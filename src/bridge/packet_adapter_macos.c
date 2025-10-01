@@ -261,17 +261,22 @@ bool MacOsTunInit(SESSION *s) {
 // PA_GETCANCEL callback - Get cancellation object
 CANCEL* MacOsTunGetCancel(SESSION *s) {
     MACOS_TUN_CONTEXT *ctx;
+    CANCEL *c;
     
     if (s == NULL || s->PacketAdapter == NULL) {
         return NULL;
     }
     
     ctx = (MACOS_TUN_CONTEXT *)s->PacketAdapter->Param;
-    if (ctx == NULL) {
+    if (ctx == NULL || ctx->cancel == NULL) {
         return NULL;
     }
     
-    return ctx->cancel;
+    // Important: AddRef before returning because caller will ReleaseCancel
+    c = ctx->cancel;
+    AddRef(c->ref);
+    
+    return c;
 }
 
 // PA_GETNEXTPACKET callback - Get next packet from TUN device
@@ -310,8 +315,13 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     UCHAR buf[MAX_PACKET_SIZE];
     int n;
     
-    if (s == NULL || s->PacketAdapter == NULL || data == NULL || size == 0) {
+    if (s == NULL || s->PacketAdapter == NULL) {
         return false;
+    }
+    
+    // Handle flush call (data=NULL, size=0) - just return success
+    if (data == NULL || size == 0) {
+        return true;
     }
     
     ctx = (MACOS_TUN_CONTEXT *)s->PacketAdapter->Param;

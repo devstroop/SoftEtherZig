@@ -477,6 +477,8 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
 }
 
 int vpn_bridge_disconnect(VpnBridgeClient* client) {
+    SESSION* session;
+    
     if (!client) {
         return VPN_BRIDGE_ERROR_INVALID_PARAM;
     }
@@ -488,34 +490,32 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
     printf("[vpn_bridge_disconnect] Stopping VPN session...\n");
     fflush(stdout);
     
+    // Save session pointer and clear it first to avoid double-free
+    session = client->softether_session;
+    client->softether_session = NULL;
+    client->packet_adapter = NULL; // Will be freed by SESSION cleanup
+    
     // Stop and release SESSION
-    if (client->softether_session) {
-        printf("[vpn_bridge_disconnect] Calling StopSession...\n");
+    // Note: StopSession waits for ClientThread to finish
+    // The ClientThread will call ReleaseSession twice before exiting, which will free the session
+    // So we should NOT call ReleaseSession ourselves!
+    if (session) {
+        printf("[vpn_bridge_disconnect] Session=%p, Session->ref=%p\n", session, session->ref);
         fflush(stdout);
         
-        StopSession(client->softether_session);
-        
-        printf("[vpn_bridge_disconnect] Calling ReleaseSession...\n");
+        printf("[vpn_bridge_disconnect] Calling StopSession (will wait for ClientThread to finish)...\n");
         fflush(stdout);
         
-        ReleaseSession(client->softether_session);
+        StopSession(session);
         
-        printf("[vpn_bridge_disconnect] Session released\n");
+        printf("[vpn_bridge_disconnect] StopSession returned - ClientThread has exited and freed the session\n");
         fflush(stdout);
         
-        client->softether_session = NULL;
+        // Session is now freed by ClientThread - don't touch it!
+        // DO NOT call ReleaseSession here!
     }
     
-    printf("[vpn_bridge_disconnect] Freeing packet adapter...\n");
-    fflush(stdout);
-    
-    // Cleanup packet adapter (will close TUN device)
-    if (client->packet_adapter) {
-        FreePacketAdapter(client->packet_adapter);
-        client->packet_adapter = NULL;
-    }
-    
-    printf("[vpn_bridge_disconnect] Packet adapter freed\n");
+    printf("[vpn_bridge_disconnect] Session cleanup complete\n");
     fflush(stdout);
     
     // Cleanup ACCOUNT
@@ -530,7 +530,7 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
             DeleteLock(account->lock);
         }
         
-        // Note: CLIENT_OPTION and CLIENT_AUTH are freed by SESSION
+        // CLIENT_OPTION and CLIENT_AUTH are freed by SESSION
         Free(account);
         client->softether_account = NULL;
         
