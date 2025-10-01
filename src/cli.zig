@@ -187,11 +187,12 @@ pub fn main() !void {
         std.debug.print("✗ Failed to initialize VPN client: {}\n", .{err});
         std.process.exit(1);
     };
-    defer client.deinit();
+    // Note: defer client.deinit() is NOT here - we handle it manually for daemon mode
 
     // Connect to VPN server
     std.debug.print("Establishing VPN connection...\n", .{});
     client.connect() catch |err| {
+        client.deinit();
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -202,30 +203,69 @@ pub fn main() !void {
     std.debug.print("Connection Status: {s}\n\n", .{@tagName(client.getStatus())});
 
     if (args.daemon) {
-        std.debug.print("Running as daemon. Press Ctrl+C to disconnect.\n", .{});
-        std.debug.print("─────────────────────────────────────────────\n", .{});
-
-        // Keep connection alive
-        while (client.isConnected()) {
-            std.Thread.sleep(5 * std.time.ns_per_s);
-
-            // Try to update stats every 5 seconds
-            if (client.getConnectionInfo()) |current_info| {
-                std.debug.print("[{d}s] Sent: {d} bytes, Received: {d} bytes, Status: {s}\n", .{
-                    current_info.connected_seconds,
-                    current_info.bytes_sent,
-                    current_info.bytes_received,
-                    @tagName(client.getStatus()),
-                });
-            } else |_| {
-                std.debug.print("[Status: {s}] Connection active\n", .{@tagName(client.getStatus())});
-            }
+        // Daemon mode: fork and run in background
+        const pid = std.c.fork();
+        
+        if (pid < 0) {
+            std.debug.print("✗ Failed to fork process\n", .{});
+            client.deinit();
+            std.process.exit(1);
         }
-        std.debug.print("\nConnection closed.\n", .{});
-    } else {
-        std.debug.print("Connection established successfully.\n", .{});
-        std.debug.print("(This is a test run. Use -d/--daemon for persistent connection)\n", .{});
-        std.debug.print("\nWaiting 10 seconds before disconnecting...\n", .{});
-        std.Thread.sleep(10 * std.time.ns_per_s);
+        
+        if (pid > 0) {
+            // Parent process: print info and exit
+            std.debug.print("Starting in daemon mode...\n", .{});
+            std.debug.print("VPN client running in background (PID: {d})\n", .{pid});
+            std.debug.print("Use 'kill {d}' to stop the VPN connection\n", .{pid});
+            std.debug.print("─────────────────────────────────────────────\n", .{});
+            
+            // Parent exits - child continues in background
+            client.deinit(); // Parent doesn't need the client anymore
+            return;
+        }
+        
+        // Child process: continue as daemon
+        // Create new session to detach from terminal
+        _ = std.c.setsid();
+        
+        // Close standard file descriptors
+        const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .read_write }) catch {
+            // Can't print here - stdout might be closed
+            // Continue anyway with inherited file descriptors
+            daemonLoop(&client);
+        };
+        defer devnull.close();
+        
+        std.posix.dup2(devnull.handle, std.posix.STDIN_FILENO) catch {};
+        std.posix.dup2(devnull.handle, std.posix.STDOUT_FILENO) catch {};
+        std.posix.dup2(devnull.handle, std.posix.STDERR_FILENO) catch {};
+        
+        
+        // Keep connection alive in background forever
+        daemonLoop(&client);
+    }
+
+    // Foreground mode: wait for Ctrl+C
+    std.debug.print("Connection established successfully.\n", .{});
+    std.debug.print("Press Ctrl+C to disconnect.\n", .{});
+    std.debug.print("─────────────────────────────────────────────\n", .{});
+
+    // Keep connection alive until interrupted
+    while (client.isConnected()) {
+        std.Thread.sleep(5 * std.time.ns_per_s);
+    }
+    
+    std.debug.print("\nConnection closed.\n", .{});
+    client.deinit();
+}
+
+// Background daemon loop - runs forever until killed
+fn daemonLoop(client: *VpnClient) noreturn {
+    while (true) {
+        if (!client.isConnected()) {
+            // Connection lost - exit with error code
+            std.process.exit(1);
+        }
+        std.Thread.sleep(5 * std.time.ns_per_s);
     }
 }
