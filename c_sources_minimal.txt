@@ -1,0 +1,28 @@
+# Minimal C sources needed for VPN client functionality
+# Phase 2A: Core initialization and basic client
+
+# Mayaqua Layer (Foundation)
+SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.c          # Core initialization
+SoftEtherVPN_Stable/src/Mayaqua/Memory.c           # Memory management
+SoftEtherVPN_Stable/src/Mayaqua/Str.c              # String operations
+SoftEtherVPN_Stable/src/Mayaqua/Object.c           # Reference counting
+SoftEtherVPN_Stable/src/Mayaqua/OS.c               # OS abstraction
+SoftEtherVPN_Stable/src/Mayaqua/FileIO.c           # File I/O
+SoftEtherVPN_Stable/src/Mayaqua/Kernel.c           # Kernel utilities
+SoftEtherVPN_Stable/src/Mayaqua/Network.c          # Network layer
+SoftEtherVPN_Stable/src/Mayaqua/TcpIp.c            # TCP/IP stack
+SoftEtherVPN_Stable/src/Mayaqua/Encrypt.c          # Encryption
+SoftEtherVPN_Stable/src/Mayaqua/Secure.c           # Security
+SoftEtherVPN_Stable/src/Mayaqua/Pack.c             # Data packing
+SoftEtherVPN_Stable/src/Mayaqua/Cfg.c              # Configuration
+SoftEtherVPN_Stable/src/Mayaqua/Table.c            # Hash tables
+SoftEtherVPN_Stable/src/Mayaqua/Tick64.c           # Timing
+SoftEtherVPN_Stable/src/Mayaqua/Tracking.c         # Memory tracking
+SoftEtherVPN_Stable/src/Mayaqua/Unix.c             # Unix-specific code
+
+# Cedar Layer (VPN Core)
+SoftEtherVPN_Stable/src/Cedar/Cedar.c              # Cedar initialization
+SoftEtherVPN_Stable/src/Cedar/Client.c             # VPN Client core
+SoftEtherVPN_Stable/src/Cedar/Protocol.c           # VPN Protocol
+SoftEtherVPN_Stable/src/Cedar/Connection.c         # Connection management
+SoftEtherVPN_Stable/src/Cedar/Session.c            # Session management
