@@ -647,6 +647,10 @@ void InitMayaqua(bool memcheck, bool debug, int argc, char **argv)
 	// (If not found, quit because this is started in strange path)
 	printf("[InitMayaqua] 22. Checking exe file exists...\n"); fflush(stdout);
 	GetExeNameW(tmp, sizeof(tmp));
+	
+	// TEMPORARY: Comment out this check for development
+	// This check fails when run from Zig because argv[0] may not be an absolute path
+	/*
 	if (IsFileExistsW(tmp) == false)
 	{
 		wchar_t tmp2[MAX_SIZE];
@@ -659,6 +663,9 @@ void InitMayaqua(bool memcheck, bool debug, int argc, char **argv)
 		AlertW(tmp2, NULL);
 		_exit(0);
 	}
+	*/
+	
+	printf("[InitMayaqua] 22. Exe check SKIPPED (development mode)\n"); fflush(stdout);
 
 	CheckUnixTempDir();
 

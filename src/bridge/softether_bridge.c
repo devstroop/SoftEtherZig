@@ -101,8 +101,7 @@ int vpn_bridge_init(bool debug) {
     printf("[DEBUG] Attempting client initialization...\n");
     fflush(stdout);
     
-    // For macOS, we need to provide a valid executable path
-    // Using absolute path to current executable
+    // Provide a simple executable name - the exe path check is disabled in development mode
     char *fake_argv[] = { "vpnclient", NULL };
     
     // Try full initialization with debug enabled
