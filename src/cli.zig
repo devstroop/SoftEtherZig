@@ -205,29 +205,29 @@ pub fn main() !void {
     if (args.daemon) {
         // Daemon mode: fork and run in background
         const pid = std.c.fork();
-        
+
         if (pid < 0) {
             std.debug.print("✗ Failed to fork process\n", .{});
             client.deinit();
             std.process.exit(1);
         }
-        
+
         if (pid > 0) {
             // Parent process: print info and exit
             std.debug.print("Starting in daemon mode...\n", .{});
             std.debug.print("VPN client running in background (PID: {d})\n", .{pid});
             std.debug.print("Use 'kill {d}' to stop the VPN connection\n", .{pid});
             std.debug.print("─────────────────────────────────────────────\n", .{});
-            
+
             // Parent exits - child continues in background
             client.deinit(); // Parent doesn't need the client anymore
             return;
         }
-        
+
         // Child process: continue as daemon
         // Create new session to detach from terminal
         _ = std.c.setsid();
-        
+
         // Close standard file descriptors
         const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .read_write }) catch {
             // Can't print here - stdout might be closed
@@ -235,12 +235,11 @@ pub fn main() !void {
             daemonLoop(&client);
         };
         defer devnull.close();
-        
+
         std.posix.dup2(devnull.handle, std.posix.STDIN_FILENO) catch {};
         std.posix.dup2(devnull.handle, std.posix.STDOUT_FILENO) catch {};
         std.posix.dup2(devnull.handle, std.posix.STDERR_FILENO) catch {};
-        
-        
+
         // Keep connection alive in background forever
         daemonLoop(&client);
     }
@@ -254,7 +253,7 @@ pub fn main() !void {
     while (client.isConnected()) {
         std.Thread.sleep(5 * std.time.ns_per_s);
     }
-    
+
     std.debug.print("\nConnection closed.\n", .{});
     client.deinit();
 }
