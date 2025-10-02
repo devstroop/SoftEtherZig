@@ -6536,6 +6536,45 @@ bool ParseWelcomeFromPack(PACK *p, char *session_name, UINT session_name_size,
 		return false;
 	}
 
+	// DEBUG: Log key policy settings that might affect DHCP
+	printf("[PackLoginWithCertNoPassword] 📋 Server Policy Settings:\n");
+	printf("  Access=%d (must be 1)\n", (*policy)->Access);
+	printf("  MonitorPort=%d (if 1, can only receive, not send!)\n", (*policy)->MonitorPort);
+	printf("  ⚠️  NoBridge=%d (if 1, BRIDGE MODE DISABLED - DHCP WON'T WORK!)\n", (*policy)->NoBridge);
+	printf("  ⚠️  NoRouting=%d (if 1, ROUTING MODE DISABLED - DHCP WON'T WORK!)\n", (*policy)->NoRouting);
+	printf("  🚨 DHCPFilter=%d (if 1, ALL DHCP PACKETS BLOCKED - DHCP WON'T WORK!!!)\n", (*policy)->DHCPFilter);
+	printf("  🚨 DHCPNoServer=%d (if 1, DHCP RESPONSES FROM SERVER BLOCKED - DHCP WON'T WORK!!!)\n", (*policy)->DHCPNoServer);
+	printf("  DHCPForce=%d (if 1, force DHCP-assigned IP)\n", (*policy)->DHCPForce);
+	printf("  ArpDhcpOnly=%d (if 1, only ARP/DHCP/ICMPv6 broadcasts allowed)\n", (*policy)->ArpDhcpOnly);
+	printf("  NoBroadcastLimiter=%d (if 1, no broadcast limiting)\n", (*policy)->NoBroadcastLimiter);
+	printf("  PrivacyFilter=%d (if 1, privacy mode)\n", (*policy)->PrivacyFilter);
+	printf("  NoServer=%d (if 1, can't be TCP/IP server)\n", (*policy)->NoServer);
+	printf("  CheckMac=%d (if 1, prohibit duplicate MAC)\n", (*policy)->CheckMac);
+	printf("  CheckIP=%d (if 1, prohibit duplicate IP)\n", (*policy)->CheckIP);
+	printf("  FilterIPv4=%d (if 1, filter IPv4)\n", (*policy)->FilterIPv4);
+
+	// Check for DHCP-blocking policies
+	if ((*policy)->DHCPFilter == 1) {
+		printf("\n❌ CRITICAL ERROR: DHCPFilter=1 blocks ALL DHCP packets!\n");
+		printf("   This policy must be disabled on the server for DHCP to work.\n");
+		printf("   Contact server administrator to change user policy.\n\n");
+	}
+	if ((*policy)->DHCPNoServer == 1) {
+		printf("\n❌ CRITICAL ERROR: DHCPNoServer=1 blocks DHCP responses from DHCP server!\n");
+		printf("   This policy blocks DHCP OFFER/ACK packets from reaching the client.\n");
+		printf("   Contact server administrator to change user policy.\n\n");
+	}
+	if ((*policy)->NoBridge == 1) {
+		printf("\n❌ CRITICAL ERROR: NoBridge=1 disables bridge mode!\n");
+		printf("   This policy prevents Layer 2 packet forwarding required for DHCP.\n");
+		printf("   Contact server administrator to change user policy.\n\n");
+	}
+	if ((*policy)->NoRouting == 1) {
+		printf("\n❌ CRITICAL ERROR: NoRouting=1 disables routing mode!\n");
+		printf("   This policy prevents IP routing required for network connectivity.\n");
+		printf("   Contact server administrator to change user policy.\n\n");
+	}
+
 	return true;
 }
 

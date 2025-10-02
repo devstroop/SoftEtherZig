@@ -23,14 +23,10 @@
 // DHCP configuration state
 typedef enum {
     DHCP_STATE_INIT = 0,
-    DHCP_STATE_ARP_ANNOUNCE_SENT = 1, // **NEW**: Send Gratuitous ARP first to register MAC!
-    DHCP_STATE_IPV6_NA_SENT = 2,      // Sent IPv6 Neighbor Advertisement
-    DHCP_STATE_IPV6_RS_SENT = 3,      // Sent IPv6 Router Solicitation
-    DHCP_STATE_DISCOVER_SENT = 4,
-    DHCP_STATE_OFFER_RECEIVED = 5,
-    DHCP_STATE_REQUEST_SENT = 6,
-    DHCP_STATE_ARP_PROBE_SENT = 7,    // Send ARP Probe after getting DHCP ACK
-    DHCP_STATE_CONFIGURED = 8
+    DHCP_STATE_DISCOVER_SENT = 1,
+    DHCP_STATE_OFFER_RECEIVED = 2,
+    DHCP_STATE_REQUEST_SENT = 3,
+    DHCP_STATE_CONFIGURED = 4
 } DHCP_STATE;
 
 static DHCP_STATE g_dhcp_state = DHCP_STATE_INIT;
@@ -41,14 +37,6 @@ static UINT64 g_connection_start_time = 0;  // Timestamp when connection establi
 static UINT32 g_offered_ip = 0;
 static UINT32 g_offered_mask = 0;
 static UINT32 g_offered_gw = 0;
-static UINT64 g_last_dhcp_send_time = 0;    // Last DHCP packet send time
-static UINT g_dhcp_retry_count = 0;          // DHCP retry counter
-static UINT64 g_last_state_change_time = 0;  // When we last changed g_dhcp_state
-
-// ARP reply state
-static bool g_need_arp_reply = false;        // Flag: need to send ARP reply
-static UCHAR g_arp_reply_to_mac[6] = {0};   // MAC to send ARP reply to
-static UINT32 g_arp_reply_to_ip = 0;         // IP to send ARP reply to
 
 // Configure the TUN interface with IP address
 static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask, UINT32 gateway) {
@@ -96,278 +84,6 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
     
     printf("[ConfigureTunInterface] ✅ Interface configured successfully\n\n");
     return true;
-}
-
-// Build IPv6 Router Solicitation packet (ICMPv6 type 133)
-// This is sent by SSTP Connect alongside DHCP DISCOVER
-static UCHAR* BuildRouterSolicitation(UCHAR *my_mac, UINT *out_size) {
-    static UCHAR packet[1024];
-    UINT pos = 0;
-    
-    // Ethernet header (14 bytes)
-    // Destination MAC: IPv6 all-routers multicast (33:33:00:00:00:02)
-    packet[pos++] = 0x33; packet[pos++] = 0x33; packet[pos++] = 0x00;
-    packet[pos++] = 0x00; packet[pos++] = 0x00; packet[pos++] = 0x02;
-    // Source MAC
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    // EtherType: IPv6
-    packet[pos++] = 0x86; packet[pos++] = 0xDD;
-    
-    // IPv6 header (40 bytes)
-    packet[pos++] = 0x60; // Version 6
-    packet[pos++] = 0x00; packet[pos++] = 0x00; packet[pos++] = 0x00; // Traffic class + flow label
-    USHORT payload_len = 8; // ICMPv6 Router Solicitation length
-    packet[pos++] = (payload_len >> 8) & 0xFF;
-    packet[pos++] = payload_len & 0xFF;
-    packet[pos++] = 58; // Next header: ICMPv6
-    packet[pos++] = 255; // Hop limit
-    
-    // Source: IPv6 link-local address generated from MAC (fe80::)
-    packet[pos++] = 0xFE; packet[pos++] = 0x80;
-    for (int i = 0; i < 6; i++) packet[pos++] = 0x00;
-    // Generate EUI-64 from MAC
-    packet[pos++] = my_mac[0] ^ 0x02; // Flip universal/local bit
-    packet[pos++] = my_mac[1];
-    packet[pos++] = my_mac[2];
-    packet[pos++] = 0xFF;
-    packet[pos++] = 0xFE;
-    packet[pos++] = my_mac[3];
-    packet[pos++] = my_mac[4];
-    packet[pos++] = my_mac[5];
-    
-    // Destination: ff02::2 (all-routers multicast)
-    packet[pos++] = 0xFF; packet[pos++] = 0x02;
-    for (int i = 0; i < 12; i++) packet[pos++] = 0x00;
-    packet[pos++] = 0x00; packet[pos++] = 0x02;
-    
-    // ICMPv6 Router Solicitation (8 bytes)
-    packet[pos++] = 133; // Type: Router Solicitation
-    packet[pos++] = 0; // Code
-    packet[pos++] = 0x00; packet[pos++] = 0x00; // Checksum (will calculate)
-    packet[pos++] = 0x00; packet[pos++] = 0x00; // Reserved
-    packet[pos++] = 0x00; packet[pos++] = 0x00;
-    
-    // Calculate ICMPv6 checksum (simplified - set to 0 for now)
-    packet[54] = 0x00;
-    packet[55] = 0x00;
-    
-    *out_size = pos;
-    return packet;
-}
-
-// Build IPv6 Neighbor Advertisement packet (ICMPv6 type 136)
-// This is sent by SSTP Connect alongside DHCP DISCOVER
-static UCHAR* BuildNeighborAdvertisement(UCHAR *my_mac, UINT *out_size) {
-    static UCHAR packet[1024];
-    UINT pos = 0;
-    
-    // Ethernet header (14 bytes)
-    // Destination MAC: IPv6 all-nodes multicast (33:33:00:00:00:01)
-    packet[pos++] = 0x33; packet[pos++] = 0x33; packet[pos++] = 0x00;
-    packet[pos++] = 0x00; packet[pos++] = 0x00; packet[pos++] = 0x01;
-    // Source MAC
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    // EtherType: IPv6
-    packet[pos++] = 0x86; packet[pos++] = 0xDD;
-    
-    // IPv6 header (40 bytes)
-    packet[pos++] = 0x60; // Version 6
-    packet[pos++] = 0x00; packet[pos++] = 0x00; packet[pos++] = 0x00; // Traffic class + flow label
-    USHORT payload_len = 24; // ICMPv6 Neighbor Advertisement length
-    packet[pos++] = (payload_len >> 8) & 0xFF;
-    packet[pos++] = payload_len & 0xFF;
-    packet[pos++] = 58; // Next header: ICMPv6
-    packet[pos++] = 255; // Hop limit
-    
-    // Source: IPv6 link-local address generated from MAC (fe80::)
-    packet[pos++] = 0xFE; packet[pos++] = 0x80;
-    for (int i = 0; i < 6; i++) packet[pos++] = 0x00;
-    // Generate EUI-64 from MAC
-    packet[pos++] = my_mac[0] ^ 0x02; // Flip universal/local bit
-    packet[pos++] = my_mac[1];
-    packet[pos++] = my_mac[2];
-    packet[pos++] = 0xFF;
-    packet[pos++] = 0xFE;
-    packet[pos++] = my_mac[3];
-    packet[pos++] = my_mac[4];
-    packet[pos++] = my_mac[5];
-    
-    // Destination: ff02::1 (all-nodes multicast)
-    packet[pos++] = 0xFF; packet[pos++] = 0x02;
-    for (int i = 0; i < 13; i++) packet[pos++] = 0x00;
-    packet[pos++] = 0x01;
-    
-    // ICMPv6 Neighbor Advertisement (24 bytes)
-    packet[pos++] = 136; // Type: Neighbor Advertisement
-    packet[pos++] = 0; // Code
-    packet[pos++] = 0x00; packet[pos++] = 0x00; // Checksum (will calculate)
-    packet[pos++] = 0x00; packet[pos++] = 0x00; // Flags (solicited=0, override=0)
-    packet[pos++] = 0x00; packet[pos++] = 0x00;
-    
-    // Target address (same as source IPv6 link-local)
-    packet[pos++] = 0xFE; packet[pos++] = 0x80;
-    for (int i = 0; i < 6; i++) packet[pos++] = 0x00;
-    packet[pos++] = my_mac[0] ^ 0x02;
-    packet[pos++] = my_mac[1];
-    packet[pos++] = my_mac[2];
-    packet[pos++] = 0xFF;
-    packet[pos++] = 0xFE;
-    packet[pos++] = my_mac[3];
-    packet[pos++] = my_mac[4];
-    packet[pos++] = my_mac[5];
-    
-    // Calculate ICMPv6 checksum (simplified - set to 0 for now)
-    packet[56] = 0x00;
-    packet[57] = 0x00;
-    
-    *out_size = pos;
-    return packet;
-}
-
-// Build Gratuitous ARP packet (ARP Announcement)
-// CRITICAL: This registers our MAC address in SoftEther's bridge MAC/IP learning table!
-// Without this, the bridge won't forward unicast packets to us (including DHCP responses)
-static UCHAR* BuildGratuitousArp(UCHAR *my_mac, UINT32 my_ip, UINT *out_size) {
-    static UCHAR packet[1024];
-    UINT pos = 0;
-    
-    // Ethernet header (14 bytes)
-    // Destination MAC: broadcast (for gratuitous ARP)
-    packet[pos++] = 0xFF; packet[pos++] = 0xFF; packet[pos++] = 0xFF;
-    packet[pos++] = 0xFF; packet[pos++] = 0xFF; packet[pos++] = 0xFF;
-    // Source MAC
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    // EtherType: ARP (0x0806)
-    packet[pos++] = 0x08; packet[pos++] = 0x06;
-    
-    // ARP packet (28 bytes)
-    // Hardware type: Ethernet (1)
-    packet[pos++] = 0x00; packet[pos++] = 0x01;
-    // Protocol type: IPv4 (0x0800)
-    packet[pos++] = 0x08; packet[pos++] = 0x00;
-    // Hardware size: 6
-    packet[pos++] = 0x06;
-    // Protocol size: 4
-    packet[pos++] = 0x04;
-    // Opcode: Request (1) - Gratuitous ARP uses Request
-    packet[pos++] = 0x00; packet[pos++] = 0x01;
-    
-    // Sender MAC address
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    
-    // Sender IP address
-    packet[pos++] = (my_ip >> 24) & 0xFF;
-    packet[pos++] = (my_ip >> 16) & 0xFF;
-    packet[pos++] = (my_ip >> 8) & 0xFF;
-    packet[pos++] = my_ip & 0xFF;
-    
-    // Target MAC address (00:00:00:00:00:00 for gratuitous ARP)
-    for (int i = 0; i < 6; i++) packet[pos++] = 0x00;
-    
-    // Target IP address (same as sender IP for gratuitous ARP)
-    packet[pos++] = (my_ip >> 24) & 0xFF;
-    packet[pos++] = (my_ip >> 16) & 0xFF;
-    packet[pos++] = (my_ip >> 8) & 0xFF;
-    packet[pos++] = my_ip & 0xFF;
-    
-    *out_size = pos;
-    return packet;
-}
-
-// Build ARP Reply packet (responds to ARP requests for our IP)
-// CRITICAL: When DHCP server or router sends ARP request checking if our IP is alive,
-// we MUST respond or they'll think the IP is unused and won't complete DHCP!
-static UCHAR* BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT32 target_ip, UINT *out_size) {
-    static UCHAR packet[1024];
-    UINT pos = 0;
-    
-    // Ethernet header (14 bytes)
-    // Destination MAC: the requester's MAC
-    memcpy(packet + pos, target_mac, 6); pos += 6;
-    // Source MAC: our MAC
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    // EtherType: ARP (0x0806)
-    packet[pos++] = 0x08; packet[pos++] = 0x06;
-    
-    // ARP packet (28 bytes)
-    // Hardware type: Ethernet (1)
-    packet[pos++] = 0x00; packet[pos++] = 0x01;
-    // Protocol type: IPv4 (0x0800)
-    packet[pos++] = 0x08; packet[pos++] = 0x00;
-    // Hardware size: 6
-    packet[pos++] = 0x06;
-    // Protocol size: 4
-    packet[pos++] = 0x04;
-    // Opcode: Reply (2)
-    packet[pos++] = 0x00; packet[pos++] = 0x02;
-    
-    // Sender MAC address (us)
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    
-    // Sender IP address (our IP: 10.21.255.100)
-    packet[pos++] = (my_ip >> 24) & 0xFF;
-    packet[pos++] = (my_ip >> 16) & 0xFF;
-    packet[pos++] = (my_ip >> 8) & 0xFF;
-    packet[pos++] = my_ip & 0xFF;
-    
-    // Target MAC address (the requester's MAC)
-    memcpy(packet + pos, target_mac, 6); pos += 6;
-    
-    // Target IP address (the requester's IP)
-    packet[pos++] = (target_ip >> 24) & 0xFF;
-    packet[pos++] = (target_ip >> 16) & 0xFF;
-    packet[pos++] = (target_ip >> 8) & 0xFF;
-    packet[pos++] = target_ip & 0xFF;
-    
-    *out_size = pos;
-    return packet;
-}
-
-// Build ARP Probe packet (checks if IP is already in use)
-// Sent BEFORE Gratuitous ARP to detect IP conflicts
-static UCHAR* BuildArpProbe(UCHAR *my_mac, UINT32 target_ip, UINT *out_size) {
-    static UCHAR packet[1024];
-    UINT pos = 0;
-    
-    // Ethernet header (14 bytes)
-    // Destination MAC: broadcast
-    packet[pos++] = 0xFF; packet[pos++] = 0xFF; packet[pos++] = 0xFF;
-    packet[pos++] = 0xFF; packet[pos++] = 0xFF; packet[pos++] = 0xFF;
-    // Source MAC
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    // EtherType: ARP (0x0806)
-    packet[pos++] = 0x08; packet[pos++] = 0x06;
-    
-    // ARP packet (28 bytes)
-    // Hardware type: Ethernet (1)
-    packet[pos++] = 0x00; packet[pos++] = 0x01;
-    // Protocol type: IPv4 (0x0800)
-    packet[pos++] = 0x08; packet[pos++] = 0x00;
-    // Hardware size: 6
-    packet[pos++] = 0x06;
-    // Protocol size: 4
-    packet[pos++] = 0x04;
-    // Opcode: Request (1)
-    packet[pos++] = 0x00; packet[pos++] = 0x01;
-    
-    // Sender MAC address
-    memcpy(packet + pos, my_mac, 6); pos += 6;
-    
-    // Sender IP address (0.0.0.0 for ARP Probe - we don't have IP yet)
-    packet[pos++] = 0x00; packet[pos++] = 0x00;
-    packet[pos++] = 0x00; packet[pos++] = 0x00;
-    
-    // Target MAC address (00:00:00:00:00:00)
-    for (int i = 0; i < 6; i++) packet[pos++] = 0x00;
-    
-    // Target IP address (the IP we want to claim)
-    packet[pos++] = (target_ip >> 24) & 0xFF;
-    packet[pos++] = (target_ip >> 16) & 0xFF;
-    packet[pos++] = (target_ip >> 8) & 0xFF;
-    packet[pos++] = target_ip & 0xFF;
-    
-    *out_size = pos;
-    return packet;
 }
 
 // Build DHCP DISCOVER packet
@@ -454,9 +170,6 @@ static UCHAR* BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size) {
     packet[pos++] = 3;  // Router
     packet[pos++] = 6;  // DNS
     packet[pos++] = 15; // Domain Name
-    
-    // REMOVED Option 50 (Requested IP) - let DHCP server assign any IP
-    // The DHCP server seems to be rejecting our requested IP 10.21.255.100
     
     // Option 255: End
     packet[pos++] = 255;
@@ -984,13 +697,12 @@ bool MacOsTunInit(SESSION *s) {
     g_connection_start_time = Tick64();  // Record when connection was established
     
     // Generate MAC address like the official SoftEther client does
-    // Format: 5E:XX:XX:XX:XX:XX (5E prefix is standard for SoftEther clients)
-    // NOTE: CA prefix is for IPC sessions, 5E is for normal VPN clients
-    g_my_mac[0] = 0x5E;
+    // Format: CA:XX:XX:XX:XX:XX (CA prefix is standard for IPC)
+    g_my_mac[0] = 0xCA;
     for (int i = 1; i < 6; i++) {
         g_my_mac[i] = (UCHAR)(rand() % 256);
     }
-    printf("[MacOsTunInit] Generated MAC: %02x:%02x:%02x:%02x:%02x:%02x (0x5E=SoftEther client prefix)\n",
+    printf("[MacOsTunInit] Generated MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
            g_my_mac[0], g_my_mac[1], g_my_mac[2], 
            g_my_mac[3], g_my_mac[4], g_my_mac[5]);
     fflush(stdout);
@@ -1067,135 +779,23 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         return 0;
     }
     
-    // CRITICAL FIX: Send IPv6 packets + DHCP matching SSTP Connect's exact sequence
-    // SSTP Connect log shows (lines 251-256):
-    // Line 251: "TCP #1: Received Keep-Alive"
-    // Line 252: "IPv6 link-local fe80::b9ab:46e2:b7c6:c6a9"
-    // Line 253: "Send DHCP Discover"  
-    // Line 254: "Send Neighbor Advertisement from fe80::... to ff02::1"
-    // Line 255: "Send Router Solicitation from fe80::..."
-    // Line 256: "Received DHCP Offer"
-    // All packets sent with only 1 TCP connection active, additional connections come AFTER DHCP!
-    UINT64 now = Tick64();
-    UINT64 time_since_start = (g_connection_start_time > 0) ? (now - g_connection_start_time) : 0;
-    
-    // **CRITICAL FIX**: Send Gratuitous ARP with 0.0.0.0 to register MAC in bridge WITHOUT claiming an IP!
-    // Bridge needs to know our MAC exists to forward unicast DHCP responses, but we can't claim
-    // a specific IP before DHCP or the DHCP server will think it's already taken.
-    // DELAY 2 seconds to give bridge learning table time to propagate and Mikrotik router time to learn our MAC
-    if (g_dhcp_state == DHCP_STATE_INIT && time_since_start >= 2000) {
-        UINT pkt_size;
-        UINT32 zero_ip = 0x00000000; // 0.0.0.0 - no IP claimed yet
-        UCHAR *pkt = BuildGratuitousArp(g_my_mac, zero_ip, &pkt_size);
-        if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] ⏰ Tunnel established for %llu ms\n", time_since_start);
-            printf("[MacOsTunGetNextPacket] 📡 Sending Gratuitous ARP with 0.0.0.0 to register MAC in bridge\n");
-            printf("[MacOsTunGetNextPacket]    MAC: %02x:%02x:%02x:%02x:%02x:%02x (no IP claimed yet)\n",
-                   g_my_mac[0], g_my_mac[1], g_my_mac[2], g_my_mac[3], g_my_mac[4], g_my_mac[5]);
-            UCHAR *pkt_copy = Malloc(pkt_size);
-            memcpy(pkt_copy, pkt, pkt_size);
-            *data = pkt_copy;
-            g_dhcp_state = DHCP_STATE_ARP_ANNOUNCE_SENT; // Move to next state: IPv6
-            g_last_state_change_time = Tick64(); // Record state change time
-            return pkt_size;
-        }
-    }
-    
-    // **PRIORITY: Send ARP Reply if requested** (can happen at any time)
-    // This is CRITICAL - if DHCP server sends ARP request and we don't reply,
-    // it will think the IP is dead and won't send DHCP ACK!
-    if (g_need_arp_reply) {
-        UINT pkt_size;
-        // Reply with the IP from the DHCP OFFER we received (or 0.0.0.0 if we haven't got one yet)
-        UINT32 our_ip = (g_offered_ip != 0) ? g_offered_ip : 0x00000000;
-        UCHAR *pkt = BuildArpReply(g_my_mac, our_ip, g_arp_reply_to_mac, g_arp_reply_to_ip, &pkt_size);
-        if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] ✅ Sending ARP REPLY to %02x:%02x:%02x:%02x:%02x:%02x (our IP: %u.%u.%u.%u)\n",
-                   g_arp_reply_to_mac[0], g_arp_reply_to_mac[1], g_arp_reply_to_mac[2],
-                   g_arp_reply_to_mac[3], g_arp_reply_to_mac[4], g_arp_reply_to_mac[5],
-                   (our_ip >> 24) & 0xFF, (our_ip >> 16) & 0xFF,
-                   (our_ip >> 8) & 0xFF, our_ip & 0xFF);
-            UCHAR *pkt_copy = Malloc(pkt_size);
-            memcpy(pkt_copy, pkt, pkt_size);
-            *data = pkt_copy;
-            g_need_arp_reply = false; // Reset flag
-            return pkt_size;
-        }
-    }
-    
-    // Stage 1: Send IPv6 Neighbor Advertisement AFTER Gratuitous ARP (wait 500ms for ARP to propagate)
-    if (g_dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT && (Tick64() - g_last_state_change_time) >= 500) {
-        UINT pkt_size;
-        UCHAR *pkt = BuildNeighborAdvertisement(g_my_mac, &pkt_size);
-        if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] 📡 Sending IPv6 Neighbor Advertisement (size=%u)\n", pkt_size);
-            UCHAR *pkt_copy = Malloc(pkt_size);
-            memcpy(pkt_copy, pkt, pkt_size);
-            *data = pkt_copy;
-            g_dhcp_state = DHCP_STATE_IPV6_NA_SENT;
-            g_last_state_change_time = Tick64(); // Record state change time
-            return pkt_size;
-        }
-    }
-    
-    // Stage 2: Send IPv6 Router Solicitation (wait 200ms after IPv6 NA)
-    if (g_dhcp_state == DHCP_STATE_IPV6_NA_SENT && (Tick64() - g_last_state_change_time) >= 200) {
-        UINT pkt_size;
-        UCHAR *pkt = BuildRouterSolicitation(g_my_mac, &pkt_size);
-        if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] 📡 Sending IPv6 Router Solicitation (size=%u)\n", pkt_size);
-            UCHAR *pkt_copy = Malloc(pkt_size);
-            memcpy(pkt_copy, pkt, pkt_size);
-            *data = pkt_copy;
-            g_dhcp_state = DHCP_STATE_IPV6_RS_SENT;
-            g_last_state_change_time = Tick64(); // Record state change time
-            return pkt_size;
-        }
-    }
-    
-    // Stage 3: Send DHCP DISCOVER (wait 300ms after IPv6 RS, then retry every 3s)
-    // DHCP standard: Retry every 3-4 seconds, up to 5 attempts (similar to IPC implementation)
-    if (g_dhcp_state == DHCP_STATE_IPV6_RS_SENT || g_dhcp_state == DHCP_STATE_DISCOVER_SENT) {
-        UINT64 now = Tick64();
-        bool should_send = false;
-        
-        if (g_dhcp_state == DHCP_STATE_IPV6_RS_SENT) {
-            // First send after 300ms delay to let IPv6 packets propagate
-            if ((now - g_last_state_change_time) >= 300) {
-                should_send = true;
-                g_dhcp_state = DHCP_STATE_DISCOVER_SENT;
-                g_last_dhcp_send_time = now;
-                g_dhcp_retry_count = 0;
+    // Send DHCP DISCOVER if not yet requested
+    if (g_dhcp_state == DHCP_STATE_INIT) {
+        UINT dhcp_size;
+        UCHAR *dhcp_pkt = BuildDhcpDiscover(g_my_mac, g_dhcp_xid, &dhcp_size);
+        if (dhcp_size > 0 && dhcp_pkt != NULL) {
+            printf("[MacOsTunGetNextPacket] Sending DHCP DISCOVER (xid=0x%08x, size=%u)\n", g_dhcp_xid, dhcp_size);
+            printf("[MacOsTunGetNextPacket] First 100 bytes: ");
+            for (UINT i = 0; i < (dhcp_size < 100 ? dhcp_size : 100); i++) {
+                printf("%02x ", dhcp_pkt[i]);
             }
-        } else if (g_dhcp_state == DHCP_STATE_DISCOVER_SENT) {
-            // Retry every 3 seconds, up to 5 attempts (15 seconds total)
-            if (g_dhcp_retry_count < 5 && (now - g_last_dhcp_send_time) >= 3000) {
-                should_send = true;
-                g_last_dhcp_send_time = now;
-                g_dhcp_retry_count++;
-                printf("[MacOsTunGetNextPacket] 🔄 DHCP DISCOVER retry #%u (no response after %llu ms)\n", 
-                       g_dhcp_retry_count, now - g_connection_start_time);
-            }
-        }
-        
-        if (should_send) {
-            UINT dhcp_size;
-            UCHAR *dhcp_pkt = BuildDhcpDiscover(g_my_mac, g_dhcp_xid, &dhcp_size);
-            if (dhcp_size > 0 && dhcp_pkt != NULL) {
-                printf("[MacOsTunGetNextPacket] 📡 Sending DHCP DISCOVER #%u (xid=0x%08x, size=%u)\n", 
-                       g_dhcp_retry_count + 1, g_dhcp_xid, dhcp_size);
-                if (g_dhcp_retry_count == 0) {
-                    printf("[MacOsTunGetNextPacket] First 100 bytes: ");
-                    for (UINT i = 0; i < (dhcp_size < 100 ? dhcp_size : 100); i++) {
-                        printf("%02x ", dhcp_pkt[i]);
-                    }
-                    printf("\n");
-                }
-                UCHAR *pkt_copy = Malloc(dhcp_size);
-                memcpy(pkt_copy, dhcp_pkt, dhcp_size);
-                *data = pkt_copy;
-                return dhcp_size;
-            }
+            printf("\n");
+            // Allocate a copy for the session (static buffer will be reused)
+            UCHAR *pkt_copy = Malloc(dhcp_size);
+            memcpy(pkt_copy, dhcp_pkt, dhcp_size);
+            *data = pkt_copy;
+            g_dhcp_state = DHCP_STATE_DISCOVER_SENT;
+            return dhcp_size;
         }
     }
     
@@ -1264,24 +864,16 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                     UCHAR *udp_hdr = ip_hdr + ip_hdr_len;
                     USHORT src_port = (udp_hdr[0] << 8) | udp_hdr[1];
                     USHORT dest_port = (udp_hdr[2] << 8) | udp_hdr[3];
-                    
-                    // Extract source and dest IPs
-                    UINT32 src_ip = (ip_hdr[12] << 24) | (ip_hdr[13] << 16) | (ip_hdr[14] << 8) | ip_hdr[15];
-                    UINT32 dst_ip = (ip_hdr[16] << 24) | (ip_hdr[17] << 16) | (ip_hdr[18] << 8) | ip_hdr[19];
-                    
-                    printf("[MacOsTunPutPacket] 📩 UDP: %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u\n",
-                           (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 8) & 0xFF, src_ip & 0xFF, src_port,
-                           (dst_ip >> 24) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 8) & 0xFF, dst_ip & 0xFF, dest_port);
-                    
-                    if (dest_port == 68 || src_port == 67) {
-                        printf("[MacOsTunPutPacket] *** DHCP PACKET DETECTED! ***\n");
-                        // Dump first 100 bytes for debugging
-                        printf("[MacOsTunPutPacket] First 100 bytes: ");
-                        for (int i = 0; i < (size < 100 ? size : 100); i++) {
-                            printf("%02x ", ((UCHAR*)data)[i]);
-                        }
-                        printf("\n");
+                    printf("[MacOsTunPutPacket] 📩 UDP packet: src_port=%u, dest_port=%u\n", src_port, dest_port);
+                
+                if (dest_port == 68 || src_port == 67) {
+                    printf("[MacOsTunPutPacket] � This is a DHCP packet! Parsing...\n");
+                    // Dump first 100 bytes for debugging
+                    printf("[MacOsTunPutPacket] First 100 bytes: ");
+                    for (int i = 0; i < (size < 100 ? size : 100); i++) {
+                        printf("%02x ", ((UCHAR*)data)[i]);
                     }
+                    printf("\n");
                 }
             }
         }
@@ -1289,22 +881,6 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     
     // Handle DHCP responses
     if (g_dhcp_state != DHCP_STATE_CONFIGURED && size > 14) {
-        // Check if this is a UDP packet on ports 67/68 (DHCP)
-        if (size >= 14) {
-            UCHAR *pkt = (UCHAR *)data;
-            USHORT ethertype = (pkt[12] << 8) | pkt[13];
-            if (ethertype == 0x0800 && size >= 34) { // IPv4
-                UCHAR protocol = pkt[23];
-                if (protocol == 17) { // UDP
-                    USHORT src_port = (pkt[34] << 8) | pkt[35];
-                    USHORT dst_port = (pkt[36] << 8) | pkt[37];
-                    if (src_port == 67 && dst_port == 68) {
-                        printf("[MacOsTunPutPacket] 🔍 Received UDP 67->68 packet (DHCP), size=%u, state=%d\n", size, g_dhcp_state);
-                    }
-                }
-            }
-        }
-        
         // Check for DHCP OFFER
         if (g_dhcp_state == DHCP_STATE_DISCOVER_SENT) {
             UINT32 ip, mask, gw, server;
@@ -1350,37 +926,6 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     }
     
     UCHAR *pkt = (UCHAR *)data;
-    
-    // **CRITICAL**: Handle incoming ARP packets!
-    // After we send Gratuitous ARP, the network will send ARP requests to verify our IP.
-    // We MUST respond to these or DHCP server won't believe we own the IP!
-    if (size >= 14) {
-        USHORT ethertype = (pkt[12] << 8) | pkt[13];
-        if (ethertype == 0x0806) {  // ARP packet
-            // Parse ARP
-            if (size >= 42) {  // Min ARP packet size (14 eth + 28 arp)
-                USHORT opcode = (pkt[20] << 8) | pkt[21];
-                UINT32 target_ip = (pkt[38] << 24) | (pkt[39] << 16) | (pkt[40] << 8) | pkt[41];
-                
-                printf("[MacOsTunPutPacket] 📬 ARP: opcode=%u, target_ip=%u.%u.%u.%u\n",
-                       opcode,
-                       (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
-                       (target_ip >> 8) & 0xFF, target_ip & 0xFF);
-                
-                // If it's an ARP request for our IP (10.21.255.100 = 0x0A15FF64), respond!
-                if (opcode == 1 && target_ip == 0x0A15FF64) {
-                    printf("[MacOsTunPutPacket] ARP REQUEST for our IP! Need to send ARP REPLY!\n");
-                    // Queue ARP reply - we'll send it in GetNextPacket
-                    g_need_arp_reply = true;
-                    memcpy(g_arp_reply_to_mac, pkt + 6, 6);  // Sender MAC
-                    g_arp_reply_to_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];  // Sender IP
-                }
-            }
-            // Don't write ARP to TUN device (Layer 2 packet, TUN is Layer 3)
-            return true;
-        }
-    }
-    
     UCHAR *ip_packet = pkt;
     UINT ip_size = size;
     UINT32 proto;

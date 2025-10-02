@@ -157,6 +157,21 @@ VpnBridgeStatus vpn_bridge_get_status(const VpnBridgeClient* client);
  * ============================================ */
 
 /**
+ * DHCP information structure
+ */
+typedef struct {
+    uint32_t client_ip;       // Assigned IP address (network byte order)
+    uint32_t subnet_mask;     // Subnet mask (network byte order)
+    uint32_t gateway;         // Default gateway (network byte order)
+    uint32_t dns_server1;     // Primary DNS server (network byte order)
+    uint32_t dns_server2;     // Secondary DNS server (network byte order)
+    uint32_t dhcp_server;     // DHCP server address (network byte order)
+    uint32_t lease_time;      // Lease time in seconds
+    char domain_name[256];    // Domain name
+    bool valid;               // Whether DHCP info is valid
+} VpnBridgeDhcpInfo;
+
+/**
  * Get connection information.
  * All out-parameters can be NULL if not needed.
  * 
@@ -171,6 +186,18 @@ int vpn_bridge_get_connection_info(
     uint64_t* bytes_sent,
     uint64_t* bytes_received,
     uint64_t* connected_time
+);
+
+/**
+ * Get DHCP information from the VPN session.
+ * 
+ * @param client    Client handle
+ * @param dhcp_info OUT: DHCP information structure to fill
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_get_dhcp_info(
+    const VpnBridgeClient* client,
+    VpnBridgeDhcpInfo* dhcp_info
 );
 
 /**

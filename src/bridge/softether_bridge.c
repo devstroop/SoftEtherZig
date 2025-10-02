@@ -30,7 +30,7 @@
     #include "packet_adapter_windows.h"
     #define NEW_PACKET_ADAPTER() NewWindowsTapAdapter()
 #else
-    #error "Unsupported platform"
+    #define NEW_PACKET_ADAPTER() NULL
 #endif
 
 /* ============================================
@@ -306,19 +306,42 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     opt->Port = client->port;
     StrCpy(opt->HubName, sizeof(opt->HubName), client->hub_name);
     
-    // Set device name to avoid VirtualHost mode (empty DeviceName triggers NAT/VH mode)
-    // Use a dummy device name - our packet adapter will handle the actual TUN device
-    StrCpy(opt->DeviceName, sizeof(opt->DeviceName), "vpn_tun");
+    // CRITICAL: Disable NAT-T (per Stanislav's requirement)
+    // Setting PortUDP = 0 forces TCP-only mode without NAT-T server lookups
+    opt->PortUDP = 0;  // 0 = Use only TCP, no UDP/NAT-T
     
-    // Connection settings
-    opt->MaxConnection = 1;              // Single TCP connection
+    printf("[vpn_bridge_connect] ⚠️  TCP-ONLY MODE: PortUDP=%u (0 = TCP only, no NAT-T, no UDP accel)\n", opt->PortUDP);
+    fflush(stdout);
+    
+    // Device name for virtual adapter
+    // NOTE: Do NOT use "_SEHUBBRIDGE_" - that's for local bridge mode on client side
+    // We want normal VPN client mode to receive L2 packets from server's Local Bridge
+    StrCpy(opt->DeviceName, sizeof(opt->DeviceName), "vpn_adapter");
+    
+    printf("[vpn_bridge_connect] 📡 Device name set to '%s' (normal VPN client mode)\n", opt->DeviceName);
+    fflush(stdout);
+    
+    // Connection settings - TCP ONLY, let server policy control MaxConnection
+    // Stanislav: "MaxConn follows server side policy"
+    opt->MaxConnection = 8;              // Server will control actual number via policy
     opt->UseEncrypt = true;              // Use encryption
-    opt->UseCompress = false;            // No compression for now
-    opt->HalfConnection = false;         // Full connection
+    opt->UseCompress = false;            // No compression
+    opt->HalfConnection = false;         // Full-duplex (not half-duplex)
     opt->NoRoutingTracking = true;       // Don't track routing
     opt->NumRetry = 10;                  // Retry attempts
     opt->RetryInterval = 5;              // 5 seconds between retries
     opt->AdditionalConnectionInterval = 1;
+    opt->NoUdpAcceleration = true;       // CRITICAL: No UDP acceleration
+    opt->DisableQoS = true;              // Disable QoS features
+    
+    // ⚠️ CRITICAL FIX FOR DHCP: Request bridge/routing mode
+    // Without this, server FORCES policy->NoBridge = true and policy->NoRouting = true
+    // even if server policy allows it! (Protocol.c:3318-3321)
+    // This prevents DHCP packets from being delivered to the client.
+    opt->RequireBridgeRoutingMode = true;
+    
+    printf("[vpn_bridge_connect] ✅ RequireBridgeRoutingMode=true (enables Layer 2 bridging for DHCP)\n");
+    fflush(stdout);
     
     printf("[vpn_bridge_connect] CLIENT_OPTION created: %s:%d hub=%s\n", 
            opt->Hostname, opt->Port, opt->HubName);
@@ -349,11 +372,13 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     
     client->softether_account = account;
     
+    // Create packet adapter
+    PACKET_ADAPTER* pa = NULL;
+    
+    // Create packet adapter for platform
     printf("[vpn_bridge_connect] Creating packet adapter...\n");
     fflush(stdout);
-    
-    // Create platform-specific packet adapter
-    PACKET_ADAPTER* pa = NEW_PACKET_ADAPTER();
+    pa = NEW_PACKET_ADAPTER();
     if (!pa) {
         printf("[vpn_bridge_connect] Failed to create packet adapter\n");
         DeleteLock(account->lock);
@@ -362,8 +387,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         client->status = VPN_STATUS_ERROR;
         return VPN_BRIDGE_ERROR_CONNECT_FAILED;
     }
-    
-    printf("[vpn_bridge_connect] Packet adapter created at %p, Id=%u\\n", pa, pa->Id);
+    printf("[vpn_bridge_connect] Packet adapter created at %p, Id=%u\n", pa, pa->Id);
     fflush(stdout);
     
     client->packet_adapter = pa;
@@ -615,6 +639,28 @@ uint32_t vpn_bridge_get_last_error(const VpnBridgeClient* client) {
     }
     
     return client->last_error;
+}
+
+// Get DHCP information
+int vpn_bridge_get_dhcp_info(const VpnBridgeClient* client, VpnBridgeDhcpInfo* dhcp_info) {
+    if (!client || !dhcp_info) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    // Clear the structure
+    Zero(dhcp_info, sizeof(VpnBridgeDhcpInfo));
+    dhcp_info->valid = false;
+    
+    if (!client->softether_session || client->status != VPN_STATUS_CONNECTED) {
+        return VPN_BRIDGE_ERROR_NOT_CONNECTED;
+    }
+    
+    // Note: Regular VPN client sessions don't use IPC/IPC_ASYNC like OpenVPN/IPsec
+    // The DHCP information isn't available through the SESSION structure for standard clients
+    // This would require deep integration with the virtual network adapter layer
+    // For now, we return "not available"
+    
+    return VPN_BRIDGE_SUCCESS; // Return success but dhcp_info.valid remains false
 }
 
 const char* vpn_bridge_get_error_message(int error_code) {

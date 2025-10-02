@@ -1,0 +1,378 @@
+SSTP Connect Version 3.9.10 (443)
+04:45:21 Connecting to 62.24.65.211:443 (SoftEther)
+04:45:21 TCP state: Connecting
+04:45:22 Cert 0 worxvpn.662.cloud
+04:45:22 Cert 1 PostSignum Qualified CA 4
+04:45:22 Cert 2 PostSignum Root QCA 4
+04:45:22 Cert 3 worx211.worxvpn.net
+04:45:22 Cert 4 worx212
+04:45:22 Cert 5 worx213
+04:45:22 Cert 6 worx216
+04:45:22 Cert 7 worx217
+04:45:22 Cert 8 worx218
+04:45:22 Cert 9 worx219
+04:45:22 Cert 10 worx220
+04:45:22 Cert 11 WorxVPN
+04:45:22 Certificate 0 “worxvpn.662.cloud” has errors: Unable to build chain to root (possible missing intermediate), Certificate exceeds maximum temporal validity period;
+04:45:22 Server certificate matches the record
+04:45:22 TCP state: Connected
+04:45:22 Resolving proxy for https://62.24.65.211:443
+04:45:22 Link established to 62.24.65.211:443 (TCP)
+04:45:22 Local address 192.168.1.11:57451
+04:45:22 Send Client Signature
+04:45:22 POST /vpnsvc/connect.cgi HTTP/1.1
+Host: worxvpn.662.cloud
+Content-Type: image/jpeg
+Content-Length: 1618
+Connection: Keep-Alive
+04:45:22 Received Server Hello
+04:45:22 HTTP/1.1 200 OK
+Connection: Keep-Alive
+Content-Length: 540
+Content-Type: application/octet-stream
+Date: Wed, 01 Oct 2025 23:15:25 GMT
+Keep-Alive: timeout=15; max=19
+04:45:22 pencore=***REDACTED***
+04:45:22 random=6AB51ACAB03C1907FEA2B0DC4E17F69F1C83592B
+04:45:22 hello=SoftEther VPN Server (64 bit)
+04:45:22 version=[443]
+04:45:22 build=[9799]
+04:45:22 SoftEther VPN Server (64 bit) Version 4.43 Build 9799
+04:45:22 Verifying login credentials
+04:45:22 Send Client Authentication
+04:45:22 POST /vpnsvc/vpn.cgi HTTP/1.1
+Date: Wed, 01 Oct 2025 23:15:22 GMT
+Host: worxvpn.662.cloud
+Content-Type: application/octet-stream
+Keep-Alive: timeout=15; max=19
+Connection: Keep-Alive
+Content-Length: 1495
+04:45:22 username=devstroop
+04:45:22 ProxyIpAddress6=00000000000000000000000000000000
+04:45:22 client_build=[9745]
+04:45:22 ServerIpAddress=[3544258622]
+04:45:22 client_id=[1]
+04:45:22 ProxyHostname=
+04:45:22 rudp_bulk_max_version=[2]
+04:45:22 ClientOsName=iOS
+04:45:22 unique_id=2DF3E3B3720DA6ED263AF41D8CD9CACDB6C09582
+04:45:22 support_hmac_on_bulk_of_rudp=[1]
+04:45:22 ProxyIpAddress=[0]
+04:45:22 max_connection=[8]
+04:45:22 ServerProductName=SoftEther VPN Server (64 bit)
+04:45:22 use_encrypt=[1]
+04:45:22 client_ver=[434]
+04:45:22 protocol=[0]
+04:45:22 ClientProductName=SSTP Connect
+04:45:22 UniqueId=22C285AB0E76F34194007CCCCAD6C53C
+04:45:22 version=[391]
+04:45:22 half_connection=[0]
+04:45:22 support_bulk_on_rudp=[1]
+04:45:22 support_udp_recovery=[1]
+04:45:22 ServerProductVer=[3137404928]
+04:45:22 ClientIpAddress6=00000000000000000000000000000000
+04:45:22 ProxyPort=[0]
+04:45:22 build=[443]
+04:45:22 authtype=[1]
+04:45:22 secure_password=***REDACTED***
+04:45:22 hello=SSTP Connect
+04:45:22 client_str=SoftEther VPN Client
+04:45:22 ClientOsVer=18.0.1
+04:45:22 ClientProductBuild=[3137404928]
+04:45:22 ServerHostname=worxvpn.662.cloud
+04:45:22 hubname=VPN
+04:45:22 use_compress=[0]
+04:45:22 ClientIpAddress=[184658112]
+04:45:22 ServerProductBuild=[1193672704]
+04:45:22 method=login
+04:45:22 ServerPort2=[3137404928]
+04:45:22 ClientPort=[1809842176]
+04:45:22 ServerIpAddress6=00000000000000000000000000000000
+04:45:22 ClientHostname=localhost
+04:45:22 qos=[0]
+04:45:22 ClientProductVer=[2264989696]
+04:45:22 Received Server Welcome
+04:45:22 HTTP/1.1 200 OK
+Connection: Keep-Alive
+Content-Length: 2364
+Content-Type: application/octet-stream
+Date: Wed, 01 Oct 2025 23:15:25 GMT
+Keep-Alive: timeout=15; max=19
+04:45:22 ip@ipv6_bool=[0]
+04:45:22 port=[443, 992, 1194, 5555]
+04:45:22 cert=***REDACTED***
+04:45:22 ip@ipv6_array=00000000000000000000000000000000
+04:45:22 ticket=***REDACTED***
+04:45:22 ip@ipv6_scope_id=[0]
+04:45:22 redirect=[1]
+04:45:22 pencore=***REDACTED***
+04:45:22 ip=[3695253566]
+04:45:22 Redirected
+
+04:45:22 Connecting to 62.24.65.220:443 (SoftEther)
+04:45:22 TCP state: Connecting
+04:45:23 TCP state: Connected
+04:45:23 Resolving proxy for https://62.24.65.211:443
+04:45:23 Link established to 62.24.65.220:443 (TCP)
+04:45:23 Local address 192.168.1.11:57452
+04:45:23 Send Client Signature
+04:45:23 POST /vpnsvc/connect.cgi HTTP/1.1
+Connection: Keep-Alive
+Host: 62.24.65.220
+Content-Length: 2773
+Content-Type: image/jpeg
+04:45:23 Received Server Hello
+04:45:23 HTTP/1.1 200 OK
+Connection: Keep-Alive
+Content-Length: 516
+Content-Type: application/octet-stream
+Date: Wed, 01 Oct 2025 23:15:24 GMT
+Keep-Alive: timeout=15; max=19
+04:45:23 pencore=***REDACTED***
+04:45:23 hello=SoftEther VPN Server (64 bit)
+04:45:23 build=[9799]
+04:45:23 random=FB49E071A3546F71313C22FDE60F36A2EB6C8453
+04:45:23 version=[443]
+04:45:23 SoftEther VPN Server (64 bit) Version 4.43 Build 9799
+04:45:23 Verifying login credentials
+04:45:23 Send Client Authentication
+04:45:23 POST /vpnsvc/vpn.cgi HTTP/1.1
+Date: Wed, 01 Oct 2025 23:15:23 GMT
+Host: 62.24.65.220
+Content-Type: application/octet-stream
+Keep-Alive: timeout=15; max=19
+Connection: Keep-Alive
+Content-Length: 1481
+04:45:23 UniqueId=18560F2F8E3AAC6C81C023323177366F
+04:45:23 ServerProductVer=[3137404928]
+04:45:23 version=[391]
+04:45:23 ClientHostname=localhost
+04:45:23 ProxyHostname=
+04:45:23 client_build=[9745]
+04:45:23 ServerIpAddress6=00000000000000000000000000000000
+04:45:23 ProxyIpAddress=[0]
+04:45:23 method=login
+04:45:23 ServerHostname=62.24.65.220
+04:45:23 client_id=[1]
+04:45:23 ClientIpAddress=[184658112]
+04:45:23 ClientPort=[1826619392]
+04:45:23 use_encrypt=[1]
+04:45:23 build=[443]
+04:45:23 username=devstroop
+04:45:23 max_connection=[8]
+04:45:23 ClientProductBuild=[3137404928]
+04:45:23 support_udp_recovery=[1]
+04:45:23 ClientIpAddress6=00000000000000000000000000000000
+04:45:23 ClientOsName=iOS
+04:45:23 ProxyIpAddress6=00000000000000000000000000000000
+04:45:23 half_connection=[0]
+04:45:23 authtype=[99]
+04:45:23 ServerProductBuild=[1193672704]
+04:45:23 support_bulk_on_rudp=[1]
+04:45:23 ServerProductName=SoftEther VPN Server (64 bit)
+04:45:23 ClientProductVer=[2264989696]
+04:45:23 rudp_bulk_max_version=[2]
+04:45:23 client_str=SoftEther VPN Client
+04:45:23 ClientProductName=SSTP Connect
+04:45:23 client_ver=[434]
+04:45:23 ProxyPort=[0]
+04:45:23 ticket=***REDACTED***
+04:45:23 support_hmac_on_bulk_of_rudp=[1]
+04:45:23 protocol=[0]
+04:45:23 unique_id=2DF3E3B3720DA6ED263AF41D8CD9CACDB6C09582
+04:45:23 ServerIpAddress=[3695253566]
+04:45:23 use_compress=[0]
+04:45:23 ServerPort2=[3137404928]
+04:45:23 hubname=VPN
+04:45:23 qos=[0]
+04:45:23 hello=SSTP Connect
+04:45:23 ClientOsVer=18.0.1
+04:45:23 Received Server Welcome
+04:45:23 HTTP/1.1 200 OK
+Connection: Keep-Alive
+Content-Length: 2370
+Content-Type: application/octet-stream
+Date: Wed, 01 Oct 2025 23:15:24 GMT
+Keep-Alive: timeout=15; max=19
+04:45:23 policy:checkmac=[0]
+04:45:23 policy:noqos=[0]
+04:45:23 timeout=[20000]
+04:45:23 policy:arpdhcponly=[0]
+04:45:23 policy:maxupload=[0]
+04:45:23 use_encrypt=[1]
+04:45:23 policy:monitorport=[0]
+04:45:23 policy:rsandrafilter=[0]
+04:45:23 policy:filternonip=[0]
+04:45:23 policy:nosavepassword=***REDACTED***
+04:45:23 policy:access=[1]
+04:45:23 msg=
+04:45:23 policy:nobridge=[1]
+04:45:23 session_name=SID-DEVSTROOP-12
+04:45:23 policy:maxmac=[0]
+04:45:23 connection_name=CID-1435
+04:45:23 policy:ver3=[1]
+04:45:23 policy:nobroadcastlimiter=[0]
+04:45:23 max_connection=[8]
+04:45:23 policy:multilogins=[0]
+04:45:23 policy:maxdownload=[0]
+04:45:23 use_fast_rc4=[0]
+04:45:23 is_azure_session=[0]
+04:45:23 policy:fixpassword=***REDACTED***
+04:45:23 policy:rafilter=[0]
+04:45:23 policy:filteripv6=[0]
+04:45:23 half_connection=[0]
+04:45:23 enable_udp_recovery=[0]
+04:45:23 policy:noipv6defaultrouterinrawhenipv6=[0]
+04:45:23 session_key_32=***REDACTED***
+04:45:23 use_compress=[0]
+04:45:23 pencore=***REDACTED***
+04:45:23 policy:timeout=[20]
+04:45:23 session_key=***REDACTED***
+04:45:23 policy:maxipv6=[0]
+04:45:23 policy:norouting=[1]
+04:45:23 policy:maxconnection=[32]
+04:45:23 policy:noserverv6=[0]
+04:45:23 vlan_id=[0]
+04:45:23 policy:dhcpv6filter=[0]
+04:45:23 suppress_client_update_notification=[0]
+04:45:23 policy:privacyfilter=[0]
+04:45:23 policy:checkipv6=[0]
+04:45:23 policy:dhcpnoserver=[0]
+04:45:23 policy:filteripv4=[0]
+04:45:23 policy:noroutingv6=[0]
+04:45:23 policy:checkip=[0]
+04:45:23 qos=[0]
+04:45:23 policy:dhcpforce=[0]
+04:45:23 policy:noserver=[0]
+04:45:23 policy:maxip=[0]
+04:45:23 policy:vlanid=[0]
+04:45:23 policy:dhcpv6noserver=[0]
+04:45:23 policy:noipv6defaultrouterinra=[0]
+04:45:23 policy:dhcpfilter=[0]
+04:45:23 policy:autodisconnect=[0]
+04:45:23 Session name: SID-DEVSTROOP-12
+04:45:23 Connection name: CID-1435
+04:45:23 Max number of connections: 8
+04:45:23 Timeout: 20.0 seconds
+04:45:23 SoftEther tunnel opened
+04:45:23 TCP #1: Received Keep-Alive
+04:45:23 IPv6 link-local fe80::b9ab:46e2:b7c6:c6a9
+04:45:23 Send DHCP Discover
+04:45:23 Send Neighbor Advertisement from fe80::b9ab:46e2:b7c6:c6a9 to ff02::1
+04:45:23 Send Router Solicitation from fe80::b9ab:46e2:b7c6:c6a9
+04:45:24 Received DHCP Offer
+04:45:24 DHCP: Your IP 10.21.254.246
+04:45:24 DHCP: Option 53=02
+04:45:24 DHCP: Option 1=FFFF0000
+04:45:24 DHCP: Subnet mask 255.255.0.0
+04:45:24 DHCP: Option 3=0A150001
+04:45:24 DHCP: Router 10.21.0.1
+04:45:24 DHCP: Option 6=0A1500014D30020A
+04:45:24 DHCP: DNS 10.21.0.1
+04:45:24 DHCP: DNS 77.48.2.10
+04:45:24 DHCP: Option 51=00005460
+04:45:24 DHCP: Lease time 21600 seconds
+04:45:24 DHCP: Option 54=0A150001
+04:45:24 DHCP: Server IP 10.21.0.1
+04:45:24 Send DHCP Request
+04:45:24 Received DHCP Ack
+04:45:24 DHCP: Option 53=05
+04:45:24 DHCP: Option 1=FFFF0000
+04:45:24 DHCP: Subnet mask 255.255.0.0
+04:45:24 DHCP: Option 3=0A150001
+04:45:24 DHCP: Router 10.21.0.1
+04:45:24 DHCP: Option 6=0A1500014D30020A
+04:45:24 DHCP: DNS 10.21.0.1
+04:45:24 DHCP: DNS 77.48.2.10
+04:45:24 DHCP: Option 51=00005460
+04:45:24 DHCP: Lease time 21600 seconds
+04:45:24 DHCP: Option 54=0A150001
+04:45:24 DHCP: Server IP 10.21.0.1
+04:45:24 IP Address 10.21.254.246/16
+04:45:24 Router 10.21.0.1
+04:45:24 DNS 10.21.0.1
+04:45:24 DNS 77.48.2.10
+04:45:24 Send ARP Probe
+04:45:24 Making additional connection
+04:45:24 TCP state: Connecting
+04:45:25 TCP state: Connected
+04:45:25 Link established to 62.24.65.220:443 (TCP)
+04:45:25 TCP #2: Received Keep-Alive
+04:45:25 TCP #2: Link up, 2 active
+04:45:25 Send ARP Announcement
+04:45:25 Applying network settings
+04:45:25 Interface pdp_ip0: 100.113.238.5/32
+04:45:25 Interface pdp_ip0: 2401:4900:a01f:86e6:14d9:f846:716e:f3ce/64
+04:45:25 Interface pdp_ip0: 2401:4900:a01f:86e6:508d:faf5:301d:7544/64
+04:45:25 Interface pdp_ip1: 2401:4900:87cf:83b3:8dc:9db8:1b72:5ae5/64
+04:45:25 Interface pdp_ip1: 2401:4900:87cf:83b3:e95e:1e1:133d:8d3f/64
+04:45:25 Interface pdp_ip2: 2409:4110:100e:86ba:abe4:77ad:a4c8:8ad4/64
+04:45:25 Interface en0: 192.168.1.11/16
+04:45:25 Interface ipsec3: 2409:4110:100e:86ba:abe4:77ad:a4c8:8ad4/64
+04:45:25 Interface ipsec4: 2401:4900:87cf:83b3:8dc:9db8:1b72:5ae5/64
+04:45:25 Interface ipsec5: 2401:4900:87cf:83b3:8dc:9db8:1b72:5ae5/64
+04:45:25 Interface ipsec6: 2409:4110:100e:86ba:abe4:77ad:a4c8:8ad4/64
+04:45:25 Interface ipsec7: 2409:4110:100e:86ba:abe4:77ad:a4c8:8ad4/64
+04:45:25 Add IPv4 default route
+04:45:25 Include route: 10.21.0.0/16
+04:45:25 MTU set to 1500
+04:45:25 Making additional connection
+04:45:25 TCP state: Connecting
+04:45:26 Connected
+04:45:26 TCP state: Connected
+04:45:26 Link established to 62.24.65.220:443 (TCP)
+04:45:26 Resolve MAC address for 10.21.0.1
+04:45:26 MAC address for 10.21.0.1 resolved
+04:45:26 TCP #3: Received Keep-Alive
+04:45:26 TCP #3: Link up, 3 active
+04:45:26 Making additional connection
+04:45:26 TCP state: Connecting
+04:45:27 TCP state: Connected
+04:45:27 Link established to 62.24.65.220:443 (TCP)
+04:45:27 TCP #4: Received Keep-Alive
+04:45:27 TCP #4: Link up, 4 active
+04:45:27 Making additional connection
+04:45:27 TCP state: Connecting
+04:45:27 Send Router Solicitation from fe80::b9ab:46e2:b7c6:c6a9
+04:45:28 TCP state: Connected
+04:45:28 Link established to 62.24.65.220:443 (TCP)
+04:45:28 TCP #5: Received Keep-Alive
+04:45:28 TCP #5: Link up, 5 active
+04:45:28 Making additional connection
+04:45:28 TCP state: Connecting
+04:45:29 TCP state: Connected
+04:45:29 Link established to 62.24.65.220:443 (TCP)
+04:45:29 TCP #6: Received Keep-Alive
+04:45:29 TCP #6: Link up, 6 active
+04:45:29 Making additional connection
+04:45:29 TCP state: Connecting
+04:45:30 TCP #1: Received Keep-Alive
+04:45:30 TCP state: Connected
+04:45:30 Link established to 62.24.65.220:443 (TCP)
+04:45:30 Reply to ARP Request from 172.31.246.98
+04:45:30 TCP #7: Received Keep-Alive
+04:45:30 TCP #7: Link up, 7 active
+04:45:30 Making additional connection
+04:45:30 TCP state: Connecting
+04:45:31 TCP state: Connected
+04:45:31 Link established to 62.24.65.220:443 (TCP)
+04:45:31 Reply to ARP Request from 172.31.19.128
+04:45:31 TCP #8: Link up, 8 active
+04:45:31 TCP #8: Received Keep-Alive
+04:45:32 Send Router Solicitation from fe80::b9ab:46e2:b7c6:c6a9
+04:45:32 Reply to ARP Request from 172.31.220.99
+04:45:32 Reply to ARP Request from 172.31.234.220
+04:45:33 Reply to ARP Request from 172.31.162.60
+04:45:33 Reply to ARP Request from 172.31.45.115
+04:45:33 TCP #1: Send Keep-Alive
+04:45:33 TCP #5: Received Keep-Alive
+04:45:34 Reply to ARP Request from 172.31.166.155
+04:45:34 Reply to ARP Request from 172.31.145.88
+04:45:34 TCP #4: Send Keep-Alive
+04:45:35 Reply to ARP Request from 172.31.226.42
+04:45:35 TCP #4: Received Keep-Alive
+04:45:35 Reply to ARP Request from 172.31.226.150
+04:45:35 TCP #6: Send Keep-Alive
+04:45:35 TCP #5: Send Keep-Alive
+04:45:35 Reply to ARP Request from 172.31.44.214
+04:45:36 Disconnected by user

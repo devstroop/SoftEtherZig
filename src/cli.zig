@@ -200,7 +200,20 @@ pub fn main() !void {
     std.debug.print("✓ VPN connection established\n\n", .{});
 
     // Display basic status
-    std.debug.print("Connection Status: {s}\n\n", .{@tagName(client.getStatus())});
+    std.debug.print("Connection Status: {s}\n", .{@tagName(client.getStatus())});
+    std.debug.print("TUN Device:        utun (use 'ifconfig' to check interface name)\n\n", .{});
+
+    // Show IP configuration instructions
+    std.debug.print("⚠️  Manual IP Configuration Required\n", .{});
+    std.debug.print("─────────────────────────────────────────────\n", .{});
+    std.debug.print("The server uses Local Bridge mode which requires manual IP setup.\n", .{});
+    std.debug.print("Based on server network: 10.21.0.0/16\n\n", .{});
+    std.debug.print("Run these commands in another terminal:\n", .{});
+    std.debug.print("  sudo ifconfig utun6 10.21.255.100 netmask 255.255.0.0 up\n", .{});
+    std.debug.print("  sudo route add -net 10.21.0.0/16 -interface utun6\n", .{});
+    std.debug.print("  sudo route add default 10.21.0.1\n\n", .{});
+    std.debug.print("Replace 10.21.255.100 with your desired IP in the 10.21.0.0/16 range.\n", .{});
+    std.debug.print("─────────────────────────────────────────────\n\n", .{});
 
     if (args.daemon) {
         // Daemon mode: fork and run in background
