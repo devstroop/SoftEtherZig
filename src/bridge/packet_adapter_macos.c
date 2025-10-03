@@ -413,36 +413,25 @@ static UCHAR* BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size) {
     // IPv4 header (20 bytes)
     packet[pos++] = 0x45; // Version 4, IHL 5
     packet[pos++] = 0x00; // DSCP/ECN
-    USHORT total_len = 20 + 8 + 240 + 64; // IP + UDP + DHCP
-    packet[pos++] = (total_len >> 8) & 0xFF;
-    packet[pos++] = total_len & 0xFF;
+    // Will update total_len later after we know the actual packet size
+    UINT ip_total_len_pos = pos;  // Save position for later update
+    packet[pos++] = 0x00; packet[pos++] = 0x00; // Placeholder for total length
     packet[pos++] = 0x00; packet[pos++] = 0x00; // ID
     packet[pos++] = 0x00; packet[pos++] = 0x00; // Flags/Fragment
     packet[pos++] = 64; // TTL
     packet[pos++] = 17; // Protocol: UDP
+    UINT ip_checksum_pos = pos;  // Save position for checksum
     packet[pos++] = 0x00; packet[pos++] = 0x00; // Checksum (will calculate)
     // Source IP: 0.0.0.0
     packet[pos++] = 0; packet[pos++] = 0; packet[pos++] = 0; packet[pos++] = 0;
     // Dest IP: 255.255.255.255
     packet[pos++] = 255; packet[pos++] = 255; packet[pos++] = 255; packet[pos++] = 255;
     
-    // Calculate IP checksum
-    UINT ip_header_start = 14;
-    UINT checksum = 0;
-    for (int i = 0; i < 20; i += 2) {
-        checksum += (packet[ip_header_start + i] << 8) | packet[ip_header_start + i + 1];
-    }
-    checksum = (checksum >> 16) + (checksum & 0xFFFF);
-    checksum = ~checksum & 0xFFFF;
-    packet[ip_header_start + 10] = (checksum >> 8) & 0xFF;
-    packet[ip_header_start + 11] = checksum & 0xFF;
-    
     // UDP header (8 bytes)
     packet[pos++] = 0x00; packet[pos++] = 68; // Source port: 68 (DHCP client)
     packet[pos++] = 0x00; packet[pos++] = 67; // Dest port: 67 (DHCP server)
-    USHORT udp_len = 8 + 240 + 64;
-    packet[pos++] = (udp_len >> 8) & 0xFF;
-    packet[pos++] = udp_len & 0xFF;
+    UINT udp_len_pos = pos;  // Save position for length
+    packet[pos++] = 0x00; packet[pos++] = 0x00; // Placeholder for UDP length
     packet[pos++] = 0x00; packet[pos++] = 0x00; // Checksum (optional for IPv4)
     
     // DHCP header (240 bytes minimum)
@@ -487,6 +476,34 @@ static UCHAR* BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size) {
     // Option 255: End
     packet[pos++] = 255;
     
+    // Now update the lengths with actual packet size
+    UINT ip_header_start = 14;
+    UINT udp_header_start = ip_header_start + 20;
+    UINT dhcp_start = udp_header_start + 8;
+    UINT total_packet_size = pos;
+    
+    // Calculate actual lengths
+    USHORT ip_total_len = total_packet_size - ip_header_start;  // IP header + UDP + DHCP
+    USHORT udp_len = total_packet_size - udp_header_start;      // UDP header + DHCP
+    
+    // Update IP total length
+    packet[ip_total_len_pos] = (ip_total_len >> 8) & 0xFF;
+    packet[ip_total_len_pos + 1] = ip_total_len & 0xFF;
+    
+    // Update UDP length
+    packet[udp_len_pos] = (udp_len >> 8) & 0xFF;
+    packet[udp_len_pos + 1] = udp_len & 0xFF;
+    
+    // Calculate and update IP checksum
+    UINT checksum = 0;
+    for (int i = 0; i < 20; i += 2) {
+        checksum += (packet[ip_header_start + i] << 8) | packet[ip_header_start + i + 1];
+    }
+    checksum = (checksum >> 16) + (checksum & 0xFFFF);
+    checksum = ~checksum & 0xFFFF;
+    packet[ip_checksum_pos] = (checksum >> 8) & 0xFF;
+    packet[ip_checksum_pos + 1] = checksum & 0xFF;
+    
     *out_size = pos;
     return packet;
 }
@@ -515,7 +532,13 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
     size -= ihl;
     USHORT src_port = (data[0] << 8) | data[1];
     USHORT dst_port = (data[2] << 8) | data[3];
-    if (src_port != 67 || dst_port != 68) return false;
+    if (src_port != 67 || dst_port != 68) {
+        // Debug: Log UDP port mismatch for potential DHCP ACK packets
+        if ((src_port == 67 && dst_port != 68) || (src_port != 67 && dst_port == 68)) {
+            printf("[ParseDhcpAck] ⚠️ UDP port mismatch: src=%u, dst=%u (expected 67->68)\n", src_port, dst_port);
+        }
+        return false;
+    }
     
     // Skip UDP header
     data += 8;
@@ -1136,6 +1159,87 @@ bool MacOsTunInit(SESSION *s) {
     
     printf("[MacOsTunInit] === SUCCESS === TUN device: %s\n", ctx->device_name);
     fflush(stdout);
+    
+    // 🚀 **CRITICAL FIX**: Queue DHCP/IPv6 packets IMMEDIATELY (SSTP Connect style)
+    // Don't wait for GetNextPacket delay - send packets right away!
+    // **ORDER MATTERS**: SSTP Connect log shows DHCP sent FIRST, then IPv6 NA, then IPv6 RS!
+    printf("[MacOsTunInit] 🚀 Pre-queuing initial packets for instant transmission (SSTP Connect order)...\n");
+    fflush(stdout);
+    
+    // **PACKET 1**: DHCP DISCOVER (FIRST! - matching SSTP Connect line 253)
+    UINT dhcp_size = 0;
+    UCHAR *dhcp_discover = BuildDhcpDiscover(g_my_mac, g_dhcp_xid, &dhcp_size);
+    if (dhcp_discover && dhcp_size > 0) {
+        TUN_PACKET *pkt_dhcp = Malloc(sizeof(TUN_PACKET));
+        pkt_dhcp->data = Malloc(dhcp_size);  // Allocate memory
+        Copy(pkt_dhcp->data, dhcp_discover, dhcp_size);  // Copy from static buffer
+        pkt_dhcp->size = dhcp_size;
+        Lock(ctx->queue_lock);
+        InsertQueue(ctx->recv_queue, pkt_dhcp);
+        Unlock(ctx->queue_lock);
+        g_dhcp_state = DHCP_STATE_DISCOVER_SENT;
+        printf("[MacOsTunInit]   1️⃣  DHCP DISCOVER queued (%u bytes) - FIRST PRIORITY\n", dhcp_size);
+        
+        // **DEBUG**: Print full DHCP packet in hex for analysis
+        printf("[MacOsTunInit] 📋 DHCP DISCOVER packet hex dump:\n");
+        for (UINT i = 0; i < dhcp_size; i++) {
+            printf("%02x ", dhcp_discover[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
+        if (dhcp_size % 16 != 0) printf("\n");
+        fflush(stdout);
+    }
+    
+    // **PACKET 2**: IPv6 Neighbor Advertisement (matching SSTP Connect line 254)
+    UINT ipv6_na_size = 0;
+    UCHAR *ipv6_na = BuildNeighborAdvertisement(g_my_mac, &ipv6_na_size);
+    if (ipv6_na && ipv6_na_size > 0) {
+        TUN_PACKET *pkt_na = Malloc(sizeof(TUN_PACKET));
+        pkt_na->data = Malloc(ipv6_na_size);  // Allocate memory
+        Copy(pkt_na->data, ipv6_na, ipv6_na_size);  // Copy from static buffer
+        pkt_na->size = ipv6_na_size;
+        Lock(ctx->queue_lock);
+        InsertQueue(ctx->recv_queue, pkt_na);
+        Unlock(ctx->queue_lock);
+        printf("[MacOsTunInit]   2️⃣  IPv6 NA queued (%u bytes)\n", ipv6_na_size);
+    }
+    
+    // **PACKET 3**: IPv6 Router Solicitation (matching SSTP Connect line 255)
+    UINT ipv6_rs_size = 0;
+    UCHAR *ipv6_rs = BuildRouterSolicitation(g_my_mac, &ipv6_rs_size);
+    if (ipv6_rs && ipv6_rs_size > 0) {
+        TUN_PACKET *pkt_rs = Malloc(sizeof(TUN_PACKET));
+        pkt_rs->data = Malloc(ipv6_rs_size);  // Allocate memory
+        Copy(pkt_rs->data, ipv6_rs, ipv6_rs_size);  // Copy from static buffer
+        pkt_rs->size = ipv6_rs_size;
+        Lock(ctx->queue_lock);
+        InsertQueue(ctx->recv_queue, pkt_rs);
+        Unlock(ctx->queue_lock);
+        printf("[MacOsTunInit]   3️⃣  IPv6 RS queued (%u bytes)\n", ipv6_rs_size);
+    }
+    
+    // **PACKET 4**: Gratuitous ARP (register MAC without claiming IP)
+    UINT garp_size = 0;
+    UCHAR *garp = BuildGratuitousArp(g_my_mac, 0, &garp_size);  // 0 = 0.0.0.0
+    if (garp && garp_size > 0) {
+        TUN_PACKET *pkt_garp = Malloc(sizeof(TUN_PACKET));
+        pkt_garp->data = Malloc(garp_size);  // Allocate memory
+        Copy(pkt_garp->data, garp, garp_size);  // Copy from static buffer
+        pkt_garp->size = garp_size;
+        Lock(ctx->queue_lock);
+        InsertQueue(ctx->recv_queue, pkt_garp);
+        Unlock(ctx->queue_lock);
+        printf("[MacOsTunInit]   4️⃣  Gratuitous ARP queued (%u bytes)\n", garp_size);
+    }
+    
+    printf("[MacOsTunInit] ✅ Queued 4 packets in SSTP Connect order: DHCP → IPv6 NA → IPv6 RS → GARP\n");
+    fflush(stdout);
+    
+    // Trigger session to send packets IMMEDIATELY
+    Cancel(ctx->cancel);
+    printf("[MacOsTunInit] ✅ Triggered session - packets will be sent instantly!\n");
+    fflush(stdout);
+    
     return true;
 }
 
@@ -1327,61 +1431,86 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
     {
         pkt = (TUN_PACKET *)GetNext(ctx->recv_queue);
         if (pkt != NULL) {
-            // **CRITICAL**: TUN device gives us raw IP packets, but SoftEther session expects Ethernet frames!
-            // We must add Ethernet header: [6 bytes dest MAC][6 bytes src MAC][2 bytes EtherType][IP packet]
-            UCHAR *ip_packet = (UCHAR *)pkt->data;
+            UCHAR *packet_data = (UCHAR *)pkt->data;
             size = pkt->size;
             
-            // Determine dest MAC and EtherType from IP packet
-            UCHAR dest_mac[6];
-            USHORT ethertype;
+            // Check if this is already an Ethernet frame (pre-queued packets) or raw IP packet (from TUN device)
+            // Ethernet frames are at least 14 bytes and have dest MAC as first 6 bytes
+            // Pre-queued packets (DHCP, IPv6, ARP) are already Ethernet frames, just return them as-is
+            bool is_ethernet_frame = false;
             
-            if (size > 0 && (ip_packet[0] & 0xF0) == 0x40) {
-                // IPv4 packet
-                ethertype = 0x0800;
+            if (size >= 14) {
+                // Check if EtherType field (bytes 12-13) looks valid
+                USHORT ethertype = (packet_data[12] << 8) | packet_data[13];
+                if (ethertype == 0x0800 || ethertype == 0x0806 || ethertype == 0x86DD) {
+                    // Valid EtherType (IPv4, ARP, or IPv6) - this is already an Ethernet frame
+                    is_ethernet_frame = true;
+                }
+            }
+            
+            if (is_ethernet_frame) {
+                // Already an Ethernet frame (pre-queued packet), return as-is
+                printf("[MacOsTunGetNextPacket] 📤 Sending pre-queued Ethernet frame to VPN: %u bytes\n", size);
+                *data = pkt->data;  // Transfer ownership to session
+                Free(pkt);          // Free packet structure (but NOT pkt->data!)
+            } else if (size > 0 && (packet_data[0] & 0xF0) == 0x40) {
+                // Raw IPv4 packet from TUN device - add Ethernet header
+                UCHAR dest_mac[6];
+                USHORT ethertype = 0x0800;
+                
                 // Use learned gateway MAC if available, otherwise broadcast
                 if (g_gateway_mac[0] != 0) {
                     memcpy(dest_mac, g_gateway_mac, 6);
                 } else {
-                    memset(dest_mac, 0xFF, 6); // Broadcast until we learn gateway MAC
+                    memset(dest_mac, 0xFF, 6);
                 }
-            } else if (size > 0 && (ip_packet[0] & 0xF0) == 0x60) {
-                // IPv6 packet
-                ethertype = 0x86DD;
-                memset(dest_mac, 0xFF, 6); // Broadcast for now
-            } else {
-                // Unknown protocol, skip it
-                printf("[MacOsTunGetNextPacket] ⚠️  Skipping unknown packet type (first byte: 0x%02x)\n", 
-                       ip_packet[0]);
-                Free(pkt->data);
-                Free(pkt);
-                pkt = NULL;
-            }
-            
-            if (pkt != NULL) {
+                
                 // Build Ethernet frame
                 UINT eth_size = 14 + size;
                 UCHAR *eth_frame = Malloc(eth_size);
                 
-                // Dest MAC
-                memcpy(eth_frame, dest_mac, 6);
-                // Src MAC (our MAC)
-                memcpy(eth_frame + 6, g_my_mac, 6);
-                // EtherType
-                eth_frame[12] = (ethertype >> 8) & 0xFF;
+                memcpy(eth_frame, dest_mac, 6);                    // Dest MAC
+                memcpy(eth_frame + 6, g_my_mac, 6);               // Src MAC
+                eth_frame[12] = (ethertype >> 8) & 0xFF;          // EtherType
                 eth_frame[13] = ethertype & 0xFF;
-                // IP packet
-                memcpy(eth_frame + 14, ip_packet, size);
+                memcpy(eth_frame + 14, packet_data, size);        // IP packet
                 
-                printf("[MacOsTunGetNextPacket] 📤 Forwarding packet to VPN: %u bytes IP → %u bytes Ethernet (type=0x%04x)\n",
-                       size, eth_size, ethertype);
+                printf("[MacOsTunGetNextPacket] 📤 Forwarding IPv4 packet to VPN: %u bytes IP → %u bytes Ethernet\n",
+                       size, eth_size);
                 
-                // Free original IP packet, return Ethernet frame
                 Free(pkt->data);
                 Free(pkt);
-                
                 *data = eth_frame;
                 size = eth_size;
+            } else if (size > 0 && (packet_data[0] & 0xF0) == 0x60) {
+                // Raw IPv6 packet from TUN device - add Ethernet header
+                UCHAR dest_mac[6];
+                USHORT ethertype = 0x86DD;
+                memset(dest_mac, 0xFF, 6);
+                
+                UINT eth_size = 14 + size;
+                UCHAR *eth_frame = Malloc(eth_size);
+                
+                memcpy(eth_frame, dest_mac, 6);
+                memcpy(eth_frame + 6, g_my_mac, 6);
+                eth_frame[12] = (ethertype >> 8) & 0xFF;
+                eth_frame[13] = ethertype & 0xFF;
+                memcpy(eth_frame + 14, packet_data, size);
+                
+                printf("[MacOsTunGetNextPacket] 📤 Forwarding IPv6 packet to VPN: %u bytes IP → %u bytes Ethernet\n",
+                       size, eth_size);
+                
+                Free(pkt->data);
+                Free(pkt);
+                *data = eth_frame;
+                size = eth_size;
+            } else {
+                // Unknown protocol, skip it
+                printf("[MacOsTunGetNextPacket] ⚠️  Skipping unknown packet type (first byte: 0x%02x, size: %u)\n", 
+                       packet_data[0], size);
+                Free(pkt->data);
+                Free(pkt);
+                size = 0;  // Return 0 to indicate no packet
             }
         }
     }
@@ -1551,9 +1680,11 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                     }
                 }
                 
-                // If it's an ARP request for our IP (learned or 10.21.255.100), respond!
-                if (opcode == 1 && (target_ip == g_our_ip || target_ip == 0x0A15FF64)) {
-                    printf("[MacOsTunPutPacket] ARP REQUEST for our IP! Need to send ARP REPLY!\n");
+                // If it's an ARP request for our IP (learned, offered, or configured), respond!
+                if (opcode == 1 && (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64)) {
+                    printf("[MacOsTunPutPacket] ✅ ARP REQUEST for our IP (%u.%u.%u.%u)! Queueing ARP REPLY!\n",
+                           (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
+                           (target_ip >> 8) & 0xFF, target_ip & 0xFF);
                     // Queue ARP reply - we'll send it in GetNextPacket
                     g_need_arp_reply = true;
                     memcpy(g_arp_reply_to_mac, pkt + 6, 6);  // Sender MAC

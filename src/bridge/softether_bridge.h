@@ -283,6 +283,53 @@ int vpn_bridge_generate_password_hash(
     size_t output_size
 );
 
+/* ============================================
+ * Runtime Network Information
+ * ============================================ */
+
+/**
+ * Get TUN device name (e.g., "utun6").
+ * Returns dynamic information from active connection.
+ * 
+ * @param client      Client handle
+ * @param output      Buffer to receive device name
+ * @param output_size Size of output buffer (recommended: 64 bytes)
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_get_device_name(
+    const VpnBridgeClient* client,
+    char* output,
+    size_t output_size
+);
+
+/**
+ * Get learned or configured IP address.
+ * Returns the IP address learned from network traffic or configured via DHCP.
+ * 
+ * @param client    Client handle
+ * @param ip        OUT: IP address (network byte order), 0 if not yet learned
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_get_learned_ip(
+    const VpnBridgeClient* client,
+    uint32_t* ip
+);
+
+/**
+ * Get learned gateway MAC address.
+ * Returns the gateway MAC address learned from ARP replies.
+ * 
+ * @param client     Client handle
+ * @param mac        OUT: 6-byte MAC address buffer
+ * @param has_mac    OUT: 1 if MAC was learned, 0 if not yet available
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_get_gateway_mac(
+    const VpnBridgeClient* client,
+    uint8_t* mac,
+    uint32_t* has_mac
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -255,25 +255,55 @@ pub fn main() !void {
 
     std.debug.print("✓ VPN connection established\n\n", .{});
 
-    // Display basic status
-    std.debug.print("Connection Status: {s}\n", .{@tagName(client.getStatus())});
-    std.debug.print("TUN Device:        utun (use 'ifconfig' to check interface name)\n\n", .{});
+    // Get dynamic network information
+    const device_name_buf = client.getDeviceName() catch |err| blk: {
+        std.debug.print("Warning: Could not get device name: {any}\n", .{err});
+        break :blk [_]u8{0} ** 64;
+    };
+    const device_name_end = std.mem.indexOfScalar(u8, &device_name_buf, 0) orelse device_name_buf.len;
+    const device_name = device_name_buf[0..device_name_end];
 
-    // Show IP configuration instructions
-    std.debug.print("⚠️  Manual IP Configuration Required\n", .{});
+    const learned_ip = client.getLearnedIp() catch 0;
+    const gateway_mac = client.getGatewayMac() catch null;
+
+    // Display connection status
+    std.debug.print("Connection Status: {s}\n", .{@tagName(client.getStatus())});
+    std.debug.print("TUN Device:        {s}\n", .{device_name});
+
+    if (learned_ip != 0) {
+        std.debug.print("Learned IP:        {}.{}.{}.{}\n", .{
+            (learned_ip >> 24) & 0xFF,
+            (learned_ip >> 16) & 0xFF,
+            (learned_ip >> 8) & 0xFF,
+            learned_ip & 0xFF,
+        });
+    } else {
+        std.debug.print("Learned IP:        (not yet detected)\n", .{});
+    }
+
+    if (gateway_mac) |mac| {
+        std.debug.print("Gateway MAC:       {X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}\n\n", .{
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        });
+    } else {
+        std.debug.print("Gateway MAC:       (not yet learned)\n\n", .{});
+    }
+
+    // Show network information
+    std.debug.print("✅ Network Configuration\n", .{});
     std.debug.print("─────────────────────────────────────────────\n", .{});
-    std.debug.print("The server uses Local Bridge mode which requires manual IP setup.\n", .{});
-    std.debug.print("macOS TUN devices require point-to-point configuration.\n", .{});
-    std.debug.print("Based on server network: 10.21.0.0/16, Gateway: 10.21.0.1\n\n", .{});
-    std.debug.print("Run these commands in another terminal:\n", .{});
-    std.debug.print("  # Configure utun6 as point-to-point: local_ip remote_ip (gateway)\n", .{});
-    std.debug.print("  sudo ifconfig utun6 10.21.255.100 10.21.0.1\n\n", .{});
-    std.debug.print("  # Add route to VPN network\n", .{});
+    std.debug.print("The interface has been auto-configured with VPN network settings.\n", .{});
+    std.debug.print("Network: 10.21.0.0/16\n", .{});
+    std.debug.print("Gateway: 10.21.0.1\n\n", .{});
+
+    std.debug.print("To add route to VPN network (if needed):\n", .{});
     std.debug.print("  sudo route add -net 10.21.0.0/16 10.21.0.1\n\n", .{});
-    std.debug.print("Replace 10.21.255.100 with your desired IP in the 10.21.0.0/16 range.\n", .{});
-    std.debug.print("\n💡 Note: DHCP doesn't work on macOS TUN devices due to lack of\n", .{});
-    std.debug.print("   Layer 2 (Ethernet) support. Consider asking server admin to\n", .{});
-    std.debug.print("   enable SecureNAT mode for automatic IP configuration.\n", .{});
+
+    std.debug.print("To route ALL traffic through VPN:\n", .{});
+    std.debug.print("  sudo route delete default\n", .{});
+    std.debug.print("  sudo route add default 10.21.0.1\n\n", .{});
+
+    std.debug.print("💡 Note: Press Ctrl+C to disconnect.\n", .{});
     std.debug.print("─────────────────────────────────────────────\n\n", .{});
 
     if (args.daemon) {

@@ -4,12 +4,22 @@
 #ifndef PACKET_ADAPTER_MACOS_H
 #define PACKET_ADAPTER_MACOS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
 #include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
 
 // Forward declarations - these are defined in CedarType.h, don't redefine them
 // typedef struct SESSION SESSION;
 // typedef struct PACKET_ADAPTER PACKET_ADAPTER;
+
+// Forward declare opaque translator handle (only if not already declared)
+#ifndef TRANSLATOR_HANDLE_DEFINED
+#define TRANSLATOR_HANDLE_DEFINED
+typedef void* TranslatorHandle;
+#endif
 
 // macOS TUN device context
 typedef struct MACOS_TUN_CONTEXT {
@@ -22,6 +32,7 @@ typedef struct MACOS_TUN_CONTEXT {
     LOCK *queue_lock;                // Lock for thread-safe queue access
     volatile bool halt;              // Stop flag
     SESSION *session;                // Associated session
+    TranslatorHandle translator;     // ZigTapTun L2↔L3 translator
     
     // Statistics
     UINT64 bytes_sent;
@@ -40,14 +51,18 @@ typedef struct TUN_PACKET {
 PACKET_ADAPTER* NewMacOsTunAdapter();
 
 // Packet adapter callbacks (used by SoftEther internally)
-bool MacOsTunInit(SESSION *s);
+UINT MacOsTunInit(SESSION *s);
 CANCEL* MacOsTunGetCancel(SESSION *s);
 UINT MacOsTunGetNextPacket(SESSION *s, void **data);
-bool MacOsTunPutPacket(SESSION *s, void *data, UINT size);
+UINT MacOsTunPutPacket(SESSION *s, void *data, UINT size);
 void MacOsTunFree(SESSION *s);
 
 // TUN device management
 int OpenMacOsTunDevice(char *device_name, size_t device_name_size);
 void CloseMacOsTunDevice(int fd);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PACKET_ADAPTER_MACOS_H

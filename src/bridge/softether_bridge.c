@@ -832,3 +832,110 @@ int vpn_bridge_generate_password_hash(
 
     return VPN_BRIDGE_SUCCESS;
 }
+
+/* ============================================
+ * Runtime Network Information Implementation
+ * ============================================ */
+
+int vpn_bridge_get_device_name(
+    const VpnBridgeClient* client,
+    char* output,
+    size_t output_size
+) {
+    if (!client || !output || output_size == 0) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+
+    if (!client->softether_session || !client->softether_session->PacketAdapter) {
+        // Not connected - return placeholder
+        strncpy(output, "not_connected", output_size - 1);
+        output[output_size - 1] = '\0';
+        return VPN_BRIDGE_SUCCESS;
+    }
+
+    // Get context from packet adapter
+    #if defined(UNIX_MACOS)
+        MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)client->softether_session->PacketAdapter->Param;
+        if (ctx && ctx->device_name[0] != '\0') {
+            strncpy(output, ctx->device_name, output_size - 1);
+            output[output_size - 1] = '\0';
+        } else {
+            strncpy(output, "utun?", output_size - 1);
+            output[output_size - 1] = '\0';
+        }
+    #else
+        // Other platforms - return generic name
+        strncpy(output, "tun0", output_size - 1);
+        output[output_size - 1] = '\0';
+    #endif
+
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_get_learned_ip(
+    const VpnBridgeClient* client,
+    uint32_t* ip
+) {
+    if (!client || !ip) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+
+    *ip = 0;  // Default: not learned
+
+    if (!client->softether_session || !client->softether_session->PacketAdapter) {
+        return VPN_BRIDGE_SUCCESS;
+    }
+
+    // Try to get IP from translator
+    #if defined(UNIX_MACOS) || defined(UNIX_LINUX)
+        void* ctx_ptr = client->softether_session->PacketAdapter->Param;
+        if (!ctx_ptr) {
+            return VPN_BRIDGE_SUCCESS;
+        }
+
+        #if defined(UNIX_MACOS)
+            MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
+            if (ctx->translator) {
+                *ip = taptun_get_learned_ip(ctx->translator);
+            }
+        #endif
+        // Linux implementation can be added similarly
+    #endif
+
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_get_gateway_mac(
+    const VpnBridgeClient* client,
+    uint8_t* mac,
+    uint32_t* has_mac
+) {
+    if (!client || !mac || !has_mac) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+
+    *has_mac = 0;  // Default: not learned
+    memset(mac, 0, 6);
+
+    if (!client->softether_session || !client->softether_session->PacketAdapter) {
+        return VPN_BRIDGE_SUCCESS;
+    }
+
+    // Try to get MAC from translator
+    #if defined(UNIX_MACOS) || defined(UNIX_LINUX)
+        void* ctx_ptr = client->softether_session->PacketAdapter->Param;
+        if (!ctx_ptr) {
+            return VPN_BRIDGE_SUCCESS;
+        }
+
+        #if defined(UNIX_MACOS)
+            MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
+            if (ctx->translator) {
+                *has_mac = taptun_get_gateway_mac(ctx->translator, mac) ? 1 : 0;
+            }
+        #endif
+        // Linux implementation can be added similarly
+    #endif
+
+    return VPN_BRIDGE_SUCCESS;
+}

@@ -181,4 +181,54 @@ pub const VpnClient = struct {
             .connected_seconds = connected_time,
         };
     }
+
+    /// Get TUN device name (e.g., "utun6")
+    pub fn getDeviceName(self: *const VpnClient) ![64]u8 {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        var device_name: [64]u8 = undefined;
+        const result = c.vpn_bridge_get_device_name(
+            handle,
+            &device_name,
+            device_name.len,
+        );
+
+        if (result != c_mod.VPN_BRIDGE_SUCCESS) {
+            return VpnError.OperationFailed;
+        }
+
+        return device_name;
+    }
+
+    /// Get learned IP address (0 if not yet learned)
+    pub fn getLearnedIp(self: *const VpnClient) !u32 {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        var ip: u32 = 0;
+        const result = c.vpn_bridge_get_learned_ip(handle, &ip);
+
+        if (result != c_mod.VPN_BRIDGE_SUCCESS) {
+            return VpnError.OperationFailed;
+        }
+
+        return ip;
+    }
+
+    /// Get learned gateway MAC address
+    pub fn getGatewayMac(self: *const VpnClient) !?[6]u8 {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        var mac: [6]u8 = undefined;
+        var has_mac: u32 = 0;
+        const result = c.vpn_bridge_get_gateway_mac(handle, &mac, &has_mac);
+
+        if (result != c_mod.VPN_BRIDGE_SUCCESS) {
+            return VpnError.OperationFailed;
+        }
+
+        if (has_mac != 0) {
+            return mac;
+        }
+        return null;
+    }
 };

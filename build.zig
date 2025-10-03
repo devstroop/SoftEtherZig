@@ -139,11 +139,19 @@ pub fn build(b: *std.Build) void {
     // ============================================
     // 1. LIBRARY MODULE (for Zig programs)
     // ============================================
+
+    // Add ZigTapTun dependency
+    const taptun = b.dependency("taptun", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const lib_module = b.addModule("softether", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
     });
     lib_module.addIncludePath(b.path("src"));
+    lib_module.addImport("taptun", taptun.module("taptun"));
     lib_module.link_libc = true;
 
     // ============================================
@@ -175,6 +183,20 @@ pub fn build(b: *std.Build) void {
         .files = c_sources,
         .flags = c_flags,
     });
+
+    // Add ZigTapTun wrapper module
+    const taptun_wrapper_module = b.createModule(.{
+        .root_source_file = b.path("src/bridge/taptun_wrapper.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    taptun_wrapper_module.addImport("taptun", taptun.module("taptun"));
+
+    const taptun_wrapper = b.addObject(.{
+        .name = "taptun_wrapper",
+        .root_module = taptun_wrapper_module,
+    });
+    cli.addObject(taptun_wrapper);
 
     // Add OpenSSL library path (platform-specific)
     const openssl_lib = b.fmt("{s}/lib", .{openssl_prefix});
