@@ -18,6 +18,7 @@
 #include "Cedar/Connection.h"
 #include "Cedar/Session.h"
 #include "Cedar/Account.h"
+#include "Cedar/IPsec_IPC.h"  // Add IPC header for DHCP
 
 // Platform-specific packet adapter
 #if defined(UNIX_MACOS)
@@ -37,7 +38,7 @@
  * Internal State
  * ============================================ */
 
-static bool g_initialized = false;
+static uint32_t g_initialized = 0;  // 0 = false, 1 = true
 
 /* ============================================
  * Client Structure
@@ -50,6 +51,7 @@ struct VpnBridgeClient {
     char hub_name[256];
     char username[256];
     char password[256];
+    bool password_is_hashed;  // Flag: true if password field contains pre-hashed password
     
     // State
     VpnBridgeStatus status;
@@ -63,6 +65,7 @@ struct VpnBridgeClient {
     ACCOUNT* softether_account;
     SESSION* softether_session;
     PACKET_ADAPTER* packet_adapter;
+    IPC* softether_ipc;  // IPC connection for DHCP
 };
 
 /* ============================================
@@ -88,7 +91,7 @@ static const char* get_error_message_internal(int error_code) {
  * Library Initialization
  * ============================================ */
 
-int vpn_bridge_init(bool debug) {
+int vpn_bridge_init(uint32_t debug) {
     printf("[DEBUG] vpn_bridge_init starting...\n");
     fflush(stdout);
     
@@ -121,7 +124,7 @@ int vpn_bridge_init(bool debug) {
     printf("[DEBUG] ✅ InitCedar completed successfully!\n");
     fflush(stdout);
     
-    g_initialized = true;
+    g_initialized = 1;  // 1 = true
     return VPN_BRIDGE_SUCCESS;
 }
 
@@ -134,11 +137,14 @@ void vpn_bridge_cleanup(void) {
     FreeCedar();
     FreeMayaqua();
     
-    g_initialized = false;
+    g_initialized = 0;  // 0 = false
 }
 
-bool vpn_bridge_is_initialized(void) {
-    return g_initialized;
+/**
+ * Check if library is initialized
+ */
+uint32_t vpn_bridge_is_initialized(void) {
+    return g_initialized ? 1 : 0;
 }
 
 /* ============================================
@@ -261,6 +267,40 @@ int vpn_bridge_configure(
     strncpy(client->password, password, sizeof(client->password) - 1);
     client->password[sizeof(client->password) - 1] = '\0';
     
+    client->password_is_hashed = false;  // Plain password
+    
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_configure_with_hash(
+    VpnBridgeClient* client,
+    const char* hostname,
+    uint16_t port,
+    const char* hub_name,
+    const char* username,
+    const char* password_hash
+) {
+    if (!client || !hostname || !hub_name || !username || !password_hash) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    // Store configuration
+    strncpy(client->hostname, hostname, sizeof(client->hostname) - 1);
+    client->hostname[sizeof(client->hostname) - 1] = '\0';
+    
+    client->port = port;
+    
+    strncpy(client->hub_name, hub_name, sizeof(client->hub_name) - 1);
+    client->hub_name[sizeof(client->hub_name) - 1] = '\0';
+    
+    strncpy(client->username, username, sizeof(client->username) - 1);
+    client->username[sizeof(client->username) - 1] = '\0';
+    
+    strncpy(client->password, password_hash, sizeof(client->password) - 1);
+    client->password[sizeof(client->password) - 1] = '\0';
+    
+    client->password_is_hashed = true;  // Pre-hashed password
+    
     return VPN_BRIDGE_SUCCESS;
 }
 
@@ -313,20 +353,19 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     printf("[vpn_bridge_connect] ⚠️  TCP-ONLY MODE: PortUDP=%u (0 = TCP only, no NAT-T, no UDP accel)\n", opt->PortUDP);
     fflush(stdout);
     
-    // Device name for virtual adapter
-    // NOTE: Do NOT use "_SEHUBBRIDGE_" - that's for local bridge mode on client side
-    // We want normal VPN client mode to receive L2 packets from server's Local Bridge
+    // Device name for virtual adapter - use generic VPN adapter name
+    // This enables proper Layer 2 bridging without special modes
     StrCpy(opt->DeviceName, sizeof(opt->DeviceName), "vpn_adapter");
     
-    printf("[vpn_bridge_connect] 📡 Device name set to '%s' (normal VPN client mode)\n", opt->DeviceName);
+    printf("[vpn_bridge_connect] 📡 Device name set to 'vpn_adapter' (Layer 2 bridging mode)\n");
     fflush(stdout);
     
-    // Connection settings - TCP ONLY, let server policy control MaxConnection
-    // Stanislav: "MaxConn follows server side policy"
-    opt->MaxConnection = 8;              // Server will control actual number via policy
-    opt->UseEncrypt = true;              // Use encryption
-    opt->UseCompress = false;            // No compression
-    opt->HalfConnection = false;         // Full-duplex (not half-duplex)
+    // Connection settings - TCP ONLY, matching SSTP Connect configuration EXACTLY
+    // **CRITICAL**: SSTP Connect log shows "max_connection=[1]" - we MUST match this!
+    opt->MaxConnection = 1;              // SSTP Connect uses 1, not 2!
+    opt->UseEncrypt = true;              // Use encryption (SSTP: use_encrypt=[1])
+    opt->UseCompress = false;            // No compression (SSTP: use_compress=[0])
+    opt->HalfConnection = false;         // Full-duplex (SSTP: half_connection=[0])
     opt->NoRoutingTracking = true;       // Don't track routing
     opt->NumRetry = 10;                  // Retry attempts
     opt->RetryInterval = 5;              // 5 seconds between retries
@@ -354,8 +393,32 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     // Set username
     StrCpy(auth->Username, sizeof(auth->Username), client->username);
     
-    // Hash the password using SoftEther's method
-    HashPassword(auth->HashedPassword, client->username, client->password);
+    // Handle password: hash it if plain, or decode base64 if pre-hashed
+    if (client->password_is_hashed) {
+        // Password is already hashed (base64-encoded SHA1)
+        // Decode base64 to get the 20-byte SHA1 hash
+        printf("[vpn_bridge_connect] Using pre-hashed password (base64-encoded)\n");
+        fflush(stdout);
+        
+        // Decode base64
+        char decoded[256];
+        int decoded_len = B64_Decode(decoded, client->password, strlen(client->password));
+        
+        if (decoded_len == 20) {
+            // Copy the 20-byte hash to HashedPassword
+            memcpy(auth->HashedPassword, decoded, 20);
+            printf("[vpn_bridge_connect] ✅ Pre-hashed password decoded (20 bytes)\n");
+        } else {
+            printf("[vpn_bridge_connect] ⚠️  Warning: Base64 decoded to %d bytes (expected 20)\n", decoded_len);
+            // Fall back to hashing the password string itself
+            HashPassword(auth->HashedPassword, client->username, client->password);
+        }
+    } else {
+        // Plain password - hash it using SoftEther's method
+        printf("[vpn_bridge_connect] Hashing plain password\n");
+        fflush(stdout);
+        HashPassword(auth->HashedPassword, client->username, client->password);
+    }
     
     printf("[vpn_bridge_connect] CLIENT_AUTH created: user=%s, type=%d\n", 
            auth->Username, auth->AuthType);
@@ -474,6 +537,13 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     
     if (connected) {
         printf("[vpn_bridge_connect] ✅ VPN connection established!\n");
+        printf("[vpn_bridge_connect] 💡 DHCP will be handled by packet adapter\n");
+        fflush(stdout);
+        
+        // NOTE: DHCP is handled by the packet adapter (packet_adapter_macos.c)
+        // It will automatically send DHCP DISCOVER and handle the response
+        // No need for IPC connection - that's only for local connections
+        
         client->status = VPN_STATUS_CONNECTED;
         client->last_error = VPN_BRIDGE_SUCCESS;
         client->connect_time = Tick64();
@@ -559,6 +629,18 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
         client->softether_account = NULL;
         
         printf("[vpn_bridge_disconnect] Account freed\n");
+        fflush(stdout);
+    }
+    
+    // Cleanup IPC connection
+    if (client->softether_ipc) {
+        printf("[vpn_bridge_disconnect] Freeing IPC connection...\n");
+        fflush(stdout);
+        
+        FreeIPC(client->softether_ipc);
+        client->softether_ipc = NULL;
+        
+        printf("[vpn_bridge_disconnect] IPC connection freed\n");
         fflush(stdout);
     }
     
@@ -655,6 +737,41 @@ int vpn_bridge_get_dhcp_info(const VpnBridgeClient* client, VpnBridgeDhcpInfo* d
         return VPN_BRIDGE_ERROR_NOT_CONNECTED;
     }
     
+    // Try IPC-based DHCP if we have an IPC connection
+    if (client->softether_ipc != NULL) {
+        printf("[vpn_bridge_get_dhcp_info] Attempting IPC-based DHCP...\n");
+        
+        // Create DHCP request for information
+        DHCP_OPTION_LIST req;
+        Zero(&req, sizeof(req));
+        req.Opcode = DHCP_INFORM;
+        req.ClientAddress = IPToUINT(&client->softether_ipc->ClientIPAddress);
+        StrCpy(req.Hostname, sizeof(req.Hostname), "vpnclient");
+        
+        // Send DHCP INFORM request
+        DHCPV4_DATA *d = IPCSendDhcpRequest(client->softether_ipc, NULL, Rand32(), &req, DHCP_ACK, IPC_DHCP_TIMEOUT, NULL);
+        if (d != NULL) {
+            printf("[vpn_bridge_get_dhcp_info] IPC DHCP INFORM successful!\n");
+            
+            // Extract DHCP information
+            dhcp_info->client_ip = IPToUINT(&client->softether_ipc->ClientIPAddress);
+            dhcp_info->subnet_mask = d->ParsedOptionList->SubnetMask;
+            dhcp_info->gateway = d->ParsedOptionList->ServerAddress;  // Usually the gateway
+            dhcp_info->dns_server1 = d->ParsedOptionList->DnsServer;
+            dhcp_info->dns_server2 = d->ParsedOptionList->DnsServer2;
+            dhcp_info->dhcp_server = d->ParsedOptionList->ServerAddress;
+            dhcp_info->lease_time = d->ParsedOptionList->LeaseTime;
+            StrCpy(dhcp_info->domain_name, sizeof(dhcp_info->domain_name), d->ParsedOptionList->DomainName);
+            dhcp_info->valid = true;
+            
+            FreeDHCPv4Data(d);
+            return VPN_BRIDGE_SUCCESS;
+        } else {
+            printf("[vpn_bridge_get_dhcp_info] IPC DHCP INFORM failed\n");
+        }
+    }
+    
+    // Fall back to session-based DHCP info (not available for standard clients)
     // Note: Regular VPN client sessions don't use IPC/IPC_ASYNC like OpenVPN/IPsec
     // The DHCP information isn't available through the SESSION structure for standard clients
     // This would require deep integration with the virtual network adapter layer
@@ -679,4 +796,39 @@ const char* vpn_bridge_softether_version(void) {
     // TODO: Return real SoftEther version
     // return CEDAR_VERSION_STR;
     return "4.44-9807 (stub)";
+}
+
+/* ============================================
+ * Utility Functions Implementation
+ * ============================================ */
+
+int vpn_bridge_generate_password_hash(
+    const char* username,
+    const char* password,
+    char* output,
+    size_t output_size
+) {
+    if (!username || !password || !output || output_size < 32) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+
+    // Generate the hash using SoftEther's HashPassword function
+    UCHAR hash[20];  // SHA-0 produces 20 bytes (SHA1_SIZE)
+    HashPassword(hash, (char*)username, (char*)password);
+
+    // Base64 encode the hash
+    char encoded[64];  // Base64 of 20 bytes needs ~28 chars + null
+    int encoded_len = B64_Encode(encoded, (char*)hash, 20);
+    if (encoded_len <= 0) {
+        return VPN_BRIDGE_ERROR_INIT_FAILED;
+    }
+
+    // Copy to output buffer
+    if ((size_t)encoded_len >= output_size) {
+        return VPN_BRIDGE_ERROR_ALLOC_FAILED;
+    }
+
+    strcpy(output, encoded);
+
+    return VPN_BRIDGE_SUCCESS;
 }

@@ -1,6 +1,11 @@
 // SoftEther VPN Zig Client - macOS Packet Adapter Implementation
 // Uses macOS utun kernel interface for packet forwarding
 
+// **CRITICAL FIX**: Undefine TARGET_OS_IPHONE if defined - we're building for macOS, not iOS!
+#ifdef TARGET_OS_IPHONE
+#undef TARGET_OS_IPHONE
+#endif
+
 #include "packet_adapter_macos.h"
 #include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
 #include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
@@ -50,8 +55,26 @@ static bool g_need_arp_reply = false;        // Flag: need to send ARP reply
 static UCHAR g_arp_reply_to_mac[6] = {0};   // MAC to send ARP reply to
 static UINT32 g_arp_reply_to_ip = 0;         // IP to send ARP reply to
 
+// Our configured IP (learned from outgoing packets or DHCP)
+static UINT32 g_our_ip = 0;                  // Our IP address (0 = not known yet)
+static UCHAR g_gateway_mac[6] = {0};         // Gateway MAC address (learned from ARP)
+
 // Configure the TUN interface with IP address
 static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask, UINT32 gateway) {
+#ifdef TARGET_OS_IPHONE
+    // On iOS, network configuration is handled by NEPacketTunnelProvider
+    // This function is not used - configuration comes from the tunnel settings
+    char ip_str[32], mask_str[32], gw_str[32];
+    snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d",
+             (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+    snprintf(mask_str, sizeof(mask_str), "%d.%d.%d.%d",
+             (netmask >> 24) & 0xFF, (netmask >> 16) & 0xFF, (netmask >> 8) & 0xFF, netmask & 0xFF);
+    snprintf(gw_str, sizeof(gw_str), "%d.%d.%d.%d",
+             (gateway >> 24) & 0xFF, (gateway >> 16) & 0xFF, (gateway >> 8) & 0xFF, gateway & 0xFF);
+    printf("[ConfigureTunInterface] iOS: IP=%s, Netmask=%s, Gateway=%s\n", ip_str, mask_str, gw_str);
+    printf("[ConfigureTunInterface] iOS: Network configuration handled by PacketTunnelProvider\n");
+    return true;
+#else
     char cmd[512];
     char ip_str[32], mask_str[32], gw_str[32];
     
@@ -74,8 +97,10 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
     printf("╚════════════════════════════════════════════╝\n");
     printf("\n");
     
-    // Set IP address and netmask
-    snprintf(cmd, sizeof(cmd), "ifconfig %s %s %s up", device, ip_str, mask_str);
+    // Set IP address with peer (gateway) - TUN devices need both local and peer IPs
+    // Format: ifconfig DEVICE LOCAL_IP PEER_IP netmask NETMASK up
+    // This is required for macOS TUN devices (point-to-point interfaces)
+    snprintf(cmd, sizeof(cmd), "ifconfig %s %s %s netmask %s up", device, ip_str, gw_str, mask_str);
     printf("[ConfigureTunInterface] Executing: %s\n", cmd);
     if (system(cmd) != 0) {
         printf("[ConfigureTunInterface] ❌ Failed to configure interface\n");
@@ -96,6 +121,7 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
     
     printf("[ConfigureTunInterface] ✅ Interface configured successfully\n\n");
     return true;
+#endif // TARGET_OS_IPHONE
 }
 
 // Build IPv6 Router Solicitation packet (ICMPv6 type 133)
@@ -808,6 +834,31 @@ void MacOsTunReadThread(THREAD *t, void *param) {
             continue;
         }
         
+        // **LEARN OUR IP**: Extract source IP from outgoing IPv4 packets
+        if (n >= 24) {  // Minimum IPv4 header = 20 bytes + 4 byte protocol header
+            UCHAR *ip_packet = buf + 4;
+            UCHAR ip_version = (ip_packet[0] >> 4) & 0x0F;
+            
+            if (ip_version == 4) {
+                // Extract source IP (bytes 12-15 of IPv4 header)
+                UINT32 src_ip = (ip_packet[12] << 24) | (ip_packet[13] << 16) | 
+                               (ip_packet[14] << 8) | ip_packet[15];
+                
+                // Learn our IP if not already known (ignore 169.254.x.x link-local)
+                if (g_our_ip == 0 && (src_ip & 0xFFFF0000) != 0xA9FE0000) {
+                    g_our_ip = src_ip;
+                    printf("[MacOsTunReadThread] 🎯 LEARNED OUR IP: %u.%u.%u.%u\n",
+                           (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+                           (src_ip >> 8) & 0xFF, src_ip & 0xFF);
+                    fflush(stdout);
+                }
+            }
+        }
+        
+        // **DEBUG**: Log packets read from TUN device (outgoing packets from macOS)
+        printf("[MacOsTunReadThread] 📤 Read %d bytes from TUN device (outgoing to VPN)\n", n - 4);
+        fflush(stdout);
+        
         // Allocate packet and copy data
         void *packet_data = Malloc(n - 4);
         Copy(packet_data, buf + 4, n - 4);
@@ -843,6 +894,16 @@ void MacOsTunReadThread(THREAD *t, void *param) {
 
 // Open a macOS TUN device using utun kernel control interface
 int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
+#ifdef TARGET_OS_IPHONE
+    // On iOS, packet I/O goes through NEPacketTunnelFlow, not utun
+    // This function should not be called on iOS
+    printf("[OpenMacOsTunDevice] ERROR: Running iOS code path on macOS! TARGET_OS_IPHONE is defined!\n");
+    if (device_name && device_name_size > 0) {
+        StrCpy(device_name, device_name_size, "ios_network_extension");
+    }
+    return -1; // No fd needed on iOS
+#else
+    printf("[OpenMacOsTunDevice] Starting utun device search (macOS code path)...\n");
     struct sockaddr_ctl addr;
     struct ctl_info info;
     int fd = -1;
@@ -917,6 +978,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
     
     printf("[OpenMacOsTunDevice] Created TUN device: %s (fd=%d)\n", device_name, fd);
     return fd;
+#endif // TARGET_OS_IPHONE
 }
 
 // Close TUN device
@@ -977,20 +1039,66 @@ bool MacOsTunInit(SESSION *s) {
     printf("[MacOsTunInit] TUN device opened: %s (fd=%d)\n", ctx->device_name, ctx->tun_fd);
     fflush(stdout);
     
+    // **CRITICAL FIX**: Configure TUN interface immediately with temporary IP
+    // This allows packets to flow through the interface while DHCP is in progress
+    // Using 169.254.x.x (link-local) range for initial configuration
+    printf("[MacOsTunInit] ⚠️  Configuring TUN interface with temporary link-local IP...\n");
+    fflush(stdout);
+    
+    // Generate unique link-local address based on MAC
+    UINT32 temp_ip = 0xA9FE0000 | ((rand() & 0xFF) << 8) | (rand() & 0xFF); // 169.254.x.x
+    UINT32 temp_peer = 0xA9FE0001; // 169.254.0.1 as peer (gateway)
+    UINT32 temp_mask = 0xFFFF0000; // 255.255.0.0
+    
+    char temp_ip_str[64];
+    sprintf(temp_ip_str, "%u.%u.%u.%u",
+            (temp_ip >> 24) & 0xFF, (temp_ip >> 16) & 0xFF,
+            (temp_ip >> 8) & 0xFF, temp_ip & 0xFF);
+    
+    char temp_peer_str[64];
+    sprintf(temp_peer_str, "%u.%u.%u.%u",
+            (temp_peer >> 24) & 0xFF, (temp_peer >> 16) & 0xFF,
+            (temp_peer >> 8) & 0xFF, temp_peer & 0xFF);
+    
+    char temp_mask_str[64];
+    sprintf(temp_mask_str, "%u.%u.%u.%u",
+            (temp_mask >> 24) & 0xFF, (temp_mask >> 16) & 0xFF,
+            (temp_mask >> 8) & 0xFF, temp_mask & 0xFF);
+    
+    // Configure interface immediately - this is REQUIRED for TUN devices to pass packets
+    char cmd[512];
+    sprintf(cmd, "ifconfig %s %s %s netmask %s up 2>&1",
+            ctx->device_name, temp_ip_str, temp_peer_str, temp_mask_str);
+    printf("[MacOsTunInit] Executing: %s\n", cmd);
+    fflush(stdout);
+    
+    int result = system(cmd);
+    if (result != 0) {
+        printf("[MacOsTunInit] ⚠️  Warning: Failed to configure interface (result=%d)\n", result);
+        printf("[MacOsTunInit] ⚠️  This may cause packet flow issues!\n");
+        fflush(stdout);
+    } else {
+        printf("[MacOsTunInit] ✅ Interface configured with temporary IP: %s -> %s\n", 
+               temp_ip_str, temp_peer_str);
+        fflush(stdout);
+    }
+    
     // Initialize DHCP state
     printf("[MacOsTunInit] Initializing DHCP state...\n");
     fflush(stdout);
     g_dhcp_state = DHCP_STATE_INIT;
     g_connection_start_time = Tick64();  // Record when connection was established
     
-    // Generate MAC address like the official SoftEther client does
-    // Format: 5E:XX:XX:XX:XX:XX (5E prefix is standard for SoftEther clients)
-    // NOTE: CA prefix is for IPC sessions, 5E is for normal VPN clients
-    g_my_mac[0] = 0x5E;
-    for (int i = 1; i < 6; i++) {
+    // Generate MAC address matching iPhone/iOS app format
+    // Format: 02:00:5E:XX:XX:XX (matches iPhone Network Extension implementation)
+    // 02 = Locally administered address, 00:5E = SoftEther prefix
+    g_my_mac[0] = 0x02;  // Locally administered
+    g_my_mac[1] = 0x00;
+    g_my_mac[2] = 0x5E;  // SoftEther prefix
+    for (int i = 3; i < 6; i++) {
         g_my_mac[i] = (UCHAR)(rand() % 256);
     }
-    printf("[MacOsTunInit] Generated MAC: %02x:%02x:%02x:%02x:%02x:%02x (0x5E=SoftEther client prefix)\n",
+    printf("[MacOsTunInit] Generated MAC: %02x:%02x:%02x:%02x:%02x:%02x (02:00:5E matches iPhone app)\n",
            g_my_mac[0], g_my_mac[1], g_my_mac[2], 
            g_my_mac[3], g_my_mac[4], g_my_mac[5]);
     fflush(stdout);
@@ -1106,8 +1214,8 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
     // it will think the IP is dead and won't send DHCP ACK!
     if (g_need_arp_reply) {
         UINT pkt_size;
-        // Reply with the IP from the DHCP OFFER we received (or 0.0.0.0 if we haven't got one yet)
-        UINT32 our_ip = (g_offered_ip != 0) ? g_offered_ip : 0x00000000;
+        // Reply with: 1) learned IP, 2) DHCP offered IP, or 3) 0.0.0.0 if neither known
+        UINT32 our_ip = (g_our_ip != 0) ? g_our_ip : ((g_offered_ip != 0) ? g_offered_ip : 0x00000000);
         UCHAR *pkt = BuildArpReply(g_my_mac, our_ip, g_arp_reply_to_mac, g_arp_reply_to_ip, &pkt_size);
         if (pkt_size > 0 && pkt != NULL) {
             printf("[MacOsTunGetNextPacket] ✅ Sending ARP REPLY to %02x:%02x:%02x:%02x:%02x:%02x (our IP: %u.%u.%u.%u)\n",
@@ -1219,9 +1327,62 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
     {
         pkt = (TUN_PACKET *)GetNext(ctx->recv_queue);
         if (pkt != NULL) {
-            *data = pkt->data;
+            // **CRITICAL**: TUN device gives us raw IP packets, but SoftEther session expects Ethernet frames!
+            // We must add Ethernet header: [6 bytes dest MAC][6 bytes src MAC][2 bytes EtherType][IP packet]
+            UCHAR *ip_packet = (UCHAR *)pkt->data;
             size = pkt->size;
-            Free(pkt); // Free wrapper, but data is returned to caller
+            
+            // Determine dest MAC and EtherType from IP packet
+            UCHAR dest_mac[6];
+            USHORT ethertype;
+            
+            if (size > 0 && (ip_packet[0] & 0xF0) == 0x40) {
+                // IPv4 packet
+                ethertype = 0x0800;
+                // Use learned gateway MAC if available, otherwise broadcast
+                if (g_gateway_mac[0] != 0) {
+                    memcpy(dest_mac, g_gateway_mac, 6);
+                } else {
+                    memset(dest_mac, 0xFF, 6); // Broadcast until we learn gateway MAC
+                }
+            } else if (size > 0 && (ip_packet[0] & 0xF0) == 0x60) {
+                // IPv6 packet
+                ethertype = 0x86DD;
+                memset(dest_mac, 0xFF, 6); // Broadcast for now
+            } else {
+                // Unknown protocol, skip it
+                printf("[MacOsTunGetNextPacket] ⚠️  Skipping unknown packet type (first byte: 0x%02x)\n", 
+                       ip_packet[0]);
+                Free(pkt->data);
+                Free(pkt);
+                pkt = NULL;
+            }
+            
+            if (pkt != NULL) {
+                // Build Ethernet frame
+                UINT eth_size = 14 + size;
+                UCHAR *eth_frame = Malloc(eth_size);
+                
+                // Dest MAC
+                memcpy(eth_frame, dest_mac, 6);
+                // Src MAC (our MAC)
+                memcpy(eth_frame + 6, g_my_mac, 6);
+                // EtherType
+                eth_frame[12] = (ethertype >> 8) & 0xFF;
+                eth_frame[13] = ethertype & 0xFF;
+                // IP packet
+                memcpy(eth_frame + 14, ip_packet, size);
+                
+                printf("[MacOsTunGetNextPacket] 📤 Forwarding packet to VPN: %u bytes IP → %u bytes Ethernet (type=0x%04x)\n",
+                       size, eth_size, ethertype);
+                
+                // Free original IP packet, return Ethernet frame
+                Free(pkt->data);
+                Free(pkt);
+                
+                *data = eth_frame;
+                size = eth_size;
+            }
         }
     }
     Unlock(ctx->queue_lock);
@@ -1249,10 +1410,18 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
         return false;
     }
     
-    // Debug: Log all incoming packets during DHCP
-    if (g_dhcp_state != DHCP_STATE_CONFIGURED && size > 14) {
+    // Debug: Log ALL incoming packets (not just during DHCP negotiation)
+    if (size > 14) {
         USHORT ethertype = (((UCHAR*)data)[12] << 8) | ((UCHAR*)data)[13];
-        printf("[MacOsTunPutPacket] Incoming packet: size=%u, ethertype=0x%04x, state=%d\n", size, ethertype, g_dhcp_state);
+        printf("[MacOsTunPutPacket] 📦 Incoming packet: size=%u, ethertype=0x%04x, state=%d\n", size, ethertype, g_dhcp_state);
+        
+        // Dump first 64 bytes of EVERY packet for debugging
+        printf("[MacOsTunPutPacket] First 64 bytes: ");
+        for (int i = 0; i < (size < 64 ? size : 64); i++) {
+            printf("%02x ", ((UCHAR*)data)[i]);
+            if ((i + 1) % 16 == 0) printf("\n[MacOsTunPutPacket]                    ");
+        }
+        printf("\n");
         
         if (ethertype == 0x0800) {
             // Check if it's UDP port 68 (DHCP client port)
@@ -1367,8 +1536,23 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                        (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
                        (target_ip >> 8) & 0xFF, target_ip & 0xFF);
                 
-                // If it's an ARP request for our IP (10.21.255.100 = 0x0A15FF64), respond!
-                if (opcode == 1 && target_ip == 0x0A15FF64) {
+                // Learn gateway MAC from ARP replies (opcode=2)
+                if (opcode == 2) {
+                    UINT32 sender_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];
+                    // If this is from 10.21.0.1 (gateway), learn its MAC
+                    if (sender_ip == 0x0A150001) {
+                        bool mac_changed = (memcmp(g_gateway_mac, pkt + 22, 6) != 0);
+                        if (mac_changed || g_gateway_mac[0] == 0) {
+                            memcpy(g_gateway_mac, pkt + 22, 6);
+                            printf("[MacOsTunPutPacket] 🎯 LEARNED GATEWAY MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                                   g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
+                                   g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
+                        }
+                    }
+                }
+                
+                // If it's an ARP request for our IP (learned or 10.21.255.100), respond!
+                if (opcode == 1 && (target_ip == g_our_ip || target_ip == 0x0A15FF64)) {
                     printf("[MacOsTunPutPacket] ARP REQUEST for our IP! Need to send ARP REPLY!\n");
                     // Queue ARP reply - we'll send it in GetNextPacket
                     g_need_arp_reply = true;

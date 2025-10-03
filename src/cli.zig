@@ -15,6 +15,7 @@ fn printUsage() void {
         \\
         \\USAGE:
         \\    vpnclient [OPTIONS]
+        \\    vpnclient --gen-hash <USERNAME> <PASSWORD>
         \\
         \\OPTIONS:
         \\    -h, --help              Show this help message
@@ -24,10 +25,12 @@ fn printUsage() void {
         \\    -H, --hub <HUB>         Virtual hub name (required)
         \\    -u, --user <USERNAME>   Username for authentication (required)
         \\    -P, --password <PASS>   Password for authentication (required)
+        \\    --password-hash <HASH>  Pre-hashed password (base64, use instead of -P)
         \\    -a, --account <NAME>    Account name (default: username)
         \\    --no-encrypt            Disable encryption (not recommended)
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
+        \\    --gen-hash <USER> <PASS> Generate password hash and exit
         \\
         \\EXAMPLES:
         \\    # Connect to VPN server
@@ -35,6 +38,9 @@ fn printUsage() void {
         \\
         \\    # Connect with custom port
         \\    vpnclient -s vpn.example.com -p 8443 -H VPN -u myuser -P mypass
+        \\
+        \\    # Generate password hash
+        \\    vpnclient --gen-hash myuser mypassword
         \\
         \\    # Run as daemon
         \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass -d
@@ -53,12 +59,16 @@ const CliArgs = struct {
     hub: ?[]const u8 = null,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
+    password_hash: ?[]const u8 = null,
     account: ?[]const u8 = null,
     use_encrypt: bool = true,
     use_compress: bool = true,
     daemon: bool = false,
     help: bool = false,
     version: bool = false,
+    gen_hash: bool = false,
+    gen_hash_user: ?[]const u8 = null,
+    gen_hash_pass: ?[]const u8 = null,
 };
 
 fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
@@ -75,6 +85,10 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.help = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             result.version = true;
+        } else if (std.mem.eql(u8, arg, "--gen-hash")) {
+            result.gen_hash = true;
+            result.gen_hash_user = args.next() orelse return error.MissingHashUsername;
+            result.gen_hash_pass = args.next() orelse return error.MissingHashPassword;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--server")) {
             result.server = args.next() orelse return error.MissingServerArg;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
@@ -86,6 +100,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.username = args.next() orelse return error.MissingUserArg;
         } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--password")) {
             result.password = args.next() orelse return error.MissingPasswordArg;
+        } else if (std.mem.eql(u8, arg, "--password-hash")) {
+            result.password_hash = args.next() orelse return error.MissingPasswordHashArg;
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--account")) {
             result.account = args.next() orelse return error.MissingAccountArg;
         } else if (std.mem.eql(u8, arg, "--no-encrypt")) {
@@ -116,7 +132,7 @@ pub fn main() !void {
                 std.process.exit(1);
             },
             else => {
-                std.debug.print("Error parsing arguments: {}\n", .{err});
+                std.debug.print("Error parsing arguments: {any}\n", .{err});
                 std.process.exit(1);
             },
         }
@@ -129,6 +145,35 @@ pub fn main() !void {
 
     if (args.version) {
         printVersion();
+        return;
+    }
+
+    // Handle hash generation mode
+    if (args.gen_hash) {
+        const username = args.gen_hash_user.?;
+        const password = args.gen_hash_pass.?;
+
+        // Initialize SoftEther library first
+        const init_result = softether.c.c.vpn_bridge_init(0); // 0 = FALSE (debug off)
+        if (init_result != softether.c.VPN_BRIDGE_SUCCESS) {
+            std.debug.print("Error initializing SoftEther library\n", .{});
+            std.process.exit(1);
+        }
+        defer _ = softether.c.c.vpn_bridge_cleanup();
+
+        var hash_buffer: [128]u8 = undefined;
+        const result = softether.c.c.vpn_bridge_generate_password_hash(username.ptr, password.ptr, &hash_buffer, hash_buffer.len);
+
+        if (result != softether.c.VPN_BRIDGE_SUCCESS) {
+            std.debug.print("Error generating hash: {d}\n", .{result});
+            std.process.exit(1);
+        }
+
+        const hash_len = std.mem.indexOfScalar(u8, &hash_buffer, 0) orelse hash_buffer.len;
+        for (hash_buffer[0..hash_len]) |byte| {
+            std.debug.print("{c}", .{byte});
+        }
+        std.debug.print("\n", .{});
         return;
     }
 
@@ -151,11 +196,21 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    const password = args.password orelse {
-        std.debug.print("Error: Password is required (-P/--password)\n\n", .{});
+    // Either password or password_hash is required
+    if (args.password == null and args.password_hash == null) {
+        std.debug.print("Error: Password is required (-P/--password or --password-hash)\n\n", .{});
         printUsage();
         std.process.exit(1);
-    };
+    }
+
+    if (args.password != null and args.password_hash != null) {
+        std.debug.print("Error: Cannot specify both --password and --password-hash\n\n", .{});
+        printUsage();
+        std.process.exit(1);
+    }
+
+    const password = args.password orelse args.password_hash.?;
+    const use_password_hash = args.password_hash != null;
 
     const account = args.account orelse username;
 
@@ -168,6 +223,7 @@ pub fn main() !void {
         .auth = .{ .password = .{
             .username = username,
             .password = password,
+            .is_hashed = use_password_hash,
         } },
         .use_encrypt = args.use_encrypt,
         .use_compress = args.use_compress,
@@ -184,7 +240,7 @@ pub fn main() !void {
     std.debug.print("─────────────────────────────────────────────\n\n", .{});
 
     var client = VpnClient.init(allocator, config) catch |err| {
-        std.debug.print("✗ Failed to initialize VPN client: {}\n", .{err});
+        std.debug.print("✗ Failed to initialize VPN client: {any}\n", .{err});
         std.process.exit(1);
     };
     // Note: defer client.deinit() is NOT here - we handle it manually for daemon mode
@@ -193,7 +249,7 @@ pub fn main() !void {
     std.debug.print("Establishing VPN connection...\n", .{});
     client.connect() catch |err| {
         client.deinit();
-        std.debug.print("✗ Connection failed: {}\n", .{err});
+        std.debug.print("✗ Connection failed: {any}\n", .{err});
         std.process.exit(1);
     };
 
@@ -207,12 +263,17 @@ pub fn main() !void {
     std.debug.print("⚠️  Manual IP Configuration Required\n", .{});
     std.debug.print("─────────────────────────────────────────────\n", .{});
     std.debug.print("The server uses Local Bridge mode which requires manual IP setup.\n", .{});
-    std.debug.print("Based on server network: 10.21.0.0/16\n\n", .{});
+    std.debug.print("macOS TUN devices require point-to-point configuration.\n", .{});
+    std.debug.print("Based on server network: 10.21.0.0/16, Gateway: 10.21.0.1\n\n", .{});
     std.debug.print("Run these commands in another terminal:\n", .{});
-    std.debug.print("  sudo ifconfig utun6 10.21.255.100 netmask 255.255.0.0 up\n", .{});
-    std.debug.print("  sudo route add -net 10.21.0.0/16 -interface utun6\n", .{});
-    std.debug.print("  sudo route add default 10.21.0.1\n\n", .{});
+    std.debug.print("  # Configure utun6 as point-to-point: local_ip remote_ip (gateway)\n", .{});
+    std.debug.print("  sudo ifconfig utun6 10.21.255.100 10.21.0.1\n\n", .{});
+    std.debug.print("  # Add route to VPN network\n", .{});
+    std.debug.print("  sudo route add -net 10.21.0.0/16 10.21.0.1\n\n", .{});
     std.debug.print("Replace 10.21.255.100 with your desired IP in the 10.21.0.0/16 range.\n", .{});
+    std.debug.print("\n💡 Note: DHCP doesn't work on macOS TUN devices due to lack of\n", .{});
+    std.debug.print("   Layer 2 (Ethernet) support. Consider asking server admin to\n", .{});
+    std.debug.print("   enable SecureNAT mode for automatic IP configuration.\n", .{});
     std.debug.print("─────────────────────────────────────────────\n\n", .{});
 
     if (args.daemon) {

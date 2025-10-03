@@ -7,9 +7,9 @@
 #include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
 #include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
 
-// Forward declarations
-typedef struct SESSION SESSION;
-typedef struct PACKET_ADAPTER PACKET_ADAPTER;
+// Forward declarations - these are defined in CedarType.h, don't redefine them
+// typedef struct SESSION SESSION;
+// typedef struct PACKET_ADAPTER PACKET_ADAPTER;
 
 // macOS TUN device context
 typedef struct MACOS_TUN_CONTEXT {
@@ -17,6 +17,7 @@ typedef struct MACOS_TUN_CONTEXT {
     char device_name[64];            // Device name (e.g., "utun0")
     CANCEL *cancel;                  // Cancellation object for blocking I/O
     THREAD *read_thread;             // Background thread for reading packets
+    THREAD *timer_thread;            // Timer thread for DHCP retries
     QUEUE *recv_queue;               // Queue of received packets
     LOCK *queue_lock;                // Lock for thread-safe queue access
     volatile bool halt;              // Stop flag

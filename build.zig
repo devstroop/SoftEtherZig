@@ -6,10 +6,12 @@ pub fn build(b: *std.Build) void {
 
     // Detect target OS
     const target_os = target.result.os.tag;
+    const is_ios = target_os == .ios;
 
     // Platform-specific OpenSSL paths
     const openssl_prefix = switch (target_os) {
         .macos => "/opt/homebrew/opt/openssl@3",
+        .ios => "/opt/homebrew/opt/openssl@3", // Will use macOS OpenSSL for now
         .linux => "/usr",
         .windows => "C:/OpenSSL-Win64",
         else => "/usr",
@@ -43,7 +45,7 @@ pub fn build(b: *std.Build) void {
     // Platform-specific defines
     var c_flags: []const []const u8 = undefined;
 
-    if (target_os == .macos) {
+    if (target_os == .macos or is_ios) {
         c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS" };
     } else if (target_os == .linux) {
         c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_LINUX" };
@@ -55,14 +57,14 @@ pub fn build(b: *std.Build) void {
 
     // Platform-specific packet adapter and timing files
     const packet_adapter_file = switch (target_os) {
-        .macos => "src/bridge/packet_adapter_macos.c",
+        .macos, .ios => "src/bridge/packet_adapter_macos.c",
         .linux => "src/bridge/packet_adapter_linux.c",
         .windows => "src/bridge/packet_adapter_windows.c",
         else => "src/bridge/packet_adapter_linux.c", // fallback
     };
 
     const tick64_file = switch (target_os) {
-        .macos => "src/bridge/tick64_macos.c",
+        .macos, .ios => "src/bridge/tick64_macos.c",
         .linux => "src/bridge/tick64_linux.c",
         .windows => "src/bridge/tick64_windows.c",
         else => "src/bridge/tick64_linux.c", // fallback
@@ -215,4 +217,70 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the VPN client CLI");
     run_step.dependOn(&run_cli.step);
+
+    // ============================================
+    // 3. STATIC LIBRARY (for iOS/FFI)
+    // ============================================
+    const lib = b.addLibrary(.{
+        .name = "SoftEtherClient",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    lib.linkLibC();
+
+    // Add all the same includes and sources as CLI
+    lib.addIncludePath(b.path("src"));
+    lib.addIncludePath(b.path("src/bridge"));
+    lib.addIncludePath(b.path("include"));
+    lib.addIncludePath(b.path("SoftEtherVPN_Stable/src"));
+    lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Mayaqua"));
+    lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Cedar"));
+    lib.addIncludePath(.{ .cwd_relative = openssl_include });
+
+    // Add FFI implementation
+    const ffi_sources = c_sources ++ &[_][]const u8{
+        "src/bridge/ios_ffi.c",
+    };
+
+    lib.addCSourceFiles(.{
+        .files = ffi_sources,
+        .flags = c_flags,
+    });
+
+    // For iOS builds, skip OpenSSL linking (will be provided by XCFramework or system)
+    if (!is_ios) {
+        lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
+        lib.linkSystemLibrary("ssl");
+        lib.linkSystemLibrary("crypto");
+    }
+    lib.linkLibC();
+
+    // For iOS, use iOS SDK system libraries instead of macOS ones
+    if (is_ios) {
+        // For iOS cross-compilation, don't link any system libraries
+        // They will be linked by Xcode when building the final app
+        // Just link libc
+    } else if (target_os == .macos) {
+        lib.linkSystemLibrary("pthread");
+        lib.linkSystemLibrary("z");
+        lib.linkSystemLibrary("iconv");
+    } else if (target_os == .linux) {
+        lib.linkSystemLibrary("pthread");
+        lib.linkSystemLibrary("z");
+        lib.linkSystemLibrary("rt");
+        lib.linkSystemLibrary("dl");
+    } else if (target_os == .windows) {
+        lib.linkSystemLibrary("ws2_32");
+        lib.linkSystemLibrary("iphlpapi");
+        lib.linkSystemLibrary("advapi32");
+    }
+
+    b.installArtifact(lib);
+
+    // Add a step to build just the library
+    const lib_step = b.step("lib", "Build static library for iOS/FFI");
+    lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 }

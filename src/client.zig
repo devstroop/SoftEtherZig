@@ -19,10 +19,10 @@ pub const VpnClient = struct {
         std.debug.print("[Zig] VpnClient.init() called\n", .{});
 
         // Initialize the bridge library (once per program)
-        // Note: bool in C is typedef'd as unsigned int in SoftEther
+        // Note: BOOL in SoftEther is typedef'd as unsigned int (0 = FALSE, 1 = TRUE)
         std.debug.print("[Zig] Calling vpn_bridge_init()...\n", .{});
-        const init_result = c.vpn_bridge_init(0); // 0 = false
-        std.debug.print("[Zig] vpn_bridge_init() returned: {}\n", .{init_result});
+        const init_result = c.vpn_bridge_init(0); // 0 = FALSE (debug off)
+        std.debug.print("[Zig] vpn_bridge_init() returned: {d}\n", .{init_result});
 
         if (init_result != c_mod.VPN_BRIDGE_SUCCESS) {
             return VpnError.InitializationFailed;
@@ -53,6 +53,10 @@ pub const VpnClient = struct {
             .password => |p| p.password,
             else => "",
         };
+        const is_hashed = switch (cfg.auth) {
+            .password => |p| p.is_hashed,
+            else => false,
+        };
 
         const user_z = try allocator.dupeZ(u8, username);
         defer allocator.free(user_z);
@@ -60,16 +64,26 @@ pub const VpnClient = struct {
         const pass_z = try allocator.dupeZ(u8, password);
         defer allocator.free(pass_z);
 
-        std.debug.print("[Zig] Calling vpn_bridge_configure()...\n", .{});
-        const config_result = c.vpn_bridge_configure(
-            client_handle,
-            host_z.ptr,
-            cfg.server_port,
-            hub_z.ptr,
-            user_z.ptr,
-            pass_z.ptr,
-        );
-        std.debug.print("[Zig] vpn_bridge_configure() returned: {}\n", .{config_result});
+        std.debug.print("[Zig] Calling vpn_bridge_configure{s}...\n", .{if (is_hashed) "_with_hash" else ""});
+        const config_result = if (is_hashed)
+            c.vpn_bridge_configure_with_hash(
+                client_handle,
+                host_z.ptr,
+                cfg.server_port,
+                hub_z.ptr,
+                user_z.ptr,
+                pass_z.ptr,
+            )
+        else
+            c.vpn_bridge_configure(
+                client_handle,
+                host_z.ptr,
+                cfg.server_port,
+                hub_z.ptr,
+                user_z.ptr,
+                pass_z.ptr,
+            );
+        std.debug.print("[Zig] vpn_bridge_configure{s}() returned: {d}\n", .{ if (is_hashed) "_with_hash" else "", config_result });
 
         if (config_result != c_mod.VPN_BRIDGE_SUCCESS) {
             c.vpn_bridge_free_client(client_handle);

@@ -13,13 +13,13 @@
 
 #include <stdint.h>
 
-/* SoftEther defines bool as unsigned int, not C99 _Bool */
-/* We need to match that definition for ABI compatibility */
-#ifndef bool
-typedef unsigned int bool;
-#define true 1
-#define false 0
-#endif
+// Forward declarations to avoid header conflicts
+// We use uint32_t instead of BOOL to avoid bool/BOOL conflicts
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* bool is defined by Mayaqua/MayaType.h */
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,10 +63,10 @@ typedef struct VpnBridgeClient VpnBridgeClient;
  * Initialize the SoftEther library.
  * Must be called once before any other functions.
  * 
- * @param debug Enable debug logging
+ * @param debug Enable debug logging (0 = FALSE, 1 = TRUE)
  * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
  */
-int vpn_bridge_init(bool debug);
+int vpn_bridge_init(uint32_t debug);
 
 /**
  * Cleanup and free all SoftEther library resources.
@@ -76,9 +76,9 @@ void vpn_bridge_cleanup(void);
 
 /**
  * Check if the library is initialized.
- * @return true if initialized, false otherwise
+ * @return 1 if initialized, 0 otherwise
  */
-bool vpn_bridge_is_initialized(void);
+uint32_t vpn_bridge_is_initialized(void);
 
 /* ============================================
  * Client Management
@@ -121,6 +121,31 @@ int vpn_bridge_configure(
     const char* hub_name,
     const char* username,
     const char* password
+);
+
+/**
+ * Configure connection parameters with pre-hashed password.
+ * Must be called before vpn_bridge_connect().
+ * 
+ * NOTE: SoftEther uses SHA-0 (not SHA-1) for password hashing!
+ * Hash format: SHA-0(password + UPPERCASE(username))
+ * The hash should be base64-encoded when passed to this function.
+ * 
+ * @param client        Client handle
+ * @param hostname      VPN server hostname or IP
+ * @param port          VPN server port (usually 443 or 992)
+ * @param hub_name      Virtual HUB name
+ * @param username      Username for authentication
+ * @param password_hash Pre-hashed password (base64-encoded SHA-0, 20 bytes)
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_configure_with_hash(
+    VpnBridgeClient* client,
+    const char* hostname,
+    uint16_t port,
+    const char* hub_name,
+    const char* username,
+    const char* password_hash
 );
 
 /* ============================================
@@ -168,7 +193,7 @@ typedef struct {
     uint32_t dhcp_server;     // DHCP server address (network byte order)
     uint32_t lease_time;      // Lease time in seconds
     char domain_name[256];    // Domain name
-    bool valid;               // Whether DHCP info is valid
+    uint32_t valid;           // Whether DHCP info is valid (0 = FALSE, 1 = TRUE)
 } VpnBridgeDhcpInfo;
 
 /**
@@ -231,6 +256,32 @@ const char* vpn_bridge_version(void);
  * @return Version string (static, do not free)
  */
 const char* vpn_bridge_softether_version(void);
+
+/* ============================================
+ * Utility Functions
+ * ============================================ */
+
+/**
+ * Generate SoftEther password hash.
+ * 
+ * This computes: SHA-0(password + UPPERCASE(username))
+ * The result is base64-encoded and suitable for use with
+ * vpn_bridge_configure_with_hash().
+ * 
+ * NOTE: Uses SHA-0 (not SHA-1) for compatibility with SoftEther protocol.
+ * 
+ * @param username    Username (will be uppercased internally)
+ * @param password    Plain text password
+ * @param output      Buffer to receive base64-encoded hash (min 32 bytes)
+ * @param output_size Size of output buffer
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_generate_password_hash(
+    const char* username,
+    const char* password,
+    char* output,
+    size_t output_size
+);
 
 #ifdef __cplusplus
 }

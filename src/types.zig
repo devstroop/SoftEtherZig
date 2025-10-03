@@ -1,7 +1,6 @@
 const std = @import("std");
 
 /// Common types used throughout the library
-
 /// IP address (IPv4 or IPv6)
 pub const IpAddress = union(enum) {
     ipv4: [4]u8,
@@ -15,7 +14,7 @@ pub const IpAddress = union(enum) {
     ) !void {
         _ = fmt;
         _ = options;
-        
+
         switch (self) {
             .ipv4 => |addr| {
                 try writer.print("{d}.{d}.{d}.{d}", .{
@@ -60,8 +59,8 @@ pub const SessionStats = struct {
 
 test "ip address formatting" {
     const ipv4 = IpAddress{ .ipv4 = .{ 192, 168, 1, 1 } };
-    const str = try std.fmt.allocPrint(std.testing.allocator, "{}", .{ipv4});
+    const str = try std.fmt.allocPrint(std.testing.allocator, "{any}", .{ipv4});
     defer std.testing.allocator.free(str);
-    
+
     try std.testing.expectEqualStrings("192.168.1.1", str);
 }

@@ -9,6 +9,7 @@ pub const AuthMethod = union(enum) {
     password: struct {
         username: []const u8,
         password: []const u8,
+        is_hashed: bool = false,  // True if password is pre-hashed (base64-encoded SHA1)
     },
     certificate: struct {
         cert_path: []const u8,
