@@ -59,6 +59,10 @@ static UINT32 g_arp_reply_to_ip = 0;         // IP to send ARP reply to
 static UINT32 g_our_ip = 0;                  // Our IP address (0 = not known yet)
 static UCHAR g_gateway_mac[6] = {0};         // Gateway MAC address (learned from ARP)
 
+// Forward declarations
+static UINT32 GetDefaultGateway(void);
+static UINT32 GetVpnServerIp(void);
+
 // Configure the TUN interface with IP address
 static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask, UINT32 gateway) {
 #ifdef TARGET_OS_IPHONE
@@ -107,21 +111,167 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
         return false;
     }
     
-    // Add default route via gateway
+    // Add "include route" for VPN subnet only - Bridge Routing Mode
+    // This keeps internet traffic on the physical interface and only routes
+    // VPN subnet traffic through the tunnel (just like SSTP Connect does)
     if (gateway != 0) {
-        // Delete existing default route (may fail, that's OK)
-        system("route delete default >/dev/null 2>&1");
+        // CRITICAL: Get the original default gateway BEFORE any route changes
+        UINT32 orig_gateway = GetDefaultGateway();
+        UINT32 vpn_server_ip = GetVpnServerIp();
         
-        snprintf(cmd, sizeof(cmd), "route add default %s", gw_str);
-        printf("[ConfigureTunInterface] Executing: %s\n", cmd);
-        if (system(cmd) != 0) {
-            printf("[ConfigureTunInterface] ⚠️  Failed to add default route (may already exist)\n");
+        if (vpn_server_ip != 0 && orig_gateway != 0) {
+            // Add host route for VPN server through original gateway
+            // This ensures VPN traffic doesn't get routed through the VPN itself
+            char orig_gw_str[32];
+            char server_ip_str[32];
+            snprintf(orig_gw_str, sizeof(orig_gw_str), "%d.%d.%d.%d",
+                     (orig_gateway >> 24) & 0xFF, (orig_gateway >> 16) & 0xFF,
+                     (orig_gateway >> 8) & 0xFF, orig_gateway & 0xFF);
+            snprintf(server_ip_str, sizeof(server_ip_str), "%d.%d.%d.%d",
+                     (vpn_server_ip >> 24) & 0xFF, (vpn_server_ip >> 16) & 0xFF,
+                     (vpn_server_ip >> 8) & 0xFF, vpn_server_ip & 0xFF);
+            
+            // Calculate VPN network address and netmask
+            UINT32 vpn_network = ip & netmask;  // 10.21.254.238 & 255.255.0.0 = 10.21.0.0
+            char vpn_net_str[32];
+            snprintf(vpn_net_str, sizeof(vpn_net_str), "%d.%d.%d.%d",
+                     (vpn_network >> 24) & 0xFF, (vpn_network >> 16) & 0xFF,
+                     (vpn_network >> 8) & 0xFF, vpn_network & 0xFF);
+            
+            // Calculate netmask prefix (count bits)
+            int prefix = 0;
+            UINT32 mask_copy = netmask;
+            while (mask_copy) {
+                prefix += mask_copy & 1;
+                mask_copy >>= 1;
+            }
+            
+            printf("\n");
+            printf("╔════════════════════════════════════════════╗\n");
+            printf("║     Bridge Routing Mode (Include Route)   ║\n");
+            printf("╠════════════════════════════════════════════╣\n");
+            printf("║ VPN Subnet:       %-25s║\n", vpn_net_str);
+            printf("║ VPN Prefix:       /%d%-23s║\n", prefix, "");
+            printf("║ VPN Gateway:      %-25s║\n", gw_str);
+            printf("║ VPN Server IP:    %-25s║\n", server_ip_str);
+            printf("║ Original Gateway: %-25s║\n", orig_gw_str);
+            printf("╠════════════════════════════════════════════╣\n");
+            printf("║ Internet traffic: Physical interface      ║\n");
+            printf("║ VPN subnet only:  Through tunnel          ║\n");
+            printf("╚════════════════════════════════════════════╝\n");
+            printf("\n");
+            
+            // 1. Add host route for VPN server through original gateway FIRST
+            //    This ensures VPN tunnel itself doesn't get routed through VPN
+            snprintf(cmd, sizeof(cmd), "route add -host %s %s", server_ip_str, orig_gw_str);
+            printf("[ConfigureTunInterface] 🔐 Adding VPN server route: %s\n", cmd);
+            if (system(cmd) != 0) {
+                printf("[ConfigureTunInterface] ⚠️  Failed to add VPN server route (may already exist)\n");
+            } else {
+                printf("[ConfigureTunInterface] ✅ VPN server route established\n");
+            }
+            
+            // 2. Add "include route" for VPN subnet ONLY
+            //    This is the key difference from default route mode
+            //    Only traffic destined for the VPN subnet goes through tunnel
+            snprintf(cmd, sizeof(cmd), "route add -net %s/%d %s", vpn_net_str, prefix, gw_str);
+            printf("[ConfigureTunInterface] 🌐 Adding include route: %s\n", cmd);
+            if (system(cmd) != 0) {
+                printf("[ConfigureTunInterface] ⚠️  Failed to add VPN subnet route (may already exist)\n");
+            } else {
+                printf("[ConfigureTunInterface] ✅ VPN subnet route established\n");
+            }
+            
+            printf("\n");
+            printf("✅ Bridge Routing Mode active:\n");
+            printf("   • Internet traffic stays on physical interface\n");
+            printf("   • Only %s/%d routes through VPN\n", vpn_net_str, prefix);
+            printf("   • Local network and internet fully accessible\n\n");
+        } else {
+            printf("[ConfigureTunInterface] ⚠️  Could not determine VPN server IP or original gateway\n");
+            printf("[ConfigureTunInterface]     VPN server IP: %u.%u.%u.%u\n",
+                   (vpn_server_ip >> 24) & 0xFF, (vpn_server_ip >> 16) & 0xFF,
+                   (vpn_server_ip >> 8) & 0xFF, vpn_server_ip & 0xFF);
+            printf("[ConfigureTunInterface]     Original gateway: %u.%u.%u.%u\n",
+                   (orig_gateway >> 24) & 0xFF, (orig_gateway >> 16) & 0xFF,
+                   (orig_gateway >> 8) & 0xFF, orig_gateway & 0xFF);
         }
     }
     
     printf("[ConfigureTunInterface] ✅ Interface configured successfully\n\n");
     return true;
 #endif // TARGET_OS_IPHONE
+}
+
+// Get the current default gateway IP address
+// Returns 0 if no default route found
+static UINT32 GetDefaultGateway(void) {
+    FILE *fp;
+    char line[512];
+    UINT32 gateway = 0;
+    
+    // Run netstat to get routing table
+    fp = popen("netstat -rn | grep '^default' | grep -v 'utun' | head -1", "r");
+    if (fp == NULL) {
+        printf("[GetDefaultGateway] ⚠️  Failed to execute netstat\n");
+        return 0;
+    }
+    
+    // Parse output: "default            192.168.1.1        UGScg                 en1"
+    if (fgets(line, sizeof(line), fp) != NULL) {
+        char *token = strtok(line, " \t");  // Skip "default"
+        if (token != NULL) {
+            token = strtok(NULL, " \t");     // Get gateway IP
+            if (token != NULL) {
+                // Parse IP address
+                unsigned int a, b, c, d;
+                if (sscanf(token, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                    gateway = (a << 24) | (b << 16) | (c << 8) | d;
+                    printf("[GetDefaultGateway] 🌐 Found default gateway: %u.%u.%u.%u\n", a, b, c, d);
+                }
+            }
+        }
+    }
+    
+    pclose(fp);
+    return gateway;
+}
+
+// Get the VPN server IP address from SoftEther's connection info
+// Returns 0 if not available
+static UINT32 GetVpnServerIp(void) {
+    FILE *fp;
+    char line[512];
+    UINT32 server_ip = 0;
+    
+    // Try to get connected server IP from netstat
+    // Look for ESTABLISHED TCP connections on port 443
+    fp = popen("netstat -an | grep ESTABLISHED | grep '\\.443 ' | head -1", "r");
+    if (fp == NULL) {
+        printf("[GetVpnServerIp] ⚠️  Failed to execute netstat\n");
+        return 0;
+    }
+    
+    // Parse output: "tcp4       0      0  192.168.1.8.57816      62.24.65.211.443       ESTABLISHED"
+    if (fgets(line, sizeof(line), fp) != NULL) {
+        // Find the server IP (after local IP, before .443)
+        char *p = strstr(line, ".443 ");
+        if (p != NULL) {
+            // Backtrack to find start of IP
+            while (p > line && *(p-1) != ' ' && *(p-1) != '\t') {
+                p--;
+            }
+            // Parse IP address
+            unsigned int a, b, c, d;
+            if (sscanf(p, "%u.%u.%u.%u.443", &a, &b, &c, &d) == 4) {
+                server_ip = (a << 24) | (b << 16) | (c << 8) | d;
+                printf("[GetVpnServerIp] 🔐 Found VPN server IP: %u.%u.%u.%u\n", a, b, c, d);
+            }
+        }
+    }
+    
+    pclose(fp);
+    return server_ip;
 }
 
 // Build IPv6 Router Solicitation packet (ICMPv6 type 133)
@@ -753,11 +903,12 @@ static UCHAR* BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, U
     packet[pos++] = 0x08; packet[pos++] = 0x00;
     
     // IPv4 header (20 bytes)
+    UINT ip_header_start = 14;
     packet[pos++] = 0x45; // Version 4, IHL 5
     packet[pos++] = 0x00; // DSCP/ECN
-    USHORT total_len = 20 + 8 + 240 + 80; // IP + UDP + DHCP + extra options
-    packet[pos++] = (total_len >> 8) & 0xFF;
-    packet[pos++] = total_len & 0xFF;
+    // Save position for IP total length (will update after building packet)
+    UINT ip_total_len_pos = pos;
+    packet[pos++] = 0x00; packet[pos++] = 0x00; // Placeholder for total length
     packet[pos++] = 0x00; packet[pos++] = 0x00; // ID
     packet[pos++] = 0x00; packet[pos++] = 0x00; // Flags/Fragment
     packet[pos++] = 64; // TTL
@@ -768,23 +919,13 @@ static UCHAR* BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, U
     // Dest IP: 255.255.255.255
     packet[pos++] = 255; packet[pos++] = 255; packet[pos++] = 255; packet[pos++] = 255;
     
-    // Calculate IP checksum
-    UINT ip_header_start = 14;
-    UINT checksum = 0;
-    for (int i = 0; i < 20; i += 2) {
-        checksum += (packet[ip_header_start + i] << 8) | packet[ip_header_start + i + 1];
-    }
-    checksum = (checksum >> 16) + (checksum & 0xFFFF);
-    checksum = ~checksum & 0xFFFF;
-    packet[ip_header_start + 10] = (checksum >> 8) & 0xFF;
-    packet[ip_header_start + 11] = checksum & 0xFF;
-    
     // UDP header (8 bytes)
+    UINT udp_header_start = pos;
     packet[pos++] = 0x00; packet[pos++] = 68; // Source port: 68 (DHCP client)
     packet[pos++] = 0x00; packet[pos++] = 67; // Dest port: 67 (DHCP server)
-    USHORT udp_len = 8 + 240 + 80;
-    packet[pos++] = (udp_len >> 8) & 0xFF;
-    packet[pos++] = udp_len & 0xFF;
+    // Save position for UDP length (will update after building packet)
+    UINT udp_len_pos = pos;
+    packet[pos++] = 0x00; packet[pos++] = 0x00; // Placeholder for UDP length
     packet[pos++] = 0x00; packet[pos++] = 0x00; // Checksum (optional for IPv4)
     
     // DHCP header (240 bytes minimum)
@@ -839,6 +980,34 @@ static UCHAR* BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, U
     
     // Option 255: End
     packet[pos++] = 255;
+    
+    // Now calculate actual lengths based on final packet size
+    UINT total_packet_size = pos;
+    USHORT ip_total_len = total_packet_size - ip_header_start;
+    USHORT udp_len = total_packet_size - udp_header_start;
+    
+    // Update IP total length
+    packet[ip_total_len_pos] = (ip_total_len >> 8) & 0xFF;
+    packet[ip_total_len_pos + 1] = ip_total_len & 0xFF;
+    
+    // Update UDP length
+    packet[udp_len_pos] = (udp_len >> 8) & 0xFF;
+    packet[udp_len_pos + 1] = udp_len & 0xFF;
+    
+    // Calculate IP checksum (must be done after length is set)
+    packet[ip_header_start + 10] = 0x00;  // Clear checksum field first
+    packet[ip_header_start + 11] = 0x00;
+    UINT checksum = 0;
+    for (int i = 0; i < 20; i += 2) {
+        checksum += (packet[ip_header_start + i] << 8) | packet[ip_header_start + i + 1];
+    }
+    checksum = (checksum >> 16) + (checksum & 0xFFFF);
+    checksum = ~checksum & 0xFFFF;
+    packet[ip_header_start + 10] = (checksum >> 8) & 0xFF;
+    packet[ip_header_start + 11] = checksum & 0xFF;
+    
+    printf("[BuildDhcpRequest] 📏 Calculated lengths: IP=%u bytes, UDP=%u bytes, Total=%u bytes\n",
+           ip_total_len, udp_len, total_packet_size);
     
     *out_size = pos;
     return packet;
@@ -906,7 +1075,6 @@ void MacOsTunReadThread(THREAD *t, void *param) {
         
         // **DEBUG**: Log packets read from TUN device (outgoing packets from macOS)
         printf("[MacOsTunReadThread] 📤 Read %d bytes from TUN device (outgoing to VPN)\n", n - 4);
-        fflush(stdout);
         
         // Allocate packet and copy data
         void *packet_data = Malloc(n - 4);
@@ -1565,18 +1733,20 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
         return false;
     }
     
-    // Debug: Log ALL incoming packets (not just during DHCP negotiation)
-    if (size > 14) {
+    // Debug: Log incoming packets only during DHCP negotiation
+    if (size > 14 && g_dhcp_state != DHCP_STATE_CONFIGURED) {
         USHORT ethertype = (((UCHAR*)data)[12] << 8) | ((UCHAR*)data)[13];
         printf("[MacOsTunPutPacket] 📦 Incoming packet: size=%u, ethertype=0x%04x, state=%d\n", size, ethertype, g_dhcp_state);
         
-        // Dump first 64 bytes of EVERY packet for debugging
-        printf("[MacOsTunPutPacket] First 64 bytes: ");
-        for (int i = 0; i < (size < 64 ? size : 64); i++) {
-            printf("%02x ", ((UCHAR*)data)[i]);
-            if ((i + 1) % 16 == 0) printf("\n[MacOsTunPutPacket]                    ");
+        // Dump first 64 bytes only for DHCP/ARP packets
+        if (ethertype == 0x0806 || ethertype == 0x0800) {
+            printf("[MacOsTunPutPacket] First 64 bytes: ");
+            for (int i = 0; i < (size < 64 ? size : 64); i++) {
+                printf("%02x ", ((UCHAR*)data)[i]);
+                if ((i + 1) % 16 == 0) printf("\n[MacOsTunPutPacket]                    ");
+            }
+            printf("\n");
         }
-        printf("\n");
         
         if (ethertype == 0x0800) {
             // Check if it's UDP port 68 (DHCP client port)
@@ -1686,10 +1856,13 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                 USHORT opcode = (pkt[20] << 8) | pkt[21];
                 UINT32 target_ip = (pkt[38] << 24) | (pkt[39] << 16) | (pkt[40] << 8) | pkt[41];
                 
-                printf("[MacOsTunPutPacket] 📬 ARP: opcode=%u, target_ip=%u.%u.%u.%u\n",
-                       opcode,
-                       (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
-                       (target_ip >> 8) & 0xFF, target_ip & 0xFF);
+                // Only log ARP during DHCP negotiation to reduce verbosity
+                if (g_dhcp_state != DHCP_STATE_CONFIGURED) {
+                    printf("[MacOsTunPutPacket] 📬 ARP: opcode=%u, target_ip=%u.%u.%u.%u\n",
+                           opcode,
+                           (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
+                           (target_ip >> 8) & 0xFF, target_ip & 0xFF);
+                }
                 
                 // Learn gateway MAC from ARP replies (opcode=2)
                 if (opcode == 2) {
@@ -1708,9 +1881,12 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                 
                 // If it's an ARP request for our IP (learned, offered, or configured), respond!
                 if (opcode == 1 && (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64)) {
-                    printf("[MacOsTunPutPacket] ✅ ARP REQUEST for our IP (%u.%u.%u.%u)! Queueing ARP REPLY!\n",
-                           (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
-                           (target_ip >> 8) & 0xFF, target_ip & 0xFF);
+                    // Only log during DHCP negotiation
+                    if (g_dhcp_state != DHCP_STATE_CONFIGURED) {
+                        printf("[MacOsTunPutPacket] ✅ ARP REQUEST for our IP (%u.%u.%u.%u)! Queueing ARP REPLY!\n",
+                               (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
+                               (target_ip >> 8) & 0xFF, target_ip & 0xFF);
+                    }
                     // Queue ARP reply - we'll send it in GetNextPacket
                     g_need_arp_reply = true;
                     memcpy(g_arp_reply_to_mac, pkt + 6, 6);  // Sender MAC
