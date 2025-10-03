@@ -545,16 +545,30 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
     size -= 8;
     
     // Parse DHCP
-    if (size < 240) return false;
-    if (data[0] != 2) return false; // BOOTREPLY
+    if (size < 240) {
+        printf("[ParseDhcpAck] ⚠️ DHCP packet too small: %u bytes (expected >= 240)\n", size);
+        return false;
+    }
+    if (data[0] != 2) {
+        printf("[ParseDhcpAck] ⚠️ Not BOOTREPLY: op=%u (expected 2)\n", data[0]);
+        return false; // BOOTREPLY
+    }
     
     // Check transaction ID
     UINT32 xid = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
-    if (xid != expected_xid) return false;
+    if (xid != expected_xid) {
+        printf("[ParseDhcpAck] ⚠️ Transaction ID mismatch: got 0x%08x, expected 0x%08x\n", xid, expected_xid);
+        return false;
+    }
+    
+    printf("[ParseDhcpAck] 🔍 DHCP packet with matching xid! Parsing options...\n");
     
     // Extract yiaddr (your IP address)
     UINT32 yiaddr = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
-    if (yiaddr == 0) return false;
+    if (yiaddr == 0) {
+        printf("[ParseDhcpAck] ⚠️ yiaddr is 0\n");
+        return false;
+    }
     
     *out_ip = yiaddr;
     
@@ -571,6 +585,8 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
     *out_gw = 0;
     bool is_ack = false;
     
+    printf("[ParseDhcpAck] 🔎 Parsing DHCP options (length=%u)...\n", options_len);
+    
     while (pos < options_len) {
         UCHAR opt_type = options[pos++];
         if (opt_type == 0xFF) break;
@@ -582,8 +598,12 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
         
         switch (opt_type) {
             case 53: // DHCP Message Type
-                if (opt_len >= 1 && options[pos] == 5) {
-                    is_ack = true; // DHCP ACK
+                if (opt_len >= 1) {
+                    UCHAR msg_type = options[pos];
+                    printf("[ParseDhcpAck] 📋 DHCP Message Type: %u (5=ACK, 2=OFFER)\n", msg_type);
+                    if (msg_type == 5) {
+                        is_ack = true; // DHCP ACK
+                    }
                 }
                 break;
             case 1: // Subnet Mask
@@ -602,6 +622,12 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
         
         pos += opt_len;
     }
+    
+    printf("[ParseDhcpAck] 🏁 Result: is_ack=%d, ip=%u.%u.%u.%u, mask=%u.%u.%u.%u, gw=%u.%u.%u.%u\n",
+           is_ack,
+           (*out_ip >> 24) & 0xFF, (*out_ip >> 16) & 0xFF, (*out_ip >> 8) & 0xFF, *out_ip & 0xFF,
+           (*out_mask >> 24) & 0xFF, (*out_mask >> 16) & 0xFF, (*out_mask >> 8) & 0xFF, *out_mask & 0xFF,
+           (*out_gw >> 24) & 0xFF, (*out_gw >> 16) & 0xFF, (*out_gw >> 8) & 0xFF, *out_gw & 0xFF);
     
     return is_ack && (*out_ip != 0);
 }
