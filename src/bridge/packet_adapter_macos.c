@@ -68,6 +68,12 @@ static UCHAR g_gateway_mac[6] = {0};         // Gateway MAC address (learned fro
 static UINT64 g_last_keepalive_time = 0;     // Last time we sent keep-alive GARP
 #define KEEPALIVE_INTERVAL_MS 10000           // Send GARP every 10 seconds
 
+// Original routing configuration (for restoration on disconnect)
+static UINT32 g_original_gateway = 0;        // Original default gateway
+static UINT32 g_vpn_server_ip = 0;           // VPN server IP
+static UINT32 g_local_network = 0;           // Local network (e.g., 192.168.1.0)
+static bool g_routes_configured = false;     // Flag: routes have been modified
+
 // Forward declarations
 static UINT32 GetDefaultGateway(void);
 static UINT32 GetVpnServerIp(void);
@@ -196,6 +202,12 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
             printf("   • All internet traffic encrypted through VPN\n");
             printf("   • Local network (%s/24) direct access preserved\n", local_net_str);
             printf("   • VPN server connection protected from routing loop\n\n");
+            
+            // Store routing info for restoration on disconnect
+            g_original_gateway = orig_gateway;
+            g_vpn_server_ip = vpn_server_ip;
+            g_local_network = local_network;
+            g_routes_configured = true;
         } else {
             printf("[ConfigureTunInterface] ⚠️  Could not determine VPN server IP or original gateway\n");
             printf("[ConfigureTunInterface]     VPN server IP: %u.%u.%u.%u\n",
@@ -1131,8 +1143,11 @@ void MacOsTunReadThread(THREAD *t, void *param) {
             }
         }
         
-        // **DEBUG**: Log packets read from TUN device (outgoing packets from macOS)
-        printf("[MacOsTunReadThread] 📤 Read %d bytes from TUN device (outgoing to VPN)\n", n - 4);
+        // Log outgoing packets only during DHCP setup or periodically
+        static UINT64 read_count = 0;
+        if (g_dhcp_state != DHCP_STATE_CONFIGURED || (++read_count % 100) == 1) {
+            printf("[MacOsTunReadThread] 📤 Read %d bytes from TUN device (outgoing to VPN)\n", n - 4);
+        }
         
         // Allocate packet and copy data
         void *packet_data = Malloc(n - 4);
@@ -1574,15 +1589,12 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         UINT32 our_ip = (g_our_ip != 0) ? g_our_ip : ((g_offered_ip != 0) ? g_offered_ip : 0x00000000);
         UCHAR *pkt = BuildArpReply(g_my_mac, our_ip, g_arp_reply_to_mac, g_arp_reply_to_ip, &pkt_size);
         if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] ✅ ARP REPLY to %u.%u.%u.%u (%02x:%02x:%02x:%02x:%02x:%02x): I am %u.%u.%u.%u at %02x:%02x:%02x:%02x:%02x:%02x\n",
-                   (g_arp_reply_to_ip >> 24) & 0xFF, (g_arp_reply_to_ip >> 16) & 0xFF,
-                   (g_arp_reply_to_ip >> 8) & 0xFF, g_arp_reply_to_ip & 0xFF,
-                   g_arp_reply_to_mac[0], g_arp_reply_to_mac[1], g_arp_reply_to_mac[2],
-                   g_arp_reply_to_mac[3], g_arp_reply_to_mac[4], g_arp_reply_to_mac[5],
-                   (our_ip >> 24) & 0xFF, (our_ip >> 16) & 0xFF,
-                   (our_ip >> 8) & 0xFF, our_ip & 0xFF,
-                   g_my_mac[0], g_my_mac[1], g_my_mac[2],
-                   g_my_mac[3], g_my_mac[4], g_my_mac[5]);
+            // Only log gateway ARP replies or during setup
+            if (g_arp_reply_to_ip == 0x0A150001 || g_dhcp_state != DHCP_STATE_CONFIGURED) {
+                printf("[MacOsTunGetNextPacket] ✅ ARP REPLY to %u.%u.%u.%u\n",
+                       (g_arp_reply_to_ip >> 24) & 0xFF, (g_arp_reply_to_ip >> 16) & 0xFF,
+                       (g_arp_reply_to_ip >> 8) & 0xFF, g_arp_reply_to_ip & 0xFF);
+            }
             UCHAR *pkt_copy = Malloc(pkt_size);
             memcpy(pkt_copy, pkt, pkt_size);
             *data = pkt_copy;
@@ -1715,11 +1727,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
             UINT pkt_size;
             UCHAR *pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &pkt_size);
             if (pkt_size > 0 && pkt != NULL) {
-                printf("[MacOsTunGetNextPacket] 💓 Sending keep-alive Gratuitous ARP (MAC/IP table refresh)\n");
-                printf("[MacOsTunGetNextPacket]    MAC: %02x:%02x:%02x:%02x:%02x:%02x, IP: %u.%u.%u.%u\n",
-                       g_my_mac[0], g_my_mac[1], g_my_mac[2], g_my_mac[3], g_my_mac[4], g_my_mac[5],
-                       (g_our_ip >> 24) & 0xFF, (g_our_ip >> 16) & 0xFF,
-                       (g_our_ip >> 8) & 0xFF, g_our_ip & 0xFF);
+                printf("[MacOsTunGetNextPacket] 💓 Keep-alive GARP (MAC/IP table refresh)\n");
                 UCHAR *pkt_copy = Malloc(pkt_size);
                 memcpy(pkt_copy, pkt, pkt_size);
                 *data = pkt_copy;
@@ -1778,8 +1786,11 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
                 eth_frame[13] = ethertype & 0xFF;
                 memcpy(eth_frame + 14, packet_data, size);        // IP packet
                 
-                printf("[MacOsTunGetNextPacket] 📤 Forwarding IPv4 packet to VPN: %u bytes IP → %u bytes Ethernet\n",
-                       size, eth_size);
+                // Log periodically to reduce verbosity
+                static UINT64 ipv4_count = 0;
+                if (g_dhcp_state != DHCP_STATE_CONFIGURED || (++ipv4_count % 100) == 1) {
+                    printf("[MacOsTunGetNextPacket] 📤 IPv4: %u bytes\n", eth_size);
+                }
                 
                 Free(pkt->data);
                 Free(pkt);
@@ -2008,15 +2019,13 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                 if (opcode == 1) {
                     UINT32 sender_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];
                     
-                    // **ALWAYS LOG ARP REQUESTS** to debug MAC/IP table population
-                    printf("[MacOsTunPutPacket] 📬 ARP Request FROM %u.%u.%u.%u asking WHO HAS %u.%u.%u.%u\n",
-                           (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
-                           (sender_ip >> 8) & 0xFF, sender_ip & 0xFF,
-                           (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
-                           (target_ip >> 8) & 0xFF, target_ip & 0xFF);
-                    
                     if (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64) {
-                        printf("[MacOsTunPutPacket] ✅ This is OUR IP! Queueing ARP REPLY!\n");
+                        // Only log ARP requests from gateway (10.21.0.1) or during DHCP setup
+                        if (sender_ip == 0x0A150001 || g_dhcp_state != DHCP_STATE_CONFIGURED) {
+                            printf("[MacOsTunPutPacket] 📬 ARP Request from %u.%u.%u.%u for our IP, replying\n",
+                                   (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
+                                   (sender_ip >> 8) & 0xFF, sender_ip & 0xFF);
+                        }
                         // Queue ARP reply - we'll send it in GetNextPacket
                         g_need_arp_reply = true;
                         memcpy(g_arp_reply_to_mac, pkt + 6, 6);  // Sender MAC
@@ -2090,11 +2099,81 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
 }
 
 // PA_FREE callback - Cleanup TUN device
+// Restore original routing configuration on disconnect
+static void RestoreRouting(void) {
+#ifndef TARGET_OS_IPHONE
+    if (!g_routes_configured || g_original_gateway == 0) {
+        printf("[RestoreRouting] No routes to restore\n");
+        return;
+    }
+    
+    char cmd[512];
+    char gw_str[32];
+    
+    snprintf(gw_str, sizeof(gw_str), "%u.%u.%u.%u",
+             (g_original_gateway >> 24) & 0xFF, (g_original_gateway >> 16) & 0xFF,
+             (g_original_gateway >> 8) & 0xFF, g_original_gateway & 0xFF);
+    
+    printf("\n");
+    printf("╔════════════════════════════════════════════╗\n");
+    printf("║     Restoring Original Routing             ║\n");
+    printf("╠════════════════════════════════════════════╣\n");
+    printf("║ Original Gateway: %-24s ║\n", gw_str);
+    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n");
+    
+    // Delete VPN default route
+    printf("[RestoreRouting] 🔄 Removing VPN default route...\n");
+    snprintf(cmd, sizeof(cmd), "route delete default 2>&1");
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        char result[256];
+        while (fgets(result, sizeof(result), fp)) {
+            printf("%s", result);
+        }
+        pclose(fp);
+    }
+    
+    // Restore original default route
+    printf("[RestoreRouting] ✅ Restoring original default route: %s\n", gw_str);
+    snprintf(cmd, sizeof(cmd), "route add default %s 2>&1", gw_str);
+    fp = popen(cmd, "r");
+    if (fp) {
+        char result[256];
+        while (fgets(result, sizeof(result), fp)) {
+            printf("%s", result);
+        }
+        pclose(fp);
+    }
+    
+    // Clean up host routes (VPN server and local network)
+    if (g_vpn_server_ip != 0) {
+        char vpn_str[32];
+        snprintf(vpn_str, sizeof(vpn_str), "%u.%u.%u.%u",
+                 (g_vpn_server_ip >> 24) & 0xFF, (g_vpn_server_ip >> 16) & 0xFF,
+                 (g_vpn_server_ip >> 8) & 0xFF, g_vpn_server_ip & 0xFF);
+        printf("[RestoreRouting] 🧹 Cleaning up VPN server route: %s\n", vpn_str);
+        snprintf(cmd, sizeof(cmd), "route delete -host %s 2>&1", vpn_str);
+        fp = popen(cmd, "r");
+        if (fp) pclose(fp);
+    }
+    
+    printf("\n✅ Original routing restored successfully\n");
+    printf("   • Internet connectivity through %s\n", gw_str);
+    printf("   • VPN routes cleaned up\n\n");
+    
+    g_routes_configured = false;
+#endif
+}
+
 void MacOsTunFree(SESSION *s) {
     MACOS_TUN_CONTEXT *ctx;
     TUN_PACKET *pkt;
     
     printf("[MacOsTunFree] Cleaning up macOS TUN adapter\n");
+    
+    // Restore original routing FIRST (before closing TUN device)
+    RestoreRouting();
     
     if (s == NULL || s->PacketAdapter == NULL) {
         return;

@@ -9,6 +9,17 @@ const AuthMethod = softether.AuthMethod;
 
 const VERSION = "1.0.0";
 
+// Global client pointer for signal handler
+var g_client: ?*VpnClient = null;
+var g_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+
+// Signal handler for Ctrl+C (SIGINT)
+fn signalHandler(sig: c_int) callconv(.c) void {
+    _ = sig;
+    std.debug.print("\n\n🛑 Interrupt signal received, disconnecting...\n", .{});
+    g_running.store(false, .monotonic);
+}
+
 fn printUsage() void {
     std.debug.print(
         \\SoftEther VPN Client v{s}
@@ -253,6 +264,15 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
+    // Set up signal handler for Ctrl+C
+    g_client = &client;
+    const sigaction = std.posix.Sigaction{
+        .handler = .{ .handler = signalHandler },
+        .mask = 0,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null);
+
     std.debug.print("✓ VPN connection established\n\n", .{});
 
     // Get dynamic network information
@@ -354,12 +374,13 @@ pub fn main() !void {
     std.debug.print("─────────────────────────────────────────────\n", .{});
 
     // Keep connection alive until interrupted
-    while (client.isConnected()) {
-        std.Thread.sleep(5 * std.time.ns_per_s);
+    while (client.isConnected() and g_running.load(.monotonic)) {
+        std.Thread.sleep(500 * std.time.ns_per_ms); // Check more frequently
     }
 
-    std.debug.print("\nConnection closed.\n", .{});
+    std.debug.print("\n🔌 Disconnecting...\n", .{});
     client.deinit();
+    std.debug.print("✅ Disconnected successfully\n", .{});
 }
 
 // Background daemon loop - runs forever until killed
