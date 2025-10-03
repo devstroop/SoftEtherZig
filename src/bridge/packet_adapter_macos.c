@@ -22,6 +22,7 @@
 #include <fcntl.h>
 
 #define TUN_MTU 1500
+#define MAX_ETHERNET_FRAME 1518  // 1500 IP + 14 Ethernet header + 4 VLAN tag (if any)
 #define MAX_PACKET_SIZE 2048
 #define RECV_QUEUE_MAX 1024
 
@@ -55,9 +56,17 @@ static bool g_need_arp_reply = false;        // Flag: need to send ARP reply
 static UCHAR g_arp_reply_to_mac[6] = {0};   // MAC to send ARP reply to
 static UINT32 g_arp_reply_to_ip = 0;         // IP to send ARP reply to
 
+// Gateway ARP resolution (CRITICAL for MAC/IP table population!)
+static bool g_need_gateway_arp = false;      // Flag: need to send gateway ARP request
+static UINT32 g_gateway_ip = 0;              // Gateway IP to resolve
+
 // Our configured IP (learned from outgoing packets or DHCP)
 static UINT32 g_our_ip = 0;                  // Our IP address (0 = not known yet)
 static UCHAR g_gateway_mac[6] = {0};         // Gateway MAC address (learned from ARP)
+
+// Keep-alive: Send periodic Gratuitous ARP to maintain MAC/IP table in SoftEther
+static UINT64 g_last_keepalive_time = 0;     // Last time we sent keep-alive GARP
+#define KEEPALIVE_INTERVAL_MS 10000           // Send GARP every 10 seconds
 
 // Forward declarations
 static UINT32 GetDefaultGateway(void);
@@ -111,19 +120,23 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
         return false;
     }
     
-    // Add "include route" for VPN subnet only - Bridge Routing Mode
-    // This keeps internet traffic on the physical interface and only routes
-    // VPN subnet traffic through the tunnel (just like SSTP Connect does)
+    // Full Tunnel Mode - Route ALL traffic through VPN
+    // This is the default behavior for maximum security
     if (gateway != 0) {
         // CRITICAL: Get the original default gateway BEFORE any route changes
         UINT32 orig_gateway = GetDefaultGateway();
         UINT32 vpn_server_ip = GetVpnServerIp();
         
         if (vpn_server_ip != 0 && orig_gateway != 0) {
-            // Add host route for VPN server through original gateway
-            // This ensures VPN traffic doesn't get routed through the VPN itself
+            // Calculate local network (192.168.1.0/24 from 192.168.1.1)
+            UINT32 local_network = orig_gateway & 0xFFFFFF00;  // Assume /24
+            char local_net_str[32];
             char orig_gw_str[32];
             char server_ip_str[32];
+            
+            snprintf(local_net_str, sizeof(local_net_str), "%d.%d.%d.0",
+                     (local_network >> 24) & 0xFF, (local_network >> 16) & 0xFF,
+                     (local_network >> 8) & 0xFF);
             snprintf(orig_gw_str, sizeof(orig_gw_str), "%d.%d.%d.%d",
                      (orig_gateway >> 24) & 0xFF, (orig_gateway >> 16) & 0xFF,
                      (orig_gateway >> 8) & 0xFF, orig_gateway & 0xFF);
@@ -131,38 +144,32 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
                      (vpn_server_ip >> 24) & 0xFF, (vpn_server_ip >> 16) & 0xFF,
                      (vpn_server_ip >> 8) & 0xFF, vpn_server_ip & 0xFF);
             
-            // Calculate VPN network address and netmask
-            UINT32 vpn_network = ip & netmask;  // 10.21.254.238 & 255.255.0.0 = 10.21.0.0
-            char vpn_net_str[32];
-            snprintf(vpn_net_str, sizeof(vpn_net_str), "%d.%d.%d.%d",
-                     (vpn_network >> 24) & 0xFF, (vpn_network >> 16) & 0xFF,
-                     (vpn_network >> 8) & 0xFF, vpn_network & 0xFF);
-            
-            // Calculate netmask prefix (count bits)
-            int prefix = 0;
-            UINT32 mask_copy = netmask;
-            while (mask_copy) {
-                prefix += mask_copy & 1;
-                mask_copy >>= 1;
-            }
-            
             printf("\n");
             printf("╔════════════════════════════════════════════╗\n");
-            printf("║     Bridge Routing Mode (Include Route)   ║\n");
+            printf("║     Full Tunnel Mode (All Traffic)        ║\n");
             printf("╠════════════════════════════════════════════╣\n");
-            printf("║ VPN Subnet:       %-25s║\n", vpn_net_str);
-            printf("║ VPN Prefix:       /%d%-23s║\n", prefix, "");
+            printf("║ Local Network:    %-25s║\n", local_net_str);
             printf("║ VPN Gateway:      %-25s║\n", gw_str);
             printf("║ VPN Server IP:    %-25s║\n", server_ip_str);
             printf("║ Original Gateway: %-25s║\n", orig_gw_str);
             printf("╠════════════════════════════════════════════╣\n");
-            printf("║ Internet traffic: Physical interface      ║\n");
-            printf("║ VPN subnet only:  Through tunnel          ║\n");
+            printf("║ All Internet traffic: Through VPN tunnel  ║\n");
+            printf("║ Local network:        Direct access       ║\n");
             printf("╚════════════════════════════════════════════╝\n");
             printf("\n");
             
-            // 1. Add host route for VPN server through original gateway FIRST
-            //    This ensures VPN tunnel itself doesn't get routed through VPN
+            // 1. Preserve local network access FIRST
+            //    Keep LAN traffic (file sharing, printers, etc.) direct
+            snprintf(cmd, sizeof(cmd), "route add -net %s/24 %s", local_net_str, orig_gw_str);
+            printf("[ConfigureTunInterface] 🏠 Adding local network route: %s\n", cmd);
+            if (system(cmd) != 0) {
+                printf("[ConfigureTunInterface] ⚠️  Failed to add local network route (may already exist)\n");
+            } else {
+                printf("[ConfigureTunInterface] ✅ Local network route preserved\n");
+            }
+            
+            // 2. Add host route for VPN server through original gateway
+            //    CRITICAL: Prevents routing loop (VPN traffic going through VPN)
             snprintf(cmd, sizeof(cmd), "route add -host %s %s", server_ip_str, orig_gw_str);
             printf("[ConfigureTunInterface] 🔐 Adding VPN server route: %s\n", cmd);
             if (system(cmd) != 0) {
@@ -171,22 +178,24 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
                 printf("[ConfigureTunInterface] ✅ VPN server route established\n");
             }
             
-            // 2. Add "include route" for VPN subnet ONLY
-            //    This is the key difference from default route mode
-            //    Only traffic destined for the VPN subnet goes through tunnel
-            snprintf(cmd, sizeof(cmd), "route add -net %s/%d %s", vpn_net_str, prefix, gw_str);
-            printf("[ConfigureTunInterface] 🌐 Adding include route: %s\n", cmd);
+            // 3. Delete existing default route (important!)
+            system("route delete default >/dev/null 2>&1");
+            
+            // 4. Add default route through VPN
+            //    ALL internet traffic now goes through encrypted tunnel
+            snprintf(cmd, sizeof(cmd), "route add default %s", gw_str);
+            printf("[ConfigureTunInterface] � Adding default route through VPN: %s\n", cmd);
             if (system(cmd) != 0) {
-                printf("[ConfigureTunInterface] ⚠️  Failed to add VPN subnet route (may already exist)\n");
+                printf("[ConfigureTunInterface] ⚠️  Failed to add default route (may already exist)\n");
             } else {
-                printf("[ConfigureTunInterface] ✅ VPN subnet route established\n");
+                printf("[ConfigureTunInterface] ✅ Default route through VPN established\n");
             }
             
             printf("\n");
-            printf("✅ Bridge Routing Mode active:\n");
-            printf("   • Internet traffic stays on physical interface\n");
-            printf("   • Only %s/%d routes through VPN\n", vpn_net_str, prefix);
-            printf("   • Local network and internet fully accessible\n\n");
+            printf("✅ Full Tunnel Mode active:\n");
+            printf("   • All internet traffic encrypted through VPN\n");
+            printf("   • Local network (%s/24) direct access preserved\n", local_net_str);
+            printf("   • VPN server connection protected from routing loop\n\n");
         } else {
             printf("[ConfigureTunInterface] ⚠️  Could not determine VPN server IP or original gateway\n");
             printf("[ConfigureTunInterface]     VPN server IP: %u.%u.%u.%u\n",
@@ -490,6 +499,55 @@ static UCHAR* BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT
     memcpy(packet + pos, target_mac, 6); pos += 6;
     
     // Target IP address (the requester's IP)
+    packet[pos++] = (target_ip >> 24) & 0xFF;
+    packet[pos++] = (target_ip >> 16) & 0xFF;
+    packet[pos++] = (target_ip >> 8) & 0xFF;
+    packet[pos++] = target_ip & 0xFF;
+    
+    *out_size = pos;
+    return packet;
+}
+
+// Build ARP Request packet (asks "who has target_ip?")
+// Used to resolve gateway MAC address - CRITICAL for MAC/IP table population!
+static UCHAR* BuildArpRequest(UCHAR *my_mac, UINT32 my_ip, UINT32 target_ip, UINT *out_size) {
+    static UCHAR packet[1024];
+    UINT pos = 0;
+    
+    // Ethernet header (14 bytes)
+    // Destination MAC: broadcast (we don't know target MAC yet)
+    packet[pos++] = 0xFF; packet[pos++] = 0xFF; packet[pos++] = 0xFF;
+    packet[pos++] = 0xFF; packet[pos++] = 0xFF; packet[pos++] = 0xFF;
+    // Source MAC: our MAC
+    memcpy(packet + pos, my_mac, 6); pos += 6;
+    // EtherType: ARP (0x0806)
+    packet[pos++] = 0x08; packet[pos++] = 0x06;
+    
+    // ARP packet (28 bytes)
+    // Hardware type: Ethernet (1)
+    packet[pos++] = 0x00; packet[pos++] = 0x01;
+    // Protocol type: IPv4 (0x0800)
+    packet[pos++] = 0x08; packet[pos++] = 0x00;
+    // Hardware size: 6
+    packet[pos++] = 0x06;
+    // Protocol size: 4
+    packet[pos++] = 0x04;
+    // Opcode: Request (1)
+    packet[pos++] = 0x00; packet[pos++] = 0x01;
+    
+    // Sender MAC address (us)
+    memcpy(packet + pos, my_mac, 6); pos += 6;
+    
+    // Sender IP address (our IP)
+    packet[pos++] = (my_ip >> 24) & 0xFF;
+    packet[pos++] = (my_ip >> 16) & 0xFF;
+    packet[pos++] = (my_ip >> 8) & 0xFF;
+    packet[pos++] = my_ip & 0xFF;
+    
+    // Target MAC address (00:00:00:00:00:00 - unknown)
+    for (int i = 0; i < 6; i++) packet[pos++] = 0x00;
+    
+    // Target IP address (gateway we want to resolve)
     packet[pos++] = (target_ip >> 24) & 0xFF;
     packet[pos++] = (target_ip >> 16) & 0xFF;
     packet[pos++] = (target_ip >> 8) & 0xFF;
@@ -1516,11 +1574,15 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         UINT32 our_ip = (g_our_ip != 0) ? g_our_ip : ((g_offered_ip != 0) ? g_offered_ip : 0x00000000);
         UCHAR *pkt = BuildArpReply(g_my_mac, our_ip, g_arp_reply_to_mac, g_arp_reply_to_ip, &pkt_size);
         if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] ✅ Sending ARP REPLY to %02x:%02x:%02x:%02x:%02x:%02x (our IP: %u.%u.%u.%u)\n",
+            printf("[MacOsTunGetNextPacket] ✅ ARP REPLY to %u.%u.%u.%u (%02x:%02x:%02x:%02x:%02x:%02x): I am %u.%u.%u.%u at %02x:%02x:%02x:%02x:%02x:%02x\n",
+                   (g_arp_reply_to_ip >> 24) & 0xFF, (g_arp_reply_to_ip >> 16) & 0xFF,
+                   (g_arp_reply_to_ip >> 8) & 0xFF, g_arp_reply_to_ip & 0xFF,
                    g_arp_reply_to_mac[0], g_arp_reply_to_mac[1], g_arp_reply_to_mac[2],
                    g_arp_reply_to_mac[3], g_arp_reply_to_mac[4], g_arp_reply_to_mac[5],
                    (our_ip >> 24) & 0xFF, (our_ip >> 16) & 0xFF,
-                   (our_ip >> 8) & 0xFF, our_ip & 0xFF);
+                   (our_ip >> 8) & 0xFF, our_ip & 0xFF,
+                   g_my_mac[0], g_my_mac[1], g_my_mac[2],
+                   g_my_mac[3], g_my_mac[4], g_my_mac[5]);
             UCHAR *pkt_copy = Malloc(pkt_size);
             memcpy(pkt_copy, pkt, pkt_size);
             *data = pkt_copy;
@@ -1617,6 +1679,53 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
             *data = pkt_copy;
             g_dhcp_state = DHCP_STATE_REQUEST_SENT;
             return dhcp_size;
+        }
+    }
+    
+    // **CRITICAL FOR MAC/IP TABLE**: Send ARP Request to resolve gateway MAC
+    // This mimics SSTP Connect behavior and is essential for SoftEther to add us to MAC/IP table!
+    // Must be sent BEFORE keep-alive GARP, right after DHCP configuration (just like SSTP Connect)
+    if (g_need_gateway_arp && g_our_ip != 0 && g_gateway_ip != 0) {
+        UINT pkt_size;
+        UCHAR *pkt = BuildArpRequest(g_my_mac, g_our_ip, g_gateway_ip, &pkt_size);
+        if (pkt_size > 0 && pkt != NULL) {
+            printf("[MacOsTunGetNextPacket] 🔍 Resolving gateway MAC address for %u.%u.%u.%u\n",
+                   (g_gateway_ip >> 24) & 0xFF, (g_gateway_ip >> 16) & 0xFF,
+                   (g_gateway_ip >> 8) & 0xFF, g_gateway_ip & 0xFF);
+            printf("[MacOsTunGetNextPacket]    This ARP Request will populate SoftEther's MAC/IP table!\n");
+            UCHAR *pkt_copy = Malloc(pkt_size);
+            memcpy(pkt_copy, pkt, pkt_size);
+            *data = pkt_copy;
+            g_need_gateway_arp = false;  // Send only once
+            return pkt_size;
+        }
+    }
+    
+    // **CRITICAL FOR LOCAL BRIDGE**: Send periodic Gratuitous ARP keep-alive
+    // This maintains our MAC/IP entry in SoftEther's session table, which is required
+    // for Local Bridge mode to forward our traffic to the external router (CHR).
+    // Without this, SoftEther doesn't know about our MAC/IP and won't bridge traffic!
+    if (g_dhcp_state == DHCP_STATE_CONFIGURED && g_our_ip != 0) {
+        UINT64 now = Tick64();
+        if (g_last_keepalive_time == 0) {
+            g_last_keepalive_time = now;  // Initialize on first call
+        }
+        
+        if ((now - g_last_keepalive_time) >= KEEPALIVE_INTERVAL_MS) {
+            UINT pkt_size;
+            UCHAR *pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &pkt_size);
+            if (pkt_size > 0 && pkt != NULL) {
+                printf("[MacOsTunGetNextPacket] 💓 Sending keep-alive Gratuitous ARP (MAC/IP table refresh)\n");
+                printf("[MacOsTunGetNextPacket]    MAC: %02x:%02x:%02x:%02x:%02x:%02x, IP: %u.%u.%u.%u\n",
+                       g_my_mac[0], g_my_mac[1], g_my_mac[2], g_my_mac[3], g_my_mac[4], g_my_mac[5],
+                       (g_our_ip >> 24) & 0xFF, (g_our_ip >> 16) & 0xFF,
+                       (g_our_ip >> 8) & 0xFF, g_our_ip & 0xFF);
+                UCHAR *pkt_copy = Malloc(pkt_size);
+                memcpy(pkt_copy, pkt, pkt_size);
+                *data = pkt_copy;
+                g_last_keepalive_time = now;  // Update timestamp
+                return pkt_size;
+            }
         }
     }
     
@@ -1829,8 +1938,23 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
             if (ParseDhcpAck(data, size, g_dhcp_xid, &ip, &mask, &gw)) {
                 printf("[MacOsTunPutPacket] 🎉 DHCP ACK received!\n");
                 
+                // **CRITICAL**: Store our IP address for keep-alive GARP
+                g_our_ip = ip;
+                g_gateway_ip = gw;  // Store gateway IP for ARP resolution
+                printf("[MacOsTunPutPacket] 📋 Stored our IP: %u.%u.%u.%u (for periodic keep-alive)\n",
+                       (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+                       (ip >> 8) & 0xFF, ip & 0xFF);
+                printf("[MacOsTunPutPacket] 📋 Gateway IP: %u.%u.%u.%u (will resolve MAC)\n",
+                       (gw >> 24) & 0xFF, (gw >> 16) & 0xFF,
+                       (gw >> 8) & 0xFF, gw & 0xFF);
+                
                 if (ConfigureTunInterface(ctx->device_name, ip, mask, gw)) {
                     g_dhcp_state = DHCP_STATE_CONFIGURED;
+                    
+                    // **CRITICAL**: Request gateway MAC resolution
+                    // This is what SSTP Connect does, and it's essential for MAC/IP table!
+                    g_need_gateway_arp = true;
+                    printf("[MacOsTunPutPacket] 🔍 Will send ARP Request to resolve gateway MAC (like SSTP Connect)\n");
                 }
                 // Don't write DHCP packets to TUN
                 return true;
@@ -1838,8 +1962,9 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
         }
     }
     
-    if (size > TUN_MTU) {
-        printf("[MacOsTunPutPacket] Packet too large: %u bytes\n", size);
+    // Check packet size - allow for Ethernet frame (IP + 14-byte Ethernet header)
+    if (size > MAX_ETHERNET_FRAME) {
+        printf("[MacOsTunPutPacket] ⚠️  Packet too large: %u bytes (max=%u)\n", size, MAX_ETHERNET_FRAME);
         return false;
     }
     
@@ -1880,17 +2005,23 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                 }
                 
                 // If it's an ARP request for our IP (learned, offered, or configured), respond!
-                if (opcode == 1 && (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64)) {
-                    // Only log during DHCP negotiation
-                    if (g_dhcp_state != DHCP_STATE_CONFIGURED) {
-                        printf("[MacOsTunPutPacket] ✅ ARP REQUEST for our IP (%u.%u.%u.%u)! Queueing ARP REPLY!\n",
-                               (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
-                               (target_ip >> 8) & 0xFF, target_ip & 0xFF);
+                if (opcode == 1) {
+                    UINT32 sender_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];
+                    
+                    // **ALWAYS LOG ARP REQUESTS** to debug MAC/IP table population
+                    printf("[MacOsTunPutPacket] 📬 ARP Request FROM %u.%u.%u.%u asking WHO HAS %u.%u.%u.%u\n",
+                           (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
+                           (sender_ip >> 8) & 0xFF, sender_ip & 0xFF,
+                           (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
+                           (target_ip >> 8) & 0xFF, target_ip & 0xFF);
+                    
+                    if (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64) {
+                        printf("[MacOsTunPutPacket] ✅ This is OUR IP! Queueing ARP REPLY!\n");
+                        // Queue ARP reply - we'll send it in GetNextPacket
+                        g_need_arp_reply = true;
+                        memcpy(g_arp_reply_to_mac, pkt + 6, 6);  // Sender MAC
+                        g_arp_reply_to_ip = sender_ip;
                     }
-                    // Queue ARP reply - we'll send it in GetNextPacket
-                    g_need_arp_reply = true;
-                    memcpy(g_arp_reply_to_mac, pkt + 6, 6);  // Sender MAC
-                    g_arp_reply_to_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];  // Sender IP
                 }
             }
             // Don't write ARP to TUN device (Layer 2 packet, TUN is Layer 3)
