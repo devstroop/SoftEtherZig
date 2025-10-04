@@ -16,28 +16,20 @@ pub const VpnClient = struct {
 
     /// Initialize a new VPN client
     pub fn init(allocator: std.mem.Allocator, cfg: ConnectionConfig) !VpnClient {
-        std.debug.print("[Zig] VpnClient.init() called\n", .{});
-
         // Initialize the bridge library (once per program)
         // Note: BOOL in SoftEther is typedef'd as unsigned int (0 = FALSE, 1 = TRUE)
-        std.debug.print("[Zig] Calling vpn_bridge_init()...\n", .{});
         const init_result = c.vpn_bridge_init(0); // 0 = FALSE (debug off)
-        std.debug.print("[Zig] vpn_bridge_init() returned: {d}\n", .{init_result});
 
         if (init_result != c_mod.VPN_BRIDGE_SUCCESS) {
             return VpnError.InitializationFailed;
         }
 
         // Create client instance
-        std.debug.print("[Zig] Calling vpn_bridge_create_client()...\n", .{});
         const client_handle = c.vpn_bridge_create_client() orelse {
-            std.debug.print("[Zig] vpn_bridge_create_client() returned NULL!\n", .{});
             return VpnError.ClientCreationFailed;
         };
-        std.debug.print("[Zig] vpn_bridge_create_client() returned: {*}\n", .{client_handle});
 
         // Configure the client
-        std.debug.print("[Zig] Preparing configuration strings...\n", .{});
         const host_z = try allocator.dupeZ(u8, cfg.server_name);
         defer allocator.free(host_z);
 
@@ -64,7 +56,6 @@ pub const VpnClient = struct {
         const pass_z = try allocator.dupeZ(u8, password);
         defer allocator.free(pass_z);
 
-        std.debug.print("[Zig] Calling vpn_bridge_configure{s}...\n", .{if (is_hashed) "_with_hash" else ""});
         const config_result = if (is_hashed)
             c.vpn_bridge_configure_with_hash(
                 client_handle,
@@ -83,20 +74,17 @@ pub const VpnClient = struct {
                 user_z.ptr,
                 pass_z.ptr,
             );
-        std.debug.print("[Zig] vpn_bridge_configure{s}() returned: {d}\n", .{ if (is_hashed) "_with_hash" else "", config_result });
 
         if (config_result != c_mod.VPN_BRIDGE_SUCCESS) {
             c.vpn_bridge_free_client(client_handle);
             return VpnError.ConfigurationError;
         }
 
-        std.debug.print("[Zig] Creating VpnClient struct...\n", .{});
         const client = VpnClient{
             .handle = client_handle,
             .allocator = allocator,
             .config = cfg,
         };
-        std.debug.print("[Zig] VpnClient.init() complete!\n", .{});
         return client;
     }
 

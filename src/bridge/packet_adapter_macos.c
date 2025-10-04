@@ -1143,10 +1143,10 @@ void MacOsTunReadThread(THREAD *t, void *param) {
             }
         }
         
-        // Log outgoing packets only during DHCP setup or periodically
+        // Silent in production - only log errors or if DHCP negotiation active
         static UINT64 read_count = 0;
-        if (g_dhcp_state != DHCP_STATE_CONFIGURED || (++read_count % 100) == 1) {
-            printf("[MacOsTunReadThread] 📤 Read %d bytes from TUN device (outgoing to VPN)\n", n - 4);
+        if (g_dhcp_state != DHCP_STATE_CONFIGURED && (++read_count % 50) == 1) {
+            printf("[TUN] Read packets: %llu\n", read_count);
         }
         
         // Allocate packet and copy data
@@ -1446,15 +1446,6 @@ bool MacOsTunInit(SESSION *s) {
         Unlock(ctx->queue_lock);
         g_dhcp_state = DHCP_STATE_DISCOVER_SENT;
         printf("[MacOsTunInit]   1️⃣  DHCP DISCOVER queued (%u bytes) - FIRST PRIORITY\n", dhcp_size);
-        
-        // **DEBUG**: Print full DHCP packet in hex for analysis
-        printf("[MacOsTunInit] 📋 DHCP DISCOVER packet hex dump:\n");
-        for (UINT i = 0; i < dhcp_size; i++) {
-            printf("%02x ", dhcp_discover[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
-        }
-        if (dhcp_size % 16 != 0) printf("\n");
-        fflush(stdout);
     }
     
     // **PACKET 2**: IPv6 Neighbor Advertisement (matching SSTP Connect line 254)
@@ -1727,7 +1718,6 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
             UINT pkt_size;
             UCHAR *pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &pkt_size);
             if (pkt_size > 0 && pkt != NULL) {
-                printf("[MacOsTunGetNextPacket] 💓 Keep-alive GARP (MAC/IP table refresh)\n");
                 UCHAR *pkt_copy = Malloc(pkt_size);
                 memcpy(pkt_copy, pkt, pkt_size);
                 *data = pkt_copy;
@@ -1761,7 +1751,6 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
             
             if (is_ethernet_frame) {
                 // Already an Ethernet frame (pre-queued packet), return as-is
-                printf("[MacOsTunGetNextPacket] 📤 Sending pre-queued Ethernet frame to VPN: %u bytes\n", size);
                 *data = pkt->data;  // Transfer ownership to session
                 Free(pkt);          // Free packet structure (but NOT pkt->data!)
             } else if (size > 0 && (packet_data[0] & 0xF0) == 0x40) {
@@ -1786,10 +1775,10 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
                 eth_frame[13] = ethertype & 0xFF;
                 memcpy(eth_frame + 14, packet_data, size);        // IP packet
                 
-                // Log periodically to reduce verbosity
+                // Silent in production - logs only during setup
                 static UINT64 ipv4_count = 0;
-                if (g_dhcp_state != DHCP_STATE_CONFIGURED || (++ipv4_count % 100) == 1) {
-                    printf("[MacOsTunGetNextPacket] 📤 IPv4: %u bytes\n", eth_size);
+                if (g_dhcp_state != DHCP_STATE_CONFIGURED && (++ipv4_count % 100) == 1) {
+                    printf("[TUN] IPv4 packets: %llu\n", ipv4_count);
                 }
                 
                 Free(pkt->data);
@@ -1857,16 +1846,6 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     if (size > 14 && g_dhcp_state != DHCP_STATE_CONFIGURED) {
         USHORT ethertype = (((UCHAR*)data)[12] << 8) | ((UCHAR*)data)[13];
         printf("[MacOsTunPutPacket] 📦 Incoming packet: size=%u, ethertype=0x%04x, state=%d\n", size, ethertype, g_dhcp_state);
-        
-        // Dump first 64 bytes only for DHCP/ARP packets
-        if (ethertype == 0x0806 || ethertype == 0x0800) {
-            printf("[MacOsTunPutPacket] First 64 bytes: ");
-            for (int i = 0; i < (size < 64 ? size : 64); i++) {
-                printf("%02x ", ((UCHAR*)data)[i]);
-                if ((i + 1) % 16 == 0) printf("\n[MacOsTunPutPacket]                    ");
-            }
-            printf("\n");
-        }
         
         if (ethertype == 0x0800) {
             // Check if it's UDP port 68 (DHCP client port)
