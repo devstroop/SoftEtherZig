@@ -97,17 +97,23 @@ pub const ZigPacketAdapter = struct {
 
     /// Initialize packet adapter
     pub fn init(allocator: std.mem.Allocator, config: Config) !*ZigPacketAdapter {
+        std.debug.print("[ZigPacketAdapter.init] Starting initialization...\n", .{});
+
         const self = try allocator.create(ZigPacketAdapter);
         errdefer allocator.destroy(self);
+        std.debug.print("[ZigPacketAdapter.init] Allocated adapter struct at {*}\n", .{self});
 
         // Allocate device name
         const device_name = try allocator.alloc(u8, config.device_name.len);
         errdefer allocator.free(device_name);
         @memcpy(device_name, config.device_name);
+        std.debug.print("[ZigPacketAdapter.init] Device name: {s}\n", .{device_name});
 
         // Initialize packet pool
+        std.debug.print("[ZigPacketAdapter.init] Creating packet pool (size={d})...\n", .{config.packet_pool_size});
         var packet_pool = try PacketPool.init(allocator, config.packet_pool_size, MAX_PACKET_SIZE);
         errdefer packet_pool.deinit();
+        std.debug.print("[ZigPacketAdapter.init] Packet pool created\n", .{});
 
         self.* = .{
             .allocator = allocator,
@@ -121,6 +127,7 @@ pub const ZigPacketAdapter = struct {
             .stats = .{},
         };
 
+        std.debug.print("[ZigPacketAdapter.init] ✅ Initialization complete\n", .{});
         return self;
     }
 
@@ -393,7 +400,12 @@ pub const ZigPacketAdapter = struct {
 // Export C-compatible functions for FFI
 export fn zig_adapter_create(config: *const Config) ?*ZigPacketAdapter {
     const allocator = std.heap.c_allocator;
-    return ZigPacketAdapter.init(allocator, config.*) catch null;
+    const adapter = ZigPacketAdapter.init(allocator, config.*) catch |err| {
+        std.debug.print("[zig_adapter_create] ERROR: Failed to create adapter: {any}\n", .{err});
+        return null;
+    };
+    std.debug.print("[zig_adapter_create] ✅ Adapter created successfully at {*}\n", .{adapter});
+    return adapter;
 }
 
 export fn zig_adapter_destroy(adapter: *ZigPacketAdapter) void {
