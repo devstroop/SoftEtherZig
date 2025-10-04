@@ -7,6 +7,7 @@
 #endif
 
 #include "packet_adapter_macos.h"
+#include "logging.h"
 #include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
 #include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
 #include <sys/socket.h>
