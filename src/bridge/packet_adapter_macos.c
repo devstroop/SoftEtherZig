@@ -1090,13 +1090,16 @@ void MacOsTunReadThread(THREAD *t, void *param) {
     UCHAR buf[MAX_PACKET_SIZE];
     
     LOG_TUN_DEBUG("Read thread started, fd=%d", ctx->tun_fd);
+    fflush(stdout);
     
     // Signal thread is initialized
     LOG_TUN_TRACE("Calling NoticeThreadInit...");
+    fflush(stdout);
     
     NoticeThreadInit(t);
     
     LOG_TUN_DEBUG("Read thread initialized, entering loop");
+    fflush(stdout);
     
     while (!ctx->halt) {
         // Read packet from TUN device (blocking)
@@ -1281,40 +1284,49 @@ bool MacOsTunInit(SESSION *s) {
     MACOS_TUN_CONTEXT *ctx;
     
     LOG_TUN_DEBUG("Init starting, session=%p", s);
+    fflush(stdout);
     
     if (s == NULL) {
         LOG_TUN_ERROR("Session is NULL - invalid parameter");
+        fflush(stdout);
         return false;
     }
     
     if (s->PacketAdapter == NULL) {
         LOG_TUN_ERROR("PacketAdapter is NULL - invalid state");
+        fflush(stdout);
         return false;
     }
     
     if (s->PacketAdapter->Param != NULL) {
         LOG_TUN_ERROR("Adapter already initialized");
+        fflush(stdout);
         return false;
     }
     
     LOG_TUN_DEBUG("Validation passed, allocating context");
+    fflush(stdout);
     
     // Allocate context
     LOG_TUN_TRACE("Allocating context structure");
+    fflush(stdout);
     ctx = ZeroMalloc(sizeof(MACOS_TUN_CONTEXT));
     ctx->session = s;
     ctx->halt = false;
     LOG_TUN_TRACE("Context allocated at %p", ctx);
-    
+    fflush(stdout);
+
     // Open TUN device
     LOG_TUN_DEBUG("Opening TUN device...");
     ctx->tun_fd = OpenMacOsTunDevice(ctx->device_name, sizeof(ctx->device_name));
     if (ctx->tun_fd < 0) {
         LOG_TUN_ERROR("Failed to open TUN device");
+        fflush(stdout);
         Free(ctx);
         return false;
     }
     LOG_TUN_INFO("TUN device opened: %s (fd=%d)", ctx->device_name, ctx->tun_fd);
+    fflush(stdout);
     
     // **CRITICAL FIX**: Configure TUN interface immediately with temporary IP
     // This allows packets to flow through the interface while DHCP is in progress
@@ -1387,24 +1399,32 @@ bool MacOsTunInit(SESSION *s) {
     
     // Create synchronization objects
     LOG_TUN_DEBUG("Creating synchronization objects...\n");
+    fflush(stdout);
     ctx->cancel = NewCancel();
     LOG_TUN_DEBUG("Cancel created\n");
+    fflush(stdout);
     ctx->recv_queue = NewQueue();
     LOG_TUN_DEBUG("Queue created\n");
+    fflush(stdout);
     ctx->queue_lock = NewLock();
     LOG_TUN_DEBUG("Lock created\n");
+    fflush(stdout);
     
     // Start background read thread
     LOG_TUN_DEBUG("Starting background read thread...\n");
+    fflush(stdout);
     ctx->read_thread = NewThread(MacOsTunReadThread, ctx);
     LOG_TUN_DEBUG("NewThread returned, waiting for init...\n");
+    fflush(stdout);
     WaitThreadInit(ctx->read_thread);
     LOG_TUN_DEBUG("Thread initialized\n");
+    fflush(stdout);
     
     // Store context in packet adapter
     s->PacketAdapter->Param = ctx;
     
     LOG_TUN_INFO("=== SUCCESS === TUN device: %s\n", ctx->device_name);
+    fflush(stdout);
     
     // 🚀 **CRITICAL FIX**: Queue DHCP/IPv6 packets IMMEDIATELY (SSTP Connect style)
     // Don't wait for GetNextPacket delay - send packets right away!
