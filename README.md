@@ -223,7 +223,6 @@ SoftEtherZig/
 **Mobile implementations are production-ready!** See:
 - [`android/README.md`](android/README.md) - Android integration guide
 - [`ios/README.md`](ios/README.md) - iOS integration guide
-- [`MOBILE_COMPLETE.md`](MOBILE_COMPLETE.md) - Complete mobile implementation summary
 
 ### Building for Different Platforms
 
