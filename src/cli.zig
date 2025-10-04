@@ -63,6 +63,7 @@ fn printUsage() void {
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
         \\    --profile               Enable performance profiling
+        \\    --use-zig-adapter       Use Zig packet adapter (experimental, better performance)
         \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
         \\    --ip-version <VERSION>  IP version: auto, ipv4, ipv6, dual (default: auto)
         \\    --static-ipv4 <IP>      Static IPv4 address (e.g., 10.0.0.2)
@@ -120,6 +121,7 @@ const CliArgs = struct {
     max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     daemon: bool = false,
     profile: bool = false, // Enable performance profiling
+    use_zig_adapter: bool = false, // Use Zig packet adapter instead of C adapter
     log_level: []const u8 = "info",
     ip_version: []const u8 = "auto",
     static_ipv4: ?[]const u8 = null,
@@ -186,6 +188,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.daemon = true;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             result.profile = true;
+        } else if (std.mem.eql(u8, arg, "--use-zig-adapter")) {
+            result.use_zig_adapter = true;
         } else if (std.mem.eql(u8, arg, "--log-level")) {
             result.log_level = args.next() orelse return error.MissingLogLevel;
         } else if (std.mem.eql(u8, arg, "--ip-version")) {

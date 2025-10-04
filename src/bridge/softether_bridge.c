@@ -24,7 +24,20 @@
 // Platform-specific packet adapter
 #if defined(UNIX_MACOS)
     #include "packet_adapter_macos.h"
-    #define NEW_PACKET_ADAPTER() NewMacOsTunAdapter()
+    #include "zig_packet_adapter.h"
+    
+    // Toggle between C and Zig adapter (set to 1 to use Zig adapter)
+    #ifndef USE_ZIG_ADAPTER
+    #define USE_ZIG_ADAPTER 0  // Default: use C adapter (change to 1 for Zig)
+    #endif
+    
+    #if USE_ZIG_ADAPTER
+        #define NEW_PACKET_ADAPTER() NewZigPacketAdapter()
+        #pragma message("Building with Zig packet adapter")
+    #else
+        #define NEW_PACKET_ADAPTER() NewMacOsTunAdapter()
+        #pragma message("Building with C packet adapter")
+    #endif
 #elif defined(UNIX_LINUX)
     #include "packet_adapter_linux.h"
     #define NEW_PACKET_ADAPTER() NewLinuxTunAdapter()

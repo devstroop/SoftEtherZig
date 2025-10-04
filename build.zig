@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Build option to use Zig packet adapter
+    const use_zig_adapter = b.option(bool, "use-zig-adapter", "Use Zig packet adapter instead of C adapter (default: false)") orelse false;
+
     // Detect target OS
     const target_os = target.result.os.tag;
     const is_ios = target_os == .ios;
@@ -43,19 +46,31 @@ pub fn build(b: *std.Build) void {
     };
 
     // Platform-specific defines
-    var c_flags: []const []const u8 = undefined;
+    var c_flags_list = std.ArrayList([]const u8){};
+    c_flags_list = std.ArrayList([]const u8).initCapacity(b.allocator, 50) catch unreachable;
+    defer c_flags_list.deinit(b.allocator);
+
+    // Add base flags
+    c_flags_list.appendSlice(b.allocator, base_c_flags) catch unreachable;
+
+    // Add Zig adapter flag if enabled
+    if (use_zig_adapter) {
+        c_flags_list.append(b.allocator, "-DUSE_ZIG_ADAPTER=1") catch unreachable;
+    }
 
     if (is_ios) {
-        c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS", "-DUNIX_IOS", "-DTARGET_OS_IPHONE=1" };
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS", "-DUNIX_IOS", "-DTARGET_OS_IPHONE=1" }) catch unreachable;
     } else if (target_os == .macos) {
-        c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS" };
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS" }) catch unreachable;
     } else if (target_os == .linux) {
-        c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_LINUX" };
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-DUNIX", "-DUNIX_LINUX" }) catch unreachable;
     } else if (target_os == .windows) {
-        c_flags = base_c_flags ++ &[_][]const u8{ "-DWIN32", "-D_WIN32" };
+        c_flags_list.appendSlice(b.allocator, &[_][]const u8{ "-DWIN32", "-D_WIN32" }) catch unreachable;
     } else {
-        c_flags = base_c_flags ++ &[_][]const u8{"-DUNIX"};
+        c_flags_list.append(b.allocator, "-DUNIX") catch unreachable;
     }
+
+    const c_flags = c_flags_list.items;
 
     // Platform-specific packet adapter and timing files
     const packet_adapter_file = switch (target_os) {
@@ -78,6 +93,7 @@ pub fn build(b: *std.Build) void {
         "src/bridge/unix_bridge.c",
         tick64_file,
         packet_adapter_file,
+        "src/bridge/zig_packet_adapter.c", // Zig adapter wrapper
         "src/bridge/logging.c", // Phase 2: Log level system
         "src/bridge/Mayaqua/Mayaqua.c",
         "src/bridge/Mayaqua/Memory.c",
