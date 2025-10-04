@@ -5,6 +5,7 @@
  */
 
 #include "softether_bridge.h"
+#include "logging.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -92,36 +93,36 @@ static const char* get_error_message_internal(int error_code) {
  * ============================================ */
 
 int vpn_bridge_init(uint32_t debug) {
-    printf("[DEBUG] vpn_bridge_init starting...\n");
+    LOG_VPN_DEBUG("vpn_bridge_init starting...\n");
     fflush(stdout);
     
-    printf("[DEBUG] Enabling minimal mode (skips hamcore/string tables)...\n");
+    LOG_VPN_DEBUG("Enabling minimal mode (skips hamcore/string tables)...\n");
     fflush(stdout);
     
     // Enable minimal mode BEFORE Init to skip hamcore.se2 and string table loading
     MayaquaMinimalMode();
     
-    printf("[DEBUG] Attempting client initialization...\n");
+    LOG_VPN_DEBUG("Attempting client initialization...\n");
     fflush(stdout);
     
     // Provide a simple executable name - the exe path check is disabled in development mode
     char *fake_argv[] = { "vpnclient", NULL };
     
     // Try full initialization with debug enabled
-    printf("[DEBUG] Calling InitMayaqua...\n");
+    LOG_VPN_DEBUG("Calling InitMayaqua...\n");
     fflush(stdout);
     
     InitMayaqua(false, true, 1, fake_argv);
     
-    printf("[DEBUG] ✅ InitMayaqua completed successfully!\n");
+    LOG_VPN_INFO("✅ InitMayaqua completed successfully!\n");
     fflush(stdout);
     
-    printf("[DEBUG] Calling InitCedar...\n");
+    LOG_VPN_DEBUG("Calling InitCedar...\n");
     fflush(stdout);
     
     InitCedar();
     
-    printf("[DEBUG] ✅ InitCedar completed successfully!\n");
+    LOG_VPN_INFO("✅ InitCedar completed successfully!\n");
     fflush(stdout);
     
     g_initialized = 1;  // 1 = true
@@ -152,21 +153,21 @@ uint32_t vpn_bridge_is_initialized(void) {
  * ============================================ */
 
 VpnBridgeClient* vpn_bridge_create_client(void) {
-    printf("[DEBUG] vpn_bridge_create_client called\n");
+    LOG_VPN_DEBUG("vpn_bridge_create_client called\n");
     fflush(stdout);
     
     if (!g_initialized) {
-        printf("[DEBUG] ERROR: Not initialized!\n");
+        LOG_VPN_ERROR("Not initialized!\n");
         fflush(stdout);
         return NULL;
     }
     
-    printf("[DEBUG] Allocating VpnBridgeClient structure...\n");
+    LOG_VPN_DEBUG("Allocating VpnBridgeClient structure...\n");
     fflush(stdout);
     
     VpnBridgeClient* client = (VpnBridgeClient*)calloc(1, sizeof(VpnBridgeClient));
     if (!client) {
-        printf("[DEBUG] ERROR: calloc failed!\n");
+        LOG_VPN_ERROR("calloc failed!\n");
         fflush(stdout);
         return NULL;
     }
@@ -176,13 +177,13 @@ VpnBridgeClient* vpn_bridge_create_client(void) {
     client->last_error = VPN_BRIDGE_SUCCESS;
     client->port = 443;
     
-    printf("[DEBUG] Calling CiNewClient()...\n");
+    LOG_VPN_DEBUG("Calling CiNewClient()...\n");
     fflush(stdout);
     
     // Create real SoftEther CLIENT structure
     client->softether_client = CiNewClient();
     
-    printf("[DEBUG] CiNewClient() returned: %p\n", (void*)client->softether_client);
+    LOG_VPN_DEBUG("CiNewClient() returned: %p\n", (void*)client->softether_client);
     fflush(stdout);
     if (!client->softether_client) {
         free(client);
@@ -197,12 +198,12 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
         return;
     }
     
-    printf("[vpn_bridge_free_client] Cleaning up client...\n");
+    LOG_VPN_DEBUG("Cleaning up client...\n");
     fflush(stdout);
     
     // Disconnect if still connected
     if (client->status == VPN_STATUS_CONNECTED) {
-        printf("[vpn_bridge_free_client] Client still connected, disconnecting...\n");
+        LOG_VPN_DEBUG("Client still connected, disconnecting...\n");
         fflush(stdout);
         vpn_bridge_disconnect(client);
     }
@@ -210,12 +211,12 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
     // Free real SoftEther CLIENT structure
     // NOTE: If we already disconnected, skip CiCleanupClient as it may access freed resources
     if (client->softether_client && client->status != VPN_STATUS_DISCONNECTED) {
-        printf("[vpn_bridge_free_client] Cleaning up SoftEther CLIENT...\n");
+        LOG_VPN_DEBUG("Cleaning up SoftEther CLIENT...\n");
         fflush(stdout);
         CiCleanupClient(client->softether_client);
         client->softether_client = NULL;
     } else {
-        printf("[vpn_bridge_free_client] Skipping CiCleanupClient (already disconnected)\n");
+        LOG_VPN_DEBUG("Skipping CiCleanupClient (already disconnected)\n");
         fflush(stdout);
         // Just free the CLIENT structure directly
         if (client->softether_client) {
@@ -227,12 +228,12 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
     // Clear sensitive data
     memset(client->password, 0, sizeof(client->password));
     
-    printf("[vpn_bridge_free_client] Freeing client structure...\n");
+    LOG_VPN_DEBUG("Freeing client structure...\n");
     fflush(stdout);
     
     free(client);
     
-    printf("[vpn_bridge_free_client] ✅ Client freed\n");
+    LOG_VPN_DEBUG("✅ Client freed\n");
     fflush(stdout);
 }
 
@@ -330,7 +331,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         return VPN_BRIDGE_ERROR_INVALID_PARAM;
     }
     
-    printf("[vpn_bridge_connect] Creating account...\n");
+    LOG_VPN_INFO("Creating account...\n");
     fflush(stdout);
     
     client->status = VPN_STATUS_CONNECTING;
@@ -350,7 +351,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     // Setting PortUDP = 0 forces TCP-only mode without NAT-T server lookups
     opt->PortUDP = 0;  // 0 = Use only TCP, no UDP/NAT-T
     
-    printf("[vpn_bridge_connect] ⚠️  TCP-ONLY MODE: PortUDP=%u (0 = TCP only, no NAT-T, no UDP accel)\n", opt->PortUDP);
+    LOG_VPN_INFO("⚠️  TCP-ONLY MODE: PortUDP=%u (0 = TCP only, no NAT-T, no UDP accel)\n", opt->PortUDP);
     fflush(stdout);
     
     // Device name for virtual adapter - use generic VPN adapter name

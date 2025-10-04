@@ -1557,9 +1557,9 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         UINT32 zero_ip = 0x00000000; // 0.0.0.0 - no IP claimed yet
         UCHAR *pkt = BuildGratuitousArp(g_my_mac, zero_ip, &pkt_size);
         if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] ⏰ Tunnel established for %llu ms\n", time_since_start);
-            printf("[MacOsTunGetNextPacket] 📡 Sending Gratuitous ARP with 0.0.0.0 to register MAC in bridge\n");
-            printf("[MacOsTunGetNextPacket]    MAC: %02x:%02x:%02x:%02x:%02x:%02x (no IP claimed yet)\n",
+            LOG_TUN_DEBUG("⏰ Tunnel established for %llu ms\n", time_since_start);
+            LOG_TUN_DEBUG("📡 Sending Gratuitous ARP with 0.0.0.0 to register MAC in bridge\n");
+            LOG_TUN_TRACE("   MAC: %02x:%02x:%02x:%02x:%02x:%02x (no IP claimed yet)\n",
                    g_my_mac[0], g_my_mac[1], g_my_mac[2], g_my_mac[3], g_my_mac[4], g_my_mac[5]);
             UCHAR *pkt_copy = Malloc(pkt_size);
             memcpy(pkt_copy, pkt, pkt_size);
@@ -1581,7 +1581,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         if (pkt_size > 0 && pkt != NULL) {
             // Only log gateway ARP replies or during setup
             if (g_arp_reply_to_ip == 0x0A150001 || g_dhcp_state != DHCP_STATE_CONFIGURED) {
-                printf("[MacOsTunGetNextPacket] ✅ ARP REPLY to %u.%u.%u.%u\n",
+                LOG_TUN_TRACE("✅ ARP REPLY to %u.%u.%u.%u\n",
                        (g_arp_reply_to_ip >> 24) & 0xFF, (g_arp_reply_to_ip >> 16) & 0xFF,
                        (g_arp_reply_to_ip >> 8) & 0xFF, g_arp_reply_to_ip & 0xFF);
             }
@@ -1598,7 +1598,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         UINT pkt_size;
         UCHAR *pkt = BuildNeighborAdvertisement(g_my_mac, &pkt_size);
         if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] 📡 Sending IPv6 Neighbor Advertisement (size=%u)\n", pkt_size);
+            LOG_TUN_DEBUG("📡 Sending IPv6 Neighbor Advertisement (size=%u)\n", pkt_size);
             UCHAR *pkt_copy = Malloc(pkt_size);
             memcpy(pkt_copy, pkt, pkt_size);
             *data = pkt_copy;
@@ -1613,7 +1613,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         UINT pkt_size;
         UCHAR *pkt = BuildRouterSolicitation(g_my_mac, &pkt_size);
         if (pkt_size > 0 && pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] 📡 Sending IPv6 Router Solicitation (size=%u)\n", pkt_size);
+            LOG_TUN_DEBUG("📡 Sending IPv6 Router Solicitation (size=%u)\n", pkt_size);
             UCHAR *pkt_copy = Malloc(pkt_size);
             memcpy(pkt_copy, pkt, pkt_size);
             *data = pkt_copy;
@@ -1643,7 +1643,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
                 should_send = true;
                 g_last_dhcp_send_time = now;
                 g_dhcp_retry_count++;
-                printf("[MacOsTunGetNextPacket] 🔄 DHCP DISCOVER retry #%u (no response after %llu ms)\n", 
+                LOG_DHCP_INFO("🔄 DHCP DISCOVER retry #%u (no response after %llu ms)\n", 
                        g_dhcp_retry_count, now - g_connection_start_time);
             }
         }
@@ -1674,7 +1674,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
         UINT dhcp_size;
         UCHAR *dhcp_pkt = BuildDhcpRequest(g_my_mac, g_dhcp_xid, g_offered_ip, g_dhcp_server_ip, &dhcp_size);
         if (dhcp_size > 0 && dhcp_pkt != NULL) {
-            printf("[MacOsTunGetNextPacket] 📤 Sending DHCP REQUEST for IP (xid=0x%08x, size=%u)\n", g_dhcp_xid, dhcp_size);
+            LOG_DHCP_INFO("📤 Sending DHCP REQUEST for IP (xid=0x%08x, size=%u)\n", g_dhcp_xid, dhcp_size);
             // Allocate a copy for the session
             UCHAR *pkt_copy = Malloc(dhcp_size);
             memcpy(pkt_copy, dhcp_pkt, dhcp_size);
@@ -1799,7 +1799,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
                 eth_frame[13] = ethertype & 0xFF;
                 memcpy(eth_frame + 14, packet_data, size);
                 
-                printf("[MacOsTunGetNextPacket] 📤 Forwarding IPv6 packet to VPN: %u bytes IP → %u bytes Ethernet\n",
+                LOG_TUN_TRACE("📤 Forwarding IPv6 packet to VPN: %u bytes IP → %u bytes Ethernet\n",
                        size, eth_size);
                 
                 Free(pkt->data);
@@ -1808,7 +1808,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
                 size = eth_size;
             } else {
                 // Unknown protocol, skip it
-                printf("[MacOsTunGetNextPacket] ⚠️  Skipping unknown packet type (first byte: 0x%02x, size: %u)\n", 
+                LOG_TUN_DEBUG("⚠️  Skipping unknown packet type (first byte: 0x%02x, size: %u)\n", 
                        packet_data[0], size);
                 Free(pkt->data);
                 Free(pkt);
@@ -1844,7 +1844,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     // Debug: Log incoming packets only during DHCP negotiation
     if (size > 14 && g_dhcp_state != DHCP_STATE_CONFIGURED) {
         USHORT ethertype = (((UCHAR*)data)[12] << 8) | ((UCHAR*)data)[13];
-        printf("[MacOsTunPutPacket] 📦 Incoming packet: size=%u, ethertype=0x%04x, state=%d\n", size, ethertype, g_dhcp_state);
+        LOG_TUN_TRACE("📦 Incoming packet: size=%u, ethertype=0x%04x, state=%d\n", size, ethertype, g_dhcp_state);
         
         if (ethertype == 0x0800) {
             // Check if it's UDP port 68 (DHCP client port)
@@ -1861,18 +1861,19 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                     UINT32 src_ip = (ip_hdr[12] << 24) | (ip_hdr[13] << 16) | (ip_hdr[14] << 8) | ip_hdr[15];
                     UINT32 dst_ip = (ip_hdr[16] << 24) | (ip_hdr[17] << 16) | (ip_hdr[18] << 8) | ip_hdr[19];
                     
-                    printf("[MacOsTunPutPacket] 📩 UDP: %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u\n",
+                    LOG_TUN_TRACE("📩 UDP: %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u\n",
                            (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 8) & 0xFF, src_ip & 0xFF, src_port,
                            (dst_ip >> 24) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 8) & 0xFF, dst_ip & 0xFF, dest_port);
                     
                     if (dest_port == 68 || src_port == 67) {
-                        printf("[MacOsTunPutPacket] *** DHCP PACKET DETECTED! ***\n");
-                        // Dump first 100 bytes for debugging
-                        printf("[MacOsTunPutPacket] First 100 bytes: ");
-                        for (int i = 0; i < (size < 100 ? size : 100); i++) {
-                            printf("%02x ", ((UCHAR*)data)[i]);
-                        }
-                        printf("\n");
+                        LOG_TUN_TRACE("*** DHCP PACKET DETECTED! ***\n");
+                        // // Dump first 100 bytes for debugging
+
+                        // LOG_TUN_TRACE("First 100 bytes: ");
+                        // for (int i = 0; i < (size < 100 ? size : 100); i++) {
+                        //     LOG_TUN_TRACE("%02x ", ((UCHAR*)data)[i]);
+                        // }
+                        // LOG_TUN_TRACE("\n");
                     }
                 }
             }
@@ -1891,7 +1892,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                     USHORT src_port = (pkt[34] << 8) | pkt[35];
                     USHORT dst_port = (pkt[36] << 8) | pkt[37];
                     if (src_port == 67 && dst_port == 68) {
-                        printf("[MacOsTunPutPacket] 🔍 Received UDP 67->68 packet (DHCP), size=%u, state=%d\n", size, g_dhcp_state);
+                        LOG_DHCP_TRACE("🔍 Received UDP 67->68 packet (DHCP), size=%u, state=%d\n", size, g_dhcp_state);
                     }
                 }
             }
@@ -1901,7 +1902,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
         if (g_dhcp_state == DHCP_STATE_DISCOVER_SENT) {
             UINT32 ip, mask, gw, server;
             if (ParseDhcpOffer(data, size, g_dhcp_xid, &ip, &mask, &gw, &server)) {
-                printf("[MacOsTunPutPacket] 📨 DHCP OFFER received!\n");
+                LOG_DHCP_INFO("📨 DHCP OFFER received!\n");
                 printf("  Offered IP: %u.%u.%u.%u\n", 
                        (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
                 printf("  Netmask:    %u.%u.%u.%u\n",
@@ -1933,7 +1934,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                 printf("[MacOsTunPutPacket] 📋 Stored our IP: %u.%u.%u.%u (for periodic keep-alive)\n",
                        (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
                        (ip >> 8) & 0xFF, ip & 0xFF);
-                printf("[MacOsTunPutPacket] 📋 Gateway IP: %u.%u.%u.%u (will resolve MAC)\n",
+                LOG_DHCP_INFO("📋 Gateway IP: %u.%u.%u.%u\n",
                        (gw >> 24) & 0xFF, (gw >> 16) & 0xFF,
                        (gw >> 8) & 0xFF, gw & 0xFF);
                 
@@ -1943,7 +1944,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                     // **CRITICAL**: Request gateway MAC resolution
                     // This is what SSTP Connect does, and it's essential for MAC/IP table!
                     g_need_gateway_arp = true;
-                    printf("[MacOsTunPutPacket] 🔍 Will send ARP Request to resolve gateway MAC (like SSTP Connect)\n");
+                    LOG_TUN_DEBUG("🔍 Will send ARP Request to resolve gateway MAC (like SSTP Connect)\n");
                 }
                 // Don't write DHCP packets to TUN
                 return true;
@@ -1953,7 +1954,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     
     // Check packet size - allow for Ethernet frame (IP + 14-byte Ethernet header)
     if (size > MAX_ETHERNET_FRAME) {
-        printf("[MacOsTunPutPacket] ⚠️  Packet too large: %u bytes (max=%u)\n", size, MAX_ETHERNET_FRAME);
+        LOG_TUN_WARN("⚠️  Packet too large: %u bytes (max=%u)\n", size, MAX_ETHERNET_FRAME);
         return false;
     }
     
@@ -1972,7 +1973,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                 
                 // Only log ARP during DHCP negotiation to reduce verbosity
                 if (g_dhcp_state != DHCP_STATE_CONFIGURED) {
-                    printf("[MacOsTunPutPacket] 📬 ARP: opcode=%u, target_ip=%u.%u.%u.%u\n",
+                    LOG_TUN_TRACE("📬 ARP: opcode=%u, target_ip=%u.%u.%u.%u\n",
                            opcode,
                            (target_ip >> 24) & 0xFF, (target_ip >> 16) & 0xFF,
                            (target_ip >> 8) & 0xFF, target_ip & 0xFF);
@@ -1986,7 +1987,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                         bool mac_changed = (memcmp(g_gateway_mac, pkt + 22, 6) != 0);
                         if (mac_changed || g_gateway_mac[0] == 0) {
                             memcpy(g_gateway_mac, pkt + 22, 6);
-                            printf("[MacOsTunPutPacket] 🎯 LEARNED GATEWAY MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                            LOG_TUN_INFO("🎯 LEARNED GATEWAY MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
                                    g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
                                    g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
                         }
@@ -2000,7 +2001,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
                     if (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64) {
                         // Only log ARP requests from gateway (10.21.0.1) or during DHCP setup
                         if (sender_ip == 0x0A150001 || g_dhcp_state != DHCP_STATE_CONFIGURED) {
-                            printf("[MacOsTunPutPacket] 📬 ARP Request from %u.%u.%u.%u for our IP, replying\n",
+                            LOG_TUN_DEBUG("📬 ARP Request from %u.%u.%u.%u for our IP, replying\n",
                                    (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
                                    (sender_ip >> 8) & 0xFF, sender_ip & 0xFF);
                         }
@@ -2043,7 +2044,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
             proto = htonl(AF_INET6);
         } else {
             // Unknown protocol - skip it
-            printf("[MacOsTunPutPacket] Skipping unknown EtherType 0x%04x\n", ethertype);
+            LOG_TUN_DEBUG("Skipping unknown EtherType 0x%04x\n", ethertype);
             return true;
         }
     } else if (size > 0 && (pkt[0] & 0xF0) == 0x40) {
@@ -2064,7 +2065,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size) {
     n = write(ctx->tun_fd, buf, ip_size + 4);
     if (n < 0) {
         if (errno != EINTR && errno != EAGAIN) {
-            printf("[MacOsTunPutPacket] Write error: %s\n", strerror(errno));
+            LOG_TUN_ERROR("Write error: %s\n", strerror(errno));
             return false;
         }
         return true; // Temporary error, consider success
