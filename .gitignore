@@ -3,6 +3,11 @@
 zig-cache/
 zig-out/
 
+# iOS build artifacts
+build_ios/
+xcframework/
+scripts/build_ios/
+
 # Editor files
 .vscode/
 .idea/
@@ -14,8 +19,15 @@ zig-out/
 .DS_Store
 Thumbs.db
 
-# Test outputs
+# Build logs
 *.log
+vpn_debug.log
+build.log
+3rd-party.log
+3rd-party-app-log.txt
+log-*.log
+
+# Test outputs
 *.tmp
 
 # Compiled binaries
@@ -25,3 +37,7 @@ Thumbs.db
 *.dylib
 *.a
 *.o
+main
+
+# Temporary build files
+*.dSYM/

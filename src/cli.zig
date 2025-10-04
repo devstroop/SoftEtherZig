@@ -5,6 +5,7 @@ const std = @import("std");
 const client = @import("client.zig");
 const config = @import("config.zig");
 const errors = @import("errors.zig");
+const profiling = @import("profiling.zig");
 const c = @import("c.zig").c;
 
 const VpnClient = client.VpnClient;
@@ -17,12 +18,27 @@ const VERSION = "1.0.0";
 // Global client pointer for signal handler
 var g_client: ?*VpnClient = null;
 var g_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+var g_cleanup_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-// Signal handler for Ctrl+C (SIGINT)
+// Signal handler for Ctrl+C (SIGINT) and SIGTERM
 fn signalHandler(sig: c_int) callconv(.c) void {
-    _ = sig;
-    std.debug.print("\n\n🛑 Interrupt signal received, disconnecting...\n", .{});
-    g_running.store(false, .monotonic);
+    // Prevent double cleanup
+    if (g_cleanup_done.swap(true, .acquire)) {
+        return; // Already cleaning up
+    }
+
+    const sig_name = if (sig == std.posix.SIG.INT) "SIGINT" else if (sig == std.posix.SIG.TERM) "SIGTERM" else "UNKNOWN";
+    std.debug.print("\n\n🛑 Signal {s} received, initiating graceful shutdown...\n", .{sig_name});
+
+    // Stop the main loop
+    g_running.store(false, .release);
+
+    // Trigger immediate cleanup if we have a client reference
+    if (g_client) |vpn_client| {
+        std.debug.print("[●] Cleaning up VPN connection...\n", .{});
+        vpn_client.deinit();
+        std.debug.print("[✓] VPN connection terminated\n", .{});
+    }
 }
 
 fn printUsage() void {
@@ -46,6 +62,7 @@ fn printUsage() void {
         \\    --no-encrypt            Disable encryption (not recommended)
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
+        \\    --profile               Enable performance profiling
         \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
         \\    --ip-version <VERSION>  IP version: auto, ipv4, ipv6, dual (default: auto)
         \\    --static-ipv4 <IP>      Static IPv4 address (e.g., 10.0.0.2)
@@ -102,6 +119,7 @@ const CliArgs = struct {
     use_compress: bool = true,
     max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     daemon: bool = false,
+    profile: bool = false, // Enable performance profiling
     log_level: []const u8 = "info",
     ip_version: []const u8 = "auto",
     static_ipv4: ?[]const u8 = null,
@@ -166,6 +184,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.use_compress = false;
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--daemon")) {
             result.daemon = true;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            result.profile = true;
         } else if (std.mem.eql(u8, arg, "--log-level")) {
             result.log_level = args.next() orelse return error.MissingLogLevel;
         } else if (std.mem.eql(u8, arg, "--ip-version")) {
@@ -401,14 +421,23 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Set up signal handler for Ctrl+C
+    // Set up signal handler for Ctrl+C and graceful termination
     g_client = &vpn_client;
     const sigaction = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
         .mask = 0,
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null);
+    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null); // Ctrl+C
+    std.posix.sigaction(std.posix.SIG.TERM, &sigaction, null); // kill command
+
+    // Ignore SIGPIPE (broken pipe when writing to closed socket)
+    const sig_ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = 0,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &sig_ignore, null);
 
     std.debug.print("✓ VPN connection established\n\n", .{});
 
@@ -508,16 +537,30 @@ pub fn main() !void {
     // Foreground mode: wait for Ctrl+C
     std.debug.print("Connection established successfully.\n", .{});
     std.debug.print("Press Ctrl+C to disconnect.\n", .{});
+
+    if (args.profile) {
+        std.debug.print("🔬 Performance profiling enabled\n", .{});
+    }
     std.debug.print("─────────────────────────────────────────────\n", .{});
 
     // Keep connection alive until interrupted
-    while (vpn_client.isConnected() and g_running.load(.monotonic)) {
-        std.Thread.sleep(500 * std.time.ns_per_ms); // Check more frequently
+    if (args.profile) {
+        monitorWithProfiling(allocator, &vpn_client);
+    } else {
+        while (vpn_client.isConnected() and g_running.load(.acquire)) {
+            std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms
+        }
     }
 
-    std.debug.print("\n🔌 Disconnecting...\n", .{});
-    vpn_client.deinit();
-    std.debug.print("✅ Disconnected successfully\n", .{});
+    // Only cleanup if signal handler hasn't already done it
+    if (!g_cleanup_done.load(.acquire)) {
+        std.debug.print("\n[●] Connection lost, cleaning up...\n", .{});
+        g_cleanup_done.store(true, .release);
+        vpn_client.deinit();
+        std.debug.print("[✓] Cleanup complete\n", .{});
+    } else {
+        std.debug.print("[✓] Shutdown complete\n", .{});
+    }
 }
 
 // Background daemon loop - runs forever until killed
@@ -529,4 +572,61 @@ fn daemonLoop(vpn_client_ptr: *VpnClient) noreturn {
         }
         std.Thread.sleep(5 * std.time.ns_per_s);
     }
+}
+
+// Monitor connection with performance profiling
+fn monitorWithProfiling(allocator: std.mem.Allocator, vpn_client: *VpnClient) void {
+    var metrics = profiling.Metrics.init(allocator);
+    defer metrics.deinit();
+
+    var last_bytes_rx: u64 = 0;
+    var last_bytes_tx: u64 = 0;
+    var status_counter: u32 = 0;
+
+    std.debug.print("\n", .{});
+
+    while (vpn_client.isConnected() and g_running.load(.acquire)) {
+        // Get current stats from VPN client
+        const info = vpn_client.getConnectionInfo() catch |err| {
+            std.debug.print("Error getting connection info: {any}\n", .{err});
+            std.Thread.sleep(1000 * std.time.ns_per_ms);
+            continue;
+        };
+
+        // Calculate delta
+        const bytes_rx_delta = info.bytes_received -| last_bytes_rx;
+        const bytes_tx_delta = info.bytes_sent -| last_bytes_tx;
+
+        // Update metrics (approximate packet count based on average packet size)
+        if (bytes_rx_delta > 0) {
+            const approx_packets = bytes_rx_delta / 1200; // Assume ~1200 bytes/packet
+            var i: u64 = 0;
+            while (i < approx_packets) : (i += 1) {
+                metrics.recordPacketReceived(1200);
+            }
+        }
+        if (bytes_tx_delta > 0) {
+            const approx_packets = bytes_tx_delta / 1200;
+            var i: u64 = 0;
+            while (i < approx_packets) : (i += 1) {
+                metrics.recordPacketSent(1200);
+            }
+        }
+
+        last_bytes_rx = info.bytes_received;
+        last_bytes_tx = info.bytes_sent;
+
+        // Print status every 5 seconds
+        status_counter += 1;
+        if (status_counter >= 10) { // 10 * 500ms = 5 seconds
+            metrics.printStatus();
+            status_counter = 0;
+        }
+
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+    }
+
+    // Print final report
+    std.debug.print("\n\n", .{});
+    metrics.report();
 }

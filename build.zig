@@ -45,7 +45,9 @@ pub fn build(b: *std.Build) void {
     // Platform-specific defines
     var c_flags: []const []const u8 = undefined;
 
-    if (target_os == .macos or is_ios) {
+    if (is_ios) {
+        c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS", "-DUNIX_IOS", "-DTARGET_OS_IPHONE=1" };
+    } else if (target_os == .macos) {
         c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_MACOS" };
     } else if (target_os == .linux) {
         c_flags = base_c_flags ++ &[_][]const u8{ "-DUNIX", "-DUNIX_LINUX" };
@@ -57,7 +59,8 @@ pub fn build(b: *std.Build) void {
 
     // Platform-specific packet adapter and timing files
     const packet_adapter_file = switch (target_os) {
-        .macos, .ios => "src/bridge/packet_adapter_macos.c",
+        .ios => "src/bridge/ios/packet_adapter_ios.c",
+        .macos => "src/bridge/packet_adapter_macos.c",
         .linux => "src/bridge/packet_adapter_linux.c",
         .windows => "src/bridge/packet_adapter_windows.c",
         else => "src/bridge/packet_adapter_linux.c", // fallback
@@ -134,6 +137,11 @@ pub fn build(b: *std.Build) void {
         "SoftEtherVPN_Stable/src/Cedar/EtherLog.c",
         "SoftEtherVPN_Stable/src/Cedar/WebUI.c",
         "SoftEtherVPN_Stable/src/Cedar/WaterMark.c",
+    };
+
+    // NativeStack.c uses system() which is unavailable on iOS
+    // It's only needed for server-side routing, not client VPN
+    const native_stack_sources = &[_][]const u8{
         "SoftEtherVPN_Stable/src/Cedar/NativeStack.c",
     };
 
@@ -185,6 +193,14 @@ pub fn build(b: *std.Build) void {
         .flags = c_flags,
     });
 
+    // Add NativeStack for non-iOS builds
+    if (!is_ios) {
+        cli.addCSourceFiles(.{
+            .files = native_stack_sources,
+            .flags = c_flags,
+        });
+    }
+
     // Add ZigTapTun wrapper module
     const taptun_wrapper_module = b.createModule(.{
         .root_source_file = b.path("src/bridge/taptun_wrapper.zig"),
@@ -198,6 +214,19 @@ pub fn build(b: *std.Build) void {
         .root_module = taptun_wrapper_module,
     });
     cli.addObject(taptun_wrapper);
+
+    // Add Zig packet adapter (Phase 1) - compiled as static object
+    const packet_adapter_module = b.createModule(.{
+        .root_source_file = b.path("src/packet/adapter.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const packet_adapter_obj = b.addObject(.{
+        .name = "zig_packet_adapter",
+        .root_module = packet_adapter_module,
+    });
+    cli.addObject(packet_adapter_obj);
 
     // Add OpenSSL library path (platform-specific)
     const openssl_lib = b.fmt("{s}/lib", .{openssl_prefix});
@@ -263,13 +292,39 @@ pub fn build(b: *std.Build) void {
     lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Cedar"));
     lib.addIncludePath(.{ .cwd_relative = openssl_include });
 
-    // Add FFI implementation
-    const ffi_sources = c_sources ++ &[_][]const u8{
-        "src/bridge/ios_ffi.c",
-    };
+    // Add iOS SDK includes when cross-compiling for iOS
+    if (is_ios) {
+        // Add our iOS stub headers FIRST (before system includes)
+        lib.addIncludePath(b.path("src/bridge/ios_include"));
 
+        const ios_sdk_path = if (target.result.cpu.arch == .aarch64 and target.result.abi == .simulator)
+            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk"
+        else if (target.result.cpu.arch == .x86_64)
+            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk"
+        else
+            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk";
+
+        const ios_include = b.fmt("{s}/usr/include", .{ios_sdk_path});
+        lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
+    }
+
+    // Add C sources
     lib.addCSourceFiles(.{
-        .files = ffi_sources,
+        .files = c_sources,
+        .flags = c_flags,
+    });
+
+    // Add NativeStack for non-iOS builds
+    if (!is_ios) {
+        lib.addCSourceFiles(.{
+            .files = native_stack_sources,
+            .flags = c_flags,
+        });
+    }
+
+    // Add FFI implementation
+    lib.addCSourceFile(.{
+        .file = b.path("src/bridge/ios_ffi.c"),
         .flags = c_flags,
     });
 

@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build_ios"
 XCFRAMEWORK_DIR="$PROJECT_ROOT/xcframework"
 
@@ -20,6 +20,7 @@ FRAMEWORK_PATHS=()
 
 # Build for iOS Device (arm64)
 echo "📱 Building for iOS arm64..."
+cd "$PROJECT_ROOT"
 zig build lib -Dtarget=aarch64-ios -Doptimize=ReleaseSafe
 
 if [ ! -f "$PROJECT_ROOT/zig-out/lib/libSoftEtherClient.a" ]; then
@@ -89,6 +90,7 @@ echo "✅ Built iOS arm64 framework"
 # Build for iOS Simulator (arm64)
 echo ""
 echo "🖥️  Building for iOS Simulator arm64..."
+cd "$PROJECT_ROOT"
 zig build lib -Dtarget=aarch64-ios-simulator -Doptimize=ReleaseSafe
 
 if [ ! -f "$PROJECT_ROOT/zig-out/lib/libSoftEtherClient.a" ]; then
