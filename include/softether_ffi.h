@@ -65,6 +65,20 @@ char* softether_client_get_network_settings_json(softether_client_t* handle);
 // Get the locally-administered source MAC used by this client. Writes 6 bytes to out_mac. Returns 0 on success.
 int softether_client_get_mac(softether_client_t* handle, uint8_t out_mac[6]);
 
+// Logging system (Phase 2: Log level control)
+typedef enum {
+    LOG_LEVEL_SILENT = 0,
+    LOG_LEVEL_ERROR = 1,
+    LOG_LEVEL_WARN = 2,
+    LOG_LEVEL_INFO = 3,
+    LOG_LEVEL_DEBUG = 4,
+    LOG_LEVEL_TRACE = 5
+} LogLevel;
+
+void set_log_level(LogLevel level);
+const char* get_log_level_name(LogLevel level);
+LogLevel parse_log_level(const char* str);
+
 #ifdef __cplusplus
 }
 #endif

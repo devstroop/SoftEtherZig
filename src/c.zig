@@ -5,6 +5,7 @@ pub const c = @cImport({
     // Import the bridge layer - a clean, minimal C API
     // Note: The include path is relative to the -I flag in build.zig
     @cInclude("bridge/softether_bridge.h");
+    @cInclude("bridge/logging.h");
 });
 
 // Re-export common types for convenience

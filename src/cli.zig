@@ -46,6 +46,7 @@ fn printUsage() void {
         \\    --no-encrypt            Disable encryption (not recommended)
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
+        \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
         \\    --gen-hash <USER> <PASS> Generate password hash and exit
         \\
         \\EXAMPLES:
@@ -80,6 +81,7 @@ const CliArgs = struct {
     use_encrypt: bool = true,
     use_compress: bool = true,
     daemon: bool = false,
+    log_level: []const u8 = "info",
     help: bool = false,
     version: bool = false,
     gen_hash: bool = false,
@@ -126,6 +128,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.use_compress = false;
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--daemon")) {
             result.daemon = true;
+        } else if (std.mem.eql(u8, arg, "--log-level")) {
+            result.log_level = args.next() orelse return error.MissingLogLevel;
         } else {
             std.debug.print("Unknown argument: {s}\n", .{arg});
             return error.UnknownArgument;
@@ -229,6 +233,11 @@ pub fn main() !void {
     const use_password_hash = args.password_hash != null;
 
     const account = args.account orelse username;
+
+    // Initialize logging system
+    const log_level_cstr = std.mem.sliceTo(args.log_level, 0);
+    const parsed_level = c.parse_log_level(log_level_cstr.ptr);
+    c.set_log_level(parsed_level);
 
     // Create configuration
     const vpn_config = ConnectionConfig{
