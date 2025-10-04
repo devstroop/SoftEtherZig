@@ -59,7 +59,8 @@ void log_message(LogLevel level, const char* tag, const char* fmt, ...);
 #define LOG_DHCP_ERROR(fmt, ...)  LOG_ERROR("DHCP", fmt, ##__VA_ARGS__)
 #define LOG_DHCP_WARN(fmt, ...)   LOG_WARN("DHCP", fmt, ##__VA_ARGS__)
 #define LOG_DHCP_INFO(fmt, ...)   LOG_INFO("DHCP", fmt, ##__VA_ARGS__)
-#define LOG_DHCP_DEBUG(fmt, ...) LOG_DEBUG("DHCP", fmt, ##__VA_ARGS__)
+#define LOG_DHCP_DEBUG(fmt, ...)  LOG_DEBUG("DHCP", fmt, ##__VA_ARGS__)
+#define LOG_DHCP_TRACE(fmt, ...)  LOG_TRACE("DHCP", fmt, ##__VA_ARGS__)
 
 #define LOG_VPN_ERROR(fmt, ...)   LOG_ERROR("VPN", fmt, ##__VA_ARGS__)
 #define LOG_VPN_WARN(fmt, ...)    LOG_WARN("VPN", fmt, ##__VA_ARGS__)

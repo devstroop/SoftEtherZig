@@ -91,8 +91,8 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
              (netmask >> 24) & 0xFF, (netmask >> 16) & 0xFF, (netmask >> 8) & 0xFF, netmask & 0xFF);
     snprintf(gw_str, sizeof(gw_str), "%d.%d.%d.%d",
              (gateway >> 24) & 0xFF, (gateway >> 16) & 0xFF, (gateway >> 8) & 0xFF, gateway & 0xFF);
-    printf("[ConfigureTunInterface] iOS: IP=%s, Netmask=%s, Gateway=%s\n", ip_str, mask_str, gw_str);
-    printf("[ConfigureTunInterface] iOS: Network configuration handled by PacketTunnelProvider\n");
+    LOG_TUN_INFO(": IP=%s, Netmask=%s, Gateway=%s\n", ip_str, mask_str, gw_str);
+    LOG_TUN_INFO(": Network configuration handled by PacketTunnelProvider\n");
     return true;
 #else
     char cmd[512];
@@ -121,9 +121,9 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
     // Format: ifconfig DEVICE LOCAL_IP PEER_IP netmask NETMASK up
     // This is required for macOS TUN devices (point-to-point interfaces)
     snprintf(cmd, sizeof(cmd), "ifconfig %s %s %s netmask %s up", device, ip_str, gw_str, mask_str);
-    printf("[ConfigureTunInterface] Executing: %s\n", cmd);
+    LOG_TUN_DEBUG(": %s\n", cmd);
     if (system(cmd) != 0) {
-        printf("[ConfigureTunInterface] ❌ Failed to configure interface\n");
+        LOG_TUN_ERROR(" Failed to configure interface\n");
         return false;
     }
     
@@ -168,21 +168,21 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
             // 1. Preserve local network access FIRST
             //    Keep LAN traffic (file sharing, printers, etc.) direct
             snprintf(cmd, sizeof(cmd), "route add -net %s/24 %s", local_net_str, orig_gw_str);
-            printf("[ConfigureTunInterface] 🏠 Adding local network route: %s\n", cmd);
+            LOG_TUN_DEBUG(" Adding local network route: %s\n", cmd);
             if (system(cmd) != 0) {
-                printf("[ConfigureTunInterface] ⚠️  Failed to add local network route (may already exist)\n");
+                LOG_TUN_WARN("  Failed to add local network route (may already exist)\n");
             } else {
-                printf("[ConfigureTunInterface] ✅ Local network route preserved\n");
+                LOG_TUN_INFO(" Local network route preserved\n");
             }
             
             // 2. Add host route for VPN server through original gateway
             //    CRITICAL: Prevents routing loop (VPN traffic going through VPN)
             snprintf(cmd, sizeof(cmd), "route add -host %s %s", server_ip_str, orig_gw_str);
-            printf("[ConfigureTunInterface] 🔐 Adding VPN server route: %s\n", cmd);
+            LOG_TUN_DEBUG(" Adding VPN server route: %s\n", cmd);
             if (system(cmd) != 0) {
-                printf("[ConfigureTunInterface] ⚠️  Failed to add VPN server route (may already exist)\n");
+                LOG_TUN_WARN("  Failed to add VPN server route (may already exist)\n");
             } else {
-                printf("[ConfigureTunInterface] ✅ VPN server route established\n");
+                LOG_TUN_INFO(" VPN server route established\n");
             }
             
             // 3. Delete existing default route (important!)
@@ -191,11 +191,11 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
             // 4. Add default route through VPN
             //    ALL internet traffic now goes through encrypted tunnel
             snprintf(cmd, sizeof(cmd), "route add default %s", gw_str);
-            printf("[ConfigureTunInterface] � Adding default route through VPN: %s\n", cmd);
+            LOG_TUN_DEBUG(" Adding default route through VPN: %s\n", cmd);
             if (system(cmd) != 0) {
-                printf("[ConfigureTunInterface] ⚠️  Failed to add default route (may already exist)\n");
+                LOG_TUN_WARN("  Failed to add default route (may already exist)\n");
             } else {
-                printf("[ConfigureTunInterface] ✅ Default route through VPN established\n");
+                LOG_TUN_INFO(" Default route through VPN established\n");
             }
             
             printf("\n");
@@ -210,7 +210,7 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
             g_local_network = local_network;
             g_routes_configured = true;
         } else {
-            printf("[ConfigureTunInterface] ⚠️  Could not determine VPN server IP or original gateway\n");
+            LOG_TUN_WARN("  Could not determine VPN server IP or original gateway\n");
             printf("[ConfigureTunInterface]     VPN server IP: %u.%u.%u.%u\n",
                    (vpn_server_ip >> 24) & 0xFF, (vpn_server_ip >> 16) & 0xFF,
                    (vpn_server_ip >> 8) & 0xFF, vpn_server_ip & 0xFF);
@@ -220,7 +220,7 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
         }
     }
     
-    printf("[ConfigureTunInterface] ✅ Interface configured successfully\n\n");
+    LOG_TUN_INFO(" Interface configured successfully\n\n");
     return true;
 #endif // TARGET_OS_IPHONE
 }
@@ -235,7 +235,7 @@ static UINT32 GetDefaultGateway(void) {
     // Run netstat to get routing table
     fp = popen("netstat -rn | grep '^default' | grep -v 'utun' | head -1", "r");
     if (fp == NULL) {
-        printf("[GetDefaultGateway] ⚠️  Failed to execute netstat\n");
+        LOG_TUN_WARN("  Failed to execute netstat\n");
         return 0;
     }
     
@@ -249,7 +249,7 @@ static UINT32 GetDefaultGateway(void) {
                 unsigned int a, b, c, d;
                 if (sscanf(token, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
                     gateway = (a << 24) | (b << 16) | (c << 8) | d;
-                    printf("[GetDefaultGateway] 🌐 Found default gateway: %u.%u.%u.%u\n", a, b, c, d);
+                    LOG_TUN_INFO(" Found default gateway: %u.%u.%u.%u\n", a, b, c, d);
                 }
             }
         }
@@ -270,7 +270,7 @@ static UINT32 GetVpnServerIp(void) {
     // Look for ESTABLISHED TCP connections on port 443
     fp = popen("netstat -an | grep ESTABLISHED | grep '\\.443 ' | head -1", "r");
     if (fp == NULL) {
-        printf("[GetVpnServerIp] ⚠️  Failed to execute netstat\n");
+        LOG_TUN_WARN("  Failed to execute netstat\n");
         return 0;
     }
     
@@ -287,7 +287,7 @@ static UINT32 GetVpnServerIp(void) {
             unsigned int a, b, c, d;
             if (sscanf(p, "%u.%u.%u.%u.443", &a, &b, &c, &d) == 4) {
                 server_ip = (a << 24) | (b << 16) | (c << 8) | d;
-                printf("[GetVpnServerIp] 🔐 Found VPN server IP: %u.%u.%u.%u\n", a, b, c, d);
+                LOG_TUN_INFO(" Found VPN server IP: %u.%u.%u.%u\n", a, b, c, d);
             }
         }
     }
@@ -756,7 +756,7 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
     if (src_port != 67 || dst_port != 68) {
         // Debug: Log UDP port mismatch for potential DHCP ACK packets
         if ((src_port == 67 && dst_port != 68) || (src_port != 67 && dst_port == 68)) {
-            printf("[ParseDhcpAck] ⚠️ UDP port mismatch: src=%u, dst=%u (expected 67->68)\n", src_port, dst_port);
+            LOG_DHCP_WARN(" UDP port mismatch: src=%u, dst=%u (expected 67->68)\n", src_port, dst_port);
         }
         return false;
     }
@@ -767,27 +767,27 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
     
     // Parse DHCP
     if (size < 240) {
-        printf("[ParseDhcpAck] ⚠️ DHCP packet too small: %u bytes (expected >= 240)\n", size);
+        LOG_DHCP_WARN(" DHCP packet too small: %u bytes (expected >= 240)\n", size);
         return false;
     }
     if (data[0] != 2) {
-        printf("[ParseDhcpAck] ⚠️ Not BOOTREPLY: op=%u (expected 2)\n", data[0]);
+        LOG_DHCP_WARN(" Not BOOTREPLY: op=%u (expected 2)\n", data[0]);
         return false; // BOOTREPLY
     }
     
     // Check transaction ID
     UINT32 xid = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
     if (xid != expected_xid) {
-        printf("[ParseDhcpAck] ⚠️ Transaction ID mismatch: got 0x%08x, expected 0x%08x\n", xid, expected_xid);
+        LOG_DHCP_WARN(" Transaction ID mismatch: got 0x%08x, expected 0x%08x\n", xid, expected_xid);
         return false;
     }
     
-    printf("[ParseDhcpAck] 🔍 DHCP packet with matching xid! Parsing options...\n");
+    LOG_DHCP_DEBUG(" DHCP packet with matching xid! Parsing options...\n");
     
     // Extract yiaddr (your IP address)
     UINT32 yiaddr = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
     if (yiaddr == 0) {
-        printf("[ParseDhcpAck] ⚠️ yiaddr is 0\n");
+        LOG_DHCP_WARN(" yiaddr is 0\n");
         return false;
     }
     
@@ -806,7 +806,7 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
     *out_gw = 0;
     bool is_ack = false;
     
-    printf("[ParseDhcpAck] 🔎 Parsing DHCP options (length=%u)...\n", options_len);
+    LOG_DHCP_DEBUG(" Parsing DHCP options (length=%u)...\n", options_len);
     
     while (pos < options_len) {
         UCHAR opt_type = options[pos++];
@@ -821,7 +821,7 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
             case 53: // DHCP Message Type
                 if (opt_len >= 1) {
                     UCHAR msg_type = options[pos];
-                    printf("[ParseDhcpAck] 📋 DHCP Message Type: %u (5=ACK, 2=OFFER)\n", msg_type);
+                    LOG_DHCP_DEBUG(" DHCP Message Type: %u (5=ACK, 2=OFFER)\n", msg_type);
                     if (msg_type == 5) {
                         is_ack = true; // DHCP ACK
                     }
@@ -844,7 +844,7 @@ static bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *ou
         pos += opt_len;
     }
     
-    printf("[ParseDhcpAck] 🏁 Result: is_ack=%d, ip=%u.%u.%u.%u, mask=%u.%u.%u.%u, gw=%u.%u.%u.%u\n",
+    LOG_DHCP_TRACE(" Result: is_ack=%d, ip=%u.%u.%u.%u, mask=%u.%u.%u.%u, gw=%u.%u.%u.%u\n",
            is_ack,
            (*out_ip >> 24) & 0xFF, (*out_ip >> 16) & 0xFF, (*out_ip >> 8) & 0xFF, *out_ip & 0xFF,
            (*out_mask >> 24) & 0xFF, (*out_mask >> 16) & 0xFF, (*out_mask >> 8) & 0xFF, *out_mask & 0xFF,
@@ -1077,7 +1077,7 @@ static UCHAR* BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, U
     packet[ip_header_start + 10] = (checksum >> 8) & 0xFF;
     packet[ip_header_start + 11] = checksum & 0xFF;
     
-    printf("[BuildDhcpRequest] 📏 Calculated lengths: IP=%u bytes, UDP=%u bytes, Total=%u bytes\n",
+    LOG_DHCP_TRACE("Request] 📏 Calculated lengths: IP=%u bytes, UDP=%u bytes, Total=%u bytes\n",
            ip_total_len, udp_len, total_packet_size);
     
     *out_size = pos;
@@ -1089,17 +1089,14 @@ void MacOsTunReadThread(THREAD *t, void *param) {
     MACOS_TUN_CONTEXT *ctx = (MACOS_TUN_CONTEXT *)param;
     UCHAR buf[MAX_PACKET_SIZE];
     
-    printf("[MacOsTunReadThread] === THREAD STARTED === fd=%d\n", ctx->tun_fd);
-    fflush(stdout);
+    LOG_TUN_DEBUG("Read thread started, fd=%d", ctx->tun_fd);
     
     // Signal thread is initialized
-    printf("[MacOsTunReadThread] About to call NoticeThreadInit()...\n");
-    fflush(stdout);
+    LOG_TUN_TRACE("Calling NoticeThreadInit...");
     
     NoticeThreadInit(t);
     
-    printf("[MacOsTunReadThread] NoticeThreadInit() called, entering read loop\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Read thread initialized, entering loop");
     
     while (!ctx->halt) {
         // Read packet from TUN device (blocking)
@@ -1109,12 +1106,12 @@ void MacOsTunReadThread(THREAD *t, void *param) {
             if (errno == EINTR || errno == EAGAIN) {
                 continue;
             }
-            printf("[MacOsTunReadThread] Read error: %s\n", strerror(errno));
+            LOG_TUN_ERROR("TUN read error: %s", strerror(errno));
             break;
         }
         
         if (n == 0) {
-            printf("[MacOsTunReadThread] TUN device closed\n");
+            LOG_TUN_INFO("TUN device closed");
             break;
         }
         
@@ -1136,18 +1133,17 @@ void MacOsTunReadThread(THREAD *t, void *param) {
                 // Learn our IP if not already known (ignore 169.254.x.x link-local)
                 if (g_our_ip == 0 && (src_ip & 0xFFFF0000) != 0xA9FE0000) {
                     g_our_ip = src_ip;
-                    printf("[MacOsTunReadThread] 🎯 LEARNED OUR IP: %u.%u.%u.%u\n",
+                    LOG_TUN_INFO("Learned our IP: %u.%u.%u.%u",
                            (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
                            (src_ip >> 8) & 0xFF, src_ip & 0xFF);
-                    fflush(stdout);
                 }
             }
         }
         
-        // Silent in production - only log errors or if DHCP negotiation active
+        // Periodic stats at TRACE level
         static UINT64 read_count = 0;
         if (g_dhcp_state != DHCP_STATE_CONFIGURED && (++read_count % 50) == 1) {
-            printf("[TUN] Read packets: %llu\n", read_count);
+            LOG_TUN_TRACE("Read packets: %llu", (unsigned long long)read_count);
         }
         
         // Allocate packet and copy data
@@ -1169,7 +1165,7 @@ void MacOsTunReadThread(THREAD *t, void *param) {
                 // Queue full, drop packet
                 Free(pkt->data);
                 Free(pkt);
-                printf("[MacOsTunReadThread] Queue full, dropping packet\n");
+                LOG_TUN_WARN("Receive queue full, dropping packet");
             }
         }
         Unlock(ctx->queue_lock);
@@ -1180,7 +1176,7 @@ void MacOsTunReadThread(THREAD *t, void *param) {
         }
     }
     
-    printf("[MacOsTunReadThread] Exiting\n");
+    LOG_TUN_DEBUG("Exiting\n");
 }
 
 // Open a macOS TUN device using utun kernel control interface
@@ -1188,13 +1184,13 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
 #ifdef TARGET_OS_IPHONE
     // On iOS, packet I/O goes through NEPacketTunnelFlow, not utun
     // This function should not be called on iOS
-    printf("[OpenMacOsTunDevice] ERROR: Running iOS code path on macOS! TARGET_OS_IPHONE is defined!\n");
+    LOG_TUN_ERROR(": Running iOS code path on macOS! TARGET_OS_IPHONE is defined!\n");
     if (device_name && device_name_size > 0) {
         StrCpy(device_name, device_name_size, "ios_network_extension");
     }
     return -1; // No fd needed on iOS
 #else
-    printf("[OpenMacOsTunDevice] Starting utun device search (macOS code path)...\n");
+    LOG_TUN_DEBUG(" utun device search (macOS code path)...\n");
     struct sockaddr_ctl addr;
     struct ctl_info info;
     int fd = -1;
@@ -1203,7 +1199,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
     // Get utun control ID first (only need to do this once)
     int temp_fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
     if (temp_fd < 0) {
-        printf("[OpenMacOsTunDevice] Failed to create socket: %s\n", strerror(errno));
+        LOG_TUN_ERROR(" to create socket: %s\n", strerror(errno));
         return -1;
     }
     
@@ -1211,7 +1207,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
     StrCpy(info.ctl_name, sizeof(info.ctl_name), UTUN_CONTROL_NAME);
     
     if (ioctl(temp_fd, CTLIOCGINFO, &info) < 0) {
-        printf("[OpenMacOsTunDevice] ioctl CTLIOCGINFO failed: %s\n", strerror(errno));
+        LOG_TUN_ERROR(" CTLIOCGINFO failed: %s\n", strerror(errno));
         close(temp_fd);
         return -1;
     }
@@ -1223,7 +1219,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
         // Create socket for kernel control
         fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
         if (fd < 0) {
-            printf("[OpenMacOsTunDevice] Failed to create socket for utun%d: %s\n", 
+            LOG_TUN_ERROR(" to create socket for utun%d: %s\n", 
                    unit_number, strerror(errno));
             continue;
         }
@@ -1237,7 +1233,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
         addr.sc_unit = unit_number + 1; // utun0 = 1, utun1 = 2, etc.
         
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            printf("[OpenMacOsTunDevice] utun%d busy (%s), trying next...\n", 
+            LOG_TUN_DEBUG("utun%d busy (%s), trying next...\n", 
                    unit_number, strerror(errno));
             close(fd);
             fd = -1;
@@ -1245,19 +1241,19 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
         }
         
         // Successfully connected!
-        printf("[OpenMacOsTunDevice] Successfully connected to utun%d\n", unit_number);
+        LOG_TUN_INFO(" connected to utun%d\n", unit_number);
         break;
     }
     
     if (fd < 0) {
-        printf("[OpenMacOsTunDevice] Failed to find available utun device\n");
+        LOG_TUN_ERROR(" to find available utun device\n");
         return -1;
     }
     
     // Get the device name
     socklen_t optlen = (socklen_t)device_name_size;
     if (getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, device_name, &optlen) < 0) {
-        printf("[OpenMacOsTunDevice] getsockopt UTUN_OPT_IFNAME failed: %s\n", strerror(errno));
+        LOG_TUN_ERROR(" UTUN_OPT_IFNAME failed: %s\n", strerror(errno));
         StrCpy(device_name, device_name_size, "utun?");
     }
     
@@ -1267,7 +1263,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
     
-    printf("[OpenMacOsTunDevice] Created TUN device: %s (fd=%d)\n", device_name, fd);
+    LOG_TUN_INFO(" TUN device: %s (fd=%d)\n", device_name, fd);
     return fd;
 #endif // TARGET_OS_IPHONE
 }
@@ -1275,7 +1271,7 @@ int OpenMacOsTunDevice(char *device_name, size_t device_name_size) {
 // Close TUN device
 void CloseMacOsTunDevice(int fd) {
     if (fd >= 0) {
-        printf("[CloseMacOsTunDevice] Closing fd=%d\n", fd);
+        LOG_TUN_DEBUG(" Closing fd=%d\n", fd);
         close(fd);
     }
 }
@@ -1284,56 +1280,46 @@ void CloseMacOsTunDevice(int fd) {
 bool MacOsTunInit(SESSION *s) {
     MACOS_TUN_CONTEXT *ctx;
     
-    printf("[MacOsTunInit] === ENTER === session=%p\n", s);
-    fflush(stdout);
+    LOG_TUN_DEBUG("Init starting, session=%p", s);
     
     if (s == NULL) {
-        printf("[MacOsTunInit] ERROR: session is NULL\n");
-        fflush(stdout);
+        LOG_TUN_ERROR("Session is NULL - invalid parameter");
         return false;
     }
     
     if (s->PacketAdapter == NULL) {
-        printf("[MacOsTunInit] ERROR: PacketAdapter is NULL\n");
-        fflush(stdout);
+        LOG_TUN_ERROR("PacketAdapter is NULL - invalid state");
         return false;
     }
     
     if (s->PacketAdapter->Param != NULL) {
-        printf("[MacOsTunInit] ERROR: Param already set\n");
-        fflush(stdout);
+        LOG_TUN_ERROR("Adapter already initialized");
         return false;
     }
     
-    printf("[MacOsTunInit] Validation passed, allocating context\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Validation passed, allocating context");
     
     // Allocate context
-    printf("[MacOsTunInit] Allocating context structure\n");
-    fflush(stdout);
+    LOG_TUN_TRACE("Allocating context structure");
     ctx = ZeroMalloc(sizeof(MACOS_TUN_CONTEXT));
     ctx->session = s;
     ctx->halt = false;
-    printf("[MacOsTunInit] Context allocated at %p\n", ctx);
-    fflush(stdout);
+    LOG_TUN_TRACE("Context allocated at %p", ctx);
     
     // Open TUN device
-    printf("[MacOsTunInit] Opening TUN device...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Opening TUN device...");
     ctx->tun_fd = OpenMacOsTunDevice(ctx->device_name, sizeof(ctx->device_name));
     if (ctx->tun_fd < 0) {
-        printf("[MacOsTunInit] ERROR: Failed to open TUN device\n");
-        fflush(stdout);
+        LOG_TUN_ERROR("Failed to open TUN device");
         Free(ctx);
         return false;
     }
-    printf("[MacOsTunInit] TUN device opened: %s (fd=%d)\n", ctx->device_name, ctx->tun_fd);
-    fflush(stdout);
+    LOG_TUN_INFO("TUN device opened: %s (fd=%d)", ctx->device_name, ctx->tun_fd);
     
     // **CRITICAL FIX**: Configure TUN interface immediately with temporary IP
     // This allows packets to flow through the interface while DHCP is in progress
     // Using 169.254.x.x (link-local) range for initial configuration
-    printf("[MacOsTunInit] ⚠️  Configuring TUN interface with temporary link-local IP...\n");
+    LOG_TUN_WARN("  Configuring TUN interface with temporary link-local IP...\n");
     fflush(stdout);
     
     // Generate unique link-local address based on MAC
@@ -1360,22 +1346,22 @@ bool MacOsTunInit(SESSION *s) {
     char cmd[512];
     sprintf(cmd, "ifconfig %s %s %s netmask %s up 2>&1",
             ctx->device_name, temp_ip_str, temp_peer_str, temp_mask_str);
-    printf("[MacOsTunInit] Executing: %s\n", cmd);
+    LOG_TUN_DEBUG(": %s\n", cmd);
     fflush(stdout);
     
     int result = system(cmd);
     if (result != 0) {
-        printf("[MacOsTunInit] ⚠️  Warning: Failed to configure interface (result=%d)\n", result);
-        printf("[MacOsTunInit] ⚠️  This may cause packet flow issues!\n");
+        LOG_TUN_WARN("  Warning: Failed to configure interface (result=%d)\n", result);
+        LOG_TUN_WARN("  This may cause packet flow issues!\n");
         fflush(stdout);
     } else {
-        printf("[MacOsTunInit] ✅ Interface configured with temporary IP: %s -> %s\n", 
+        LOG_TUN_INFO(" Interface configured with temporary IP: %s -> %s\n", 
                temp_ip_str, temp_peer_str);
         fflush(stdout);
     }
     
     // Initialize DHCP state
-    printf("[MacOsTunInit] Initializing DHCP state...\n");
+    LOG_TUN_DEBUG(" DHCP state...\n");
     fflush(stdout);
     g_dhcp_state = DHCP_STATE_INIT;
     g_connection_start_time = Tick64();  // Record when connection was established
@@ -1389,49 +1375,41 @@ bool MacOsTunInit(SESSION *s) {
     for (int i = 3; i < 6; i++) {
         g_my_mac[i] = (UCHAR)(rand() % 256);
     }
-    printf("[MacOsTunInit] Generated MAC: %02x:%02x:%02x:%02x:%02x:%02x (02:00:5E matches iPhone app)\n",
+    LOG_TUN_DEBUG(": %02x:%02x:%02x:%02x:%02x:%02x (02:00:5E matches iPhone app)\n",
            g_my_mac[0], g_my_mac[1], g_my_mac[2], 
            g_my_mac[3], g_my_mac[4], g_my_mac[5]);
     fflush(stdout);
     
     // Generate random DHCP transaction ID
     g_dhcp_xid = (UINT32)rand();
-    printf("[MacOsTunInit] Generated DHCP XID: 0x%08x\n", g_dhcp_xid);
+    LOG_TUN_DEBUG(" XID: 0x%08x\n", g_dhcp_xid);
     fflush(stdout);
     
     // Create synchronization objects
-    printf("[MacOsTunInit] Creating synchronization objects...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Creating synchronization objects...\n");
     ctx->cancel = NewCancel();
-    printf("[MacOsTunInit] Cancel created\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Cancel created\n");
     ctx->recv_queue = NewQueue();
-    printf("[MacOsTunInit] Queue created\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Queue created\n");
     ctx->queue_lock = NewLock();
-    printf("[MacOsTunInit] Lock created\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Lock created\n");
     
     // Start background read thread
-    printf("[MacOsTunInit] Starting background read thread...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Starting background read thread...\n");
     ctx->read_thread = NewThread(MacOsTunReadThread, ctx);
-    printf("[MacOsTunInit] NewThread returned, waiting for init...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("NewThread returned, waiting for init...\n");
     WaitThreadInit(ctx->read_thread);
-    printf("[MacOsTunInit] Thread initialized\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Thread initialized\n");
     
     // Store context in packet adapter
     s->PacketAdapter->Param = ctx;
     
-    printf("[MacOsTunInit] === SUCCESS === TUN device: %s\n", ctx->device_name);
-    fflush(stdout);
+    LOG_TUN_INFO("=== SUCCESS === TUN device: %s\n", ctx->device_name);
     
     // 🚀 **CRITICAL FIX**: Queue DHCP/IPv6 packets IMMEDIATELY (SSTP Connect style)
     // Don't wait for GetNextPacket delay - send packets right away!
     // **ORDER MATTERS**: SSTP Connect log shows DHCP sent FIRST, then IPv6 NA, then IPv6 RS!
-    printf("[MacOsTunInit] 🚀 Pre-queuing initial packets for instant transmission (SSTP Connect order)...\n");
+    LOG_TUN_DEBUG("🚀 Pre-queuing initial packets for instant transmission (SSTP Connect order)...\n");
     fflush(stdout);
     
     // **PACKET 1**: DHCP DISCOVER (FIRST! - matching SSTP Connect line 253)
@@ -1446,7 +1424,7 @@ bool MacOsTunInit(SESSION *s) {
         InsertQueue(ctx->recv_queue, pkt_dhcp);
         Unlock(ctx->queue_lock);
         g_dhcp_state = DHCP_STATE_DISCOVER_SENT;
-        printf("[MacOsTunInit]   1️⃣  DHCP DISCOVER queued (%u bytes) - FIRST PRIORITY\n", dhcp_size);
+        LOG_TUN_DEBUG("  1️⃣  DHCP DISCOVER queued (%u bytes) - FIRST PRIORITY\n", dhcp_size);
     }
     
     // **PACKET 2**: IPv6 Neighbor Advertisement (matching SSTP Connect line 254)
@@ -1460,7 +1438,7 @@ bool MacOsTunInit(SESSION *s) {
         Lock(ctx->queue_lock);
         InsertQueue(ctx->recv_queue, pkt_na);
         Unlock(ctx->queue_lock);
-        printf("[MacOsTunInit]   2️⃣  IPv6 NA queued (%u bytes)\n", ipv6_na_size);
+        LOG_TUN_DEBUG("  2️⃣  IPv6 NA queued (%u bytes)\n", ipv6_na_size);
     }
     
     // **PACKET 3**: IPv6 Router Solicitation (matching SSTP Connect line 255)
@@ -1474,7 +1452,7 @@ bool MacOsTunInit(SESSION *s) {
         Lock(ctx->queue_lock);
         InsertQueue(ctx->recv_queue, pkt_rs);
         Unlock(ctx->queue_lock);
-        printf("[MacOsTunInit]   3️⃣  IPv6 RS queued (%u bytes)\n", ipv6_rs_size);
+        LOG_TUN_DEBUG("  3️⃣  IPv6 RS queued (%u bytes)\n", ipv6_rs_size);
     }
     
     // **PACKET 4**: Gratuitous ARP (register MAC without claiming IP)
@@ -1488,15 +1466,15 @@ bool MacOsTunInit(SESSION *s) {
         Lock(ctx->queue_lock);
         InsertQueue(ctx->recv_queue, pkt_garp);
         Unlock(ctx->queue_lock);
-        printf("[MacOsTunInit]   4️⃣  Gratuitous ARP queued (%u bytes)\n", garp_size);
+        LOG_TUN_DEBUG("  4️⃣  Gratuitous ARP queued (%u bytes)\n", garp_size);
     }
     
-    printf("[MacOsTunInit] ✅ Queued 4 packets in SSTP Connect order: DHCP → IPv6 NA → IPv6 RS → GARP\n");
+    LOG_TUN_INFO(" Queued 4 packets in SSTP Connect order: DHCP → IPv6 NA → IPv6 RS → GARP\n");
     fflush(stdout);
     
     // Trigger session to send packets IMMEDIATELY
     Cancel(ctx->cancel);
-    printf("[MacOsTunInit] ✅ Triggered session - packets will be sent instantly!\n");
+    LOG_TUN_INFO(" Triggered session - packets will be sent instantly!\n");
     fflush(stdout);
     
     return true;
@@ -1779,7 +1757,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data) {
                 // Silent in production - logs only during setup
                 static UINT64 ipv4_count = 0;
                 if (g_dhcp_state != DHCP_STATE_CONFIGURED && (++ipv4_count % 100) == 1) {
-                    printf("[TUN] IPv4 packets: %llu\n", ipv4_count);
+                    LOG_TUN_DEBUG("IPv4 packets: %llu\n", ipv4_count);
                 }
                 
                 Free(pkt->data);
