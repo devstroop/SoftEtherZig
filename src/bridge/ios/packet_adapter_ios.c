@@ -44,7 +44,9 @@ typedef struct {
     UINT32 assigned_ip;
     UINT32 gateway_ip;
     UINT32 subnet_mask;
-    UINT8 mac_address[6];
+    UINT32 dns_server1;
+    UINT32 dns_server2;
+    UCHAR mac_address[6];
     
 } IOSTunContext;
 
