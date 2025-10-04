@@ -29,14 +29,20 @@ extern "C" {
  * Error Codes
  * ============================================ */
 #define VPN_BRIDGE_SUCCESS              0
-#define VPN_BRIDGE_ERROR_INIT_FAILED    1
-#define VPN_BRIDGE_ERROR_INVALID_PARAM  2
-#define VPN_BRIDGE_ERROR_ALLOC_FAILED   3
-#define VPN_BRIDGE_ERROR_CONNECT_FAILED 4
-#define VPN_BRIDGE_ERROR_AUTH_FAILED    5
-#define VPN_BRIDGE_ERROR_NOT_CONNECTED  6
-#define VPN_BRIDGE_ERROR_ALREADY_INIT   7
-#define VPN_BRIDGE_ERROR_NOT_INIT       8
+#define VPN_BRIDGE_ERROR_INIT_FAILED    (-1)
+#define VPN_BRIDGE_ERROR_INVALID_PARAM  (-2)
+#define VPN_BRIDGE_ERROR_ALLOC_FAILED   (-3)
+#define VPN_BRIDGE_ERROR_CONNECT_FAILED (-4)
+#define VPN_BRIDGE_ERROR_AUTH_FAILED    (-5)
+#define VPN_BRIDGE_ERROR_NOT_CONNECTED  (-6)
+#define VPN_BRIDGE_ERROR_ALREADY_INIT   (-7)
+#define VPN_BRIDGE_ERROR_NOT_INIT       (-8)
+
+// IP version modes
+#define VPN_IP_VERSION_AUTO  0
+#define VPN_IP_VERSION_IPV4  1
+#define VPN_IP_VERSION_IPV6  2
+#define VPN_IP_VERSION_DUAL  3
 
 /* ============================================
  * Connection Status
@@ -329,6 +335,55 @@ int vpn_bridge_get_gateway_mac(
     uint8_t* mac,
     uint32_t* has_mac
 );
+
+/* ============================================
+ * IP Configuration
+ * ============================================ */
+
+/**
+ * Set IP version mode (auto, IPv4, IPv6, or dual-stack).
+ * Must be called before vpn_bridge_connect().
+ * 
+ * @param client      Client handle
+ * @param ip_version  IP version mode (VPN_IP_VERSION_AUTO, IPV4, IPV6, or DUAL)
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_set_ip_version(VpnBridgeClient* client, int ip_version);
+
+/**
+ * Configure static IPv4 address (skip DHCP).
+ * Must be called before vpn_bridge_connect().
+ * 
+ * @param client   Client handle
+ * @param ip       IPv4 address string (e.g., "10.0.0.2")
+ * @param netmask  IPv4 netmask string (e.g., "255.255.255.0"), can be NULL
+ * @param gateway  IPv4 gateway string (e.g., "10.0.0.1"), can be NULL
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_set_static_ipv4(VpnBridgeClient* client, const char* ip, const char* netmask, const char* gateway);
+
+/**
+ * Configure static IPv6 address (skip DHCPv6).
+ * Must be called before vpn_bridge_connect().
+ * 
+ * @param client      Client handle
+ * @param ip          IPv6 address string (e.g., "2001:db8::1")
+ * @param prefix_len  IPv6 prefix length (e.g., 64)
+ * @param gateway     IPv6 gateway string (e.g., "fe80::1"), can be NULL
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_set_static_ipv6(VpnBridgeClient* client, const char* ip, uint8_t prefix_len, const char* gateway);
+
+/**
+ * Configure DNS servers (override DHCP).
+ * Must be called before vpn_bridge_connect().
+ * 
+ * @param client       Client handle
+ * @param dns_servers  Array of DNS server IP address strings
+ * @param count        Number of DNS servers (max 8)
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_set_dns_servers(VpnBridgeClient* client, const char** dns_servers, int count);
 
 #ifdef __cplusplus
 }

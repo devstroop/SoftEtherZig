@@ -54,6 +54,19 @@ struct VpnBridgeClient {
     char password[256];
     bool password_is_hashed;  // Flag: true if password field contains pre-hashed password
     
+    // IP Configuration
+    int ip_version;  // VPN_IP_VERSION_* constants
+    bool use_static_ipv4;
+    char static_ipv4[64];
+    char static_ipv4_netmask[64];
+    char static_ipv4_gateway[64];
+    bool use_static_ipv6;
+    char static_ipv6[128];
+    uint8_t static_ipv6_prefix;
+    char static_ipv6_gateway[128];
+    char* dns_servers[8];  // Max 8 DNS servers
+    int dns_server_count;
+    
     // State
     VpnBridgeStatus status;
     uint32_t last_error;
@@ -176,6 +189,21 @@ VpnBridgeClient* vpn_bridge_create_client(void) {
     client->status = VPN_STATUS_DISCONNECTED;
     client->last_error = VPN_BRIDGE_SUCCESS;
     client->port = 443;
+    
+    // Initialize IP configuration (defaults)
+    client->ip_version = VPN_IP_VERSION_AUTO;
+    client->use_static_ipv4 = false;
+    client->use_static_ipv6 = false;
+    client->dns_server_count = 0;
+    memset(client->static_ipv4, 0, sizeof(client->static_ipv4));
+    memset(client->static_ipv4_netmask, 0, sizeof(client->static_ipv4_netmask));
+    memset(client->static_ipv4_gateway, 0, sizeof(client->static_ipv4_gateway));
+    memset(client->static_ipv6, 0, sizeof(client->static_ipv6));
+    client->static_ipv6_prefix = 0;
+    memset(client->static_ipv6_gateway, 0, sizeof(client->static_ipv6_gateway));
+    for (int i = 0; i < 8; i++) {
+        client->dns_servers[i] = NULL;
+    }
     
     LOG_VPN_DEBUG("Calling CiNewClient()...\n");
     fflush(stdout);
@@ -435,6 +463,26 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     account->ClientSession = NULL;  // Will be set by SESSION
     
     client->softether_account = account;
+    
+    // Set global IP configuration for packet adapter (before creating it)
+    #if defined(UNIX_MACOS) || defined(UNIX_LINUX)
+        extern IP_CONFIG g_ip_config;
+        g_ip_config.ip_version = client->ip_version;
+        g_ip_config.use_static_ipv4 = client->use_static_ipv4;
+        g_ip_config.use_static_ipv6 = client->use_static_ipv6;
+        if (client->use_static_ipv4) {
+            strncpy(g_ip_config.static_ipv4, client->static_ipv4, sizeof(g_ip_config.static_ipv4) - 1);
+            strncpy(g_ip_config.static_ipv4_netmask, client->static_ipv4_netmask, sizeof(g_ip_config.static_ipv4_netmask) - 1);
+            strncpy(g_ip_config.static_ipv4_gateway, client->static_ipv4_gateway, sizeof(g_ip_config.static_ipv4_gateway) - 1);
+        }
+        if (client->use_static_ipv6) {
+            strncpy(g_ip_config.static_ipv6, client->static_ipv6, sizeof(g_ip_config.static_ipv6) - 1);
+            g_ip_config.static_ipv6_prefix = client->static_ipv6_prefix;
+            strncpy(g_ip_config.static_ipv6_gateway, client->static_ipv6_gateway, sizeof(g_ip_config.static_ipv6_gateway) - 1);
+        }
+        LOG_VPN_INFO("IP configuration set: version=%d, static_v4=%d, static_v6=%d\n",
+                     g_ip_config.ip_version, g_ip_config.use_static_ipv4, g_ip_config.use_static_ipv6);
+    #endif
     
     // Create packet adapter
     PACKET_ADAPTER* pa = NULL;
@@ -938,5 +986,84 @@ int vpn_bridge_get_gateway_mac(
         // Linux implementation can be added similarly
     #endif
 
+    return VPN_BRIDGE_SUCCESS;
+}
+
+/* ============================================
+ * IP Configuration Functions
+ * ============================================ */
+
+int vpn_bridge_set_ip_version(VpnBridgeClient* client, int ip_version) {
+    if (!client) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    if (ip_version < VPN_IP_VERSION_AUTO || ip_version > VPN_IP_VERSION_DUAL) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    client->ip_version = ip_version;
+    LOG_VPN_INFO("IP version set to: %d\n", ip_version);
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_set_static_ipv4(VpnBridgeClient* client, const char* ip, const char* netmask, const char* gateway) {
+    if (!client || !ip) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    strncpy(client->static_ipv4, ip, sizeof(client->static_ipv4) - 1);
+    if (netmask) {
+        strncpy(client->static_ipv4_netmask, netmask, sizeof(client->static_ipv4_netmask) - 1);
+    }
+    if (gateway) {
+        strncpy(client->static_ipv4_gateway, gateway, sizeof(client->static_ipv4_gateway) - 1);
+    }
+    client->use_static_ipv4 = true;
+    
+    LOG_VPN_INFO("Static IPv4 configured: %s/%s via %s\n", 
+                 ip, netmask ? netmask : "(none)", gateway ? gateway : "(none)");
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_set_static_ipv6(VpnBridgeClient* client, const char* ip, uint8_t prefix_len, const char* gateway) {
+    if (!client || !ip) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    strncpy(client->static_ipv6, ip, sizeof(client->static_ipv6) - 1);
+    client->static_ipv6_prefix = prefix_len;
+    if (gateway) {
+        strncpy(client->static_ipv6_gateway, gateway, sizeof(client->static_ipv6_gateway) - 1);
+    }
+    client->use_static_ipv6 = true;
+    
+    LOG_VPN_INFO("Static IPv6 configured: %s/%d via %s\n", 
+                 ip, prefix_len, gateway ? gateway : "(none)");
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_set_dns_servers(VpnBridgeClient* client, const char** dns_servers, int count) {
+    if (!client || !dns_servers || count < 0 || count > 8) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    // Free existing DNS servers
+    for (int i = 0; i < client->dns_server_count; i++) {
+        if (client->dns_servers[i]) {
+            Free(client->dns_servers[i]);
+            client->dns_servers[i] = NULL;
+        }
+    }
+    
+    // Copy new DNS servers
+    client->dns_server_count = count;
+    for (int i = 0; i < count; i++) {
+        size_t len = strlen(dns_servers[i]) + 1;
+        client->dns_servers[i] = (char*)Malloc(len);
+        strncpy(client->dns_servers[i], dns_servers[i], len);
+        LOG_VPN_INFO("DNS server %d: %s\n", i + 1, dns_servers[i]);
+    }
+    
     return VPN_BRIDGE_SUCCESS;
 }

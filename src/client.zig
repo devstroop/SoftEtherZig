@@ -80,6 +80,76 @@ pub const VpnClient = struct {
             return VpnError.ConfigurationError;
         }
 
+        // Configure IP version
+        const ip_version_code: c_int = switch (cfg.ip_version) {
+            .auto => c_mod.VPN_IP_VERSION_AUTO,
+            .ipv4 => c_mod.VPN_IP_VERSION_IPV4,
+            .ipv6 => c_mod.VPN_IP_VERSION_IPV6,
+            .dual => c_mod.VPN_IP_VERSION_DUAL,
+        };
+        _ = c.vpn_bridge_set_ip_version(client_handle, ip_version_code);
+
+        // Configure static IP if provided
+        if (cfg.static_ip) |sip| {
+            if (sip.ipv4_address) |ipv4| {
+                const ipv4_z = try allocator.dupeZ(u8, ipv4);
+                defer allocator.free(ipv4_z);
+
+                const mask_z = if (sip.ipv4_netmask) |m| try allocator.dupeZ(u8, m) else null;
+                defer if (mask_z) |m| allocator.free(m);
+
+                const gw_z = if (sip.ipv4_gateway) |g| try allocator.dupeZ(u8, g) else null;
+                defer if (gw_z) |g| allocator.free(g);
+
+                _ = c.vpn_bridge_set_static_ipv4(
+                    client_handle,
+                    ipv4_z.ptr,
+                    if (mask_z) |m| m.ptr else null,
+                    if (gw_z) |g| g.ptr else null,
+                );
+            }
+
+            if (sip.ipv6_address) |ipv6| {
+                const ipv6_z = try allocator.dupeZ(u8, ipv6);
+                defer allocator.free(ipv6_z);
+
+                const gw6_z = if (sip.ipv6_gateway) |g| try allocator.dupeZ(u8, g) else null;
+                defer if (gw6_z) |g| allocator.free(g);
+
+                _ = c.vpn_bridge_set_static_ipv6(
+                    client_handle,
+                    ipv6_z.ptr,
+                    sip.ipv6_prefix_len orelse 64,
+                    if (gw6_z) |g| g.ptr else null,
+                );
+            }
+
+            if (sip.dns_servers) |dns_list| {
+                // Allocate C string array
+                var dns_ptrs = try allocator.alloc([*c]const u8, dns_list.len);
+                defer allocator.free(dns_ptrs);
+
+                var dns_z_list = try allocator.alloc([]const u8, dns_list.len);
+                defer {
+                    for (dns_z_list) |dns_z| {
+                        allocator.free(dns_z);
+                    }
+                    allocator.free(dns_z_list);
+                }
+
+                for (dns_list, 0..) |dns, i| {
+                    dns_z_list[i] = try allocator.dupeZ(u8, dns);
+                    dns_ptrs[i] = @ptrCast(dns_z_list[i].ptr);
+                }
+
+                _ = c.vpn_bridge_set_dns_servers(
+                    client_handle,
+                    @ptrCast(dns_ptrs.ptr),
+                    @intCast(dns_list.len),
+                );
+            }
+        }
+
         const client = VpnClient{
             .handle = client_handle,
             .allocator = allocator,

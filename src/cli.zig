@@ -47,6 +47,14 @@ fn printUsage() void {
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
         \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
+        \\    --ip-version <VERSION>  IP version: auto, ipv4, ipv6, dual (default: auto)
+        \\    --static-ipv4 <IP>      Static IPv4 address (e.g., 10.0.0.2)
+        \\    --static-ipv4-netmask <MASK>  Static IPv4 netmask (e.g., 255.255.255.0)
+        \\    --static-ipv4-gateway <GW>    Static IPv4 gateway (e.g., 10.0.0.1)
+        \\    --static-ipv6 <IP>      Static IPv6 address (e.g., 2001:db8::1)
+        \\    --static-ipv6-prefix <LEN>    Static IPv6 prefix length (e.g., 64)
+        \\    --static-ipv6-gateway <GW>    Static IPv6 gateway (e.g., fe80::1)
+        \\    --dns-server <SERVER>   DNS server (can be specified multiple times)
         \\    --gen-hash <USER> <PASS> Generate password hash and exit
         \\
         \\EXAMPLES:
@@ -58,6 +66,18 @@ fn printUsage() void {
         \\
         \\    # Generate password hash
         \\    vpnclient --gen-hash myuser mypassword
+        \\
+        \\    # Force IPv4 only
+        \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass --ip-version ipv4
+        \\
+        \\    # Use static IPv4 configuration
+        \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass \
+        \\              --static-ipv4 10.0.0.2 --static-ipv4-netmask 255.255.255.0 \
+        \\              --static-ipv4-gateway 10.0.0.1 --dns-server 8.8.8.8
+        \\
+        \\    # Dual-stack with static IPv4 and IPv6
+        \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass --ip-version dual \
+        \\              --static-ipv4 10.0.0.2 --static-ipv6 2001:db8::1
         \\
         \\    # Run as daemon
         \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass -d
@@ -82,6 +102,14 @@ const CliArgs = struct {
     use_compress: bool = true,
     daemon: bool = false,
     log_level: []const u8 = "info",
+    ip_version: []const u8 = "auto",
+    static_ipv4: ?[]const u8 = null,
+    static_ipv4_netmask: ?[]const u8 = null,
+    static_ipv4_gateway: ?[]const u8 = null,
+    static_ipv6: ?[]const u8 = null,
+    static_ipv6_prefix: ?u8 = null,
+    static_ipv6_gateway: ?[]const u8 = null,
+    dns_servers: ?[][]const u8 = null,
     help: bool = false,
     version: bool = false,
     gen_hash: bool = false,
@@ -93,9 +121,11 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    var result = CliArgs{};
+    var dns_list = std.ArrayList([]const u8){};
+    defer dns_list.deinit(allocator);
+    try dns_list.ensureTotalCapacity(allocator, 4);
 
-    // Skip program name
+    var result = CliArgs{}; // Skip program name
     _ = args.skip();
 
     while (args.next()) |arg| {
@@ -130,10 +160,33 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.daemon = true;
         } else if (std.mem.eql(u8, arg, "--log-level")) {
             result.log_level = args.next() orelse return error.MissingLogLevel;
+        } else if (std.mem.eql(u8, arg, "--ip-version")) {
+            result.ip_version = args.next() orelse return error.MissingIpVersion;
+        } else if (std.mem.eql(u8, arg, "--static-ipv4")) {
+            result.static_ipv4 = args.next() orelse return error.MissingStaticIpv4;
+        } else if (std.mem.eql(u8, arg, "--static-ipv4-netmask")) {
+            result.static_ipv4_netmask = args.next() orelse return error.MissingStaticIpv4Netmask;
+        } else if (std.mem.eql(u8, arg, "--static-ipv4-gateway")) {
+            result.static_ipv4_gateway = args.next() orelse return error.MissingStaticIpv4Gateway;
+        } else if (std.mem.eql(u8, arg, "--static-ipv6")) {
+            result.static_ipv6 = args.next() orelse return error.MissingStaticIpv6;
+        } else if (std.mem.eql(u8, arg, "--static-ipv6-prefix")) {
+            const prefix_str = args.next() orelse return error.MissingStaticIpv6Prefix;
+            result.static_ipv6_prefix = try std.fmt.parseInt(u8, prefix_str, 10);
+        } else if (std.mem.eql(u8, arg, "--static-ipv6-gateway")) {
+            result.static_ipv6_gateway = args.next() orelse return error.MissingStaticIpv6Gateway;
+        } else if (std.mem.eql(u8, arg, "--dns-server")) {
+            const dns_server = args.next() orelse return error.MissingDnsServer;
+            try dns_list.append(allocator, dns_server);
         } else {
             std.debug.print("Unknown argument: {s}\n", .{arg});
             return error.UnknownArgument;
         }
+    }
+
+    // Convert DNS list to slice
+    if (dns_list.items.len > 0) {
+        result.dns_servers = try allocator.dupe([]const u8, dns_list.items);
     }
 
     return result;
@@ -239,6 +292,35 @@ pub fn main() !void {
     const parsed_level = c.parse_log_level(log_level_cstr.ptr);
     c.set_log_level(parsed_level);
 
+    // Parse IP version
+    const ip_version: config.IpVersion = if (std.mem.eql(u8, args.ip_version, "auto"))
+        .auto
+    else if (std.mem.eql(u8, args.ip_version, "ipv4"))
+        .ipv4
+    else if (std.mem.eql(u8, args.ip_version, "ipv6"))
+        .ipv6
+    else if (std.mem.eql(u8, args.ip_version, "dual"))
+        .dual
+    else {
+        std.debug.print("Error: Invalid IP version '{s}'. Must be one of: auto, ipv4, ipv6, dual\n\n", .{args.ip_version});
+        printUsage();
+        std.process.exit(1);
+    };
+
+    // Build static IP configuration if provided
+    var static_ip: ?config.StaticIpConfig = null;
+    if (args.static_ipv4 != null or args.static_ipv6 != null or args.dns_servers != null) {
+        static_ip = config.StaticIpConfig{
+            .ipv4_address = args.static_ipv4,
+            .ipv4_netmask = args.static_ipv4_netmask,
+            .ipv4_gateway = args.static_ipv4_gateway,
+            .ipv6_address = args.static_ipv6,
+            .ipv6_prefix_len = args.static_ipv6_prefix,
+            .ipv6_gateway = args.static_ipv6_gateway,
+            .dns_servers = args.dns_servers,
+        };
+    }
+
     // Create configuration
     const vpn_config = ConnectionConfig{
         .server_name = server,
@@ -252,6 +334,8 @@ pub fn main() !void {
         } },
         .use_encrypt = args.use_encrypt,
         .use_compress = args.use_compress,
+        .ip_version = ip_version,
+        .static_ip = static_ip,
     };
 
     // Initialize VPN client
@@ -262,6 +346,31 @@ pub fn main() !void {
     std.debug.print("User:          {s}\n", .{username});
     std.debug.print("Encryption:    {s}\n", .{if (args.use_encrypt) "Enabled" else "Disabled"});
     std.debug.print("Compression:   {s}\n", .{if (args.use_compress) "Enabled" else "Disabled"});
+    std.debug.print("IP Version:    {s}\n", .{args.ip_version});
+
+    if (static_ip) |sip| {
+        if (sip.ipv4_address) |ipv4| {
+            std.debug.print("Static IPv4:   {s}", .{ipv4});
+            if (sip.ipv4_netmask) |mask| std.debug.print("/{s}", .{mask});
+            if (sip.ipv4_gateway) |gw| std.debug.print(" via {s}", .{gw});
+            std.debug.print("\n", .{});
+        }
+        if (sip.ipv6_address) |ipv6| {
+            std.debug.print("Static IPv6:   {s}", .{ipv6});
+            if (sip.ipv6_prefix_len) |prefix| std.debug.print("/{d}", .{prefix});
+            if (sip.ipv6_gateway) |gw| std.debug.print(" via {s}", .{gw});
+            std.debug.print("\n", .{});
+        }
+        if (sip.dns_servers) |dns_list| {
+            std.debug.print("DNS Servers:   ", .{});
+            for (dns_list, 0..) |dns, i| {
+                if (i > 0) std.debug.print(", ", .{});
+                std.debug.print("{s}", .{dns});
+            }
+            std.debug.print("\n", .{});
+        }
+    }
+
     std.debug.print("─────────────────────────────────────────────\n\n", .{});
 
     var vpn_client = VpnClient.init(allocator, vpn_config) catch |err| {

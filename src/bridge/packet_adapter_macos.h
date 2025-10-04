@@ -21,6 +21,22 @@ extern "C" {
 typedef void* TranslatorHandle;
 #endif
 
+// IP configuration passed from bridge layer
+typedef struct IP_CONFIG {
+    int ip_version;  // 0=auto, 1=ipv4, 2=ipv6, 3=dual
+    bool use_static_ipv4;
+    char static_ipv4[64];
+    char static_ipv4_netmask[64];
+    char static_ipv4_gateway[64];
+    bool use_static_ipv6;
+    char static_ipv6[128];
+    int static_ipv6_prefix;
+    char static_ipv6_gateway[128];
+} IP_CONFIG;
+
+// Global IP configuration (set by bridge layer before adapter init)
+extern IP_CONFIG g_ip_config;
+
 // macOS TUN device context
 typedef struct MACOS_TUN_CONTEXT {
     int tun_fd;                      // TUN device file descriptor

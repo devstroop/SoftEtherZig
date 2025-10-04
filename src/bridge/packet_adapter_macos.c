@@ -72,6 +72,15 @@ static UCHAR g_gateway_mac[6] = {0}; // Gateway MAC address (learned from ARP)
 static UINT64 g_last_keepalive_time = 0; // Last time we sent keep-alive GARP
 #define KEEPALIVE_INTERVAL_MS 10000      // Send GARP every 10 seconds
 
+// IPv6 configuration state
+static UCHAR g_ipv6_addr[16] = {0};        // Our IPv6 address
+static UCHAR g_ipv6_gateway[16] = {0};     // IPv6 gateway
+static int g_ipv6_prefix_len = 64;         // IPv6 prefix length
+static bool g_ipv6_configured = false;     // IPv6 has been configured
+
+// IP configuration from bridge layer
+IP_CONFIG g_ip_config = {0};
+
 // Original routing configuration (for restoration on disconnect)
 static UINT32 g_original_gateway = 0;    // Original default gateway
 static UINT32 g_vpn_server_ip = 0;       // VPN server IP
@@ -81,6 +90,50 @@ static bool g_routes_configured = false; // Flag: routes have been modified
 // Forward declarations
 static UINT32 GetDefaultGateway(void);
 static UINT32 GetVpnServerIp(void);
+static bool ConfigureTunInterfaceIPv6(const char *device, const char *ipv6_addr, int prefix_len, const char *gateway);
+
+// Configure the TUN interface with IPv6 address
+static bool ConfigureTunInterfaceIPv6(const char *device, const char *ipv6_addr, int prefix_len, const char *gateway)
+{
+    char cmd[512];
+
+    printf("\n");
+    printf("╔════════════════════════════════════════════╗\n");
+    printf("║     IPv6 Configuration!                    ║\n");
+    printf("╠════════════════════════════════════════════╣\n");
+    printf("║ Device:    %-32s║\n", device);
+    printf("║ IPv6:      %-32s║\n", ipv6_addr);
+    printf("║ Prefix:    %-32d║\n", prefix_len);
+    if (gateway && gateway[0]) {
+        printf("║ Gateway:   %-32s║\n", gateway);
+    }
+    printf("╚════════════════════════════════════════════╝\n");
+    printf("\n");
+
+    // Configure IPv6 address
+    snprintf(cmd, sizeof(cmd), "ifconfig %s inet6 %s/%d up", device, ipv6_addr, prefix_len);
+    LOG_TUN_DEBUG(": %s\n", cmd);
+    if (system(cmd) != 0)
+    {
+        LOG_TUN_ERROR(" Failed to configure IPv6 address\n");
+        return false;
+    }
+
+    // Add default IPv6 route if gateway provided
+    if (gateway && gateway[0])
+    {
+        snprintf(cmd, sizeof(cmd), "route add -inet6 default %s", gateway);
+        LOG_TUN_DEBUG(": %s\n", cmd);
+        if (system(cmd) != 0)
+        {
+            LOG_TUN_WARN(" Warning: Failed to add IPv6 default route\n");
+        }
+    }
+
+    g_ipv6_configured = true;
+    LOG_TUN_INFO("✅ IPv6 interface configured successfully\n");
+    return true;
+}
 
 // Configure the TUN interface with IP address
 static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask, UINT32 gateway)
@@ -1675,6 +1728,17 @@ bool MacOsTunInit(SESSION *s)
         fflush(stdout);
     }
 
+    // Check for static IPv6 configuration
+    if (g_ip_config.use_static_ipv6 && g_ip_config.static_ipv6[0]) {
+        LOG_TUN_INFO("🌐 Using static IPv6 configuration\n");
+        if (ConfigureTunInterfaceIPv6(ctx->device_name, 
+                                        g_ip_config.static_ipv6,
+                                        g_ip_config.static_ipv6_prefix,
+                                        g_ip_config.static_ipv6_gateway[0] ? g_ip_config.static_ipv6_gateway : NULL)) {
+            LOG_TUN_INFO("✅ Static IPv6 configured successfully\n");
+        }
+    }
+
     // Initialize DHCP state
     LOG_TUN_DEBUG(" DHCP state...\n");
     fflush(stdout);
@@ -1912,8 +1976,18 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data)
         }
     }
 
+    // Check if we're in IPv6-only mode or dual-stack mode
+    bool ipv6_mode = (g_ip_config.ip_version == 2 || g_ip_config.ip_version == 3); // ipv6 or dual
+    bool ipv4_mode = (g_ip_config.ip_version == 0 || g_ip_config.ip_version == 1 || g_ip_config.ip_version == 3); // auto, ipv4, or dual
+
+    // Skip IPv4 DHCP if we're IPv6-only
+    if (!ipv4_mode && g_dhcp_state < DHCP_STATE_CONFIGURED) {
+        LOG_TUN_INFO("📡 IPv6-only mode: Skipping IPv4 DHCP\n");
+        g_dhcp_state = DHCP_STATE_CONFIGURED;
+    }
+
     // Stage 1: Send IPv6 Neighbor Advertisement AFTER Gratuitous ARP (wait 500ms for ARP to propagate)
-    if (g_dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT && (Tick64() - g_last_state_change_time) >= 500)
+    if (ipv6_mode && g_dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT && (Tick64() - g_last_state_change_time) >= 500)
     {
         UINT pkt_size;
         UCHAR *pkt = BuildNeighborAdvertisement(g_my_mac, &pkt_size);

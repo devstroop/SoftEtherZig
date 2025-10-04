@@ -29,5 +29,11 @@ pub const VPN_BRIDGE_ERROR_NOT_CONNECTED = c.VPN_BRIDGE_ERROR_NOT_CONNECTED;
 pub const VPN_BRIDGE_ERROR_ALREADY_INIT = c.VPN_BRIDGE_ERROR_ALREADY_INIT;
 pub const VPN_BRIDGE_ERROR_NOT_INIT = c.VPN_BRIDGE_ERROR_NOT_INIT;
 
+// IP version constants
+pub const VPN_IP_VERSION_AUTO = c.VPN_IP_VERSION_AUTO;
+pub const VPN_IP_VERSION_IPV4 = c.VPN_IP_VERSION_IPV4;
+pub const VPN_IP_VERSION_IPV6 = c.VPN_IP_VERSION_IPV6;
+pub const VPN_IP_VERSION_DUAL = c.VPN_IP_VERSION_DUAL;
+
 // Note: In Zig 0.15+, we can't use `pub usingnamespace`
 // Access C symbols via: const c = @import("c.zig").c;

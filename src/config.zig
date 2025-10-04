@@ -3,13 +3,32 @@ const errors = @import("errors.zig");
 
 const VpnError = errors.VpnError;
 
+/// IP version selection
+pub const IpVersion = enum {
+    auto, // Auto-detect (prefer IPv4, fallback to IPv6)
+    ipv4, // Force IPv4 only
+    ipv6, // Force IPv6 only
+    dual, // Dual-stack (both IPv4 and IPv6)
+};
+
+/// Static IP configuration
+pub const StaticIpConfig = struct {
+    ipv4_address: ?[]const u8 = null, // e.g., "192.168.1.10"
+    ipv4_netmask: ?[]const u8 = null, // e.g., "255.255.255.0"
+    ipv4_gateway: ?[]const u8 = null, // e.g., "192.168.1.1"
+    ipv6_address: ?[]const u8 = null, // e.g., "2001:db8::1"
+    ipv6_prefix_len: ?u8 = null, // e.g., 64
+    ipv6_gateway: ?[]const u8 = null, // e.g., "fe80::1"
+    dns_servers: ?[]const []const u8 = null, // e.g., ["8.8.8.8", "8.8.4.4"]
+};
+
 /// Authentication method
 pub const AuthMethod = union(enum) {
     anonymous,
     password: struct {
         username: []const u8,
         password: []const u8,
-        is_hashed: bool = false,  // True if password is pre-hashed (base64-encoded SHA1)
+        is_hashed: bool = false, // True if password is pre-hashed (base64-encoded SHA1)
     },
     certificate: struct {
         cert_path: []const u8,
@@ -30,6 +49,8 @@ pub const ConnectionConfig = struct {
     max_connection: u32 = 1,
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
+    ip_version: IpVersion = .auto,
+    static_ip: ?StaticIpConfig = null,
 
     /// Create a configuration builder
     pub fn builder() ConfigBuilder {
@@ -49,6 +70,8 @@ pub const ConfigBuilder = struct {
     max_connection: u32 = 1,
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
+    ip_version: IpVersion = .auto,
+    static_ip: ?StaticIpConfig = null,
 
     /// Set VPN server address and port
     pub fn setServer(self: *ConfigBuilder, name: []const u8, port: u16) *ConfigBuilder {
@@ -93,6 +116,18 @@ pub const ConfigBuilder = struct {
         return self;
     }
 
+    /// Set IP version preference
+    pub fn setIpVersion(self: *ConfigBuilder, version: IpVersion) *ConfigBuilder {
+        self.ip_version = version;
+        return self;
+    }
+
+    /// Set static IP configuration
+    pub fn setStaticIp(self: *ConfigBuilder, static_config: StaticIpConfig) *ConfigBuilder {
+        self.static_ip = static_config;
+        return self;
+    }
+
     /// Build the final configuration
     pub fn build(self: ConfigBuilder) !ConnectionConfig {
         const server_name = self.server_name orelse return VpnError.MissingParameter;
@@ -111,6 +146,8 @@ pub const ConfigBuilder = struct {
             .max_connection = self.max_connection,
             .half_connection = self.half_connection,
             .additional_connection_interval = self.additional_connection_interval,
+            .ip_version = self.ip_version,
+            .static_ip = self.static_ip,
         };
     }
 };
