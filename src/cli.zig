@@ -5,6 +5,7 @@ const std = @import("std");
 const client = @import("client.zig");
 const config = @import("config.zig");
 const errors = @import("errors.zig");
+const profiling = @import("profiling.zig");
 const c = @import("c.zig").c;
 
 const VpnClient = client.VpnClient;
@@ -61,6 +62,7 @@ fn printUsage() void {
         \\    --no-encrypt            Disable encryption (not recommended)
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
+        \\    --profile               Enable performance profiling
         \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
         \\    --ip-version <VERSION>  IP version: auto, ipv4, ipv6, dual (default: auto)
         \\    --static-ipv4 <IP>      Static IPv4 address (e.g., 10.0.0.2)
@@ -117,6 +119,7 @@ const CliArgs = struct {
     use_compress: bool = true,
     max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     daemon: bool = false,
+    profile: bool = false, // Enable performance profiling
     log_level: []const u8 = "info",
     ip_version: []const u8 = "auto",
     static_ipv4: ?[]const u8 = null,
@@ -181,6 +184,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.use_compress = false;
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--daemon")) {
             result.daemon = true;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            result.profile = true;
         } else if (std.mem.eql(u8, arg, "--log-level")) {
             result.log_level = args.next() orelse return error.MissingLogLevel;
         } else if (std.mem.eql(u8, arg, "--ip-version")) {
@@ -532,11 +537,19 @@ pub fn main() !void {
     // Foreground mode: wait for Ctrl+C
     std.debug.print("Connection established successfully.\n", .{});
     std.debug.print("Press Ctrl+C to disconnect.\n", .{});
+
+    if (args.profile) {
+        std.debug.print("🔬 Performance profiling enabled\n", .{});
+    }
     std.debug.print("─────────────────────────────────────────────\n", .{});
 
     // Keep connection alive until interrupted
-    while (vpn_client.isConnected() and g_running.load(.acquire)) {
-        std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms
+    if (args.profile) {
+        monitorWithProfiling(allocator, &vpn_client);
+    } else {
+        while (vpn_client.isConnected() and g_running.load(.acquire)) {
+            std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms
+        }
     }
 
     // Only cleanup if signal handler hasn't already done it
@@ -559,4 +572,61 @@ fn daemonLoop(vpn_client_ptr: *VpnClient) noreturn {
         }
         std.Thread.sleep(5 * std.time.ns_per_s);
     }
+}
+
+// Monitor connection with performance profiling
+fn monitorWithProfiling(allocator: std.mem.Allocator, vpn_client: *VpnClient) void {
+    var metrics = profiling.Metrics.init(allocator);
+    defer metrics.deinit();
+
+    var last_bytes_rx: u64 = 0;
+    var last_bytes_tx: u64 = 0;
+    var status_counter: u32 = 0;
+
+    std.debug.print("\n", .{});
+
+    while (vpn_client.isConnected() and g_running.load(.acquire)) {
+        // Get current stats from VPN client
+        const info = vpn_client.getConnectionInfo() catch |err| {
+            std.debug.print("Error getting connection info: {any}\n", .{err});
+            std.Thread.sleep(1000 * std.time.ns_per_ms);
+            continue;
+        };
+
+        // Calculate delta
+        const bytes_rx_delta = info.bytes_received -| last_bytes_rx;
+        const bytes_tx_delta = info.bytes_sent -| last_bytes_tx;
+
+        // Update metrics (approximate packet count based on average packet size)
+        if (bytes_rx_delta > 0) {
+            const approx_packets = bytes_rx_delta / 1200; // Assume ~1200 bytes/packet
+            var i: u64 = 0;
+            while (i < approx_packets) : (i += 1) {
+                metrics.recordPacketReceived(1200);
+            }
+        }
+        if (bytes_tx_delta > 0) {
+            const approx_packets = bytes_tx_delta / 1200;
+            var i: u64 = 0;
+            while (i < approx_packets) : (i += 1) {
+                metrics.recordPacketSent(1200);
+            }
+        }
+
+        last_bytes_rx = info.bytes_received;
+        last_bytes_tx = info.bytes_sent;
+
+        // Print status every 5 seconds
+        status_counter += 1;
+        if (status_counter >= 10) { // 10 * 500ms = 5 seconds
+            metrics.printStatus();
+            status_counter = 0;
+        }
+
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+    }
+
+    // Print final report
+    std.debug.print("\n\n", .{});
+    metrics.report();
 }
