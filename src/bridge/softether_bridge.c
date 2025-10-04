@@ -938,13 +938,13 @@ int vpn_bridge_get_learned_ip(
     }
 
     // Try to get IP from translator
-    #if defined(UNIX_MACOS) || defined(UNIX_LINUX)
+    #if (defined(UNIX_MACOS) && !defined(UNIX_IOS)) || defined(UNIX_LINUX)
         void* ctx_ptr = client->softether_session->PacketAdapter->Param;
         if (!ctx_ptr) {
             return VPN_BRIDGE_SUCCESS;
         }
 
-        #if defined(UNIX_MACOS)
+        #if defined(UNIX_MACOS) && !defined(UNIX_IOS)
             MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
             if (ctx->translator) {
                 *ip = taptun_get_learned_ip(ctx->translator);
@@ -973,13 +973,13 @@ int vpn_bridge_get_gateway_mac(
     }
 
     // Try to get MAC from translator
-    #if defined(UNIX_MACOS) || defined(UNIX_LINUX)
+    #if (defined(UNIX_MACOS) && !defined(UNIX_IOS)) || defined(UNIX_LINUX)
         void* ctx_ptr = client->softether_session->PacketAdapter->Param;
         if (!ctx_ptr) {
             return VPN_BRIDGE_SUCCESS;
         }
 
-        #if defined(UNIX_MACOS)
+        #if defined(UNIX_MACOS) && !defined(UNIX_IOS)
             MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
             if (ctx->translator) {
                 *has_mac = taptun_get_gateway_mac(ctx->translator, mac) ? 1 : 0;
