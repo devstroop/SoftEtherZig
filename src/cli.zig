@@ -100,6 +100,7 @@ const CliArgs = struct {
     account: ?[]const u8 = null,
     use_encrypt: bool = true,
     use_compress: bool = true,
+    max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     daemon: bool = false,
     log_level: []const u8 = "info",
     ip_version: []const u8 = "auto",
@@ -152,6 +153,13 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.password_hash = args.next() orelse return error.MissingPasswordHashArg;
         } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--account")) {
             result.account = args.next() orelse return error.MissingAccountArg;
+        } else if (std.mem.eql(u8, arg, "--max-connection")) {
+            const max_str = args.next() orelse return error.MissingMaxConnectionArg;
+            result.max_connection = try std.fmt.parseInt(u32, max_str, 10);
+            if (result.max_connection > 32) {
+                std.debug.print("Error: max_connection must be between 0 (server policy) and 32\n", .{});
+                return error.InvalidMaxConnection;
+            }
         } else if (std.mem.eql(u8, arg, "--no-encrypt")) {
             result.use_encrypt = false;
         } else if (std.mem.eql(u8, arg, "--no-compress")) {
@@ -334,6 +342,7 @@ pub fn main() !void {
         } },
         .use_encrypt = args.use_encrypt,
         .use_compress = args.use_compress,
+        .max_connection = args.max_connection,
         .ip_version = ip_version,
         .static_ip = static_ip,
     };
@@ -346,6 +355,11 @@ pub fn main() !void {
     std.debug.print("User:          {s}\n", .{username});
     std.debug.print("Encryption:    {s}\n", .{if (args.use_encrypt) "Enabled" else "Disabled"});
     std.debug.print("Compression:   {s}\n", .{if (args.use_compress) "Enabled" else "Disabled"});
+    if (args.max_connection == 0) {
+        std.debug.print("Max Connections: Server Policy\n", .{});
+    } else {
+        std.debug.print("Max Connections: {d}\n", .{args.max_connection});
+    }
     std.debug.print("IP Version:    {s}\n", .{args.ip_version});
 
     if (static_ip) |sip| {

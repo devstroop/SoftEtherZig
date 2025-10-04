@@ -348,7 +348,22 @@ int vpn_bridge_get_gateway_mac(
  * @param ip_version  IP version mode (VPN_IP_VERSION_AUTO, IPV4, IPV6, or DUAL)
  * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
  */
+/**
+ * Set IP version preference for the connection.
+ * Must be called before vpn_bridge_connect().
+ */
 int vpn_bridge_set_ip_version(VpnBridgeClient* client, int ip_version);
+
+/**
+ * Set maximum number of concurrent TCP connections (1-32).
+ * Multiple connections improve throughput by parallelizing data transfer.
+ * Must be called before vpn_bridge_connect().
+ * 
+ * @param client VPN client handle
+ * @param max_connection Number of connections (1-32, default: 1)
+ * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
+ */
+int vpn_bridge_set_max_connection(VpnBridgeClient* client, uint32_t max_connection);
 
 /**
  * Configure static IPv4 address (skip DHCP).

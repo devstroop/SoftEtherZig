@@ -46,7 +46,7 @@ pub const ConnectionConfig = struct {
     auth: AuthMethod,
     use_encrypt: bool = true,
     use_compress: bool = true,
-    max_connection: u32 = 1,
+    max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
@@ -67,7 +67,7 @@ pub const ConfigBuilder = struct {
     auth: ?AuthMethod = null,
     use_encrypt: bool = true,
     use_compress: bool = true,
-    max_connection: u32 = 1,
+    max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,

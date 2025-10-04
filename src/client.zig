@@ -89,6 +89,9 @@ pub const VpnClient = struct {
         };
         _ = c.vpn_bridge_set_ip_version(client_handle, ip_version_code);
 
+        // Configure max connections
+        _ = c.vpn_bridge_set_max_connection(client_handle, @intCast(cfg.max_connection));
+
         // Configure static IP if provided
         if (cfg.static_ip) |sip| {
             if (sip.ipv4_address) |ipv4| {

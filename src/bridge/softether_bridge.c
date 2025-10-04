@@ -53,6 +53,7 @@ struct VpnBridgeClient {
     char username[256];
     char password[256];
     bool password_is_hashed;  // Flag: true if password field contains pre-hashed password
+    uint32_t max_connection;   // Maximum number of concurrent TCP connections (1-32)
     
     // IP Configuration
     int ip_version;  // VPN_IP_VERSION_* constants
@@ -189,6 +190,7 @@ VpnBridgeClient* vpn_bridge_create_client(void) {
     client->status = VPN_STATUS_DISCONNECTED;
     client->last_error = VPN_BRIDGE_SUCCESS;
     client->port = 443;
+    client->max_connection = 1;  // Default to 1 connection
     
     // Initialize IP configuration (defaults)
     client->ip_version = VPN_IP_VERSION_AUTO;
@@ -389,9 +391,9 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     printf("[vpn_bridge_connect] 📡 Device name set to 'vpn_adapter' (Layer 2 bridging mode)\n");
     fflush(stdout);
     
-    // Connection settings - TCP ONLY, matching SSTP Connect configuration EXACTLY
-    // **CRITICAL**: SSTP Connect log shows "max_connection=[1]" - we MUST match this!
-    opt->MaxConnection = 1;              // SSTP Connect uses 1, not 2!
+    // Connection settings - TCP ONLY, configurable max connections
+    // Multiple connections improve throughput through parallelization
+    opt->MaxConnection = client->max_connection;  // User-configurable (1-32)
     opt->UseEncrypt = true;              // Use encryption (SSTP: use_encrypt=[1])
     opt->UseCompress = false;            // No compression (SSTP: use_compress=[0])
     opt->HalfConnection = false;         // Full-duplex (SSTP: half_connection=[0])
@@ -1004,6 +1006,21 @@ int vpn_bridge_set_ip_version(VpnBridgeClient* client, int ip_version) {
     
     client->ip_version = ip_version;
     LOG_VPN_INFO("IP version set to: %d\n", ip_version);
+    return VPN_BRIDGE_SUCCESS;
+}
+
+int vpn_bridge_set_max_connection(VpnBridgeClient* client, uint32_t max_connection) {
+    if (!client) {
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    if (max_connection < 1 || max_connection > 32) {
+        LOG_VPN_ERROR("max_connection must be 1-32, got %u\n", max_connection);
+        return VPN_BRIDGE_ERROR_INVALID_PARAM;
+    }
+    
+    client->max_connection = max_connection;
+    LOG_VPN_INFO("🔗 Max connections set to %u\n", max_connection);
     return VPN_BRIDGE_SUCCESS;
 }
 
