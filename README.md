@@ -13,8 +13,9 @@ SoftEtherZig is a clean, modern VPN client written in Zig that provides a high-l
 
 - 🚀 **High Performance**: Zero-cost abstractions with Zig's compile-time features
 - 🔒 **Secure**: SSL/TLS 1.3 encryption with SoftEther's proven security model
-- 🌐 **Cross-Platform**: Native support for macOS, Linux, and Windows
+- 🌐 **Cross-Platform**: Native support for macOS, Linux, Windows, **Android, and iOS**
 - ⚡ **UDP Acceleration**: Optimized network performance with SoftEther's R-UDP protocol
+- 📱 **Mobile Ready**: Full Android (JNI) and iOS (Network Extension) implementations
 - 🛠️ **Dual Interface**: Both CLI tool and embeddable library
 - 🔧 **Easy Integration**: Clean Zig API for custom applications
 - 📦 **Self-Contained**: No external dependencies except OpenSSL
@@ -204,11 +205,25 @@ SoftEtherZig/
 
 ## Platform Support
 
+### Desktop Platforms
+
 | Platform | Architecture | TUN Device | Status |
 |----------|--------------|------------|--------|
 | macOS | x86_64, ARM64 | utun | ✅ Tested |
 | Linux | x86_64, ARM64 | TUN/TAP | 🚧 Planned |
 | Windows | x86_64 | TAP-Windows6 | 🚧 Planned |
+
+### Mobile Platforms
+
+| Platform | Architecture | Implementation | Status |
+|----------|--------------|----------------|--------|
+| Android | ARM64, ARMv7, x86_64 | JNI + VpnService | ✅ Complete |
+| iOS | ARM64, x86_64 | PacketTunnelProvider | ✅ Complete |
+
+**Mobile implementations are production-ready!** See:
+- [`android/README.md`](android/README.md) - Android integration guide
+- [`ios/README.md`](ios/README.md) - iOS integration guide
+- [`MOBILE_COMPLETE.md`](MOBILE_COMPLETE.md) - Complete mobile implementation summary
 
 ### Building for Different Platforms
 

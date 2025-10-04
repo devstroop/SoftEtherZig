@@ -1,0 +1,4 @@
+module SoftEtherVPN {
+    header "softether_ios.h"
+    export *
+}
