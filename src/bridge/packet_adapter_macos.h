@@ -21,6 +21,11 @@ extern "C" {
 typedef void* TranslatorHandle;
 #endif
 
+// Forward declare Zig packet adapter (only if enabled)
+#ifdef USE_ZIG_ADAPTER
+typedef struct ZigPacketAdapter ZigPacketAdapter;
+#endif
+
 // IP configuration passed from bridge layer
 typedef struct IP_CONFIG {
     int ip_version;  // 0=auto, 1=ipv4, 2=ipv6, 3=dual
@@ -49,6 +54,12 @@ typedef struct MACOS_TUN_CONTEXT {
     volatile bool halt;              // Stop flag
     SESSION *session;                // Associated session
     TranslatorHandle translator;     // ZigTapTun L2↔L3 translator
+    
+#ifdef USE_ZIG_ADAPTER
+    // Zig packet adapter (Phase 1 implementation)
+    ZigPacketAdapter *zig_adapter;   // High-performance Zig adapter
+    bool use_zig_adapter;            // Enable Zig adapter instead of C
+#endif
     
     // Statistics
     UINT64 bytes_sent;
