@@ -17,12 +17,27 @@ const VERSION = "1.0.0";
 // Global client pointer for signal handler
 var g_client: ?*VpnClient = null;
 var g_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+var g_cleanup_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-// Signal handler for Ctrl+C (SIGINT)
+// Signal handler for Ctrl+C (SIGINT) and SIGTERM
 fn signalHandler(sig: c_int) callconv(.c) void {
-    _ = sig;
-    std.debug.print("\n\n🛑 Interrupt signal received, disconnecting...\n", .{});
-    g_running.store(false, .monotonic);
+    // Prevent double cleanup
+    if (g_cleanup_done.swap(true, .acquire)) {
+        return; // Already cleaning up
+    }
+
+    const sig_name = if (sig == std.posix.SIG.INT) "SIGINT" else if (sig == std.posix.SIG.TERM) "SIGTERM" else "UNKNOWN";
+    std.debug.print("\n\n🛑 Signal {s} received, initiating graceful shutdown...\n", .{sig_name});
+
+    // Stop the main loop
+    g_running.store(false, .release);
+
+    // Trigger immediate cleanup if we have a client reference
+    if (g_client) |vpn_client| {
+        std.debug.print("[●] Cleaning up VPN connection...\n", .{});
+        vpn_client.deinit();
+        std.debug.print("[✓] VPN connection terminated\n", .{});
+    }
 }
 
 fn printUsage() void {
@@ -401,14 +416,23 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    // Set up signal handler for Ctrl+C
+    // Set up signal handler for Ctrl+C and graceful termination
     g_client = &vpn_client;
     const sigaction = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
         .mask = 0,
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null);
+    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null); // Ctrl+C
+    std.posix.sigaction(std.posix.SIG.TERM, &sigaction, null); // kill command
+
+    // Ignore SIGPIPE (broken pipe when writing to closed socket)
+    const sig_ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = 0,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &sig_ignore, null);
 
     std.debug.print("✓ VPN connection established\n\n", .{});
 
@@ -511,13 +535,19 @@ pub fn main() !void {
     std.debug.print("─────────────────────────────────────────────\n", .{});
 
     // Keep connection alive until interrupted
-    while (vpn_client.isConnected() and g_running.load(.monotonic)) {
-        std.Thread.sleep(500 * std.time.ns_per_ms); // Check more frequently
+    while (vpn_client.isConnected() and g_running.load(.acquire)) {
+        std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms
     }
 
-    std.debug.print("\n🔌 Disconnecting...\n", .{});
-    vpn_client.deinit();
-    std.debug.print("✅ Disconnected successfully\n", .{});
+    // Only cleanup if signal handler hasn't already done it
+    if (!g_cleanup_done.load(.acquire)) {
+        std.debug.print("\n[●] Connection lost, cleaning up...\n", .{});
+        g_cleanup_done.store(true, .release);
+        vpn_client.deinit();
+        std.debug.print("[✓] Cleanup complete\n", .{});
+    } else {
+        std.debug.print("[✓] Shutdown complete\n", .{});
+    }
 }
 
 // Background daemon loop - runs forever until killed

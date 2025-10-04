@@ -12,17 +12,13 @@
 #include <unistd.h>
 #include <sys/time.h>
 
-#include "../../Mayaqua/Mayaqua.h"
-#include "../../Cedar/Cedar.h"
+#include <Mayaqua/Mayaqua.h>
+#include <Cedar/Cedar.h>
+#include "packet_adapter_ios.h"
 #include "../logging.h"
 
-// Forward declaration of iOS flow interface
+// Forward declaration - opaque type for iOS packet flow
 typedef struct IOSPacketFlow IOSPacketFlow;
-
-// Function pointers for iOS NEPacketTunnelFlow callbacks
-typedef void (*IOSWritePacketsCallback)(IOSPacketFlow *flow, const void **packets, 
-                                       const int *sizes, int count);
-typedef void (*IOSReadPacketsCallback)(IOSPacketFlow *flow, void *context);
 
 // iOS adapter context
 typedef struct {
@@ -140,7 +136,7 @@ static void IOSTunSendThread(THREAD *thread, void *param) {
             Unlock(ctx->queue_lock);
         } else {
             // No packets, wait briefly
-            Wait(ctx->cancel, 10);
+            SleepThread(10);
         }
         
         // Request more packets from iOS
@@ -258,7 +254,7 @@ void* IOSTunGetNextPacket(PACKET_ADAPTER *pa, UINT *size) {
     Unlock(ctx->queue_lock);
     
     // No packets available, wait briefly
-    Wait(ctx->cancel, 10);
+    SleepThread(10);
     return NULL;
 }
 

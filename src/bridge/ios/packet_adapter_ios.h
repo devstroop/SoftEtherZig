@@ -5,8 +5,8 @@
 #ifndef PACKET_ADAPTER_IOS_H
 #define PACKET_ADAPTER_IOS_H
 
-#include "../../Mayaqua/Mayaqua.h"
-#include "../../Cedar/Cedar.h"
+#include <Mayaqua/Mayaqua.h>
+#include <Cedar/Cedar.h>
 
 // Callback types for iOS NEPacketTunnelFlow
 typedef void (*IOSWritePacketsCallback)(void *flow, const void **packets, 
