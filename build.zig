@@ -75,6 +75,7 @@ pub fn build(b: *std.Build) void {
         "src/bridge/unix_bridge.c",
         tick64_file,
         packet_adapter_file,
+        "src/bridge/logging.c", // Phase 2: Log level system
         "src/bridge/Mayaqua/Mayaqua.c",
         "src/bridge/Mayaqua/Memory.c",
         "SoftEtherVPN_Stable/src/Mayaqua/Str.c",

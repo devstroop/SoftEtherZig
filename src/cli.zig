@@ -2,10 +2,15 @@
 // Production command-line interface for establishing VPN connections
 
 const std = @import("std");
-const softether = @import("softether");
-const VpnClient = softether.VpnClient;
-const ConnectionConfig = softether.ConnectionConfig;
-const AuthMethod = softether.AuthMethod;
+const client = @import("client.zig");
+const config = @import("config.zig");
+const errors = @import("errors.zig");
+const c = @import("c.zig").c;
+
+const VpnClient = client.VpnClient;
+const ConnectionConfig = config.ConnectionConfig;
+const AuthMethod = config.AuthMethod;
+const VpnError = errors.VpnError;
 
 const VERSION = "1.0.0";
 
@@ -165,17 +170,17 @@ pub fn main() !void {
         const password = args.gen_hash_pass.?;
 
         // Initialize SoftEther library first
-        const init_result = softether.c.c.vpn_bridge_init(0); // 0 = FALSE (debug off)
-        if (init_result != softether.c.VPN_BRIDGE_SUCCESS) {
+        const init_result = c.vpn_bridge_init(0); // 0 = FALSE (debug off)
+        if (init_result != c.VPN_BRIDGE_SUCCESS) {
             std.debug.print("Error initializing SoftEther library\n", .{});
             std.process.exit(1);
         }
-        defer _ = softether.c.c.vpn_bridge_cleanup();
+        defer _ = c.vpn_bridge_cleanup();
 
         var hash_buffer: [128]u8 = undefined;
-        const result = softether.c.c.vpn_bridge_generate_password_hash(username.ptr, password.ptr, &hash_buffer, hash_buffer.len);
+        const result = c.vpn_bridge_generate_password_hash(username.ptr, password.ptr, &hash_buffer, hash_buffer.len);
 
-        if (result != softether.c.VPN_BRIDGE_SUCCESS) {
+        if (result != c.VPN_BRIDGE_SUCCESS) {
             std.debug.print("Error generating hash: {d}\n", .{result});
             std.process.exit(1);
         }
@@ -226,7 +231,7 @@ pub fn main() !void {
     const account = args.account orelse username;
 
     // Create configuration
-    const config = ConnectionConfig{
+    const vpn_config = ConnectionConfig{
         .server_name = server,
         .server_port = args.port,
         .hub_name = hub,
@@ -250,22 +255,22 @@ pub fn main() !void {
     std.debug.print("Compression:   {s}\n", .{if (args.use_compress) "Enabled" else "Disabled"});
     std.debug.print("─────────────────────────────────────────────\n\n", .{});
 
-    var client = VpnClient.init(allocator, config) catch |err| {
+    var vpn_client = VpnClient.init(allocator, vpn_config) catch |err| {
         std.debug.print("✗ Failed to initialize VPN client: {any}\n", .{err});
         std.process.exit(1);
     };
-    // Note: defer client.deinit() is NOT here - we handle it manually for daemon mode
+    // Note: defer vpn_client.deinit() is NOT here - we handle it manually for daemon mode
 
     // Connect to VPN server
     std.debug.print("Establishing VPN connection...\n", .{});
-    client.connect() catch |err| {
-        client.deinit();
+    vpn_client.connect() catch |err| {
+        vpn_client.deinit();
         std.debug.print("✗ Connection failed: {any}\n", .{err});
         std.process.exit(1);
     };
 
     // Set up signal handler for Ctrl+C
-    g_client = &client;
+    g_client = &vpn_client;
     const sigaction = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
         .mask = 0,
@@ -276,18 +281,18 @@ pub fn main() !void {
     std.debug.print("✓ VPN connection established\n\n", .{});
 
     // Get dynamic network information
-    const device_name_buf = client.getDeviceName() catch |err| blk: {
+    const device_name_buf = vpn_client.getDeviceName() catch |err| blk: {
         std.debug.print("Warning: Could not get device name: {any}\n", .{err});
         break :blk [_]u8{0} ** 64;
     };
     const device_name_end = std.mem.indexOfScalar(u8, &device_name_buf, 0) orelse device_name_buf.len;
     const device_name = device_name_buf[0..device_name_end];
 
-    const learned_ip = client.getLearnedIp() catch 0;
-    const gateway_mac = client.getGatewayMac() catch null;
+    const learned_ip = vpn_client.getLearnedIp() catch 0;
+    const gateway_mac = vpn_client.getGatewayMac() catch null;
 
     // Display connection status
-    std.debug.print("Connection Status: {s}\n", .{@tagName(client.getStatus())});
+    std.debug.print("Connection Status: {s}\n", .{@tagName(vpn_client.getStatus())});
     std.debug.print("TUN Device:        {s}\n", .{device_name});
 
     if (learned_ip != 0) {
@@ -332,7 +337,7 @@ pub fn main() !void {
 
         if (pid < 0) {
             std.debug.print("✗ Failed to fork process\n", .{});
-            client.deinit();
+            vpn_client.deinit();
             std.process.exit(1);
         }
 
@@ -344,7 +349,7 @@ pub fn main() !void {
             std.debug.print("─────────────────────────────────────────────\n", .{});
 
             // Parent exits - child continues in background
-            client.deinit(); // Parent doesn't need the client anymore
+            vpn_client.deinit(); // Parent doesn't need the vpn_client anymore
             return;
         }
 
@@ -356,7 +361,7 @@ pub fn main() !void {
         const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .read_write }) catch {
             // Can't print here - stdout might be closed
             // Continue anyway with inherited file descriptors
-            daemonLoop(&client);
+            daemonLoop(&vpn_client);
         };
         defer devnull.close();
 
@@ -365,7 +370,7 @@ pub fn main() !void {
         std.posix.dup2(devnull.handle, std.posix.STDERR_FILENO) catch {};
 
         // Keep connection alive in background forever
-        daemonLoop(&client);
+        daemonLoop(&vpn_client);
     }
 
     // Foreground mode: wait for Ctrl+C
@@ -374,19 +379,19 @@ pub fn main() !void {
     std.debug.print("─────────────────────────────────────────────\n", .{});
 
     // Keep connection alive until interrupted
-    while (client.isConnected() and g_running.load(.monotonic)) {
+    while (vpn_client.isConnected() and g_running.load(.monotonic)) {
         std.Thread.sleep(500 * std.time.ns_per_ms); // Check more frequently
     }
 
     std.debug.print("\n🔌 Disconnecting...\n", .{});
-    client.deinit();
+    vpn_client.deinit();
     std.debug.print("✅ Disconnected successfully\n", .{});
 }
 
 // Background daemon loop - runs forever until killed
-fn daemonLoop(client: *VpnClient) noreturn {
+fn daemonLoop(vpn_client_ptr: *VpnClient) noreturn {
     while (true) {
-        if (!client.isConnected()) {
+        if (!vpn_client_ptr.isConnected()) {
             // Connection lost - exit with error code
             std.process.exit(1);
         }
