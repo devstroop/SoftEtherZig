@@ -97,22 +97,14 @@ static bool ConfigureTunInterfaceIPv6(const char *device, const char *ipv6_addr,
 {
     char cmd[512];
 
-    printf("\n");
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║     IPv6 Configuration!                    ║\n");
-    printf("╠════════════════════════════════════════════╣\n");
-    printf("║ Device:    %-32s║\n", device);
-    printf("║ IPv6:      %-32s║\n", ipv6_addr);
-    printf("║ Prefix:    %-32d║\n", prefix_len);
+    LOG_INFO("TUN", "Configuring IPv6: %s/%d on %s", ipv6_addr, prefix_len, device);
     if (gateway && gateway[0]) {
-        printf("║ Gateway:   %-32s║\n", gateway);
+        LOG_DEBUG("TUN", "IPv6 gateway: %s", gateway);
     }
-    printf("╚════════════════════════════════════════════╝\n");
-    printf("\n");
 
     // Configure IPv6 address
     snprintf(cmd, sizeof(cmd), "ifconfig %s inet6 %s/%d up", device, ipv6_addr, prefix_len);
-    LOG_TUN_DEBUG(": %s\n", cmd);
+    LOG_DEBUG("TUN", "Running: %s", cmd);
     if (system(cmd) != 0)
     {
         LOG_TUN_ERROR(" Failed to configure IPv6 address\n");
@@ -123,15 +115,15 @@ static bool ConfigureTunInterfaceIPv6(const char *device, const char *ipv6_addr,
     if (gateway && gateway[0])
     {
         snprintf(cmd, sizeof(cmd), "route add -inet6 default %s", gateway);
-        LOG_TUN_DEBUG(": %s\n", cmd);
+        LOG_DEBUG("TUN", "Running: %s", cmd);
         if (system(cmd) != 0)
         {
-            LOG_TUN_WARN(" Warning: Failed to add IPv6 default route\n");
+            LOG_WARN("TUN", "Failed to add IPv6 default route");
         }
     }
 
     g_ipv6_configured = true;
-    LOG_TUN_INFO("✅ IPv6 interface configured successfully\n");
+    LOG_INFO("TUN", "IPv6 interface configured successfully");
     return true;
 }
 
@@ -168,24 +160,16 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
     snprintf(dns2_str, sizeof(dns2_str), "%d.%d.%d.%d",
                  (g_offered_dns2 >> 24) & 0xFF, (g_offered_dns2 >> 16) & 0xFF,
                  (g_offered_dns2 >> 8) & 0xFF, g_offered_dns2 & 0xFF);
-    printf("\n");
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║     DHCP Configuration Received!           ║\n");
-    printf("╠════════════════════════════════════════════╣\n");
-    printf("║ Device:    %-32s║\n", device);
-    printf("║ IP:        %-32s║\n", ip_str);
-    printf("║ Netmask:   %-32s║\n", mask_str);
-    printf("║ Gateway:   %-32s║\n", gw_str);
-    printf("║ DNS 1:     %-32s║\n", dns1_str);
-    printf("║ DNS 2:     %-32s║\n", dns2_str);
-    printf("╚════════════════════════════════════════════╝\n");
-    printf("\n");
+    
+    LOG_INFO("DHCP", "DHCP Configuration Received!");
+    LOG_DEBUG("DHCP", "Device: %s, IP: %s, Netmask: %s, Gateway: %s", device, ip_str, mask_str, gw_str);
+    LOG_DEBUG("DHCP", "DNS: %s, %s", dns1_str, dns2_str);
 
     // Set IP address with peer (gateway) - TUN devices need both local and peer IPs
     // Format: ifconfig DEVICE LOCAL_IP PEER_IP netmask NETMASK up
     // This is required for macOS TUN devices (point-to-point interfaces)
     snprintf(cmd, sizeof(cmd), "ifconfig %s %s %s netmask %s up", device, ip_str, gw_str, mask_str);
-    LOG_TUN_DEBUG(": %s\n", cmd);
+    LOG_DEBUG("TUN", "Running: %s", cmd);
     if (system(cmd) != 0)
     {
         LOG_TUN_ERROR(" Failed to configure interface\n");
@@ -218,44 +202,34 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
                      (vpn_server_ip >> 24) & 0xFF, (vpn_server_ip >> 16) & 0xFF,
                      (vpn_server_ip >> 8) & 0xFF, vpn_server_ip & 0xFF);
 
-            printf("\n");
-            printf("╔════════════════════════════════════════════╗\n");
-            printf("║     Full Tunnel Mode (All Traffic)         ║\n");
-            printf("╠════════════════════════════════════════════╣\n");
-            printf("║ Local Network:    %-25s║\n", local_net_str);
-            printf("║ VPN Gateway:      %-25s║\n", gw_str);
-            printf("║ VPN Server IP:    %-25s║\n", server_ip_str);
-            printf("║ Original Gateway: %-25s║\n", orig_gw_str);
-            printf("╠════════════════════════════════════════════╣\n");
-            printf("║ All Internet traffic: Through VPN tunnel   ║\n");
-            printf("║ Local network:        Direct access        ║\n");
-            printf("╚════════════════════════════════════════════╝\n");
-            printf("\n");
+            LOG_INFO("TUN", "Full Tunnel Mode: Routing all traffic through VPN");
+            LOG_DEBUG("TUN", "Local network: %s/24, VPN gateway: %s", local_net_str, gw_str);
+            LOG_DEBUG("TUN", "VPN server: %s, Original gateway: %s", server_ip_str, orig_gw_str);
 
             // 1. Preserve local network access FIRST
             //    Keep LAN traffic (file sharing, printers, etc.) direct
             snprintf(cmd, sizeof(cmd), "route add -net %s/24 %s", local_net_str, orig_gw_str);
-            LOG_TUN_DEBUG(" Adding local network route: %s\n", cmd);
+            LOG_DEBUG("TUN", "Adding local network route: %s", cmd);
             if (system(cmd) != 0)
             {
-                LOG_TUN_WARN("  Failed to add local network route (may already exist)\n");
+                LOG_WARN("TUN", "Failed to add local network route (may already exist)");
             }
             else
             {
-                LOG_TUN_INFO(" Local network route preserved\n");
+                LOG_DEBUG("TUN", "Local network route preserved");
             }
 
             // 2. Add host route for VPN server through original gateway
             //    CRITICAL: Prevents routing loop (VPN traffic going through VPN)
             snprintf(cmd, sizeof(cmd), "route add -host %s %s", server_ip_str, orig_gw_str);
-            LOG_TUN_DEBUG(" Adding VPN server route: %s\n", cmd);
+            LOG_DEBUG("TUN", "Adding VPN server route: %s", cmd);
             if (system(cmd) != 0)
             {
-                LOG_TUN_WARN("  Failed to add VPN server route (may already exist)\n");
+                LOG_WARN("TUN", "Failed to add VPN server route (may already exist)");
             }
             else
             {
-                LOG_TUN_INFO(" VPN server route established\n");
+                LOG_DEBUG("TUN", "VPN server route established");
             }
 
             // 3. Delete existing default route (important!)
@@ -264,21 +238,17 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
             // 4. Add default route through VPN
             //    ALL internet traffic now goes through encrypted tunnel
             snprintf(cmd, sizeof(cmd), "route add default %s", gw_str);
-            LOG_TUN_DEBUG(" Adding default route through VPN: %s\n", cmd);
+            LOG_DEBUG("TUN", "Adding default route through VPN: %s", cmd);
             if (system(cmd) != 0)
             {
-                LOG_TUN_WARN("  Failed to add default route (may already exist)\n");
+                LOG_WARN("TUN", "Failed to add default route (may already exist)");
             }
             else
             {
-                LOG_TUN_INFO(" Default route through VPN established\n");
+                LOG_INFO("TUN", "Default route through VPN established");
             }
 
-            printf("\n");
-            printf("✅ Full Tunnel Mode active:\n");
-            printf("   • All internet traffic encrypted through VPN\n");
-            printf("   • Local network (%s/24) direct access preserved\n", local_net_str);
-            printf("   • VPN server connection protected from routing loop\n\n");
+            LOG_INFO("TUN", "Interface configured successfully");
 
             // Store routing info for restoration on disconnect
             g_original_gateway = orig_gateway;
@@ -288,11 +258,11 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
         }
         else
         {
-            LOG_TUN_WARN("  Could not determine VPN server IP or original gateway\n");
-            printf("[ConfigureTunInterface]     VPN server IP: %u.%u.%u.%u\n",
+            LOG_WARN("TUN", "Could not determine VPN server IP or original gateway");
+            LOG_DEBUG("TUN", "VPN server IP: %u.%u.%u.%u",
                    (vpn_server_ip >> 24) & 0xFF, (vpn_server_ip >> 16) & 0xFF,
                    (vpn_server_ip >> 8) & 0xFF, vpn_server_ip & 0xFF);
-            printf("[ConfigureTunInterface]     Original gateway: %u.%u.%u.%u\n",
+            LOG_DEBUG("TUN", "Original gateway: %u.%u.%u.%u",
                    (orig_gateway >> 24) & 0xFF, (orig_gateway >> 16) & 0xFF,
                    (orig_gateway >> 8) & 0xFF, orig_gateway & 0xFF);
         }
@@ -1413,16 +1383,11 @@ void MacOsTunReadThread(THREAD *t, void *param)
     UCHAR buf[MAX_PACKET_SIZE];
 
     LOG_TUN_DEBUG("Read thread started, fd=%d", ctx->tun_fd);
-    fflush(stdout);
 
     // Signal thread is initialized
-    LOG_TUN_TRACE("Calling NoticeThreadInit...");
-    fflush(stdout);
-
     NoticeThreadInit(t);
 
     LOG_TUN_DEBUG("Read thread initialized, entering loop");
-    fflush(stdout);
 
     while (!ctx->halt)
     {
@@ -1633,40 +1598,31 @@ bool MacOsTunInit(SESSION *s)
     MACOS_TUN_CONTEXT *ctx;
 
     LOG_TUN_DEBUG("Init starting, session=%p", s);
-    fflush(stdout);
 
     if (s == NULL)
     {
         LOG_TUN_ERROR("Session is NULL - invalid parameter");
-        fflush(stdout);
         return false;
     }
 
     if (s->PacketAdapter == NULL)
     {
         LOG_TUN_ERROR("PacketAdapter is NULL - invalid state");
-        fflush(stdout);
         return false;
     }
 
     if (s->PacketAdapter->Param != NULL)
     {
         LOG_TUN_ERROR("Adapter already initialized");
-        fflush(stdout);
         return false;
     }
 
     LOG_TUN_DEBUG("Validation passed, allocating context");
-    fflush(stdout);
 
     // Allocate context
-    LOG_TUN_TRACE("Allocating context structure");
-    fflush(stdout);
     ctx = ZeroMalloc(sizeof(MACOS_TUN_CONTEXT));
     ctx->session = s;
     ctx->halt = false;
-    LOG_TUN_TRACE("Context allocated at %p", ctx);
-    fflush(stdout);
 
     // Open TUN device
     LOG_TUN_DEBUG("Opening TUN device...");
@@ -1674,18 +1630,15 @@ bool MacOsTunInit(SESSION *s)
     if (ctx->tun_fd < 0)
     {
         LOG_TUN_ERROR("Failed to open TUN device");
-        fflush(stdout);
         Free(ctx);
         return false;
     }
     LOG_TUN_INFO("TUN device opened: %s (fd=%d)", ctx->device_name, ctx->tun_fd);
-    fflush(stdout);
 
     // **CRITICAL FIX**: Configure TUN interface immediately with temporary IP
     // This allows packets to flow through the interface while DHCP is in progress
     // Using 169.254.x.x (link-local) range for initial configuration
-    LOG_TUN_DEBUG("  Configuring TUN with temporary link-local IP (will be replaced by DHCP)...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Configuring TUN with temporary link-local IP (will be replaced by DHCP)");
 
     // Generate unique link-local address based on MAC
     UINT32 temp_ip = 0xA9FE0000 | ((rand() & 0xFF) << 8) | (rand() & 0xFF); // 169.254.x.x
@@ -1711,37 +1664,32 @@ bool MacOsTunInit(SESSION *s)
     char cmd[512];
     sprintf(cmd, "ifconfig %s %s %s netmask %s up 2>&1",
             ctx->device_name, temp_ip_str, temp_peer_str, temp_mask_str);
-    LOG_TUN_TRACE(": %s\n", cmd);
-    fflush(stdout);
+    LOG_TUN_TRACE("Running: %s", cmd);
 
     int result = system(cmd);
     if (result != 0)
     {
-        LOG_TUN_WARN("  Warning: Failed to configure interface (result=%d)\n", result);
-        LOG_TUN_WARN("  This may cause packet flow issues!\n");
-        fflush(stdout);
+        LOG_TUN_WARN("Warning: Failed to configure interface (result=%d) - may cause packet flow issues", result);
     }
     else
     {
-        LOG_TUN_DEBUG(" Temporary IP configured: %s -> %s (will be replaced by DHCP)\n",
+        LOG_TUN_DEBUG("Temporary IP configured: %s -> %s (will be replaced by DHCP)",
                      temp_ip_str, temp_peer_str);
-        fflush(stdout);
     }
 
     // Check for static IPv6 configuration
     if (g_ip_config.use_static_ipv6 && g_ip_config.static_ipv6[0]) {
-        LOG_TUN_INFO("🌐 Using static IPv6 configuration\n");
+        LOG_TUN_INFO("Using static IPv6 configuration");
         if (ConfigureTunInterfaceIPv6(ctx->device_name, 
                                         g_ip_config.static_ipv6,
                                         g_ip_config.static_ipv6_prefix,
                                         g_ip_config.static_ipv6_gateway[0] ? g_ip_config.static_ipv6_gateway : NULL)) {
-            LOG_TUN_INFO("✅ Static IPv6 configured successfully\n");
+            LOG_TUN_INFO("Static IPv6 configured successfully");
         }
     }
 
     // Initialize DHCP state
-    LOG_TUN_DEBUG(" DHCP state...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Initializing DHCP state");
     g_dhcp_state = DHCP_STATE_INIT;
     g_connection_start_time = Tick64(); // Record when connection was established
 
@@ -1755,50 +1703,35 @@ bool MacOsTunInit(SESSION *s)
     {
         g_my_mac[i] = (UCHAR)(rand() % 256);
     }
-    LOG_TUN_DEBUG(": %02x:%02x:%02x:%02x:%02x:%02x (02:00:5E matches iPhone app)\n",
+    LOG_TUN_DEBUG("Generated MAC: %02x:%02x:%02x:%02x:%02x:%02x (02:00:5E matches iPhone app)",
                   g_my_mac[0], g_my_mac[1], g_my_mac[2],
                   g_my_mac[3], g_my_mac[4], g_my_mac[5]);
-    fflush(stdout);
 
     // Generate random DHCP transaction ID
     g_dhcp_xid = (UINT32)rand();
-    LOG_TUN_DEBUG(" XID: 0x%08x\n", g_dhcp_xid);
-    fflush(stdout);
+    LOG_TUN_DEBUG("DHCP XID: 0x%08x", g_dhcp_xid);
 
     // Create synchronization objects
-    LOG_TUN_DEBUG("Creating synchronization objects...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Creating synchronization objects");
     ctx->cancel = NewCancel();
-    LOG_TUN_DEBUG("Cancel created\n");
-    fflush(stdout);
     ctx->recv_queue = NewQueue();
-    LOG_TUN_DEBUG("Queue created\n");
-    fflush(stdout);
     ctx->queue_lock = NewLock();
-    LOG_TUN_DEBUG("Lock created\n");
-    fflush(stdout);
 
     // Start background read thread
-    LOG_TUN_DEBUG("Starting background read thread...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Starting background read thread");
     ctx->read_thread = NewThread(MacOsTunReadThread, ctx);
-    LOG_TUN_DEBUG("NewThread returned, waiting for init...\n");
-    fflush(stdout);
     WaitThreadInit(ctx->read_thread);
-    LOG_TUN_DEBUG("Thread initialized\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Thread initialized");
 
     // Store context in packet adapter
     s->PacketAdapter->Param = ctx;
 
-    LOG_TUN_INFO("=== SUCCESS === TUN device: %s\n", ctx->device_name);
-    fflush(stdout);
+    LOG_TUN_INFO("TUN device initialized successfully: %s", ctx->device_name);
 
     // 🚀 **CRITICAL FIX**: Queue DHCP/IPv6 packets IMMEDIATELY (SSTP Connect style)
     // Don't wait for GetNextPacket delay - send packets right away!
     // **ORDER MATTERS**: SSTP Connect log shows DHCP sent FIRST, then IPv6 NA, then IPv6 RS!
-    LOG_TUN_DEBUG("🚀 Pre-queuing initial packets for instant transmission (SSTP Connect order)...\n");
-    fflush(stdout);
+    LOG_TUN_DEBUG("Pre-queuing initial packets for instant transmission");
 
     // **PACKET 1**: DHCP DISCOVER (FIRST! - matching SSTP Connect line 253)
     UINT dhcp_size = 0;

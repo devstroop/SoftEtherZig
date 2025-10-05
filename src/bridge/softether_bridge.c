@@ -361,6 +361,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     // Connection settings - TCP ONLY, configurable max connections
     // Multiple connections improve throughput through parallelization
     opt->MaxConnection = client->max_connection;  // User-configurable (1-32)
+    LOG_VPN_INFO("🔧 MaxConnection set to %u (1=single conn, >1=parallel)", opt->MaxConnection);
     opt->UseEncrypt = true;              // Use encryption (SSTP: use_encrypt=[1])
     opt->UseCompress = false;            // No compression (SSTP: use_compress=[0])
     opt->HalfConnection = false;         // Full-duplex (SSTP: half_connection=[0])
