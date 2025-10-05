@@ -906,18 +906,58 @@ VpnBridgeStatus vpn_bridge_get_status(const VpnBridgeClient* client) {
         return VPN_STATUS_ERROR;
     }
     
-    // If we have an active session, check its real status
+    // Cast away const to allow status updates during health checks
+    VpnBridgeClient* mutable_client = (VpnBridgeClient*)client;
+    
+    // If we have an active session, check its real-time health
     if (client->softether_session) {
         SESSION* s = client->softether_session;
         
-        if (s->ClientStatus == CLIENT_STATUS_ESTABLISHED) {
+        // Lock and read session state atomically
+        Lock(s->lock);
+        bool halted = s->Halt;
+        UINT session_status = s->ClientStatus;
+        Unlock(s->lock);
+        
+        if (session_status == CLIENT_STATUS_ESTABLISHED) {
             return VPN_STATUS_CONNECTED;
-        } else if (s->ClientStatus == CLIENT_STATUS_CONNECTING ||
-                   s->ClientStatus == CLIENT_STATUS_NEGOTIATION ||
-                   s->ClientStatus == CLIENT_STATUS_AUTH) {
+        } else if (session_status == CLIENT_STATUS_CONNECTING ||
+                   session_status == CLIENT_STATUS_NEGOTIATION ||
+                   session_status == CLIENT_STATUS_AUTH) {
             return VPN_STATUS_CONNECTING;
-        } else if (s->Halt || s->ClientStatus == CLIENT_STATUS_IDLE) {
-            return VPN_STATUS_ERROR;
+        } else if (halted || session_status == CLIENT_STATUS_IDLE) {
+            // Session died! Update our status to trigger reconnection
+            if (mutable_client->status == VPN_STATUS_CONNECTED) {
+                LOG_WARN("VPN", "Session died (Halt=%d, Status=%u), triggering reconnection", 
+                         halted, session_status);
+                
+                // Update status to disconnected
+                mutable_client->status = VPN_STATUS_DISCONNECTED;
+                
+                // Update reconnection state
+                mutable_client->last_disconnect_time = get_current_time_ms();
+                mutable_client->consecutive_failures++;
+                mutable_client->reconnect_attempt++;
+                mutable_client->current_backoff_seconds = vpn_bridge_calculate_backoff(mutable_client);
+                mutable_client->next_reconnect_time = mutable_client->last_disconnect_time + 
+                                                      (mutable_client->current_backoff_seconds * 1000);
+                
+                if (mutable_client->reconnect_enabled && !mutable_client->user_requested_disconnect) {
+                    if (mutable_client->max_reconnect_attempts == 0) {
+                        LOG_INFO("VPN", "Will retry connection in %u seconds (attempt %u, unlimited retries)",
+                                 mutable_client->current_backoff_seconds, mutable_client->reconnect_attempt);
+                    } else if (mutable_client->reconnect_attempt < mutable_client->max_reconnect_attempts) {
+                        LOG_INFO("VPN", "Will retry connection in %u seconds (attempt %u/%u)",
+                                 mutable_client->current_backoff_seconds, 
+                                 mutable_client->reconnect_attempt,
+                                 mutable_client->max_reconnect_attempts);
+                    } else {
+                        LOG_WARN("VPN", "Max reconnection attempts (%u) will be exceeded on next attempt",
+                                 mutable_client->max_reconnect_attempts);
+                    }
+                }
+            }
+            return VPN_STATUS_DISCONNECTED;
         }
     }
     
