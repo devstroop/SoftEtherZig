@@ -217,6 +217,15 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
         vpn_bridge_disconnect(client);
     }
     
+    // Free DNS servers (FIX LEAK #1)
+    for (int i = 0; i < client->dns_server_count; i++) {
+        if (client->dns_servers[i]) {
+            Free(client->dns_servers[i]);
+            client->dns_servers[i] = NULL;
+        }
+    }
+    client->dns_server_count = 0;
+    
     // Free real SoftEther CLIENT structure
     // NOTE: If we already disconnected, skip CiCleanupClient as it may access freed resources
     if (client->softether_client && client->status != VPN_STATUS_DISCONNECTED) {
@@ -455,6 +464,9 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     pa = NEW_PACKET_ADAPTER();
     if (!pa) {
         LOG_ERROR("VPN", "Failed to create packet adapter");
+        // FIX LEAK #2: Clean up allocated structures
+        Free(opt);
+        Free(auth);
         DeleteLock(account->lock);
         Free(account);
         client->last_error = VPN_BRIDGE_ERROR_CONNECT_FAILED;
@@ -479,6 +491,9 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     if (!session) {
         LOG_ERROR("VPN", "Failed to create VPN session");
         FreePacketAdapter(pa);
+        // FIX LEAK #3: Clean up allocated structures
+        Free(opt);
+        Free(auth);
         DeleteLock(account->lock);
         Free(account);
         client->last_error = VPN_BRIDGE_ERROR_CONNECT_FAILED;
