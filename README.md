@@ -19,6 +19,7 @@ SoftEtherZig is a clean, modern VPN client written in Zig that provides a high-l
 - 🛠️ **Dual Interface**: Both CLI tool and embeddable library
 - 🔧 **Easy Integration**: Clean Zig API for custom applications
 - 📦 **Self-Contained**: No external dependencies except OpenSSL
+- 🌉 **Dual Mode Support**: SecureNAT (Layer 3) and Local Bridge (Layer 2) modes
 
 ## Quick Start
 
@@ -391,6 +392,19 @@ The SoftEther VPN components are licensed under Apache License 2.0 by the SoftEt
 - [SoftEther VPN Official](https://www.softether.org/) - Original SoftEther VPN
 - [Zig Language](https://ziglang.org/) - Programming language
 - [OpenSSL](https://www.openssl.org/) - Cryptography toolkit
+
+## Documentation
+
+### Server Mode Comparison
+- **[DOCS_INDEX.md](DOCS_INDEX.md)** - Documentation navigation and overview
+- **[SECURENAT_VS_LOCALBRIDGE.md](SECURENAT_VS_LOCALBRIDGE.md)** - Complete technical comparison of server modes
+- **[LOCALBRIDGE_QUICKREF.md](LOCALBRIDGE_QUICKREF.md)** - Quick reference for Local Bridge implementation
+- **[PACKET_FLOW_DIAGRAMS.md](PACKET_FLOW_DIAGRAMS.md)** - Visual diagrams of packet flows
+
+### Architecture
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Cross-platform architecture
+- **[PROGRESS.md](PROGRESS.md)** - Implementation progress and roadmap
+- **[ZigTapTun/](ZigTapTun/)** - Layer 2/3 translation library
 
 ---
 
