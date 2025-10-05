@@ -8,6 +8,18 @@ const types = @import("types.zig");
 const VpnError = errors.VpnError;
 const ConnectionConfig = config.ConnectionConfig;
 
+/// Reconnection state information
+pub const ReconnectInfo = struct {
+    enabled: bool,
+    should_reconnect: bool, // True if reconnection should be attempted
+    attempt: u32, // Current attempt number
+    max_attempts: u32, // Maximum attempts (0=infinite)
+    current_backoff: u32, // Current backoff delay in seconds
+    next_retry_time: u64, // Timestamp when next retry should occur
+    consecutive_failures: u32, // Count of consecutive failures
+    last_disconnect_time: u64, // When connection was lost
+};
+
 /// VPN Client wrapper using the C bridge layer
 pub const VpnClient = struct {
     handle: ?*c_mod.VpnBridgeClient,
@@ -291,5 +303,91 @@ pub const VpnClient = struct {
             return mac;
         }
         return null;
+    }
+
+    // ============================================
+    // Reconnection Management
+    // ============================================
+
+    /// Enable automatic reconnection with specified parameters.
+    pub fn enableReconnect(
+        self: *VpnClient,
+        max_attempts: u32,
+        min_backoff: u32,
+        max_backoff: u32,
+    ) !void {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        const result = c.vpn_bridge_enable_reconnect(
+            handle,
+            max_attempts,
+            min_backoff,
+            max_backoff,
+        );
+
+        if (result != 0) {
+            return VpnError.ConnectionFailed;
+        }
+    }
+
+    /// Disable automatic reconnection.
+    pub fn disableReconnect(self: *VpnClient) !void {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        const result = c.vpn_bridge_disable_reconnect(handle);
+
+        if (result != 0) {
+            return VpnError.ConnectionFailed;
+        }
+    }
+
+    /// Get current reconnection state and determine if reconnection should occur.
+    pub fn getReconnectInfo(self: *const VpnClient) !ReconnectInfo {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        var enabled: u8 = 0;
+        var attempt: u32 = 0;
+        var max_attempts: u32 = 0;
+        var current_backoff: u32 = 0;
+        var next_retry_time: u64 = 0;
+        var consecutive_failures: u32 = 0;
+        var last_disconnect_time: u64 = 0;
+
+        const result = c.vpn_bridge_get_reconnect_info(
+            handle,
+            &enabled,
+            &attempt,
+            &max_attempts,
+            &current_backoff,
+            &next_retry_time,
+            &consecutive_failures,
+            &last_disconnect_time,
+        );
+
+        if (result < 0) {
+            return VpnError.ConnectionFailed;
+        }
+
+        return ReconnectInfo{
+            .enabled = enabled != 0,
+            .should_reconnect = result == 1,
+            .attempt = attempt,
+            .max_attempts = max_attempts,
+            .current_backoff = current_backoff,
+            .next_retry_time = next_retry_time,
+            .consecutive_failures = consecutive_failures,
+            .last_disconnect_time = last_disconnect_time,
+        };
+    }
+
+    /// Mark current disconnect as user-requested (prevents reconnection).
+    pub fn markUserDisconnect(self: *VpnClient) !void {
+        const handle = self.handle orelse return VpnError.InitializationFailed;
+
+        const result = c.vpn_bridge_mark_user_disconnect(handle);
+
+        if (result != 0) {
+            return VpnError.ConnectionFailed;
+        }
     }
 };

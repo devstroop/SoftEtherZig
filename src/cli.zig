@@ -35,6 +35,9 @@ fn signalHandler(sig: c_int) callconv(.c) void {
 
     // Trigger immediate cleanup if we have a client reference
     if (g_client) |vpn_client| {
+        // Mark as user-requested disconnect to prevent reconnection
+        vpn_client.markUserDisconnect() catch {};
+
         std.debug.print("[●] Cleaning up VPN connection...\n", .{});
         vpn_client.deinit();
         std.debug.print("[✓] VPN connection terminated\n", .{});
@@ -65,6 +68,15 @@ fn printUsage() void {
         \\    --profile               Enable performance profiling
         \\    --use-zig-adapter       Use Zig packet adapter (experimental, better performance)
         \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
+        \\
+        \\  Reconnection Options:
+        \\    --reconnect             Enable automatic reconnection (default: enabled)
+        \\    --no-reconnect          Disable automatic reconnection
+        \\    --max-retries <N>       Maximum reconnection attempts, 0=infinite (default: 0)
+        \\    --min-backoff <SEC>     Minimum backoff delay in seconds (default: 5)
+        \\    --max-backoff <SEC>     Maximum backoff delay in seconds (default: 300)
+        \\
+        \\  IP Configuration:
         \\    --ip-version <VERSION>  IP version: auto, ipv4, ipv6, dual (default: auto)
         \\    --static-ipv4 <IP>      Static IPv4 address (e.g., 10.0.0.2)
         \\    --static-ipv4-netmask <MASK>  Static IPv4 netmask (e.g., 255.255.255.0)
@@ -123,6 +135,14 @@ const CliArgs = struct {
     profile: bool = false, // Enable performance profiling
     use_zig_adapter: bool = false, // Use Zig packet adapter instead of C adapter
     log_level: []const u8 = "info",
+
+    // Reconnection settings
+    reconnect: bool = true, // Enable automatic reconnection
+    max_reconnect_attempts: u32 = 0, // Max retry attempts (0=infinite)
+    min_backoff: u32 = 5, // Min backoff delay in seconds
+    max_backoff: u32 = 300, // Max backoff delay in seconds
+
+    // IP configuration
     ip_version: []const u8 = "auto",
     static_ipv4: ?[]const u8 = null,
     static_ipv4_netmask: ?[]const u8 = null,
@@ -192,6 +212,27 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.use_zig_adapter = true;
         } else if (std.mem.eql(u8, arg, "--log-level")) {
             result.log_level = args.next() orelse return error.MissingLogLevel;
+        } else if (std.mem.eql(u8, arg, "--reconnect")) {
+            result.reconnect = true;
+        } else if (std.mem.eql(u8, arg, "--no-reconnect")) {
+            result.reconnect = false;
+        } else if (std.mem.eql(u8, arg, "--max-retries")) {
+            const max_retries_str = args.next() orelse return error.MissingMaxRetries;
+            result.max_reconnect_attempts = try std.fmt.parseInt(u32, max_retries_str, 10);
+        } else if (std.mem.eql(u8, arg, "--min-backoff")) {
+            const min_backoff_str = args.next() orelse return error.MissingMinBackoff;
+            result.min_backoff = try std.fmt.parseInt(u32, min_backoff_str, 10);
+            if (result.min_backoff == 0) {
+                std.debug.print("Error: min-backoff must be > 0\n", .{});
+                return error.InvalidMinBackoff;
+            }
+        } else if (std.mem.eql(u8, arg, "--max-backoff")) {
+            const max_backoff_str = args.next() orelse return error.MissingMaxBackoff;
+            result.max_backoff = try std.fmt.parseInt(u32, max_backoff_str, 10);
+            if (result.max_backoff == 0) {
+                std.debug.print("Error: max-backoff must be > 0\n", .{});
+                return error.InvalidMaxBackoff;
+            }
         } else if (std.mem.eql(u8, arg, "--ip-version")) {
             result.ip_version = args.next() orelse return error.MissingIpVersion;
         } else if (std.mem.eql(u8, arg, "--static-ipv4")) {
@@ -547,18 +588,95 @@ pub fn main() !void {
     }
     std.debug.print("─────────────────────────────────────────────\n", .{});
 
-    // Keep connection alive until interrupted
+    // Configure reconnection
+    if (args.reconnect) {
+        try vpn_client.enableReconnect(
+            args.max_reconnect_attempts,
+            args.min_backoff,
+            args.max_backoff,
+        );
+        if (args.max_reconnect_attempts > 0) {
+            std.debug.print("Auto-reconnect enabled (max {d} attempts, backoff {d}-{d}s)\n", .{ args.max_reconnect_attempts, args.min_backoff, args.max_backoff });
+        } else {
+            std.debug.print("Auto-reconnect enabled (unlimited, backoff {d}-{d}s)\n", .{ args.min_backoff, args.max_backoff });
+        }
+    } else {
+        try vpn_client.disableReconnect();
+        std.debug.print("Auto-reconnect disabled\n", .{});
+    }
+
+    // Main monitoring/reconnection loop
     if (args.profile) {
         monitorWithProfiling(allocator, &vpn_client);
     } else {
-        while (vpn_client.isConnected() and g_running.load(.acquire)) {
-            std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms
+        // Main loop with reconnection support
+        while (g_running.load(.acquire)) {
+            if (vpn_client.isConnected()) {
+                // Connected - normal monitoring
+                std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms
+            } else {
+                // Disconnected - check if we should reconnect
+                const reconnect_info = vpn_client.getReconnectInfo() catch {
+                    std.debug.print("[!] Failed to get reconnection info\n", .{});
+                    break;
+                };
+
+                if (!reconnect_info.should_reconnect) {
+                    // User disconnect, disabled, or max retries exceeded
+                    if (reconnect_info.enabled and
+                        reconnect_info.max_attempts > 0 and
+                        reconnect_info.attempt >= reconnect_info.max_attempts)
+                    {
+                        std.debug.print("\n[!] Max reconnection attempts ({d}) exceeded\n", .{reconnect_info.max_attempts});
+                    }
+                    break;
+                }
+
+                // Calculate how long to wait
+                const current_time: u64 = @intCast(std.time.milliTimestamp());
+                if (current_time < reconnect_info.next_retry_time) {
+                    const wait_ms: u64 = reconnect_info.next_retry_time - current_time;
+                    const wait_s = wait_ms / 1000;
+
+                    if (reconnect_info.max_attempts > 0) {
+                        std.debug.print("\n[●] Connection lost, reconnecting in {d}s (attempt {d}/{d})...\n", .{ wait_s, reconnect_info.attempt + 1, reconnect_info.max_attempts });
+                    } else {
+                        std.debug.print("\n[●] Connection lost, reconnecting in {d}s (attempt {d})...\n", .{ wait_s, reconnect_info.attempt + 1 });
+                    }
+
+                    // Wait with periodic checks for Ctrl+C
+                    var remaining_ms = wait_ms;
+                    while (remaining_ms > 0 and g_running.load(.acquire)) {
+                        const sleep_ms = @min(remaining_ms, 500);
+                        const sleep_ns: u64 = @as(u64, sleep_ms) * @as(u64, std.time.ns_per_ms);
+                        std.Thread.sleep(sleep_ns);
+                        remaining_ms -|= sleep_ms;
+                    }
+
+                    if (!g_running.load(.acquire)) {
+                        break; // User pressed Ctrl+C during wait
+                    }
+                }
+
+                // Attempt reconnection
+                std.debug.print("[●] Reconnecting...\n", .{});
+                vpn_client.connect() catch |err| {
+                    std.debug.print("[!] Reconnection failed: {}\n", .{err});
+                    continue; // Will retry in next iteration
+                };
+
+                std.debug.print("[✓] Reconnection successful!\n", .{});
+            }
         }
     }
 
     // Only cleanup if signal handler hasn't already done it
     if (!g_cleanup_done.load(.acquire)) {
-        std.debug.print("\n[●] Connection lost, cleaning up...\n", .{});
+        if (vpn_client.isConnected()) {
+            std.debug.print("\n[●] Disconnecting...\n", .{});
+        } else {
+            std.debug.print("\n[●] Cleaning up...\n", .{});
+        }
         g_cleanup_done.store(true, .release);
         vpn_client.deinit();
         std.debug.print("[✓] Cleanup complete\n", .{});

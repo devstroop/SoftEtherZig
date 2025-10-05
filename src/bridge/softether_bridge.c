@@ -89,6 +89,20 @@ struct VpnBridgeClient {
     uint64_t bytes_received;
     uint64_t connect_time;
     
+    // Reconnection Configuration
+    int reconnect_enabled;              // 0=disabled, 1=enabled
+    uint32_t max_reconnect_attempts;    // 0=infinite, >0=max retries
+    uint32_t min_backoff_seconds;       // Minimum backoff delay (default: 5)
+    uint32_t max_backoff_seconds;       // Maximum backoff delay (default: 300)
+    
+    // Reconnection Runtime State
+    uint32_t reconnect_attempt;         // Current attempt number (0=no reconnection yet)
+    uint32_t current_backoff_seconds;   // Current backoff delay
+    uint64_t last_disconnect_time;      // Timestamp when connection was lost (milliseconds since epoch)
+    uint64_t next_reconnect_time;       // Timestamp when next reconnect should occur
+    int user_requested_disconnect;      // 1=user pressed Ctrl+C, 0=network failure
+    uint32_t consecutive_failures;      // Count of consecutive connection failures
+    
     // SoftEther internal handles
     CLIENT* softether_client;
     ACCOUNT* softether_account;
@@ -159,6 +173,26 @@ uint32_t vpn_bridge_is_initialized(void) {
 }
 
 /* ============================================
+ * Helper Functions
+ * ============================================ */
+
+/**
+ * Get current time in milliseconds since epoch
+ */
+static uint64_t get_current_time_ms(void) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t time = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return time / 10000 - 11644473600000ULL; // Convert from 100ns intervals since 1601 to ms since 1970
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+#endif
+}
+
+/* ============================================
  * Client Management
  * ============================================ */
 
@@ -194,6 +228,18 @@ VpnBridgeClient* vpn_bridge_create_client(void) {
     for (int i = 0; i < 8; i++) {
         client->dns_servers[i] = NULL;
     }
+    
+    // Initialize reconnection state (default: enabled, infinite retries)
+    client->reconnect_enabled = 1;
+    client->max_reconnect_attempts = 0;  // 0 = infinite
+    client->min_backoff_seconds = 5;
+    client->max_backoff_seconds = 300;
+    client->reconnect_attempt = 0;
+    client->current_backoff_seconds = 0;
+    client->last_disconnect_time = 0;
+    client->next_reconnect_time = 0;
+    client->user_requested_disconnect = 0;
+    client->consecutive_failures = 0;
     
     // Create real SoftEther CLIENT structure
     client->softether_client = CiNewClient();
@@ -245,6 +291,167 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
     
     free(client);
     LOG_DEBUG("VPN", "Client freed successfully");
+}
+
+/* ============================================
+ * Reconnection Management
+ * ============================================ */
+
+/**
+ * Enable automatic reconnection for a VPN client.
+ */
+int vpn_bridge_enable_reconnect(
+    VpnBridgeClient* client,
+    uint32_t max_attempts,
+    uint32_t min_backoff,
+    uint32_t max_backoff
+) {
+    if (!client) {
+        LOG_ERROR("VPN", "vpn_bridge_enable_reconnect: NULL client");
+        return -1;
+    }
+    
+    client->reconnect_enabled = 1;
+    client->max_reconnect_attempts = max_attempts;
+    client->min_backoff_seconds = min_backoff > 0 ? min_backoff : 5;
+    client->max_backoff_seconds = max_backoff > 0 ? max_backoff : 300;
+    
+    // Ensure min <= max
+    if (client->min_backoff_seconds > client->max_backoff_seconds) {
+        client->min_backoff_seconds = client->max_backoff_seconds;
+    }
+    
+    LOG_INFO("VPN", "Auto-reconnect enabled: max_attempts=%u (0=infinite), backoff=%u-%u seconds",
+        max_attempts, client->min_backoff_seconds, client->max_backoff_seconds);
+    
+    return 0;
+}
+
+/**
+ * Disable automatic reconnection for a VPN client.
+ */
+int vpn_bridge_disable_reconnect(VpnBridgeClient* client) {
+    if (!client) {
+        LOG_ERROR("VPN", "vpn_bridge_disable_reconnect: NULL client");
+        return -1;
+    }
+    
+    client->reconnect_enabled = 0;
+    LOG_INFO("VPN", "Auto-reconnect disabled");
+    
+    return 0;
+}
+
+/**
+ * Calculate next backoff delay using exponential backoff algorithm.
+ * Formula: delay = min(min_backoff * (2 ^ (attempt - 1)), max_backoff)
+ */
+uint32_t vpn_bridge_calculate_backoff(const VpnBridgeClient* client) {
+    if (!client || client->reconnect_attempt == 0) {
+        return 0;  // First connection has no delay
+    }
+    
+    // Start with minimum backoff
+    uint32_t delay = client->min_backoff_seconds;
+    
+    // Apply exponential growth: multiply by 2 for each attempt
+    for (uint32_t i = 1; i < client->reconnect_attempt; i++) {
+        delay *= 2;
+        if (delay >= client->max_backoff_seconds) {
+            return client->max_backoff_seconds;
+        }
+    }
+    
+    return delay;
+}
+
+/**
+ * Reset reconnection state after successful connection.
+ */
+int vpn_bridge_reset_reconnect_state(VpnBridgeClient* client) {
+    if (!client) {
+        return -1;
+    }
+    
+    client->reconnect_attempt = 0;
+    client->current_backoff_seconds = 0;
+    client->consecutive_failures = 0;
+    client->last_disconnect_time = 0;
+    client->next_reconnect_time = 0;
+    client->user_requested_disconnect = 0;
+    
+    LOG_DEBUG("VPN", "Reconnection state reset");
+    
+    return 0;
+}
+
+/**
+ * Mark a disconnect as user-requested (e.g., Ctrl+C).
+ * This prevents automatic reconnection.
+ */
+int vpn_bridge_mark_user_disconnect(VpnBridgeClient* client) {
+    if (!client) {
+        return -1;
+    }
+    
+    client->user_requested_disconnect = 1;
+    LOG_DEBUG("VPN", "Marked as user-requested disconnect");
+    
+    return 0;
+}
+
+/**
+ * Get reconnection state and configuration.
+ * 
+ * @return 1 if should reconnect, 0 if should not reconnect, -1 on error
+ */
+int vpn_bridge_get_reconnect_info(
+    const VpnBridgeClient* client,
+    uint8_t* enabled,
+    uint32_t* attempt,
+    uint32_t* max_attempts,
+    uint32_t* current_backoff,
+    uint64_t* next_retry_time,
+    uint32_t* consecutive_failures,
+    uint64_t* last_disconnect_time
+) {
+    if (!client) {
+        return -1;
+    }
+    
+    // Fill output parameters
+    if (enabled) *enabled = client->reconnect_enabled;
+    if (attempt) *attempt = client->reconnect_attempt;
+    if (max_attempts) *max_attempts = client->max_reconnect_attempts;
+    if (current_backoff) *current_backoff = client->current_backoff_seconds;
+    if (next_retry_time) *next_retry_time = client->next_reconnect_time;
+    if (consecutive_failures) *consecutive_failures = client->consecutive_failures;
+    if (last_disconnect_time) *last_disconnect_time = client->last_disconnect_time;
+    
+    // Determine if should reconnect
+    // Don't reconnect if:
+    // 1. Reconnect is disabled
+    // 2. User requested disconnect
+    // 3. Max attempts exceeded (if max_attempts > 0)
+    
+    if (!client->reconnect_enabled) {
+        LOG_DEBUG("VPN", "Should not reconnect: disabled");
+        return 0;
+    }
+    
+    if (client->user_requested_disconnect) {
+        LOG_DEBUG("VPN", "Should not reconnect: user requested disconnect");
+        return 0;
+    }
+    
+    if (client->max_reconnect_attempts > 0 && 
+        client->reconnect_attempt >= client->max_reconnect_attempts) {
+        LOG_WARN("VPN", "Max reconnection attempts (%u) exceeded", client->max_reconnect_attempts);
+        return 0;
+    }
+    
+    // Should reconnect
+    return 1;
 }
 
 /* ============================================
@@ -331,6 +538,16 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     
     if (client->status == VPN_STATUS_CONNECTED) {
         return VPN_BRIDGE_SUCCESS; // Already connected
+    }
+    
+    // Log reconnection attempt if this is not the first connection
+    if (client->reconnect_attempt > 0) {
+        if (client->max_reconnect_attempts > 0) {
+            LOG_INFO("VPN", "Reconnection attempt %u/%u", 
+                client->reconnect_attempt, client->max_reconnect_attempts);
+        } else {
+            LOG_INFO("VPN", "Reconnection attempt %u (unlimited)", client->reconnect_attempt);
+        }
     }
     
     // Validate configuration
@@ -474,6 +691,13 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     pa = NEW_PACKET_ADAPTER();
     if (!pa) {
         LOG_ERROR("VPN", "Failed to create packet adapter");
+        
+        // Update reconnection state
+        client->consecutive_failures++;
+        client->last_disconnect_time = get_current_time_ms();
+        client->current_backoff_seconds = vpn_bridge_calculate_backoff(client);
+        client->next_reconnect_time = client->last_disconnect_time + (client->current_backoff_seconds * 1000);
+        
         // FIX LEAK #2: Clean up allocated structures
         Free(opt);
         Free(auth);
@@ -500,6 +724,13 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     
     if (!session) {
         LOG_ERROR("VPN", "Failed to create VPN session");
+        
+        // Update reconnection state
+        client->consecutive_failures++;
+        client->last_disconnect_time = get_current_time_ms();
+        client->current_backoff_seconds = vpn_bridge_calculate_backoff(client);
+        client->next_reconnect_time = client->last_disconnect_time + (client->current_backoff_seconds * 1000);
+        
         FreePacketAdapter(pa);
         // FIX LEAK #3: Clean up allocated structures
         Free(opt);
@@ -569,9 +800,26 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         client->status = VPN_STATUS_CONNECTED;
         client->last_error = VPN_BRIDGE_SUCCESS;
         client->connect_time = Tick64();
+        
+        // Reset reconnection state on successful connection
+        vpn_bridge_reset_reconnect_state(client);
+        
         return VPN_BRIDGE_SUCCESS;
     } else {
         LOG_ERROR("VPN", "Connection failed or timeout after 30 seconds");
+        
+        // Update reconnection state
+        client->consecutive_failures++;
+        client->last_disconnect_time = get_current_time_ms();
+        client->current_backoff_seconds = vpn_bridge_calculate_backoff(client);
+        client->next_reconnect_time = client->last_disconnect_time + (client->current_backoff_seconds * 1000);
+        
+        if (client->reconnect_enabled && !client->user_requested_disconnect) {
+            if (client->max_reconnect_attempts == 0 || 
+                client->reconnect_attempt < client->max_reconnect_attempts) {
+                LOG_WARN("VPN", "Will retry in %u seconds", client->current_backoff_seconds);
+            }
+        }
         
         // Cleanup failed connection
         StopSession(session);
@@ -598,6 +846,9 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
     if (!client) {
         return VPN_BRIDGE_ERROR_INVALID_PARAM;
     }
+    
+    // Mark as user-requested disconnect to prevent reconnection
+    vpn_bridge_mark_user_disconnect(client);
     
     if (client->status != VPN_STATUS_CONNECTED) {
         return VPN_BRIDGE_ERROR_NOT_CONNECTED;

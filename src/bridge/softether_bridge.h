@@ -400,6 +400,84 @@ int vpn_bridge_set_static_ipv6(VpnBridgeClient* client, const char* ip, uint8_t 
  */
 int vpn_bridge_set_dns_servers(VpnBridgeClient* client, const char** dns_servers, int count);
 
+/* ============================================
+ * Reconnection Management
+ * ============================================ */
+
+/**
+ * Enable automatic reconnection for a VPN client.
+ * 
+ * @param client       The VPN client
+ * @param max_attempts Maximum reconnection attempts (0 = infinite)
+ * @param min_backoff  Minimum backoff delay in seconds (default: 5)
+ * @param max_backoff  Maximum backoff delay in seconds (default: 300)
+ * @return 0 on success, -1 on error
+ */
+int vpn_bridge_enable_reconnect(
+    VpnBridgeClient* client,
+    uint32_t max_attempts,
+    uint32_t min_backoff,
+    uint32_t max_backoff
+);
+
+/**
+ * Disable automatic reconnection for a VPN client.
+ * 
+ * @param client The VPN client
+ * @return 0 on success, -1 on error
+ */
+int vpn_bridge_disable_reconnect(VpnBridgeClient* client);
+
+/**
+ * Get reconnection state and configuration.
+ * 
+ * @param client                The VPN client
+ * @param enabled               Output: 1 if reconnect enabled, 0 if disabled
+ * @param attempt               Output: Current attempt number
+ * @param max_attempts          Output: Max attempts (0=infinite)
+ * @param current_backoff       Output: Current backoff delay in seconds
+ * @param next_retry_time       Output: When next retry should occur (ms since epoch)
+ * @param consecutive_failures  Output: Count of consecutive failures
+ * @param last_disconnect_time  Output: When connection was lost (ms since epoch)
+ * @return 1 if should reconnect, 0 if should not reconnect, -1 on error
+ */
+int vpn_bridge_get_reconnect_info(
+    const VpnBridgeClient* client,
+    uint8_t* enabled,
+    uint32_t* attempt,
+    uint32_t* max_attempts,
+    uint32_t* current_backoff,
+    uint64_t* next_retry_time,
+    uint32_t* consecutive_failures,
+    uint64_t* last_disconnect_time
+);
+
+/**
+ * Mark a disconnect as user-requested (e.g., Ctrl+C).
+ * This prevents automatic reconnection.
+ * 
+ * @param client The VPN client
+ * @return 0 on success, -1 on error
+ */
+int vpn_bridge_mark_user_disconnect(VpnBridgeClient* client);
+
+/**
+ * Calculate next backoff delay using exponential backoff algorithm.
+ * Formula: delay = min(min_backoff * (2 ^ attempt), max_backoff)
+ * 
+ * @param client The VPN client
+ * @return Calculated backoff delay in seconds
+ */
+uint32_t vpn_bridge_calculate_backoff(const VpnBridgeClient* client);
+
+/**
+ * Reset reconnection state after successful connection.
+ * 
+ * @param client The VPN client
+ * @return 0 on success, -1 on error
+ */
+int vpn_bridge_reset_reconnect_state(VpnBridgeClient* client);
+
 #ifdef __cplusplus
 }
 #endif
