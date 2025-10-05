@@ -986,8 +986,7 @@ void ClientAdditionalConnectChance(SESSION *s)
 		// Consider whether there is a need to put an additional connection
 		// by examining the number of current connections and MaxConnection property
 		UINT current_conn = Count(s->Connection->CurrentNumConnection);
-		Debug("ClientAdditionalThreadProc: current=%u, max=%u, checking if need additional", 
-		      current_conn, s->MaxConnection);
+		
 		if (current_conn < s->MaxConnection)
 		{
 			// Get the current time
@@ -1000,8 +999,6 @@ void ClientAdditionalConnectChance(SESSION *s)
 				(s->NextConnectionTime <= now))
 			{
 				// Start the work to put an additional connection
-				Debug("Attempting additional connection (current: %u, max: %u)", 
-				      current_conn, s->MaxConnection);
 				s->NextConnectionTime = now + ((UINT64)s->ClientOption->AdditionalConnectionInterval * (UINT64)1000);
 				SessionAdditionalConnect(s);
 			}
@@ -1012,8 +1009,7 @@ void ClientAdditionalConnectChance(SESSION *s)
 		}
 		else
 		{
-			Debug("No additional connection needed (current=%u >= max=%u)", 
-			      current_conn, s->MaxConnection);
+			// No additional connection needed (current >= max)
 			break;
 		}
 	}

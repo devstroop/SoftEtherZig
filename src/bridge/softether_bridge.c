@@ -6,6 +6,7 @@
 
 #include "softether_bridge.h"
 #include "logging.h"
+#include "security_utils.h"  // Secure password handling
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -33,10 +34,10 @@
     
     #if USE_ZIG_ADAPTER
         #define NEW_PACKET_ADAPTER() NewZigPacketAdapter()
-        #pragma message("Building with Zig packet adapter")
+        // Building with Zig packet adapter
     #else
         #define NEW_PACKET_ADAPTER() NewMacOsTunAdapter()
-        #pragma message("Building with C packet adapter")
+        // Building with C packet adapter
     #endif
 #elif defined(UNIX_LINUX)
     #include "packet_adapter_linux.h"
@@ -239,8 +240,8 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
         }
     }
     
-    // Clear sensitive data
-    memset(client->password, 0, sizeof(client->password));
+    // Clear sensitive data securely (cannot be optimized away)
+    secure_zero_explicit(client->password, sizeof(client->password));
     
     free(client);
     LOG_DEBUG("VPN", "Client freed successfully");
@@ -401,11 +402,12 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     if (client->password_is_hashed) {
         // Password is already hashed (base64-encoded SHA1)
         // Decode base64 to get the 20-byte SHA1 hash
-        printf("[vpn_bridge_connect] Using pre-hashed password (base64-encoded)\n");
-        fflush(stdout);
+        LOG_DEBUG("VPN", "Using pre-hashed password (base64-encoded)");
         
-        // Decode base64
+        // Decode base64 into secure buffer
         char decoded[256];
+        secure_lock_memory(decoded, sizeof(decoded));  // Lock in memory (prevent swap)
+        
         int decoded_len = B64_Decode(decoded, client->password, strlen(client->password));
         
         if (decoded_len == 20) {
@@ -417,10 +419,18 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
             // Fall back to hashing the password string itself
             HashPassword(auth->HashedPassword, client->username, client->password);
         }
+        
+        // Securely zero and unlock the decoded password
+        secure_zero_explicit(decoded, sizeof(decoded));
+        secure_unlock_memory(decoded, sizeof(decoded));
+        
     } else {
         // Plain password - hash it using SoftEther's method
         LOG_DEBUG("VPN", "Hashing plaintext password");
         HashPassword(auth->HashedPassword, client->username, client->password);
+        
+        // Securely zero the plaintext password immediately after hashing
+        secure_zero_explicit(client->password, sizeof(client->password));
     }
     
     LOG_DEBUG("VPN", "Authentication configured: user=%s, type=PASSWORD", auth->Username);
