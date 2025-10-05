@@ -135,12 +135,14 @@ openssl version  # Should be 3.x
 ### Swift Side (PacketTunnelProvider)
 
 ```swift
+// IMPORTANT: Load credentials from secure storage (Keychain), NOT hardcoded!
+// See SECURITY.md for best practices
 let config: [String: Any] = [
-    "server": "worxvpn.662.cloud",
+    "server": "vpn.example.com",  // Load from Keychain
     "port": 443,
     "hub": "VPN",
-    "username": "devstroop",
-    "password_hash": "<base64-encoded-sha0>",
+    "username": "your_username",  // Load from Keychain
+    "password_hash": "your_hash_here",  // Load from Keychain, use --gen-hash
     "use_encrypt": true,
     "use_compress": false,
     "max_connections": 8

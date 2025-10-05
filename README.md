@@ -5,6 +5,23 @@ A modern, cross-platform VPN client implementation in Zig, wrapping the SoftEthe
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Zig Version](https://img.shields.io/badge/zig-0.15.1+-blue)](https://ziglang.org/)
 
+## 🔒 Security Notice
+
+**IMPORTANT**: Never use plaintext passwords on the command line! See [SECURITY.md](SECURITY.md) for secure credential management best practices.
+
+**Recommended**: Use pre-hashed passwords or environment variables:
+```bash
+# Generate hash (do this once)
+./vpnclient --gen-hash username password
+
+# Use hash instead of plaintext password
+./vpnclient -u username --password-hash "your_hash_here"
+
+# Or use environment variables
+export SOFTETHER_PASSWORD_HASH="your_hash_here"
+./vpnclient
+```
+
 ## Overview
 
 SoftEtherZig is a clean, modern VPN client written in Zig that provides a high-level interface to the battle-tested SoftEther VPN protocol. It combines the performance and safety of Zig with the proven reliability of SoftEther VPN's C codebase.
@@ -31,9 +48,22 @@ cd SoftEtherZig
 # Build the client
 zig build -Doptimize=ReleaseFast
 
-# Connect to a VPN server
-sudo ./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u username -P password
+# Generate password hash (recommended for security)
+./zig-out/bin/vpnclient --gen-hash username password
+# Copy the generated hash
+
+# Connect to a VPN server (using hash)
+sudo ./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u username --password-hash "your_hash_here"
+
+# Or use environment variables (most secure)
+export SOFTETHER_SERVER="vpn.example.com"
+export SOFTETHER_HUB="VPN"
+export SOFTETHER_USER="username"
+export SOFTETHER_PASSWORD_HASH="your_hash_here"
+sudo -E ./zig-out/bin/vpnclient
 ```
+
+> ⚠️ **Security Warning**: The examples in the rest of this README may show `-P password` for simplicity, but you should **always use `--password-hash`** in production. See [SECURITY.md](SECURITY.md) for details.
 
 ## Installation
 

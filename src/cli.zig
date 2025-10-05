@@ -87,6 +87,16 @@ fn printUsage() void {
         \\    --dns-server <SERVER>   DNS server (can be specified multiple times)
         \\    --gen-hash <USER> <PASS> Generate password hash and exit
         \\
+        \\ENVIRONMENT VARIABLES:
+        \\    SOFTETHER_SERVER        VPN server hostname
+        \\    SOFTETHER_PORT          VPN server port
+        \\    SOFTETHER_HUB           Virtual hub name
+        \\    SOFTETHER_USER          Username
+        \\    SOFTETHER_PASSWORD      Password (plaintext, not recommended)
+        \\    SOFTETHER_PASSWORD_HASH Password hash (recommended, use --gen-hash)
+        \\
+        \\    Note: Command-line arguments override environment variables
+        \\
         \\EXAMPLES:
         \\    # Connect to VPN server
         \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass
@@ -96,6 +106,13 @@ fn printUsage() void {
         \\
         \\    # Generate password hash
         \\    vpnclient --gen-hash myuser mypassword
+        \\
+        \\    # Use environment variables (secure method)
+        \\    export SOFTETHER_SERVER="vpn.example.com"
+        \\    export SOFTETHER_HUB="VPN"
+        \\    export SOFTETHER_USER="myuser"
+        \\    export SOFTETHER_PASSWORD_HASH="base64hash..."
+        \\    vpnclient  # Credentials from environment
         \\
         \\    # Force IPv4 only
         \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass --ip-version ipv4
@@ -118,6 +135,11 @@ fn printUsage() void {
 fn printVersion() void {
     std.debug.print("SoftEther VPN Client v{s}\n", .{VERSION});
     std.debug.print("Based on SoftEther VPN 4.44 (Build 9807)\n", .{});
+}
+
+/// Get environment variable or return null
+fn getEnvVar(key: []const u8) ?[]const u8 {
+    return std.posix.getenv(key);
 }
 
 const CliArgs = struct {
@@ -166,8 +188,27 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
     defer dns_list.deinit(allocator);
     try dns_list.ensureTotalCapacity(allocator, 4);
 
-    var result = CliArgs{}; // Skip program name
-    _ = args.skip();
+    var result = CliArgs{};
+
+    // Phase 1: Load from environment variables (lowest priority)
+    if (getEnvVar("SOFTETHER_SERVER")) |val| result.server = val;
+    if (getEnvVar("SOFTETHER_PORT")) |val| {
+        result.port = std.fmt.parseInt(u16, val, 10) catch {
+            std.debug.print("Error: Invalid SOFTETHER_PORT value: {s}\n", .{val});
+            return error.InvalidPort;
+        };
+    }
+    if (getEnvVar("SOFTETHER_HUB")) |val| result.hub = val;
+    if (getEnvVar("SOFTETHER_USER")) |val| result.username = val;
+    if (getEnvVar("SOFTETHER_PASSWORD")) |val| {
+        result.password = val;
+        std.debug.print("⚠️  WARNING: Using plaintext password from SOFTETHER_PASSWORD\n", .{});
+        std.debug.print("    Consider using SOFTETHER_PASSWORD_HASH instead (run: vpnclient --gen-hash user pass)\n", .{});
+    }
+    if (getEnvVar("SOFTETHER_PASSWORD_HASH")) |val| result.password_hash = val;
+
+    // Phase 2: Parse command-line arguments (highest priority, override env vars)
+    _ = args.skip(); // Skip program name
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
