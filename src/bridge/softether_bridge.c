@@ -120,37 +120,19 @@ static const char* get_error_message_internal(int error_code) {
  * ============================================ */
 
 int vpn_bridge_init(uint32_t debug) {
-    LOG_VPN_DEBUG("vpn_bridge_init starting...\n");
-    fflush(stdout);
-    
-    LOG_VPN_DEBUG("Enabling minimal mode (skips hamcore/string tables)...\n");
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Initializing SoftEther client (minimal mode)");
     
     // Enable minimal mode BEFORE Init to skip hamcore.se2 and string table loading
     MayaquaMinimalMode();
     
-    LOG_VPN_DEBUG("Attempting client initialization...\n");
-    fflush(stdout);
-    
     // Provide a simple executable name - the exe path check is disabled in development mode
     char *fake_argv[] = { "vpnclient", NULL };
     
-    // Try full initialization with debug enabled
-    LOG_VPN_DEBUG("Calling InitMayaqua...\n");
-    fflush(stdout);
-    
+    // Initialize Mayaqua and Cedar libraries
     InitMayaqua(false, true, 1, fake_argv);
-    
-    LOG_VPN_INFO("✅ InitMayaqua completed successfully!\n");
-    fflush(stdout);
-    
-    LOG_VPN_DEBUG("Calling InitCedar...\n");
-    fflush(stdout);
-    
     InitCedar();
     
-    LOG_VPN_INFO("✅ InitCedar completed successfully!\n");
-    fflush(stdout);
+    LOG_INFO("VPN", "SoftEther client initialized successfully");
     
     g_initialized = 1;  // 1 = true
     return VPN_BRIDGE_SUCCESS;
@@ -180,22 +162,14 @@ uint32_t vpn_bridge_is_initialized(void) {
  * ============================================ */
 
 VpnBridgeClient* vpn_bridge_create_client(void) {
-    LOG_VPN_DEBUG("vpn_bridge_create_client called\n");
-    fflush(stdout);
-    
     if (!g_initialized) {
-        LOG_VPN_ERROR("Not initialized!\n");
-        fflush(stdout);
+        LOG_ERROR("VPN", "Cannot create client: library not initialized");
         return NULL;
     }
     
-    LOG_VPN_DEBUG("Allocating VpnBridgeClient structure...\n");
-    fflush(stdout);
-    
     VpnBridgeClient* client = (VpnBridgeClient*)calloc(1, sizeof(VpnBridgeClient));
     if (!client) {
-        LOG_VPN_ERROR("calloc failed!\n");
-        fflush(stdout);
+        LOG_ERROR("VPN", "Failed to allocate client structure");
         return NULL;
     }
     
@@ -220,19 +194,15 @@ VpnBridgeClient* vpn_bridge_create_client(void) {
         client->dns_servers[i] = NULL;
     }
     
-    LOG_VPN_DEBUG("Calling CiNewClient()...\n");
-    fflush(stdout);
-    
     // Create real SoftEther CLIENT structure
     client->softether_client = CiNewClient();
-    
-    LOG_VPN_DEBUG("CiNewClient() returned: %p\n", (void*)client->softether_client);
-    fflush(stdout);
     if (!client->softether_client) {
+        LOG_ERROR("VPN", "CiNewClient() failed");
         free(client);
         return NULL;
     }
     
+    LOG_DEBUG("VPN", "Client created successfully");
     return client;
 }
 
@@ -241,26 +211,18 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
         return;
     }
     
-    LOG_VPN_DEBUG("Cleaning up client...\n");
-    fflush(stdout);
-    
     // Disconnect if still connected
     if (client->status == VPN_STATUS_CONNECTED) {
-        LOG_VPN_DEBUG("Client still connected, disconnecting...\n");
-        fflush(stdout);
+        LOG_DEBUG("VPN", "Disconnecting client before cleanup");
         vpn_bridge_disconnect(client);
     }
     
     // Free real SoftEther CLIENT structure
     // NOTE: If we already disconnected, skip CiCleanupClient as it may access freed resources
     if (client->softether_client && client->status != VPN_STATUS_DISCONNECTED) {
-        LOG_VPN_DEBUG("Cleaning up SoftEther CLIENT...\n");
-        fflush(stdout);
         CiCleanupClient(client->softether_client);
         client->softether_client = NULL;
     } else {
-        LOG_VPN_DEBUG("Skipping CiCleanupClient (already disconnected)\n");
-        fflush(stdout);
         // Just free the CLIENT structure directly
         if (client->softether_client) {
             Free(client->softether_client);
@@ -271,13 +233,8 @@ void vpn_bridge_free_client(VpnBridgeClient* client) {
     // Clear sensitive data
     memset(client->password, 0, sizeof(client->password));
     
-    LOG_VPN_DEBUG("Freeing client structure...\n");
-    fflush(stdout);
-    
     free(client);
-    
-    LOG_VPN_DEBUG("✅ Client freed\n");
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Client freed successfully");
 }
 
 /* ============================================
@@ -401,9 +358,6 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     // This enables proper Layer 2 bridging without special modes
     StrCpy(opt->DeviceName, sizeof(opt->DeviceName), "vpn_adapter");
     
-    printf("[vpn_bridge_connect] 📡 Device name set to 'vpn_adapter' (Layer 2 bridging mode)\n");
-    fflush(stdout);
-    
     // Connection settings - TCP ONLY, configurable max connections
     // Multiple connections improve throughput through parallelization
     opt->MaxConnection = client->max_connection;  // User-configurable (1-32)
@@ -423,12 +377,8 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     // This prevents DHCP packets from being delivered to the client.
     opt->RequireBridgeRoutingMode = true;
     
-    printf("[vpn_bridge_connect] ✅ RequireBridgeRoutingMode=true (enables Layer 2 bridging for DHCP)\n");
-    fflush(stdout);
-    
-    printf("[vpn_bridge_connect] CLIENT_OPTION created: %s:%d hub=%s\n", 
-           opt->Hostname, opt->Port, opt->HubName);
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Connection options: %s:%d hub=%s, device=vpn_adapter, bridge_mode=true",
+              opt->Hostname, opt->Port, opt->HubName);
     
     // Create CLIENT_AUTH structure for password authentication
     CLIENT_AUTH* auth = ZeroMalloc(sizeof(CLIENT_AUTH));
@@ -451,22 +401,19 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         if (decoded_len == 20) {
             // Copy the 20-byte hash to HashedPassword
             memcpy(auth->HashedPassword, decoded, 20);
-            printf("[vpn_bridge_connect] ✅ Pre-hashed password decoded (20 bytes)\n");
+            LOG_DEBUG("VPN", "Using pre-hashed password (20 bytes decoded)");
         } else {
-            printf("[vpn_bridge_connect] ⚠️  Warning: Base64 decoded to %d bytes (expected 20)\n", decoded_len);
+            LOG_WARN("VPN", "Base64 password hash decoded to %d bytes (expected 20), rehashing", decoded_len);
             // Fall back to hashing the password string itself
             HashPassword(auth->HashedPassword, client->username, client->password);
         }
     } else {
         // Plain password - hash it using SoftEther's method
-        printf("[vpn_bridge_connect] Hashing plain password\n");
-        fflush(stdout);
+        LOG_DEBUG("VPN", "Hashing plaintext password");
         HashPassword(auth->HashedPassword, client->username, client->password);
     }
     
-    printf("[vpn_bridge_connect] CLIENT_AUTH created: user=%s, type=%d\n", 
-           auth->Username, auth->AuthType);
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Authentication configured: user=%s, type=PASSWORD", auth->Username);
     
     // Create ACCOUNT structure
     ACCOUNT* account = ZeroMalloc(sizeof(ACCOUNT));
@@ -503,29 +450,21 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     PACKET_ADAPTER* pa = NULL;
     
     // Create packet adapter for platform
-    printf("[vpn_bridge_connect] Creating packet adapter...\n");
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Creating packet adapter");
     pa = NEW_PACKET_ADAPTER();
     if (!pa) {
-        printf("[vpn_bridge_connect] Failed to create packet adapter\n");
+        LOG_ERROR("VPN", "Failed to create packet adapter");
         DeleteLock(account->lock);
         Free(account);
         client->last_error = VPN_BRIDGE_ERROR_CONNECT_FAILED;
         client->status = VPN_STATUS_ERROR;
         return VPN_BRIDGE_ERROR_CONNECT_FAILED;
     }
-    printf("[vpn_bridge_connect] Packet adapter created at %p, Id=%u\n", pa, pa->Id);
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Packet adapter created (Id=%u)", pa->Id);
     
     client->packet_adapter = pa;
     
-    printf("[vpn_bridge_connect] Creating session with NewClientSessionEx()...\n");
-    printf("[vpn_bridge_connect] Cedar=%p, opt=%p, auth=%p, pa=%p, account=%p\n",
-           client->softether_client->Cedar, opt, auth, pa, account);
-    fflush(stdout);
-    
-    printf("[vpn_bridge_connect] About to call NewClientSessionEx - this may block...\n");
-    fflush(stdout);
+    LOG_DEBUG("VPN", "Creating VPN session");
     
     // Create session - this will automatically connect in background
     SESSION* session = NewClientSessionEx(
@@ -536,11 +475,8 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         account
     );
     
-    printf("[vpn_bridge_connect] NewClientSessionEx returned: %p\n", session);
-    fflush(stdout);
-    
     if (!session) {
-        printf("[vpn_bridge_connect] Failed to create session\n");
+        LOG_ERROR("VPN", "Failed to create VPN session");
         FreePacketAdapter(pa);
         DeleteLock(account->lock);
         Free(account);
@@ -552,8 +488,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     client->softether_session = session;
     account->ClientSession = session;
     
-    printf("[vpn_bridge_connect] Session created at %p, waiting for connection...\n", session);
-    fflush(stdout);
+    LOG_INFO("VPN", "Establishing connection to %s:%d", client->hostname, client->port);
     
     // Wait for connection to establish (up to 30 seconds)
     UINT64 start_time = Tick64();
@@ -570,10 +505,10 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         }
         Unlock(session->lock);
         
-        if (check_count % 10 == 0) {  // Log every second
-            printf("[vpn_bridge_connect] Waiting... status=%u, elapsed=%llums\n", 
-                   status, (Tick64() - start_time));
-            fflush(stdout);
+        // Only log every 5 seconds at DEBUG level
+        if (g_log_level >= LOG_LEVEL_DEBUG && check_count % 50 == 0) {
+            LOG_DEBUG("VPN", "Connecting... status=%u, elapsed=%llums", 
+                      status, (Tick64() - start_time));
         }
         check_count++;
         
@@ -590,9 +525,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         Unlock(session->lock);
         
         if (should_halt || status == CLIENT_STATUS_IDLE) {
-            printf("[vpn_bridge_connect] Connection failed: Halt=%d, Status=%u\n",
-                   should_halt, status);
-            fflush(stdout);
+            LOG_ERROR("VPN", "Connection failed: Halt=%d, Status=%u", should_halt, status);
             break;
         }
         
@@ -600,9 +533,8 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     }
     
     if (connected) {
-        printf("[vpn_bridge_connect] ✅ VPN connection established!\n");
-        printf("[vpn_bridge_connect] 💡 DHCP will be handled by packet adapter\n");
-        fflush(stdout);
+        LOG_INFO("VPN", "Connection established successfully");
+        LOG_DEBUG("VPN", "DHCP and network configuration will be handled by packet adapter");
         
         // NOTE: DHCP is handled by the packet adapter (packet_adapter_macos.c)
         // It will automatically send DHCP DISCOVER and handle the response
@@ -613,7 +545,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         client->connect_time = Tick64();
         return VPN_BRIDGE_SUCCESS;
     } else {
-        printf("[vpn_bridge_connect] ❌ Connection failed or timeout\n");
+        LOG_ERROR("VPN", "Connection failed or timeout after 30 seconds");
         
         // Cleanup failed connection
         StopSession(session);
@@ -645,8 +577,7 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
         return VPN_BRIDGE_ERROR_NOT_CONNECTED;
     }
     
-    printf("[vpn_bridge_disconnect] Stopping VPN session...\n");
-    fflush(stdout);
+    LOG_INFO("VPN", "Disconnecting from server");
     
     // Save session pointer and clear it first to avoid double-free
     session = client->softether_session;
@@ -658,29 +589,15 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
     // The ClientThread will call ReleaseSession twice before exiting, which will free the session
     // So we should NOT call ReleaseSession ourselves!
     if (session) {
-        printf("[vpn_bridge_disconnect] Session=%p, Session->ref=%p\n", session, session->ref);
-        fflush(stdout);
-        
-        printf("[vpn_bridge_disconnect] Calling StopSession (will wait for ClientThread to finish)...\n");
-        fflush(stdout);
-        
+        LOG_DEBUG("VPN", "Stopping session (waiting for ClientThread to exit)");
         StopSession(session);
-        
-        printf("[vpn_bridge_disconnect] StopSession returned - ClientThread has exited and freed the session\n");
-        fflush(stdout);
-        
+        LOG_DEBUG("VPN", "Session stopped successfully");
         // Session is now freed by ClientThread - don't touch it!
         // DO NOT call ReleaseSession here!
     }
     
-    printf("[vpn_bridge_disconnect] Session cleanup complete\n");
-    fflush(stdout);
-    
     // Cleanup ACCOUNT
     if (client->softether_account) {
-        printf("[vpn_bridge_disconnect] Freeing account...\n");
-        fflush(stdout);
-        
         ACCOUNT* account = client->softether_account;
         account->ClientSession = NULL;
         
@@ -691,28 +608,18 @@ int vpn_bridge_disconnect(VpnBridgeClient* client) {
         // CLIENT_OPTION and CLIENT_AUTH are freed by SESSION
         Free(account);
         client->softether_account = NULL;
-        
-        printf("[vpn_bridge_disconnect] Account freed\n");
-        fflush(stdout);
     }
     
     // Cleanup IPC connection
     if (client->softether_ipc) {
-        printf("[vpn_bridge_disconnect] Freeing IPC connection...\n");
-        fflush(stdout);
-        
         FreeIPC(client->softether_ipc);
         client->softether_ipc = NULL;
-        
-        printf("[vpn_bridge_disconnect] IPC connection freed\n");
-        fflush(stdout);
     }
     
     client->status = VPN_STATUS_DISCONNECTED;
     client->last_error = VPN_BRIDGE_SUCCESS;
     
-    printf("[vpn_bridge_disconnect] ✅ Disconnected cleanly\n");
-    fflush(stdout);
+    LOG_INFO("VPN", "Disconnected successfully");
     
     return VPN_BRIDGE_SUCCESS;
 }
