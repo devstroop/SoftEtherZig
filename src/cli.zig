@@ -27,8 +27,14 @@ fn signalHandler(sig: c_int) callconv(.c) void {
         return; // Already cleaning up
     }
 
-    const sig_name = if (sig == std.posix.SIG.INT) "SIGINT" else if (sig == std.posix.SIG.TERM) "SIGTERM" else "UNKNOWN";
-    std.debug.print("\n\n🛑 Signal {s} received, initiating graceful shutdown...\n", .{sig_name});
+    const sig_name = if (sig == std.posix.SIG.INT) "SIGINT (Ctrl+C)" else if (sig == std.posix.SIG.TERM) "SIGTERM" else "UNKNOWN";
+
+    // Use debug print for signal handler (it's async-signal-safe)
+    std.debug.print("\n\n", .{});
+    std.debug.print("═══════════════════════════════════════════════\n", .{});
+    std.debug.print("🛑 Signal {s} received\n", .{sig_name});
+    std.debug.print("═══════════════════════════════════════════════\n", .{});
+    std.debug.print("\n", .{});
 
     // Stop the main loop
     g_running.store(false, .release);
@@ -38,10 +44,19 @@ fn signalHandler(sig: c_int) callconv(.c) void {
         // Mark as user-requested disconnect to prevent reconnection
         vpn_client.markUserDisconnect() catch {};
 
-        std.debug.print("[●] Cleaning up VPN connection...\n", .{});
+        std.debug.print("[●] Initiating graceful shutdown...\n", .{});
+        std.debug.print("[●] Disconnecting VPN session...\n", .{});
         vpn_client.deinit();
         std.debug.print("[✓] VPN connection terminated\n", .{});
+        std.debug.print("[✓] Resources released\n", .{});
+        std.debug.print("\n", .{});
+        std.debug.print("═══════════════════════════════════════════════\n", .{});
+        std.debug.print("Goodbye! VPN session closed cleanly.\n", .{});
+        std.debug.print("═══════════════════════════════════════════════\n", .{});
     }
+
+    // Force exit to ensure immediate termination
+    std.posix.exit(0);
 }
 
 fn printUsage() void {

@@ -96,6 +96,8 @@ pub fn build(b: *std.Build) void {
         "src/bridge/zig_packet_adapter.c", // Zig adapter wrapper
         "src/bridge/logging.c", // Phase 2: Log level system
         "src/bridge/security_utils.c", // Phase 3: Secure password handling
+        "src/bridge/client_bridge.c", // NEW: Zig adapter bridge (replaces VLanGetPacketAdapter)
+        "src/bridge/zig_bridge.c", // NEW: C wrapper for Zig packet adapter
         "src/bridge/Mayaqua/Mayaqua.c",
         "src/bridge/Mayaqua/Memory.c",
         "SoftEtherVPN_Stable/src/Mayaqua/Str.c",
