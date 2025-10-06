@@ -79,6 +79,132 @@ void set_log_level(LogLevel level);
 const char* get_log_level_name(LogLevel level);
 LogLevel parse_log_level(const char* str);
 
+// ============================================================================
+// WorxVPN Integration Extensions
+// ============================================================================
+
+// Connection state codes (for state callback)
+#define SOFTETHER_STATE_IDLE          0
+#define SOFTETHER_STATE_CONNECTING    1
+#define SOFTETHER_STATE_ESTABLISHED   2
+#define SOFTETHER_STATE_DISCONNECTING 3
+#define SOFTETHER_STATE_ERROR         4
+
+// Event level codes (for event callback)
+#define SOFTETHER_EVENT_INFO    0
+#define SOFTETHER_EVENT_WARNING 1
+#define SOFTETHER_EVENT_ERROR   2
+
+// Common error codes (for event callback 'code' parameter)
+#define SOFTETHER_ERROR_NONE              0
+#define SOFTETHER_ERROR_DNS_FAILED        100
+#define SOFTETHER_ERROR_CONNECTION_FAILED 101
+#define SOFTETHER_ERROR_TIMEOUT           102
+#define SOFTETHER_ERROR_AUTH_FAILED       401
+#define SOFTETHER_ERROR_NETWORK_DOWN      503
+#define SOFTETHER_ERROR_SERVER_UNREACHABLE 504
+#define SOFTETHER_ERROR_PROTOCOL          505
+
+// Connection statistics structure
+typedef struct {
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t packets_sent;
+    uint64_t packets_received;
+    uint64_t connected_seconds;
+    uint32_t current_rtt_ms;  // Round-trip time in milliseconds
+} softether_connection_stats_t;
+
+// Get connection statistics. Returns 0 on success, negative on error.
+int softether_client_get_stats(softether_client_t* handle, softether_connection_stats_t* stats);
+
+// Get current connection state (returns SOFTETHER_STATE_* constant)
+int softether_client_get_state(softether_client_t* handle);
+
+// Check if client is currently connected (convenience function)
+int softether_client_is_connected(softether_client_t* handle);
+
+// Reconnection control
+// Enable/disable automatic reconnection. Returns 0 on success.
+int softether_client_set_reconnect_enabled(softether_client_t* handle, int enabled);
+
+// Set reconnection parameters. Returns 0 on success.
+// max_attempts: 0 = infinite, >0 = limited attempts
+// initial_delay_sec: Initial backoff delay in seconds
+// max_delay_sec: Maximum backoff delay in seconds
+int softether_client_set_reconnect_params(
+    softether_client_t* handle,
+    uint32_t max_attempts,
+    uint32_t initial_delay_sec,
+    uint32_t max_delay_sec
+);
+
+// Get reconnection status as JSON. Returns NULL if not in reconnection state.
+// Format: {"enabled": true, "attempt": 3, "max_attempts": 10, "next_retry_sec": 30}
+// Must be freed with softether_string_free.
+char* softether_client_get_reconnect_status_json(softether_client_t* handle);
+
+// Log management
+// Register a callback to receive all log messages
+// The callback receives: timestamp, level, source, message
+typedef void (*softether_log_cb_t)(
+    uint64_t timestamp_ms,
+    int level,
+    const char* source,
+    const char* message,
+    void* user
+);
+int softether_client_set_log_callback(softether_client_t* handle, softether_log_cb_t cb, void* user);
+
+// Get recent logs as JSON array (last N entries). Must be freed with softether_string_free.
+// Format: [{"timestamp": 1234567890, "level": 2, "source": "vpn", "message": "..."}]
+char* softether_client_get_recent_logs_json(softether_client_t* handle, uint32_t max_entries);
+
+// Clear all stored logs
+void softether_client_clear_logs(softether_client_t* handle);
+
+// Server information
+// Get server information as JSON. Must be freed with softether_string_free.
+// Format: {"server_name": "vpn.example.com", "server_product": "SoftEther VPN", "version": "4.39"}
+char* softether_client_get_server_info_json(softether_client_t* handle);
+
+// Configuration management
+// Update client configuration (partial update). Returns 0 on success.
+// Only applies to disconnected client. JSON can contain subset of config fields.
+int softether_client_update_config(softether_client_t* handle, const char* json_config);
+
+// Get current configuration as JSON. Must be freed with softether_string_free.
+char* softether_client_get_config_json(softether_client_t* handle);
+
+// Network diagnostics
+// Perform basic connectivity test. Returns 0=success, 1=network down, 2=server unreachable, <0=error
+int softether_client_test_connectivity(const char* server_name, uint16_t server_port, uint32_t timeout_ms);
+
+// DNS resolution helper (for WorxVPN's cluster discovery)
+// Resolve hostname and return JSON array of IP addresses. Must be freed with softether_string_free.
+// Format: {"addresses": ["77.48.2.8", "2a01:5e06:100::1"], "cname": "cluster1.vpn.cloud"}
+char* softether_dns_resolve(const char* hostname, const char* dns_server);
+
+// Utility: Parse error code to human-readable message
+const char* softether_error_message(int error_code);
+
+// Platform integration helpers (iOS PacketTunnelProvider)
+// Create client optimized for iOS Packet Tunnel Provider
+// This variant uses IP-mode by default and optimizes for NEPacketTunnelFlow
+softether_client_t* softether_client_create_for_ios(const char* json_config);
+
+// Android VpnService integration
+// File descriptor for VPN tunnel device (Android VpnService.Builder.establish())
+int softether_client_get_tun_fd(softether_client_t* handle);
+int softether_client_set_tun_fd(softether_client_t* handle, int fd);
+
+// Memory and resource management
+// Get memory usage statistics in bytes
+uint64_t softether_client_get_memory_usage(softether_client_t* handle);
+
+// Force cleanup of idle resources (call periodically in long-running apps)
+void softether_client_cleanup_idle_resources(softether_client_t* handle);
+
 #ifdef __cplusplus
 }
 #endif
