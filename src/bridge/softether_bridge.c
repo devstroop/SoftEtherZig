@@ -558,8 +558,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         return VPN_BRIDGE_ERROR_INVALID_PARAM;
     }
     
-    LOG_VPN_INFO("Creating account...\n");
-    fflush(stdout);
+    LOG_INFO("VPN", "Creating account");
     
     client->status = VPN_STATUS_CONNECTING;
     
@@ -578,8 +577,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
     // Setting PortUDP = 0 forces TCP-only mode without NAT-T server lookups
     opt->PortUDP = 0;  // 0 = Use only TCP, no UDP/NAT-T
     
-    LOG_VPN_INFO("⚠️  TCP-ONLY MODE: PortUDP=%u (0 = TCP only, no NAT-T, no UDP accel)\n", opt->PortUDP);
-    fflush(stdout);
+    LOG_DEBUG("VPN", "TCP-ONLY MODE: PortUDP=%u (TCP only, no NAT-T, no UDP accel)", opt->PortUDP);
     
     // Device name for virtual adapter - use generic VPN adapter name
     // This enables proper Layer 2 bridging without special modes

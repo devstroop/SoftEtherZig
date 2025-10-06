@@ -2281,25 +2281,22 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size)
             if (ParseDhcpOffer(data, size, g_dhcp_xid, &ip, &mask, &gw, &server))
             {
                 LOG_DHCP_INFO("📨 DHCP OFFER received!\n");
-                printf("  Offered IP: %u.%u.%u.%u\n",
-                       (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-                printf("  Netmask:    %u.%u.%u.%u\n",
-                       (mask >> 24) & 0xFF, (mask >> 16) & 0xFF, (mask >> 8) & 0xFF, mask & 0xFF);
-                printf("  Gateway:    %u.%u.%u.%u\n",
-                       (gw >> 24) & 0xFF, (gw >> 16) & 0xFF, (gw >> 8) & 0xFF, gw & 0xFF);
-                printf("  Server:     %u.%u.%u.%u\n",
-                       (server >> 24) & 0xFF, (server >> 16) & 0xFF, (server >> 8) & 0xFF, server & 0xFF);
+                LOG_INFO("TUN", "DHCP: IP=%u.%u.%u.%u Mask=%u.%u.%u.%u GW=%u.%u.%u.%u Server=%u.%u.%u.%u",
+                         (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+                         (mask >> 24) & 0xFF, (mask >> 16) & 0xFF, (mask >> 8) & 0xFF, mask & 0xFF,
+                         (gw >> 24) & 0xFF, (gw >> 16) & 0xFF, (gw >> 8) & 0xFF, gw & 0xFF,
+                         (server >> 24) & 0xFF, (server >> 16) & 0xFF, (server >> 8) & 0xFF, server & 0xFF);
                 if (g_offered_dns1 != 0)
                 {
-                    printf("  DNS 1:      %u.%u.%u.%u\n",
-                           (g_offered_dns1 >> 24) & 0xFF, (g_offered_dns1 >> 16) & 0xFF,
-                           (g_offered_dns1 >> 8) & 0xFF, g_offered_dns1 & 0xFF);
+                    LOG_DEBUG("TUN", "DNS 1: %u.%u.%u.%u",
+                              (g_offered_dns1 >> 24) & 0xFF, (g_offered_dns1 >> 16) & 0xFF,
+                              (g_offered_dns1 >> 8) & 0xFF, g_offered_dns1 & 0xFF);
                 }
                 if (g_offered_dns2 != 0)
                 {
-                    printf("  DNS 2:      %u.%u.%u.%u\n",
-                           (g_offered_dns2 >> 24) & 0xFF, (g_offered_dns2 >> 16) & 0xFF,
-                           (g_offered_dns2 >> 8) & 0xFF, g_offered_dns2 & 0xFF);
+                    LOG_DEBUG("TUN", "DNS 2: %u.%u.%u.%u",
+                              (g_offered_dns2 >> 24) & 0xFF, (g_offered_dns2 >> 16) & 0xFF,
+                              (g_offered_dns2 >> 8) & 0xFF, g_offered_dns2 & 0xFF);
                 }
 
                 g_offered_ip = ip;
@@ -2498,7 +2495,7 @@ static void RestoreRouting(void)
 #ifndef TARGET_OS_IPHONE
     if (!g_routes_configured || g_original_gateway == 0)
     {
-        printf("[RestoreRouting] No routes to restore\n");
+        LOG_DEBUG("TUN", "No routes to restore");
         return;
     }
 
@@ -2509,13 +2506,7 @@ static void RestoreRouting(void)
              (g_original_gateway >> 24) & 0xFF, (g_original_gateway >> 16) & 0xFF,
              (g_original_gateway >> 8) & 0xFF, g_original_gateway & 0xFF);
 
-    printf("\n");
-    printf("╔════════════════════════════════════════════╗\n");
-    printf("║     Restoring Original Routing             ║\n");
-    printf("╠════════════════════════════════════════════╣\n");
-    printf("║ Original Gateway: %-24s ║\n", gw_str);
-    printf("╚════════════════════════════════════════════╝\n");
-    printf("\n");
+    LOG_INFO("TUN", "Restoring original routing (gateway: %s)", gw_str);
 
     // Delete VPN default route
     printf("[RestoreRouting] 🔄 Removing VPN default route...\n");
@@ -2538,10 +2529,7 @@ static void RestoreRouting(void)
     if (fp)
     {
         char result[256];
-        while (fgets(result, sizeof(result), fp))
-        {
-            printf("%s", result);
-        }
+        while (fgets(result, sizeof(result), fp)) { /* discard output */ }
         pclose(fp);
     }
 
@@ -2552,16 +2540,14 @@ static void RestoreRouting(void)
         snprintf(vpn_str, sizeof(vpn_str), "%u.%u.%u.%u",
                  (g_vpn_server_ip >> 24) & 0xFF, (g_vpn_server_ip >> 16) & 0xFF,
                  (g_vpn_server_ip >> 8) & 0xFF, g_vpn_server_ip & 0xFF);
-        printf("[RestoreRouting] 🧹 Cleaning up VPN server route: %s\n", vpn_str);
+        LOG_DEBUG("TUN", "Cleaning up VPN server route: %s", vpn_str);
         snprintf(cmd, sizeof(cmd), "route delete -host %s 2>&1", vpn_str);
         fp = popen(cmd, "r");
         if (fp)
             pclose(fp);
     }
 
-    printf("\n✅ Original routing restored successfully\n");
-    printf("   • Internet connectivity through %s\n", gw_str);
-    printf("   • VPN routes cleaned up\n\n");
+    LOG_INFO("TUN", "Original routing restored successfully (gateway: %s)", gw_str);
 
     g_routes_configured = false;
 #endif
