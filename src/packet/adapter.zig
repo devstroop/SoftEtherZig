@@ -11,13 +11,33 @@ const AdaptiveBufferManager = @import("adaptive_buffer.zig").AdaptiveBufferManag
 const AdaptiveBufferConfig = @import("adaptive_buffer.zig").AdaptiveBufferConfig;
 const PerfMetrics = @import("metrics.zig").PerfMetrics;
 
-// C FFI declarations for macOS utun
+// C FFI declarations for macOS utun and logging
 const c = @cImport({
     @cInclude("sys/socket.h");
     @cInclude("sys/ioctl.h");
     @cInclude("sys/kern_control.h");
     @cInclude("sys/sys_domain.h");
+    @cInclude("logging.h");
 });
+
+// Logging wrapper functions (using C logging system)
+fn logDebug(comptime fmt: []const u8, args: anytype) void {
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
+    c.log_message(c.LOG_LEVEL_DEBUG, "ADAPTER", "%s", msg.ptr);
+}
+
+fn logInfo(comptime fmt: []const u8, args: anytype) void {
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
+    c.log_message(c.LOG_LEVEL_INFO, "ADAPTER", "%s", msg.ptr);
+}
+
+fn logError(comptime fmt: []const u8, args: anytype) void {
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
+    c.log_message(c.LOG_LEVEL_ERROR, "ADAPTER", "%s", msg.ptr);
+}
 
 const SYSPROTO_CONTROL = 2;
 const AF_SYS_CONTROL = 2;
@@ -103,26 +123,26 @@ pub const ZigPacketAdapter = struct {
 
     /// Initialize packet adapter
     pub fn init(allocator: std.mem.Allocator, config: Config) !*ZigPacketAdapter {
-        std.debug.print("[ZigPacketAdapter.init] Starting initialization...\n", .{});
+        logDebug("Starting initialization", .{});
 
         const self = try allocator.create(ZigPacketAdapter);
         errdefer allocator.destroy(self);
-        std.debug.print("[ZigPacketAdapter.init] Allocated adapter struct at {*}\n", .{self});
+        logDebug("Allocated adapter struct at {*}", .{self});
 
         // Allocate device name
         const device_name = try allocator.alloc(u8, config.device_name.len);
         errdefer allocator.free(device_name);
         @memcpy(device_name, config.device_name);
-        std.debug.print("[ZigPacketAdapter.init] Device name: {s}\n", .{device_name});
+        logDebug("Device name: {s}", .{device_name});
 
         // Initialize packet pool
-        std.debug.print("[ZigPacketAdapter.init] Creating packet pool (size={d})...\n", .{config.packet_pool_size});
+        logDebug("Creating packet pool (size={d})", .{config.packet_pool_size});
         var packet_pool = try PacketPool.init(allocator, config.packet_pool_size, MAX_PACKET_SIZE);
         errdefer packet_pool.deinit();
-        std.debug.print("[ZigPacketAdapter.init] Packet pool created\n", .{});
+        logDebug("Packet pool created", .{});
 
         // Initialize adaptive buffer manager (core feature, always enabled)
-        std.debug.print("[ZigPacketAdapter.init] 🚀 Initializing dynamic adaptive scaling...\n", .{});
+        logDebug("Initializing dynamic adaptive scaling (1K→128K)", .{});
         const adaptive_config = AdaptiveBufferConfig{
             .min_queue_size = 1024, // Start small (1K)
             .max_queue_size = 131072, // Scale up to 128K
@@ -147,8 +167,7 @@ pub const ZigPacketAdapter = struct {
             .stats = .{},
         };
 
-        std.debug.print("[ZigPacketAdapter.init] ✅ Dynamic adaptive scaling enabled (1K→128K)\n", .{});
-        std.debug.print("[ZigPacketAdapter.init] ✅ Initialization complete\n", .{});
+        logInfo("Adapter initialized with dynamic adaptive scaling (1K→128K)", .{});
         return self;
     }
 
@@ -200,7 +219,7 @@ pub const ZigPacketAdapter = struct {
 
         self.tun_fd = fd;
 
-        std.debug.print("[Zig] Opened TUN device fd={d}\n", .{fd});
+        logInfo("Opened TUN device fd={d}", .{fd});
     }
 
     /// Start read/write threads
@@ -219,7 +238,7 @@ pub const ZigPacketAdapter = struct {
 
         // Start monitor thread (adaptive scaling is core feature, always enabled)
         self.monitor_thread = try std.Thread.spawn(.{}, monitorThreadFn, .{self});
-        std.debug.print("[Zig] Started read/write/monitor threads (adaptive scaling active)\n", .{});
+        logInfo("Started read/write/monitor threads (adaptive scaling active)", .{});
     }
 
     /// Stop threads
@@ -245,12 +264,12 @@ pub const ZigPacketAdapter = struct {
             self.monitor_thread = null;
         }
 
-        std.debug.print("[Zig] Stopped threads\n", .{});
+        logDebug("Stopped threads", .{});
     }
 
     /// Read thread - continuously reads from TUN device
     fn readThreadFn(self: *ZigPacketAdapter) void {
-        std.debug.print("[Zig] Read thread started\n", .{});
+        logDebug("Read thread started", .{});
 
         while (self.running.load(.acquire)) {
             // Get buffer from pool
@@ -309,12 +328,12 @@ pub const ZigPacketAdapter = struct {
             self.perf_metrics.recordPacket(packet_data.len, latency_us);
         }
 
-        std.debug.print("[Zig] Read thread stopped\n", .{});
+        logDebug("Read thread stopped", .{});
     }
 
     /// Write thread - continuously writes to TUN device
     fn writeThreadFn(self: *ZigPacketAdapter) void {
-        std.debug.print("[Zig] Write thread started\n", .{});
+        logDebug("Write thread started", .{});
 
         var batch: [32]?PacketBuffer = undefined;
 
@@ -365,12 +384,12 @@ pub const ZigPacketAdapter = struct {
             }
         }
 
-        std.debug.print("[Zig] Write thread stopped\n", .{});
+        logDebug("Write thread stopped", .{});
     }
 
     /// Monitor thread - adjusts buffers dynamically based on real-time metrics
     fn monitorThreadFn(self: *ZigPacketAdapter) void {
-        std.debug.print("[Zig] 📊 Monitor thread started (adaptive scaling active)\n", .{});
+        logDebug("Monitor thread started (adaptive scaling active)", .{});
 
         var last_print_time = std.time.milliTimestamp();
         const PRINT_INTERVAL_MS = 5000; // Print stats every 5 seconds
@@ -413,13 +432,13 @@ pub const ZigPacketAdapter = struct {
             // Print stats periodically
             if (now - last_print_time > PRINT_INTERVAL_MS) {
                 const adaptive_stats = self.adaptive_manager.getStats();
-                std.debug.print("📊 {any}\n", .{adaptive_stats});
+                logInfo("Adaptive stats: {any}", .{adaptive_stats});
                 self.perf_metrics.printCompact();
                 last_print_time = now;
             }
         }
 
-        std.debug.print("[Zig] Monitor thread stopped\n", .{});
+        logDebug("Monitor thread stopped", .{});
     }
 
     /// Get next packet (called by SoftEther protocol layer)
@@ -477,12 +496,11 @@ pub const ZigPacketAdapter = struct {
         packet_pool: PacketPool.Stats,
 
         pub fn print(self: StatsSnapshot) void {
-            std.debug.print("\n=== Zig Packet Adapter Stats ===\n", .{});
-            std.debug.print("Adapter: {any}\n", .{self.adapter});
-            std.debug.print("RX Queue: {any}\n", .{self.recv_queue});
-            std.debug.print("TX Queue: {any}\n", .{self.send_queue});
-            std.debug.print("Pool: {any}\n", .{self.packet_pool});
-            std.debug.print("================================\n\n", .{});
+            logInfo("Adapter stats - RX: {any}, TX: {any}, Pool: {any}", .{
+                self.recv_queue,
+                self.send_queue,
+                self.packet_pool,
+            });
         }
     };
 };
@@ -491,10 +509,10 @@ pub const ZigPacketAdapter = struct {
 export fn zig_adapter_create(config: *const Config) ?*ZigPacketAdapter {
     const allocator = std.heap.c_allocator;
     const adapter = ZigPacketAdapter.init(allocator, config.*) catch |err| {
-        std.debug.print("[zig_adapter_create] ERROR: Failed to create adapter: {any}\n", .{err});
+        logError("Failed to create adapter: {any}", .{err});
         return null;
     };
-    std.debug.print("[zig_adapter_create] ✅ Adapter created successfully at {*}\n", .{adapter});
+    logInfo("Adapter created successfully at {*}", .{adapter});
     return adapter;
 }
 

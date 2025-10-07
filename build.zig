@@ -245,6 +245,7 @@ pub fn build(b: *std.Build) void {
         .name = "zig_packet_adapter",
         .root_module = packet_adapter_module,
     });
+    packet_adapter_obj.addIncludePath(b.path("src/bridge"));
     cli.addObject(packet_adapter_obj);
 
     // Add OpenSSL library path (platform-specific)

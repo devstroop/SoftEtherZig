@@ -3,12 +3,25 @@ const errors = @import("errors.zig");
 
 const VpnError = errors.VpnError;
 
+/// Default configuration directory path
+pub const DEFAULT_CONFIG_DIR = "~/.config/softether-zig";
+pub const DEFAULT_CONFIG_FILE = "config.json";
+
 /// IP version selection
 pub const IpVersion = enum {
     auto, // Auto-detect (prefer IPv4, fallback to IPv6)
     ipv4, // Force IPv4 only
     ipv6, // Force IPv6 only
     dual, // Dual-stack (both IPv4 and IPv6)
+
+    /// Parse IpVersion from string
+    pub fn fromString(s: []const u8) !IpVersion {
+        if (std.mem.eql(u8, s, "auto")) return .auto;
+        if (std.mem.eql(u8, s, "ipv4")) return .ipv4;
+        if (std.mem.eql(u8, s, "ipv6")) return .ipv6;
+        if (std.mem.eql(u8, s, "dual")) return .dual;
+        return error.InvalidIpVersion;
+    }
 };
 
 /// Static IP configuration
@@ -154,20 +167,20 @@ pub const ConfigBuilder = struct {
 
 test "config builder validation" {
     // Missing server should fail
-    const result1 = ConnectionConfig.builder()
-        .setHub("HUB")
+    var builder1 = ConnectionConfig.builder();
+    _ = builder1.setHub("HUB")
         .setAccount("test")
-        .setAuth(.anonymous)
-        .build();
+        .setAuth(.anonymous);
+    const result1 = builder1.build();
     try std.testing.expectError(VpnError.MissingParameter, result1);
 
     // Complete config should succeed
-    const result2 = ConnectionConfig.builder()
-        .setServer("vpn.example.com", 443)
+    var builder2 = ConnectionConfig.builder();
+    _ = builder2.setServer("vpn.example.com", 443)
         .setHub("HUB")
         .setAccount("test")
-        .setAuth(.anonymous)
-        .build();
+        .setAuth(.anonymous);
+    const result2 = builder2.build();
     try std.testing.expect(result2 != VpnError.MissingParameter);
 }
 
@@ -183,4 +196,205 @@ test "config builder chaining" {
     try std.testing.expectEqualStrings("test.vpn.com", builder.server_name.?);
     try std.testing.expectEqual(@as(u16, 8443), builder.server_port);
     try std.testing.expectEqual(false, builder.use_encrypt);
+}
+
+/// JSON configuration schema
+pub const JsonConfig = struct {
+    server: ?[]const u8 = null,
+    port: ?u16 = null,
+    hub: ?[]const u8 = null,
+    account: ?[]const u8 = null,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
+    password_hash: ?[]const u8 = null,
+    use_encrypt: ?bool = null,
+    use_compress: ?bool = null,
+    max_connection: ?u32 = null,
+    ip_version: ?[]const u8 = null,
+    static_ipv4: ?[]const u8 = null,
+    static_ipv4_netmask: ?[]const u8 = null,
+    static_ipv4_gateway: ?[]const u8 = null,
+    static_ipv6: ?[]const u8 = null,
+    static_ipv6_prefix: ?u8 = null,
+    static_ipv6_gateway: ?[]const u8 = null,
+    dns_servers: ?[]const []const u8 = null,
+    reconnect: ?bool = null,
+    max_reconnect_attempts: ?u32 = null,
+    min_backoff: ?u32 = null,
+    max_backoff: ?u32 = null,
+};
+
+/// Expand tilde (~) in path to home directory
+fn expandPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    if (path.len > 0 and path[0] == '~') {
+        const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
+        if (path.len == 1) {
+            return try allocator.dupe(u8, home);
+        }
+        if (path[1] == '/') {
+            return try std.fmt.allocPrint(allocator, "{s}{s}", .{ home, path[1..] });
+        }
+    }
+    return try allocator.dupe(u8, path);
+}
+
+/// Load configuration from JSON file
+pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !JsonConfig {
+    // Expand path (e.g., ~/.config/softether-zig/config.json)
+    const expanded_path = try expandPath(allocator, path);
+    defer allocator.free(expanded_path);
+
+    // Read file contents
+    const file = std.fs.openFileAbsolute(expanded_path, .{}) catch |err| {
+        switch (err) {
+            error.FileNotFound => return JsonConfig{}, // Return empty config if file doesn't exist
+            else => return err,
+        }
+    };
+    defer file.close();
+
+    const max_size = 1024 * 1024; // 1MB limit
+    const contents = try file.readToEndAlloc(allocator, max_size);
+    defer allocator.free(contents);
+
+    // Parse JSON
+    const parsed = try std.json.parseFromSlice(JsonConfig, allocator, contents, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    // Note: caller must call parsed.deinit() to free the config
+
+    return parsed.value;
+}
+
+/// Get default config file path
+pub fn getDefaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
+    return try std.fmt.allocPrint(allocator, "{s}/.config/softether-zig/{s}", .{ home, DEFAULT_CONFIG_FILE });
+}
+
+/// Helper to pick first non-null value for optional types (CLI > env > file > default)
+fn pickOpt(comptime T: type, cli: ?T, env: ?T, file: ?T, default: ?T) ?T {
+    return cli orelse env orelse file orelse default;
+}
+
+/// Helper to pick first non-null value for non-optional types (CLI > env > file > default)
+fn pickVal(comptime T: type, cli: ?T, env: ?T, file: ?T, default: T) T {
+    return cli orelse env orelse file orelse default;
+}
+
+/// Merge configurations with priority: CLI > env vars > config file
+pub fn mergeConfigs(
+    allocator: std.mem.Allocator,
+    file_config: JsonConfig,
+    env_config: JsonConfig,
+    cli_config: JsonConfig,
+) !ConfigBuilder {
+    var builder = ConfigBuilder{};
+
+    // Server configuration
+    if (pickOpt([]const u8, cli_config.server, env_config.server, file_config.server, null)) |server| {
+        builder.server_name = server;
+    }
+    builder.server_port = pickVal(u16, cli_config.port, env_config.port, file_config.port, 443);
+
+    if (pickOpt([]const u8, cli_config.hub, env_config.hub, file_config.hub, null)) |hub| {
+        builder.hub_name = hub;
+    }
+
+    const account = pickOpt([]const u8, cli_config.account, env_config.account, file_config.account, null);
+    const username = pickOpt([]const u8, cli_config.username, env_config.username, file_config.username, null);
+
+    if (account) |acc| {
+        builder.account_name = acc;
+    } else if (username) |user| {
+        builder.account_name = user; // Default account name to username
+    }
+
+    // Authentication (password_hash takes precedence over password)
+    if (username) |user| {
+        const password_hash = pickOpt([]const u8, cli_config.password_hash, env_config.password_hash, file_config.password_hash, null);
+        const password = pickOpt([]const u8, cli_config.password, env_config.password, file_config.password, null);
+
+        if (password_hash) |hash| {
+            builder.auth = .{ .password = .{
+                .username = user,
+                .password = hash,
+                .is_hashed = true,
+            } };
+        } else if (password) |pass| {
+            builder.auth = .{ .password = .{
+                .username = user,
+                .password = pass,
+                .is_hashed = false,
+            } };
+        }
+    }
+
+    // Connection settings
+    builder.use_encrypt = pickVal(bool, cli_config.use_encrypt, env_config.use_encrypt, file_config.use_encrypt, true);
+    builder.use_compress = pickVal(bool, cli_config.use_compress, env_config.use_compress, file_config.use_compress, true);
+    builder.max_connection = pickVal(u32, cli_config.max_connection, env_config.max_connection, file_config.max_connection, 0);
+
+    // IP version
+    if (pickOpt([]const u8, cli_config.ip_version, env_config.ip_version, file_config.ip_version, null)) |ip_ver| {
+        builder.ip_version = IpVersion.fromString(ip_ver) catch .auto;
+    }
+
+    // Static IP configuration
+    const has_static_ip = file_config.static_ipv4 != null or file_config.static_ipv6 != null or
+        env_config.static_ipv4 != null or env_config.static_ipv6 != null or
+        cli_config.static_ipv4 != null or cli_config.static_ipv6 != null;
+
+    if (has_static_ip) {
+        var static_config = StaticIpConfig{};
+
+        static_config.ipv4_address = pickOpt([]const u8, cli_config.static_ipv4, env_config.static_ipv4, file_config.static_ipv4, null);
+        static_config.ipv4_netmask = pickOpt([]const u8, cli_config.static_ipv4_netmask, env_config.static_ipv4_netmask, file_config.static_ipv4_netmask, null);
+        static_config.ipv4_gateway = pickOpt([]const u8, cli_config.static_ipv4_gateway, env_config.static_ipv4_gateway, file_config.static_ipv4_gateway, null);
+        static_config.ipv6_address = pickOpt([]const u8, cli_config.static_ipv6, env_config.static_ipv6, file_config.static_ipv6, null);
+        static_config.ipv6_prefix_len = pickOpt(u8, cli_config.static_ipv6_prefix, env_config.static_ipv6_prefix, file_config.static_ipv6_prefix, null);
+        static_config.ipv6_gateway = pickOpt([]const u8, cli_config.static_ipv6_gateway, env_config.static_ipv6_gateway, file_config.static_ipv6_gateway, null); // DNS servers (merge all sources)
+        var dns_list = std.ArrayList([]const u8){};
+        defer dns_list.deinit(allocator);
+
+        if (file_config.dns_servers) |dns| {
+            try dns_list.appendSlice(allocator, dns);
+        }
+        if (env_config.dns_servers) |dns| {
+            try dns_list.appendSlice(allocator, dns);
+        }
+        if (cli_config.dns_servers) |dns| {
+            try dns_list.appendSlice(allocator, dns);
+        }
+        if (dns_list.items.len > 0) {
+            static_config.dns_servers = try allocator.dupe([]const u8, dns_list.items);
+        }
+
+        builder.static_ip = static_config;
+    }
+
+    return builder;
+}
+
+test "load from file - nonexistent file" {
+    const allocator = std.testing.allocator;
+    const config = try loadFromFile(allocator, "/nonexistent/config.json");
+    try std.testing.expect(config.server == null);
+}
+
+test "expand path with tilde" {
+    const allocator = std.testing.allocator;
+
+    // Test tilde expansion
+    if (std.posix.getenv("HOME")) |_| {
+        const expanded = try expandPath(allocator, "~/test.txt");
+        defer allocator.free(expanded);
+        try std.testing.expect(!std.mem.startsWith(u8, expanded, "~"));
+    }
+
+    // Test non-tilde path
+    const normal = try expandPath(allocator, "/tmp/test.txt");
+    defer allocator.free(normal);
+    try std.testing.expectEqualStrings("/tmp/test.txt", normal);
 }

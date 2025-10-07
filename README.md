@@ -308,12 +308,49 @@ The build system automatically:
 
 ## Configuration
 
-### Runtime Configuration
+### Configuration Methods
 
-The client supports runtime configuration through command-line arguments. For library usage, configure via the `ConnectionConfig` struct.
+SoftEtherZig supports three configuration methods with priority order:
+1. **Command-line arguments** (highest priority)
+2. **Environment variables** (medium priority)
+3. **Configuration file** (lowest priority)
+
+### Configuration File (NEW in v1.1)
+
+Create `~/.config/softether-zig/config.json`:
+
+```json
+{
+  "server": "vpn.example.com",
+  "port": 443,
+  "hub": "VPN",
+  "username": "myuser",
+  "password_hash": "base64-hashed-password"
+}
+```
+
+Then simply run:
+```bash
+vpnclient  # Uses config file
+```
+
+**See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for complete configuration guide.**
+
+Example configurations:
+- `config.example.json` - Full configuration with all options
+- `config.minimal.json` - Minimal working configuration
 
 ### Environment Variables
 
+Connection settings:
+- `SOFTETHER_SERVER`: VPN server hostname
+- `SOFTETHER_PORT`: VPN server port
+- `SOFTETHER_HUB`: Virtual hub name
+- `SOFTETHER_USER`: Username
+- `SOFTETHER_PASSWORD`: Password (plaintext, not recommended)
+- `SOFTETHER_PASSWORD_HASH`: Pre-hashed password (recommended)
+
+SSL/TLS settings:
 - `SSL_CERT_FILE`: Path to custom CA certificate bundle
 - `SSL_CERT_DIR`: Directory containing CA certificates
 

@@ -1,0 +1,7 @@
+{
+  "server": "vpn.example.com",
+  "port": 443,
+  "hub": "VPN",
+  "username": "myuser",
+  "password_hash": "generate-with-gen-hash-command"
+}

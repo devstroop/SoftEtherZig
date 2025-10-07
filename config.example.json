@@ -1,0 +1,43 @@
+{
+  "comment": "SoftEther VPN Client Configuration File",
+  "description": "Copy this file to ~/.config/softether-zig/config.json and edit as needed",
+  
+  "server": "vpn.example.com",
+  "port": 443,
+  "hub": "VPN",
+  "account": "myaccount",
+  "username": "myuser",
+  "password_hash": "base64-hashed-password-here",
+  
+  "use_encrypt": true,
+  "use_compress": true,
+  "max_connection": 0,
+  
+  "ip_version": "auto",
+  
+  "static_ipv4": null,
+  "static_ipv4_netmask": null,
+  "static_ipv4_gateway": null,
+  
+  "static_ipv6": null,
+  "static_ipv6_prefix": null,
+  "static_ipv6_gateway": null,
+  
+  "dns_servers": ["8.8.8.8", "8.8.4.4"],
+  
+  "reconnect": true,
+  "max_reconnect_attempts": 0,
+  "min_backoff": 5,
+  "max_backoff": 300,
+  
+  "notes": [
+    "Generate password hash with: ./zig-out/bin/vpnclient --gen-hash username password",
+    "Command-line arguments override environment variables",
+    "Environment variables override this config file",
+    "Set password_hash to null to use password (not recommended)",
+    "ip_version can be: auto, ipv4, ipv6, dual",
+    "max_connection: 0 = server policy, 1-32 = force specific count",
+    "max_reconnect_attempts: 0 = infinite retries",
+    "All fields are optional - CLI args and env vars will be used as fallback"
+  ]
+}
