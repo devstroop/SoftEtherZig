@@ -520,7 +520,7 @@ static UCHAR *BuildNeighborAdvertisement(UCHAR *my_mac, UINT *out_size)
 // Build Gratuitous ARP packet (ARP Announcement)
 // CRITICAL: This registers our MAC address in SoftEther's bridge MAC/IP learning table!
 // Without this, the bridge won't forward unicast packets to us (including DHCP responses)
-static UCHAR *BuildGratuitousArp(UCHAR *my_mac, UINT32 my_ip, UINT *out_size)
+UCHAR *BuildGratuitousArp(UCHAR *my_mac, UINT32 my_ip, UINT *out_size)
 {
     static UCHAR packet[1024];
     UINT pos = 0;
@@ -582,7 +582,7 @@ static UCHAR *BuildGratuitousArp(UCHAR *my_mac, UINT32 my_ip, UINT *out_size)
 // Build ARP Reply packet (responds to ARP requests for our IP)
 // CRITICAL: When DHCP server or router sends ARP request checking if our IP is alive,
 // we MUST respond or they'll think the IP is unused and won't complete DHCP!
-static UCHAR *BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT32 target_ip, UINT *out_size)
+UCHAR *BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT32 target_ip, UINT *out_size)
 {
     static UCHAR packet[1024];
     UINT pos = 0;
@@ -639,7 +639,8 @@ static UCHAR *BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT
 
 // Build ARP Request packet (asks "who has target_ip?")
 // Used to resolve gateway MAC address - CRITICAL for MAC/IP table population!
-static UCHAR *BuildArpRequest(UCHAR *my_mac, UINT32 my_ip, UINT32 target_ip, UINT *out_size)
+// **NON-STATIC**: Exported so zig_packet_adapter.c can use it
+UCHAR *BuildArpRequest(UCHAR *my_mac, UINT32 my_ip, UINT32 target_ip, UINT *out_size)
 {
     static UCHAR packet[1024];
     UINT pos = 0;
@@ -760,7 +761,7 @@ static UCHAR *BuildArpProbe(UCHAR *my_mac, UINT32 target_ip, UINT *out_size)
 }
 
 // Build DHCP DISCOVER packet
-static UCHAR *BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size)
+UCHAR *BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size)
 {
     static UCHAR packet[1024];
     UINT pos = 0;
@@ -1217,7 +1218,7 @@ static bool ParseDhcpOffer(UCHAR *data, UINT size, UINT32 expected_xid, UINT32 *
 }
 
 // Build DHCP REQUEST packet
-static UCHAR *BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, UINT32 server_ip, UINT *out_size)
+UCHAR *BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, UINT32 server_ip, UINT *out_size)
 {
     static UCHAR packet[1024];
     UINT pos = 0;

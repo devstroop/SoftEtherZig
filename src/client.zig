@@ -104,6 +104,11 @@ pub const VpnClient = struct {
         // Configure max connections
         _ = c.vpn_bridge_set_max_connection(client_handle, @intCast(cfg.max_connection));
 
+        // Configure adapter type (Zig vs C adapter)
+        if (cfg.use_zig_adapter) {
+            _ = c.vpn_bridge_set_use_zig_adapter(client_handle, 1);
+        }
+
         // Configure static IP if provided
         if (cfg.static_ip) |sip| {
             if (sip.ipv4_address) |ipv4| {

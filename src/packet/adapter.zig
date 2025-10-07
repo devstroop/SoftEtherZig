@@ -508,18 +508,37 @@ pub const ZigPacketAdapter = struct {
                         std.mem.writeInt(u32, &header, 0x1E000000, .big);
                     }
 
-                    // Write header + IP packet to TUN device
-                    _ = std.posix.write(self.tun_fd, &header) catch {
+                    // Log ICMP packets before writing
+                    if (ip_packet.len >= 20 and ip_packet[9] == 1) {
+                        logInfo("📮 writeThreadFn: Writing ICMP to TUN, len={d}", .{ip_packet.len});
+                    }
+
+                    // **CRITICAL FIX**: Write header + packet in ONE atomic write
+                    // TUN device expects: [4-byte AF_INET/AF_INET6][IP packet]
+                    // Two separate writes can cause packet corruption!
+                    var write_buf: [2048]u8 = undefined;
+                    if (ip_packet.len + 4 > write_buf.len) {
+                        logError("Packet too large: {d} bytes", .{ip_packet.len});
+                        self.packet_pool.free(pkt.data);
+                        continue;
+                    }
+
+                    // Copy header + packet into single buffer
+                    @memcpy(write_buf[0..4], &header);
+                    @memcpy(write_buf[4 .. 4 + ip_packet.len], ip_packet);
+
+                    // Single atomic write to TUN device
+                    const total_written = std.posix.write(self.tun_fd, write_buf[0 .. ip_packet.len + 4]) catch |err| {
+                        logError("TUN write failed: {} (len={d})", .{ err, ip_packet.len + 4 });
                         _ = self.stats.write_errors.fetchAdd(1, .monotonic);
                         self.packet_pool.free(pkt.data);
                         continue;
                     };
 
-                    _ = std.posix.write(self.tun_fd, ip_packet) catch {
-                        _ = self.stats.write_errors.fetchAdd(1, .monotonic);
-                        self.packet_pool.free(pkt.data);
-                        continue;
-                    };
+                    // Log successful ICMP writes
+                    if (ip_packet.len >= 20 and ip_packet[9] == 1) {
+                        logInfo("✅ ICMP written: {d} bytes total", .{total_written});
+                    }
 
                     // Update stats
                     _ = self.stats.packets_written.fetchAdd(1, .monotonic);
@@ -620,6 +639,14 @@ pub const ZigPacketAdapter = struct {
             .timestamp = @intCast(std.time.nanoTimestamp()),
         };
 
+        // Log ICMP packets
+        if (data.len >= 14 + 20) {
+            const ip_proto = data[14 + 9];
+            if (ip_proto == 1) {
+                logInfo("📬 putPacket: Queuing ICMP packet, len={d} bytes", .{data.len});
+            }
+        }
+
         if (!self.send_queue.push(pkt)) {
             _ = self.stats.send_queue_drops.fetchAdd(1, .monotonic);
             self.packet_pool.free(buffer);
@@ -715,12 +742,15 @@ export fn zig_adapter_get_packet(adapter: *ZigPacketAdapter, out_data: *[*]u8, o
 
 /// Release packet buffer back to pool (MUST be called after get_packet)
 export fn zig_adapter_release_packet(adapter: *ZigPacketAdapter, data: [*]u8) void {
-    // data points to (buffer + 4), so subtract 4 to get original buffer
-    const buffer_ptr = data - 4;
-    // Find the buffer slice from the pool
-    // Since we don't have the exact length, we assume MAX_PACKET_SIZE
-    const buffer_slice = buffer_ptr[0..MAX_PACKET_SIZE];
-    adapter.packet_pool.free(buffer_slice);
+    _ = adapter;
+    _ = data;
+    // TODO: Fix buffer lifecycle - currently leaking buffers to avoid double-free crash
+    // The issue is that we can't reconstruct the original slice from just the pointer
+    // Need to either:
+    // 1. Store active buffers in a hashmap keyed by pointer
+    // 2. Have C allocate its own buffers (don't use packet_pool for FFI)
+    // 3. Change FFI to pass/return PacketBuffer structs directly
+    // For now, just leak the memory to get connectivity working
 }
 
 export fn zig_adapter_get_packet_batch(adapter: *ZigPacketAdapter, out_array: [*]PacketBuffer, max_count: usize) usize {

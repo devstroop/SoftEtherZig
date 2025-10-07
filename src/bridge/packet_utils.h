@@ -140,7 +140,7 @@ UCHAR *BuildNeighborAdvertisement(UCHAR *my_mac, UINT *out_size);
  * @param len Data length in bytes
  * @return 16-bit checksum
  */
-UINT16 CalculateIPv4Checksum(const UCHAR *data, UINT len);
+USHORT CalculateIPv4Checksum(const UCHAR *data, UINT len);
 
 /**
  * Calculate UDP checksum
@@ -150,7 +150,7 @@ UINT16 CalculateIPv4Checksum(const UCHAR *data, UINT len);
  * @param udp_len Total UDP length
  * @return 16-bit checksum
  */
-UINT16 CalculateUDPChecksum(UINT32 src_ip, UINT32 dst_ip, const UCHAR *udp_data, UINT udp_len);
+USHORT CalculateUDPChecksum(UINT32 src_ip, UINT32 dst_ip, const UCHAR *udp_data, UINT udp_len);
 
 #ifdef __cplusplus
 }

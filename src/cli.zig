@@ -466,6 +466,7 @@ pub fn main() !void {
         .max_connection = args.max_connection,
         .ip_version = ip_version,
         .static_ip = static_ip,
+        .use_zig_adapter = args.use_zig_adapter,
     };
 
     // Initialize VPN client

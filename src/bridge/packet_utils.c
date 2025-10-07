@@ -874,7 +874,7 @@ bool ParseDhcpAck(UCHAR *data, UINT size, UINT32 expected_xid,
 // Utility Functions
 // ============================================================================
 
-UINT16 CalculateIPv4Checksum(const UCHAR *data, UINT len)
+USHORT CalculateIPv4Checksum(const UCHAR *data, UINT len)
 {
     UINT32 sum = 0;
 
@@ -889,10 +889,10 @@ UINT16 CalculateIPv4Checksum(const UCHAR *data, UINT len)
     while (sum >> 16)
         sum = (sum & 0xFFFF) + (sum >> 16);
 
-    return (UINT16)~sum;
+    return (USHORT)~sum;
 }
 
-UINT16 CalculateUDPChecksum(UINT32 src_ip, UINT32 dst_ip, const UCHAR *udp_data, UINT udp_len)
+USHORT CalculateUDPChecksum(UINT32 src_ip, UINT32 dst_ip, const UCHAR *udp_data, UINT udp_len)
 {
     UINT32 sum = 0;
 
@@ -916,5 +916,5 @@ UINT16 CalculateUDPChecksum(UINT32 src_ip, UINT32 dst_ip, const UCHAR *udp_data,
     while (sum >> 16)
         sum = (sum & 0xFFFF) + (sum >> 16);
 
-    return (UINT16)~sum;
+    return (USHORT)~sum;
 }

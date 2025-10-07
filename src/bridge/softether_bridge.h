@@ -37,6 +37,7 @@ extern "C" {
 #define VPN_BRIDGE_ERROR_NOT_CONNECTED  (-6)
 #define VPN_BRIDGE_ERROR_ALREADY_INIT   (-7)
 #define VPN_BRIDGE_ERROR_NOT_INIT       (-8)
+#define VPN_BRIDGE_ERROR_INVALID_STATE  (-9)
 
 // IP version modes
 #define VPN_IP_VERSION_AUTO  0
@@ -399,6 +400,15 @@ int vpn_bridge_set_static_ipv6(VpnBridgeClient* client, const char* ip, uint8_t 
  * @return VPN_BRIDGE_SUCCESS on success, error code otherwise
  */
 int vpn_bridge_set_dns_servers(VpnBridgeClient* client, const char** dns_servers, int count);
+
+/**
+ * Set the packet adapter type for the VPN client (must be called before connecting).
+ * 
+ * @param client         The VPN client
+ * @param use_zig_adapter 1 to use Zig adapter (experimental), 0 to use C adapter (default)
+ * @return VPN_BRIDGE_SUCCESS on success, error code on failure
+ */
+int vpn_bridge_set_use_zig_adapter(VpnBridgeClient* client, int use_zig_adapter);
 
 /* ============================================
  * Reconnection Management
