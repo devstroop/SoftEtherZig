@@ -502,11 +502,11 @@ pub const ZigPacketAdapter = struct {
                     const version = (ip_packet[0] >> 4) & 0x0F;
 
                     if (version == 4) {
-                        // AF_INET (IPv4)
-                        std.mem.writeInt(u32, &header, 0x02000000, .big);
+                        // AF_INET (IPv4) = 2 in native byte order
+                        std.mem.writeInt(u32, &header, 2, @import("builtin").cpu.arch.endian());
                     } else {
-                        // AF_INET6 (IPv6)
-                        std.mem.writeInt(u32, &header, 0x1E000000, .big);
+                        // AF_INET6 (IPv6) = 30 in native byte order
+                        std.mem.writeInt(u32, &header, 30, @import("builtin").cpu.arch.endian());
                     }
 
                     // Log ICMP packets before writing
@@ -571,9 +571,18 @@ pub const ZigPacketAdapter = struct {
                         continue;
                     };
 
-                    // Log successful ICMP writes
+                    // Log successful ICMP writes with TUN header
                     if (ip_packet.len >= 20 and ip_packet[9] == 1) {
-                        logInfo("✅ ICMP written: {d} bytes total", .{total_written});
+                        logInfo("✅ ICMP written: {d} bytes total (fd={d})", .{ total_written, self.tun_fd });
+                        // Dump TUN header (first 4 bytes)
+                        var header_hex: [16]u8 = undefined;
+                        _ = std.fmt.bufPrint(&header_hex, "{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
+                            write_buf[0],
+                            write_buf[1],
+                            write_buf[2],
+                            write_buf[3],
+                        }) catch "";
+                        logInfo("   TUN header: {s} (should be 02000000 or 00000002)", .{header_hex});
                     }
 
                     // Update stats
