@@ -698,6 +698,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         
         // FIX LEAK #2: Clean up allocated structures
         Free(opt);
+        secure_zero_explicit(auth, sizeof(CLIENT_AUTH));
         Free(auth);
         DeleteLock(account->lock);
         Free(account);
@@ -732,6 +733,7 @@ int vpn_bridge_connect(VpnBridgeClient* client) {
         FreePacketAdapter(pa);
         // FIX LEAK #3: Clean up allocated structures
         Free(opt);
+        secure_zero_explicit(auth, sizeof(CLIENT_AUTH));
         Free(auth);
         DeleteLock(account->lock);
         Free(account);

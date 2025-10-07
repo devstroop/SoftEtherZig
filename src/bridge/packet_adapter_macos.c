@@ -617,7 +617,7 @@ static UCHAR *BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT
     memcpy(packet + pos, my_mac, 6);
     pos += 6;
 
-    // Sender IP address (our IP: 10.21.255.100)
+    // Sender IP address (our IP - learned from DHCP or configuration)
     packet[pos++] = (my_ip >> 24) & 0xFF;
     packet[pos++] = (my_ip >> 16) & 0xFF;
     packet[pos++] = (my_ip >> 8) & 0xFF;
@@ -866,7 +866,7 @@ static UCHAR *BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size)
     packet[pos++] = 15; // Domain Name
 
     // REMOVED Option 50 (Requested IP) - let DHCP server assign any IP
-    // The DHCP server seems to be rejecting our requested IP 10.21.255.100
+    // The DHCP server seems to be rejecting our requested IP
 
     // Option 255: End
     packet[pos++] = 255;
@@ -1895,7 +1895,7 @@ UINT MacOsTunGetNextPacket(SESSION *s, void **data)
         if (pkt_size > 0 && pkt != NULL)
         {
             // Only log gateway ARP replies or during setup
-            if (g_arp_reply_to_ip == 0x0A150001 || g_dhcp_state != DHCP_STATE_CONFIGURED)
+            if ((g_offered_gw != 0 && g_arp_reply_to_ip == g_offered_gw) || g_dhcp_state != DHCP_STATE_CONFIGURED)
             {
                 LOG_TUN_TRACE("✅ ARP REPLY to %u.%u.%u.%u\n",
                               (g_arp_reply_to_ip >> 24) & 0xFF, (g_arp_reply_to_ip >> 16) & 0xFF,
@@ -2370,8 +2370,8 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size)
                 if (opcode == 2)
                 {
                     UINT32 sender_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];
-                    // If this is from 10.21.0.1 (gateway), learn its MAC
-                    if (sender_ip == 0x0A150001)
+                    // If this is from the gateway (learned from DHCP), learn its MAC
+                    if (g_offered_gw != 0 && sender_ip == g_offered_gw)
                     {
                         bool mac_changed = (memcmp(g_gateway_mac, pkt + 22, 6) != 0);
                         if (mac_changed || g_gateway_mac[0] == 0)
@@ -2389,10 +2389,10 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size)
                 {
                     UINT32 sender_ip = (pkt[28] << 24) | (pkt[29] << 16) | (pkt[30] << 8) | pkt[31];
 
-                    if (target_ip == g_our_ip || target_ip == g_offered_ip || target_ip == 0x0A15FF64)
+                    if (target_ip == g_our_ip || target_ip == g_offered_ip)
                     {
-                        // Only log ARP requests from gateway (10.21.0.1) or during DHCP setup
-                        if (sender_ip == 0x0A150001 || g_dhcp_state != DHCP_STATE_CONFIGURED)
+                        // Only log ARP requests from gateway (learned from DHCP) or during DHCP setup
+                        if ((g_offered_gw != 0 && sender_ip == g_offered_gw) || g_dhcp_state != DHCP_STATE_CONFIGURED)
                         {
                             LOG_TUN_DEBUG("📬 ARP Request from %u.%u.%u.%u for our IP, replying\n",
                                           (sender_ip >> 24) & 0xFF, (sender_ip >> 16) & 0xFF,
