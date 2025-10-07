@@ -284,8 +284,21 @@ void SessionMain(SESSION *s)
 
 	now = Tick64();
 
+	static UINT64 loop_count = 0;
+	if (loop_count == 0) {
+		printf("[SessionMain] *** MAIN LOOP STARTING *** pa=%p, ServerMode=%d, ClientMode=%d\n", 
+		      pa, s->ServerMode, !s->ServerMode);
+		fflush(stdout);
+	}
+
 	while (true)
 	{
+		if (loop_count % 1000 == 0) {
+			printf("[SessionMain] Loop iteration %llu\n", loop_count);
+			fflush(stdout);
+		}
+		loop_count++;
+		
 		Zero(&t, sizeof(t));
 
 
@@ -456,6 +469,13 @@ void SessionMain(SESSION *s)
 		// Add the packet to be transmitted to SendBlocks by acquiring from PacketAdapter
 		{
 			UINT i, max_num = MAX_SEND_SOCKET_QUEUE_NUM;
+			static UINT64 poll_count = 0;
+			if (poll_count == 0 || poll_count % 1000 == 0) {
+				printf("[SessionMain] Polling adapter for packets (count=%llu, pa=%p)\n", poll_count, pa);
+				fflush(stdout);
+			}
+			poll_count++;
+			
 			i = 0;
 			while (packet_size = pa->GetNextPacket(s, &packet))
 			{

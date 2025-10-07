@@ -107,6 +107,15 @@ export fn taptun_ethernet_to_ip(
 /// Get learned IP address (0 if not learned yet)
 export fn taptun_get_our_ip(handle: TranslatorHandle) callconv(.c) u32 {
     if (handle == null) return 0;
+
+    // Check pointer alignment before casting
+    const addr = @intFromPtr(handle.?);
+    const required_alignment = @alignOf(taptun.L2L3Translator);
+    if (addr % required_alignment != 0) {
+        std.debug.print("[taptun] ERROR: Pointer not aligned! addr=0x{x}, required_align={d}\n", .{ addr, required_alignment });
+        return 0;
+    }
+
     const translator: *taptun.L2L3Translator = @ptrCast(@alignCast(handle.?));
     return translator.our_ip orelse 0;
 }

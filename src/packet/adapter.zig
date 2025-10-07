@@ -10,6 +10,8 @@ const MAX_PACKET_SIZE = @import("packet.zig").MAX_PACKET_SIZE;
 const AdaptiveBufferManager = @import("adaptive_buffer.zig").AdaptiveBufferManager;
 const AdaptiveBufferConfig = @import("adaptive_buffer.zig").AdaptiveBufferConfig;
 const PerfMetrics = @import("metrics.zig").PerfMetrics;
+const taptun = @import("taptun");
+const L2L3Translator = taptun.L2L3Translator;
 
 // C FFI declarations for macOS utun and logging
 const c = @cImport({
@@ -45,14 +47,24 @@ const AF_SYS_CONTROL = 2;
 /// Packet adapter configuration
 pub const Config = struct {
     /// Initial buffer sizes (will be adjusted dynamically by adaptive manager)
-    /// These are STARTING values - actual sizes scale 1K→128K based on load!
-    recv_queue_size: usize = 65536, // 64K starting point
-    send_queue_size: usize = 32768, // 32K starting point
-    packet_pool_size: usize = 131072, // 128K starting point
-    batch_size: usize = 256, // 256 starting point
+    /// These are STARTING values - actual sizes scale up based on load!
+    recv_queue_size: usize = 512, // Small start, scales up
+    send_queue_size: usize = 256, // Small start, scales up
+    packet_pool_size: usize = 32, // 32 buffers = 64KB
+    batch_size: usize = 32, // 32 starting point
 
     /// TUN device name
     device_name: []const u8 = "utun",
+};
+
+/// C-compatible config struct (matches zig_packet_adapter.h layout)
+pub const CConfig = extern struct {
+    recv_queue_size: usize,
+    send_queue_size: usize,
+    packet_pool_size: usize,
+    batch_size: usize,
+    device_name: [*:0]const u8,
+    device_name_len: usize,
 };
 
 /// Packet with owned buffer
@@ -71,9 +83,12 @@ pub const ZigPacketAdapter = struct {
     tun_fd: std.posix.fd_t,
     device_name: []u8,
 
-    // Lock-free queues
-    recv_queue: RingBuffer(PacketBuffer, 8192),
-    send_queue: RingBuffer(PacketBuffer, 4096),
+    // L2/L3 Translator for Ethernet ↔ IP conversion
+    translator: L2L3Translator,
+
+    // Lock-free queues (heap-allocated to avoid large stack/struct size)
+    recv_queue: *RingBuffer(PacketBuffer, 512),
+    send_queue: *RingBuffer(PacketBuffer, 256),
 
     // Memory pool
     packet_pool: PacketPool,
@@ -130,6 +145,7 @@ pub const ZigPacketAdapter = struct {
         logDebug("Allocated adapter struct at {*}", .{self});
 
         // Allocate device name
+        logDebug("About to allocate device name, len={d}", .{config.device_name.len});
         const device_name = try allocator.alloc(u8, config.device_name.len);
         errdefer allocator.free(device_name);
         @memcpy(device_name, config.device_name);
@@ -153,13 +169,39 @@ pub const ZigPacketAdapter = struct {
         };
         const adaptive_manager = AdaptiveBufferManager.init(adaptive_config);
 
+        // Allocate ring buffers on heap to avoid large struct size
+        logDebug("Allocating recv_queue", .{});
+        const recv_queue = try allocator.create(RingBuffer(PacketBuffer, 512));
+        errdefer allocator.destroy(recv_queue);
+        recv_queue.* = try RingBuffer(PacketBuffer, 512).init(allocator);
+        errdefer recv_queue.deinit();
+
+        logDebug("Allocating send_queue", .{});
+        const send_queue = try allocator.create(RingBuffer(PacketBuffer, 256));
+        errdefer allocator.destroy(send_queue);
+        send_queue.* = try RingBuffer(PacketBuffer, 256).init(allocator);
+        errdefer send_queue.deinit();
+
+        // Initialize L2/L3 translator for Ethernet ↔ IP conversion
+        logDebug("Initializing L2/L3 translator", .{});
+        const translator_opts = taptun.TranslatorOptions{
+            .our_mac = [_]u8{ 0x00, 0xAC, 0x00, 0x00, 0x00, 0x01 }, // SoftEther virtual MAC
+            .learn_ip = true, // Auto-learn our IP from DHCP
+            .learn_gateway_mac = true, // Learn gateway MAC from ARP
+            .handle_arp = true, // Handle ARP requests/replies
+            .verbose = false, // Disable verbose logging for production
+        };
+        var translator = try L2L3Translator.init(allocator, translator_opts);
+        errdefer translator.deinit();
+
         self.* = .{
             .allocator = allocator,
             .config = config,
             .tun_fd = -1,
             .device_name = device_name,
-            .recv_queue = RingBuffer(PacketBuffer, 8192).init(),
-            .send_queue = RingBuffer(PacketBuffer, 4096).init(),
+            .translator = translator,
+            .recv_queue = recv_queue,
+            .send_queue = send_queue,
             .packet_pool = packet_pool,
             .adaptive_manager = adaptive_manager,
             .perf_metrics = PerfMetrics.init(),
@@ -180,7 +222,15 @@ pub const ZigPacketAdapter = struct {
         }
 
         self.allocator.free(self.device_name);
+        self.translator.deinit();
         self.packet_pool.deinit();
+
+        // Free heap-allocated ring buffers (items array then struct)
+        self.recv_queue.deinit();
+        self.allocator.destroy(self.recv_queue);
+        self.send_queue.deinit();
+        self.allocator.destroy(self.send_queue);
+
         self.allocator.destroy(self);
     }
 
@@ -217,9 +267,27 @@ pub const ZigPacketAdapter = struct {
         const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
         _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
 
-        self.tun_fd = fd;
+        // Get the actual interface name (utun0, utun1, etc.)
+        const UTUN_OPT_IFNAME: c_int = 2;
+        var ifname_buf: [c.IFNAMSIZ]u8 = undefined;
+        var ifname_len: c.socklen_t = ifname_buf.len;
+        if (c.getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, &ifname_buf, &ifname_len) == 0) {
+            const ifname_end = std.mem.indexOfScalar(u8, &ifname_buf, 0) orelse ifname_buf.len;
+            if (ifname_end > 0) {
+                // Update device_name with actual interface name
+                self.allocator.free(self.device_name);
+                const new_name = try self.allocator.alloc(u8, ifname_end);
+                @memcpy(new_name, ifname_buf[0..ifname_end]);
+                self.device_name = new_name;
+                logInfo("Opened TUN device: {s} (fd={d})", .{ self.device_name, fd });
+            } else {
+                logInfo("Opened TUN device fd={d} (name query returned empty)", .{fd});
+            }
+        } else {
+            logInfo("Opened TUN device fd={d} (couldn't query interface name)", .{fd});
+        }
 
-        logInfo("Opened TUN device fd={d}", .{fd});
+        self.tun_fd = fd;
     }
 
     /// Start read/write threads
@@ -298,12 +366,53 @@ pub const ZigPacketAdapter = struct {
             }
 
             // Skip 4-byte header (protocol family)
-            const packet_data = buffer[4..bytes_read];
+            const ip_packet = buffer[4..bytes_read];
 
-            // Create packet buffer
+            // Log packets with protocol details BEFORE converting
+            const read_count = self.stats.packets_read.load(.monotonic);
+            if (read_count < 20 or read_count % 10 == 0) {
+                if (ip_packet.len >= 20) {
+                    const ip_version = (ip_packet[0] >> 4) & 0x0F;
+                    const ip_proto = if (ip_version == 4) ip_packet[9] else ip_packet[6];
+                    const src_ip = if (ip_version == 4 and ip_packet.len >= 20)
+                        std.mem.readInt(u32, ip_packet[12..16], .big)
+                    else
+                        0;
+                    const dst_ip = if (ip_version == 4 and ip_packet.len >= 20)
+                        std.mem.readInt(u32, ip_packet[16..20], .big)
+                    else
+                        0;
+
+                    logInfo("📥 READ #{d}: IPv{d}, proto={d}, {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d}, {d} bytes", .{ read_count, ip_version, ip_proto, (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 8) & 0xFF, src_ip & 0xFF, (dst_ip >> 24) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 8) & 0xFF, dst_ip & 0xFF, ip_packet.len });
+                } else {
+                    logInfo("📥 READ: Packet #{d}, IP len={d} bytes", .{ read_count, ip_packet.len });
+                }
+            }
+
+            // Convert IP packet to Ethernet frame for SoftEther
+            const eth_frame = self.translator.ipToEthernet(ip_packet) catch |err| {
+                logError("Failed to convert IP→Ethernet: {}", .{err});
+                self.packet_pool.free(buffer);
+                continue;
+            };
+
+            // Copy Ethernet frame to a new buffer from the pool
+            const eth_buffer = self.packet_pool.alloc() orelse {
+                self.allocator.free(eth_frame); // Free translator's allocation
+                self.packet_pool.free(buffer); // Free original buffer
+                _ = self.stats.recv_queue_drops.fetchAdd(1, .monotonic);
+                continue;
+            };
+
+            // Copy frame data
+            @memcpy(eth_buffer[4 .. 4 + eth_frame.len], eth_frame);
+            self.allocator.free(eth_frame); // Free translator's allocation
+            self.packet_pool.free(buffer); // Free original buffer
+
+            // Create packet buffer with Ethernet frame
             const pkt = PacketBuffer{
-                .data = buffer,
-                .len = bytes_read - 4, // Actual IP packet length
+                .data = eth_buffer,
+                .len = eth_frame.len, // Ethernet frame length
                 .timestamp = @intCast(std.time.nanoTimestamp()),
             };
 
@@ -311,21 +420,21 @@ pub const ZigPacketAdapter = struct {
             if (!self.recv_queue.push(pkt)) {
                 // Queue full - drop packet
                 _ = self.stats.recv_queue_drops.fetchAdd(1, .monotonic);
-                self.packet_pool.free(buffer);
+                self.packet_pool.free(eth_buffer);
                 continue;
             }
 
             // Update stats
             _ = self.stats.packets_read.fetchAdd(1, .monotonic);
-            _ = self.stats.bytes_read.fetchAdd(packet_data.len, .monotonic);
+            _ = self.stats.bytes_read.fetchAdd(ip_packet.len, .monotonic);
 
             // Update adaptive manager stats (core feature)
             _ = self.adaptive_manager.packets_processed.fetchAdd(1, .monotonic);
-            _ = self.adaptive_manager.bytes_processed.fetchAdd(packet_data.len, .monotonic);
+            _ = self.adaptive_manager.bytes_processed.fetchAdd(ip_packet.len, .monotonic);
 
             // Record in performance metrics
             const latency_us = @as(u64, @intCast(std.time.nanoTimestamp() - pkt.timestamp)) / 1000;
-            self.perf_metrics.recordPacket(packet_data.len, latency_us);
+            self.perf_metrics.recordPacket(ip_packet.len, latency_us);
         }
 
         logDebug("Read thread stopped", .{});
@@ -350,34 +459,75 @@ pub const ZigPacketAdapter = struct {
             for (batch[0..count]) |pkt_opt| {
                 const pkt = pkt_opt orelse continue;
 
-                // Prepare buffer with 4-byte header
-                var header: [4]u8 = undefined;
-                const version = (pkt.data[4] >> 4) & 0x0F;
+                // Ethernet frame from SoftEther - convert to IP packet
+                const eth_frame = pkt.data[4 .. 4 + pkt.len];
 
-                if (version == 4) {
-                    // AF_INET
-                    std.mem.writeInt(u32, &header, 0x02000000, .big);
+                // Convert Ethernet frame to IP packet
+                const ip_packet_opt = self.translator.ethernetToIp(eth_frame) catch |err| {
+                    logError("Failed to convert Ethernet→IP: {}", .{err});
+                    self.packet_pool.free(pkt.data);
+                    _ = self.stats.write_errors.fetchAdd(1, .monotonic);
+                    continue;
+                };
+
+                if (ip_packet_opt) |ip_packet| {
+                    // We have an IP packet to write to TUN
+                    defer self.allocator.free(ip_packet); // Free translator's allocation
+
+                    // Log packets with protocol details
+                    const write_count = self.stats.packets_written.load(.monotonic);
+                    if (write_count < 20 or write_count % 10 == 0) {
+                        if (eth_frame.len >= 14 and ip_packet.len >= 20) {
+                            const ethertype = std.mem.readInt(u16, eth_frame[12..14], .big);
+                            const ip_version = (ip_packet[0] >> 4) & 0x0F;
+                            const ip_proto = if (ip_version == 4) ip_packet[9] else ip_packet[6];
+                            const src_ip = if (ip_version == 4 and ip_packet.len >= 20)
+                                std.mem.readInt(u32, ip_packet[12..16], .big)
+                            else
+                                0;
+                            const dst_ip = if (ip_version == 4 and ip_packet.len >= 20)
+                                std.mem.readInt(u32, ip_packet[16..20], .big)
+                            else
+                                0;
+
+                            logInfo("📤 WRITE #{d}: EtherType=0x{X:0>4}, IPv{d}, proto={d}, {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d}, {d} bytes", .{ write_count, ethertype, ip_version, ip_proto, (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 8) & 0xFF, src_ip & 0xFF, (dst_ip >> 24) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 8) & 0xFF, dst_ip & 0xFF, ip_packet.len });
+                        } else {
+                            logInfo("📤 WRITE: Packet #{d}, Ethernet len={d} → IP len={d} bytes", .{ write_count, eth_frame.len, ip_packet.len });
+                        }
+                    }
+
+                    // Determine IP version for TUN header
+                    var header: [4]u8 = undefined;
+                    const version = (ip_packet[0] >> 4) & 0x0F;
+
+                    if (version == 4) {
+                        // AF_INET (IPv4)
+                        std.mem.writeInt(u32, &header, 0x02000000, .big);
+                    } else {
+                        // AF_INET6 (IPv6)
+                        std.mem.writeInt(u32, &header, 0x1E000000, .big);
+                    }
+
+                    // Write header + IP packet to TUN device
+                    _ = std.posix.write(self.tun_fd, &header) catch {
+                        _ = self.stats.write_errors.fetchAdd(1, .monotonic);
+                        self.packet_pool.free(pkt.data);
+                        continue;
+                    };
+
+                    _ = std.posix.write(self.tun_fd, ip_packet) catch {
+                        _ = self.stats.write_errors.fetchAdd(1, .monotonic);
+                        self.packet_pool.free(pkt.data);
+                        continue;
+                    };
+
+                    // Update stats
+                    _ = self.stats.packets_written.fetchAdd(1, .monotonic);
+                    _ = self.stats.bytes_written.fetchAdd(ip_packet.len, .monotonic);
                 } else {
-                    // AF_INET6
-                    std.mem.writeInt(u32, &header, 0x1E000000, .big);
+                    // Packet was handled internally (e.g., ARP)
+                    // This is normal - ARP is handled by translator
                 }
-
-                // Write header + packet
-                _ = std.posix.write(self.tun_fd, &header) catch {
-                    _ = self.stats.write_errors.fetchAdd(1, .monotonic);
-                    self.packet_pool.free(pkt.data);
-                    continue;
-                };
-
-                _ = std.posix.write(self.tun_fd, pkt.data[4 .. 4 + pkt.len]) catch {
-                    _ = self.stats.write_errors.fetchAdd(1, .monotonic);
-                    self.packet_pool.free(pkt.data);
-                    continue;
-                };
-
-                // Update stats
-                _ = self.stats.packets_written.fetchAdd(1, .monotonic);
-                _ = self.stats.bytes_written.fetchAdd(pkt.len, .monotonic);
 
                 // Return buffer to pool
                 self.packet_pool.free(pkt.data);
@@ -491,8 +641,8 @@ pub const ZigPacketAdapter = struct {
 
     pub const StatsSnapshot = struct {
         adapter: Stats,
-        recv_queue: RingBuffer(PacketBuffer, 8192).Stats,
-        send_queue: RingBuffer(PacketBuffer, 4096).Stats,
+        recv_queue: RingBuffer(PacketBuffer, 512).Stats,
+        send_queue: RingBuffer(PacketBuffer, 256).Stats,
         packet_pool: PacketPool.Stats,
 
         pub fn print(self: StatsSnapshot) void {
@@ -506,9 +656,29 @@ pub const ZigPacketAdapter = struct {
 };
 
 // Export C-compatible functions for FFI
-export fn zig_adapter_create(config: *const Config) ?*ZigPacketAdapter {
+export fn zig_adapter_create(c_config: *const CConfig) ?*ZigPacketAdapter {
     const allocator = std.heap.c_allocator;
-    const adapter = ZigPacketAdapter.init(allocator, config.*) catch |err| {
+
+    // DEBUG: Log what C is passing
+    logDebug("C config: recv={d}, send={d}, pool={d}, batch={d}, device_name_len={d}", .{
+        c_config.recv_queue_size,
+        c_config.send_queue_size,
+        c_config.packet_pool_size,
+        c_config.batch_size,
+        c_config.device_name_len,
+    });
+
+    // Convert C config to Zig config
+    const device_name = c_config.device_name[0..c_config.device_name_len];
+    const config = Config{
+        .recv_queue_size = c_config.recv_queue_size,
+        .send_queue_size = c_config.send_queue_size,
+        .packet_pool_size = c_config.packet_pool_size,
+        .batch_size = c_config.batch_size,
+        .device_name = device_name,
+    };
+
+    const adapter = ZigPacketAdapter.init(allocator, config) catch |err| {
         logError("Failed to create adapter: {any}", .{err});
         return null;
     };
@@ -543,6 +713,16 @@ export fn zig_adapter_get_packet(adapter: *ZigPacketAdapter, out_data: *[*]u8, o
     return true;
 }
 
+/// Release packet buffer back to pool (MUST be called after get_packet)
+export fn zig_adapter_release_packet(adapter: *ZigPacketAdapter, data: [*]u8) void {
+    // data points to (buffer + 4), so subtract 4 to get original buffer
+    const buffer_ptr = data - 4;
+    // Find the buffer slice from the pool
+    // Since we don't have the exact length, we assume MAX_PACKET_SIZE
+    const buffer_slice = buffer_ptr[0..MAX_PACKET_SIZE];
+    adapter.packet_pool.free(buffer_slice);
+}
+
 export fn zig_adapter_get_packet_batch(adapter: *ZigPacketAdapter, out_array: [*]PacketBuffer, max_count: usize) usize {
     var batch = std.heap.c_allocator.alloc(?PacketBuffer, max_count) catch return 0;
     defer std.heap.c_allocator.free(batch);
@@ -565,4 +745,79 @@ export fn zig_adapter_put_packet(adapter: *ZigPacketAdapter, data: [*]const u8, 
 export fn zig_adapter_print_stats(adapter: *ZigPacketAdapter) void {
     const stats = adapter.getStats();
     stats.print();
+}
+
+export fn zig_adapter_get_device_name(adapter: *ZigPacketAdapter, out_buffer: [*]u8, buffer_len: usize) usize {
+    if (buffer_len == 0) return 0;
+
+    const copy_len = @min(adapter.device_name.len, buffer_len - 1);
+    @memcpy(out_buffer[0..copy_len], adapter.device_name[0..copy_len]);
+    out_buffer[copy_len] = 0; // Null terminate
+
+    return copy_len;
+}
+
+/// Configure TUN interface with IP address
+/// IPs are in network byte order (big-endian)
+export fn zig_adapter_configure_interface(
+    adapter: *ZigPacketAdapter,
+    local_ip: u32,
+    peer_ip: u32,
+    netmask: u32,
+) bool {
+    // Convert IPs to string (big-endian network byte order)
+    var local_str: [16]u8 = undefined;
+    var peer_str: [16]u8 = undefined;
+    var mask_str: [16]u8 = undefined;
+
+    const local_fmt = std.fmt.bufPrintZ(&local_str, "{}.{}.{}.{}", .{
+        (local_ip >> 24) & 0xFF,
+        (local_ip >> 16) & 0xFF,
+        (local_ip >> 8) & 0xFF,
+        local_ip & 0xFF,
+    }) catch return false;
+
+    const peer_fmt = std.fmt.bufPrintZ(&peer_str, "{}.{}.{}.{}", .{
+        (peer_ip >> 24) & 0xFF,
+        (peer_ip >> 16) & 0xFF,
+        (peer_ip >> 8) & 0xFF,
+        peer_ip & 0xFF,
+    }) catch return false;
+
+    const mask_fmt = std.fmt.bufPrintZ(&mask_str, "{}.{}.{}.{}", .{
+        (netmask >> 24) & 0xFF,
+        (netmask >> 16) & 0xFF,
+        (netmask >> 8) & 0xFF,
+        netmask & 0xFF,
+    }) catch return false;
+
+    // Build ifconfig command
+    var cmd: [256]u8 = undefined;
+    const cmd_str = std.fmt.bufPrintZ(&cmd, "ifconfig {s} {s} {s} netmask {s} up", .{
+        adapter.device_name,
+        local_fmt,
+        peer_fmt,
+        mask_fmt,
+    }) catch return false;
+
+    logInfo("Configuring interface: {s}", .{cmd_str});
+
+    // Execute command
+    const result = std.process.Child.run(.{
+        .allocator = adapter.allocator,
+        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
+    }) catch |err| {
+        logError("Failed to execute ifconfig: {}", .{err});
+        return false;
+    };
+    defer adapter.allocator.free(result.stdout);
+    defer adapter.allocator.free(result.stderr);
+
+    if (result.term.Exited != 0) {
+        logError("ifconfig failed with code {}: {s}", .{ result.term.Exited, result.stderr });
+        return false;
+    }
+
+    logInfo("Interface configured: {s} -> {s}", .{ local_fmt, peer_fmt });
+    return true;
 }

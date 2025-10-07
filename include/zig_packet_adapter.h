@@ -54,6 +54,7 @@ void zig_adapter_stop(ZigPacketAdapter *adapter);
 
 // Packet I/O
 bool zig_adapter_get_packet(ZigPacketAdapter *adapter, uint8_t **out_data, size_t *out_len);
+void zig_adapter_release_packet(ZigPacketAdapter *adapter, uint8_t *data);
 size_t zig_adapter_get_packet_batch(ZigPacketAdapter *adapter, ZigPacketBuffer *out_array, size_t max_count);
 bool zig_adapter_put_packet(ZigPacketAdapter *adapter, const uint8_t *data, size_t len);
 

@@ -11,8 +11,11 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
     return struct {
         const Self = @This();
 
-        // Ring buffer storage (power of 2 for fast modulo)
-        items: [capacity]?T,
+        // Allocator for heap storage
+        allocator: Allocator,
+
+        // Ring buffer storage (heap-allocated to avoid large struct size)
+        items: []?T,
 
         // Atomic indices for lock-free operation
         write_idx: atomic.Value(usize),
@@ -23,23 +26,30 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
         total_pushed: atomic.Value(u64),
         total_popped: atomic.Value(u64),
 
-        /// Initialize empty ring buffer
-        pub fn init() Self {
-            var self = Self{
-                .items = undefined,
+        /// Initialize empty ring buffer (allocates items array on heap)
+        pub fn init(allocator: Allocator) !Self {
+            const items = try allocator.alloc(?T, capacity);
+            errdefer allocator.free(items);
+
+            // Initialize all slots to null
+            for (items) |*item| {
+                item.* = null;
+            }
+
+            return Self{
+                .allocator = allocator,
+                .items = items,
                 .write_idx = atomic.Value(usize).init(0),
                 .read_idx = atomic.Value(usize).init(0),
                 .drops = atomic.Value(u64).init(0),
                 .total_pushed = atomic.Value(u64).init(0),
                 .total_popped = atomic.Value(u64).init(0),
             };
+        }
 
-            // Initialize all slots to null
-            for (&self.items) |*item| {
-                item.* = null;
-            }
-
-            return self;
+        /// Clean up heap-allocated items array
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.items);
         }
 
         /// Push single item (returns false if full)

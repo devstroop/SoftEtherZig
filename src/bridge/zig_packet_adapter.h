@@ -25,6 +25,7 @@ typedef struct {
     uint64_t packet_pool_size;
     uint64_t batch_size;
     const char* device_name;
+    uint64_t device_name_len;  // Length of device_name string
 } ZigAdapterConfig;
 
 // Packet buffer structure (matches Zig side)
@@ -41,9 +42,12 @@ extern bool zig_adapter_open(ZigPacketAdapter* adapter);
 extern bool zig_adapter_start(ZigPacketAdapter* adapter);
 extern void zig_adapter_stop(ZigPacketAdapter* adapter);
 extern bool zig_adapter_get_packet(ZigPacketAdapter* adapter, uint8_t** out_data, uint64_t* out_len);
+extern void zig_adapter_release_packet(ZigPacketAdapter* adapter, uint8_t* data);
 extern uint64_t zig_adapter_get_packet_batch(ZigPacketAdapter* adapter, ZigPacketBuffer* out_array, uint64_t max_count);
 extern bool zig_adapter_put_packet(ZigPacketAdapter* adapter, const uint8_t* data, uint64_t len);
 extern void zig_adapter_print_stats(ZigPacketAdapter* adapter);
+extern uint64_t zig_adapter_get_device_name(ZigPacketAdapter* adapter, uint8_t* out_buffer, uint64_t buffer_len);
+extern bool zig_adapter_configure_interface(ZigPacketAdapter* adapter, uint32_t local_ip, uint32_t peer_ip, uint32_t netmask);
 
 // Create SoftEther PACKET_ADAPTER that wraps Zig adapter
 PACKET_ADAPTER* NewZigPacketAdapter(void);

@@ -1141,20 +1141,37 @@ int vpn_bridge_get_device_name(
         return VPN_BRIDGE_SUCCESS;
     }
 
-    // Get context from packet adapter
-    #if defined(UNIX_MACOS)
-        MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)client->softether_session->PacketAdapter->Param;
-        if (ctx && ctx->device_name[0] != '\0') {
-            strncpy(output, ctx->device_name, output_size - 1);
-            output[output_size - 1] = '\0';
-        } else {
-            strncpy(output, "utun?", output_size - 1);
-            output[output_size - 1] = '\0';
+    // Get device name based on adapter type
+    #if USE_ZIG_ADAPTER
+        // Zig adapter - get name from adapter
+        ZIG_ADAPTER_CONTEXT* ctx = (ZIG_ADAPTER_CONTEXT*)client->softether_session->PacketAdapter->Param;
+        printf("[DEBUG] vpn_bridge_get_device_name: ctx=%p, zig_adapter=%p\n", (void*)ctx, (void*)(ctx ? ctx->zig_adapter : NULL));
+        if (ctx && ctx->zig_adapter) {
+            const size_t len = zig_adapter_get_device_name(ctx->zig_adapter, (uint8_t*)output, output_size);
+            printf("[DEBUG] zig_adapter_get_device_name returned len=%zu, name='%s'\n", len, output);
+            if (len > 0) {
+                return VPN_BRIDGE_SUCCESS;
+            }
         }
-    #else
-        // Other platforms - return generic name
-        strncpy(output, "tun0", output_size - 1);
+        printf("[DEBUG] Falling back to 'utun?'\n");
+        strncpy(output, "utun?", output_size - 1);
         output[output_size - 1] = '\0';
+    #else
+        // C adapter - get from context
+        #if defined(UNIX_MACOS)
+            MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)client->softether_session->PacketAdapter->Param;
+            if (ctx && ctx->device_name[0] != '\0') {
+                strncpy(output, ctx->device_name, output_size - 1);
+                output[output_size - 1] = '\0';
+            } else {
+                strncpy(output, "utun?", output_size - 1);
+                output[output_size - 1] = '\0';
+            }
+        #else
+            // Other platforms - return generic name
+            strncpy(output, "tun0", output_size - 1);
+            output[output_size - 1] = '\0';
+        #endif
     #endif
 
     return VPN_BRIDGE_SUCCESS;
@@ -1174,7 +1191,7 @@ int vpn_bridge_get_learned_ip(
         return VPN_BRIDGE_SUCCESS;
     }
 
-    // Try to get IP from translator
+    // Try to get IP from translator (only for C adapter, not Zig adapter)
     #if (defined(UNIX_MACOS) && !defined(UNIX_IOS)) || defined(UNIX_LINUX)
         void* ctx_ptr = client->softether_session->PacketAdapter->Param;
         if (!ctx_ptr) {
@@ -1182,10 +1199,16 @@ int vpn_bridge_get_learned_ip(
         }
 
         #if defined(UNIX_MACOS) && !defined(UNIX_IOS)
-            MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
-            if (ctx->translator) {
-                *ip = taptun_get_learned_ip(ctx->translator);
-            }
+            #if USE_ZIG_ADAPTER
+                // Zig adapter doesn't use translator - skip
+                // Zig adapter manages TUN internally
+            #else
+                // C adapter uses translator
+                MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
+                if (ctx->translator) {
+                    *ip = taptun_get_learned_ip(ctx->translator);
+                }
+            #endif
         #endif
         // Linux implementation can be added similarly
     #endif
@@ -1209,7 +1232,7 @@ int vpn_bridge_get_gateway_mac(
         return VPN_BRIDGE_SUCCESS;
     }
 
-    // Try to get MAC from translator
+    // Try to get MAC from translator (only for C adapter, not Zig adapter)
     #if (defined(UNIX_MACOS) && !defined(UNIX_IOS)) || defined(UNIX_LINUX)
         void* ctx_ptr = client->softether_session->PacketAdapter->Param;
         if (!ctx_ptr) {
@@ -1217,10 +1240,15 @@ int vpn_bridge_get_gateway_mac(
         }
 
         #if defined(UNIX_MACOS) && !defined(UNIX_IOS)
-            MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
-            if (ctx->translator) {
-                *has_mac = taptun_get_gateway_mac(ctx->translator, mac) ? 1 : 0;
-            }
+            #if USE_ZIG_ADAPTER
+                // Zig adapter doesn't use translator - skip
+            #else
+                // C adapter uses translator
+                MACOS_TUN_CONTEXT* ctx = (MACOS_TUN_CONTEXT*)ctx_ptr;
+                if (ctx->translator) {
+                    *has_mac = taptun_get_gateway_mac(ctx->translator, mac) ? 1 : 0;
+                }
+            #endif
         #endif
         // Linux implementation can be added similarly
     #endif

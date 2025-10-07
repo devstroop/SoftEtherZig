@@ -240,6 +240,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Add taptun dependency for L2/L3 translation
+    packet_adapter_module.addImport("taptun", taptun.module("taptun"));
 
     const packet_adapter_obj = b.addObject(.{
         .name = "zig_packet_adapter",

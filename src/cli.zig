@@ -542,6 +542,10 @@ pub fn main() !void {
 
     std.debug.print("✓ VPN connection established\n\n", .{});
 
+    // Wait briefly for adapter initialization to complete in background thread
+    // The adapter is initialized asynchronously, so we need to wait for it
+    std.Thread.sleep(100 * std.time.ns_per_ms); // 100ms should be enough
+
     // Get dynamic network information
     const device_name_buf = vpn_client.getDeviceName() catch |err| blk: {
         std.debug.print("Warning: Could not get device name: {any}\n", .{err});
