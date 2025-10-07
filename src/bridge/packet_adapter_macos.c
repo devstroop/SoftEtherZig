@@ -1794,7 +1794,7 @@ bool MacOsTunInit(SESSION *s)
         LOG_TUN_DEBUG("  4️⃣  Gratuitous ARP queued (%u bytes)\n", garp_size);
     }
 
-    LOG_TUN_INFO(" Queued 4 packets in SSTP Connect order: DHCP → IPv6 NA → IPv6 RS → GARP\n");
+    LOG_TUN_INFO(" Queued 4 packets: DHCP → IPv6 NA → IPv6 RS → GARP\n");
     fflush(stdout);
 
     // Trigger session to send packets IMMEDIATELY
