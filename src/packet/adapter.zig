@@ -9,6 +9,7 @@ const PacketPool = @import("packet.zig").PacketPool;
 const MAX_PACKET_SIZE = @import("packet.zig").MAX_PACKET_SIZE;
 const AdaptiveBufferManager = @import("adaptive_buffer.zig").AdaptiveBufferManager;
 const AdaptiveBufferConfig = @import("adaptive_buffer.zig").AdaptiveBufferConfig;
+const checksum = @import("checksum.zig");
 const PerfMetrics = @import("metrics.zig").PerfMetrics;
 const taptun = @import("taptun");
 const L2L3Translator = taptun.L2L3Translator;
@@ -511,6 +512,15 @@ pub const ZigPacketAdapter = struct {
                     // Log ICMP packets before writing
                     if (ip_packet.len >= 20 and ip_packet[9] == 1) {
                         logInfo("📮 writeThreadFn: Writing ICMP to TUN, len={d}", .{ip_packet.len});
+                        // Hex dump first 64 bytes of IP packet
+                        const dump_len = @min(ip_packet.len, 64);
+                        var hex_buf: [256]u8 = undefined;
+                        var pos: usize = 0;
+                        for (ip_packet[0..dump_len]) |byte| {
+                            const written = std.fmt.bufPrint(hex_buf[pos..], "{X:0>2} ", .{byte}) catch break;
+                            pos += written.len;
+                        }
+                        logInfo("   IP packet hex: {s}", .{hex_buf[0..pos]});
                     }
 
                     // **CRITICAL FIX**: Write header + packet in ONE atomic write
@@ -526,6 +536,32 @@ pub const ZigPacketAdapter = struct {
                     // Copy header + packet into single buffer
                     @memcpy(write_buf[0..4], &header);
                     @memcpy(write_buf[4 .. 4 + ip_packet.len], ip_packet);
+
+                    // 🔧 CRITICAL FIX: Recalculate checksums!
+                    // SoftEther sends packets with invalid checksums (likely due to checksum offload)
+                    // We must recalculate ICMP/TCP/UDP checksums before writing to TUN
+                    const ip_in_buf = write_buf[4 .. 4 + ip_packet.len];
+                    if (ip_in_buf.len >= 20) {
+                        const protocol = ip_in_buf[9];
+                        switch (protocol) {
+                            1 => { // ICMP
+                                if (checksum.recalculateIcmpChecksum(ip_in_buf)) {
+                                    logInfo("🔧 Recalculated ICMP checksum", .{});
+                                }
+                            },
+                            6 => { // TCP
+                                if (checksum.recalculateTcpChecksum(ip_in_buf)) {
+                                    logInfo("🔧 Recalculated TCP checksum", .{});
+                                }
+                            },
+                            17 => { // UDP
+                                if (checksum.recalculateUdpChecksum(ip_in_buf)) {
+                                    logInfo("🔧 Recalculated UDP checksum", .{});
+                                }
+                            },
+                            else => {}, // Other protocols (no checksum or unknown)
+                        }
+                    }
 
                     // Single atomic write to TUN device
                     const total_written = std.posix.write(self.tun_fd, write_buf[0 .. ip_packet.len + 4]) catch |err| {
