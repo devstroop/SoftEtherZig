@@ -498,18 +498,20 @@ pub const ZigPacketAdapter = struct {
                     }
 
                     // Determine IP version for TUN header
+                    // macOS/BSD utun expects: [AF family (4 bytes, NETWORK byte order!)][IP packet]
+                    // Despite documentation saying "host byte order", it actually wants BIG-ENDIAN!
                     var header: [4]u8 = undefined;
                     const version = (ip_packet[0] >> 4) & 0x0F;
 
                     if (version == 4) {
-                        // AF_INET (IPv4) = 2 in native byte order
-                        std.mem.writeInt(u32, &header, 2, @import("builtin").cpu.arch.endian());
+                        // AF_INET (IPv4) = 2, in BIG-ENDIAN (network byte order)
+                        // This creates: [0x00, 0x00, 0x00, 0x02]
+                        std.mem.writeInt(u32, &header, 2, .big);
                     } else {
-                        // AF_INET6 (IPv6) = 30 in native byte order
-                        std.mem.writeInt(u32, &header, 30, @import("builtin").cpu.arch.endian());
-                    }
-
-                    // Log ICMP packets before writing
+                        // AF_INET6 (IPv6) = 30, in BIG-ENDIAN
+                        // This creates: [0x00, 0x00, 0x00, 0x1E]
+                        std.mem.writeInt(u32, &header, 30, .big);
+                    } // Log ICMP packets before writing
                     if (ip_packet.len >= 20 and ip_packet[9] == 1) {
                         logInfo("📮 writeThreadFn: Writing ICMP to TUN, len={d}", .{ip_packet.len});
                         // Hex dump first 64 bytes of IP packet
