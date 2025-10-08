@@ -300,11 +300,15 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
         g_connection_start_time = Tick64();
         g_dhcp_xid = (UINT32)time(NULL); // Use timestamp as transaction ID
         
-        // Generate random MAC address (or could use interface MAC)
-        for (int i = 0; i < 6; i++) {
+        // Generate MAC address matching iPhone/iOS app format
+        // Format: 02:00:5E:XX:XX:XX (matches iPhone Network Extension implementation)
+        // 02 = Locally administered address, 00:5E = SoftEther prefix
+        g_my_mac[0] = 0x02; // Locally administered
+        g_my_mac[1] = 0x00;
+        g_my_mac[2] = 0x5E; // SoftEther prefix
+        for (int i = 3; i < 6; i++) {
             g_my_mac[i] = (UCHAR)(rand() % 256);
         }
-        g_my_mac[0] = (g_my_mac[0] & 0xFE) | 0x02; // Set locally administered bit
         
         printf("[ZigAdapterGetNextPacket] 🔄 DHCP initialized: xid=0x%08x, MAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
                g_dhcp_xid, g_my_mac[0], g_my_mac[1], g_my_mac[2], g_my_mac[3], g_my_mac[4], g_my_mac[5]);
