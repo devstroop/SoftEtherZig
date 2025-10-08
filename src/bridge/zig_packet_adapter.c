@@ -43,6 +43,9 @@ static bool g_need_gratuitous_arp_configured = false;  // CRITICAL: Announce our
 static bool g_need_arp_reply = false;    // CRITICAL: Reply to ARP Request from server
 static UCHAR g_arp_reply_to_mac[6] = {0};  // MAC to send ARP Reply to
 static UINT32 g_arp_reply_to_ip = 0;      // IP to send ARP Reply to
+static UINT64 g_last_keepalive_time = 0;  // CRITICAL: Periodic GARP for local bridge mode
+
+#define KEEPALIVE_INTERVAL_MS 10000  // Send Gratuitous ARP every 10 seconds for local bridge
 
 // Helper function to parse DHCP packet and extract message type
 static bool ParseDhcpPacket(const UCHAR* data, UINT size, UINT32* out_offered_ip, UINT32* out_gw, UINT32* out_mask, UCHAR* out_msg_type, UINT32* out_server_ip) {
@@ -420,6 +423,32 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
         }
     }
     
+    // **CRITICAL FOR LOCAL BRIDGE**: Send periodic Gratuitous ARP keep-alive
+    // This maintains our MAC/IP entry in SoftEther's session table, which is required
+    // for Local Bridge mode to forward our traffic to the external router.
+    // Without this, SoftEther doesn't know about our MAC/IP and won't bridge traffic!
+    if (g_dhcp_state == DHCP_STATE_CONFIGURED && g_our_ip != 0) {
+        UINT64 now = Tick64();
+        if (g_last_keepalive_time == 0) {
+            g_last_keepalive_time = now; // Initialize on first call
+        }
+        
+        if ((now - g_last_keepalive_time) >= KEEPALIVE_INTERVAL_MS) {
+            // Build Gratuitous ARP packet
+            UINT arp_size = 0;
+            UCHAR* arp_pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &arp_size);
+            
+            if (arp_size > 0 && arp_pkt != NULL) {
+                UCHAR* pkt_copy = Malloc(arp_size);
+                memcpy(pkt_copy, arp_pkt, arp_size);
+                *data = pkt_copy;
+                g_last_keepalive_time = now; // Update timestamp
+                printf("[ZigAdapterGetNextPacket] 🔄 Sent keep-alive Gratuitous ARP (local bridge mode)\n");
+                return arp_size;
+            }
+        }
+    }
+    
     // Get packet from Zig adapter (normal operation)
     uint8_t* packet_data = NULL;
     uint64_t packet_len = 0;
@@ -628,10 +657,12 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                 g_need_gratuitous_arp_configured = true;
                                 printf("[●] DHCP: 🔍 Will send Gratuitous ARP to announce our IP\n");
                                 
-                                // **CRITICAL**: Request gateway MAC resolution
-                                // This populates SoftEther server's MAC/IP table, enabling return traffic!
+                                // **CRITICAL FOR MAC/IP TABLE**: Request gateway MAC resolution
+                                // Even in local bridge mode, sending this ARP Request populates
+                                // SoftEther's MAC/IP table, enabling return traffic routing!
+                                // The gateway won't reply, but the REQUEST itself registers us.
                                 g_need_gateway_arp = true;
-                                printf("[●] DHCP: 🔍 Will send ARP Request to resolve gateway MAC\n");
+                                printf("[●] DHCP: 🔍 Will send ARP Request to populate MAC/IP table\n");
                             }
                         } else {
                             printf("[ZigAdapterPutPacket] ⚠️  Ignoring DHCP packet with msg_type=%u (not ACK)\n", msg_type);
@@ -694,7 +725,18 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
         }
     }
     
-    // Log first few packets for debugging
+    // Log ALL packets for debugging (especially ICMP)
+    if (size >= 34) {
+        const UCHAR* pkt = (const UCHAR*)data;
+        // Check if Ethernet type is IPv4 (0x0800)
+        if (pkt[12] == 0x08 && pkt[13] == 0x00) {
+            UCHAR ip_proto = pkt[23]; // IP protocol at offset 23
+            if (ip_proto == 1) { // ICMP
+                printf("[ZigAdapterPutPacket] 🔔 ICMP packet #%llu, size=%u - FORWARDING TO ZIG\n", packet_count, size);
+            }
+        }
+    }
+    
     if (packet_count < 5) {
         printf("[ZigAdapterPutPacket] Sending packet #%llu, size=%u\n", packet_count, size);
     } else if (packet_count % 100 == 0) {

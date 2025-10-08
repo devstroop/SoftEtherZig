@@ -405,8 +405,8 @@ pub const ZigPacketAdapter = struct {
                 continue;
             };
 
-            // Copy frame data
-            @memcpy(eth_buffer[4 .. 4 + eth_frame.len], eth_frame);
+            // Copy frame data - SoftEther expects raw Ethernet frame (no extra header)
+            @memcpy(eth_buffer[0..eth_frame.len], eth_frame);
             self.allocator.free(eth_frame); // Free translator's allocation
             self.packet_pool.free(buffer); // Free original buffer
 
@@ -460,8 +460,8 @@ pub const ZigPacketAdapter = struct {
             for (batch[0..count]) |pkt_opt| {
                 const pkt = pkt_opt orelse continue;
 
-                // Ethernet frame from SoftEther - convert to IP packet
-                const eth_frame = pkt.data[4 .. 4 + pkt.len];
+                // Ethernet frame from SoftEther (no extra header)
+                const eth_frame = pkt.data[0..pkt.len];
 
                 // Convert Ethernet frame to IP packet
                 const ip_packet_opt = self.translator.ethernetToIp(eth_frame) catch |err| {
@@ -504,14 +504,16 @@ pub const ZigPacketAdapter = struct {
                     const version = (ip_packet[0] >> 4) & 0x0F;
 
                     if (version == 4) {
-                        // AF_INET (IPv4) = 2, in BIG-ENDIAN (network byte order)
-                        // This creates: [0x00, 0x00, 0x00, 0x02]
-                        std.mem.writeInt(u32, &header, 2, .big);
+                        // AF_INET (IPv4) - must write the full 32-bit value!
+                        // This creates: [0x02, 0x00, 0x00, 0x00]
+                        std.mem.writeInt(u32, &header, 0x02000000, .big);
                     } else {
-                        // AF_INET6 (IPv6) = 30, in BIG-ENDIAN
-                        // This creates: [0x00, 0x00, 0x00, 0x1E]
-                        std.mem.writeInt(u32, &header, 30, .big);
-                    } // Log ICMP packets before writing
+                        // AF_INET6 (IPv6) - must write the full 32-bit value!
+                        // This creates: [0x1E, 0x00, 0x00, 0x00]
+                        std.mem.writeInt(u32, &header, 0x1E000000, .big);
+                    }
+
+                    // Log ICMP packets before writing
                     if (ip_packet.len >= 20 and ip_packet[9] == 1) {
                         logInfo("📮 writeThreadFn: Writing ICMP to TUN, len={d}", .{ip_packet.len});
                         // Hex dump first 64 bytes of IP packet
@@ -669,16 +671,24 @@ pub const ZigPacketAdapter = struct {
 
     /// Put packet for transmission
     pub fn putPacket(self: *ZigPacketAdapter, data: []const u8) bool {
+        // Log ALL incoming packets for debugging
+        if (data.len >= 34) {
+            const ip_proto = data[14 + 9]; // IP protocol at offset 23 (14 Ethernet + 9 IP header)
+            if (ip_proto == 1) { // ICMP
+                logInfo("📥 putPacket: RECEIVED ICMP packet from SoftEther, len={d} bytes", .{data.len});
+            }
+        }
+
         // Get buffer from pool
         const buffer = self.packet_pool.alloc() orelse return false;
 
-        // Copy packet data (skip 4 bytes for header)
-        if (data.len + 4 > buffer.len) {
+        // Copy packet data directly (Ethernet frame from SoftEther)
+        if (data.len > buffer.len) {
             self.packet_pool.free(buffer);
             return false;
         }
 
-        @memcpy(buffer[4 .. 4 + data.len], data);
+        @memcpy(buffer[0..data.len], data);
 
         const pkt = PacketBuffer{
             .data = buffer,
@@ -686,11 +696,11 @@ pub const ZigPacketAdapter = struct {
             .timestamp = @intCast(std.time.nanoTimestamp()),
         };
 
-        // Log ICMP packets
+        // Log ICMP packets being queued
         if (data.len >= 14 + 20) {
             const ip_proto = data[14 + 9];
             if (ip_proto == 1) {
-                logInfo("📬 putPacket: Queuing ICMP packet, len={d} bytes", .{data.len});
+                logInfo("📬 putPacket: Queuing ICMP packet for TUN write, len={d} bytes", .{data.len});
             }
         }
 
