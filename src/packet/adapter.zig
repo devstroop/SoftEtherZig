@@ -190,7 +190,7 @@ pub const ZigPacketAdapter = struct {
             .learn_ip = true, // Auto-learn our IP from DHCP
             .learn_gateway_mac = true, // Learn gateway MAC from ARP
             .handle_arp = true, // Handle ARP requests/replies
-            .verbose = false, // Disable verbose logging for production
+            .verbose = true, // Enable verbose logging to see gateway MAC learning
         };
         var translator = try L2L3Translator.init(allocator, translator_opts);
         errdefer translator.deinit();
@@ -842,6 +842,12 @@ export fn zig_adapter_get_device_name(adapter: *ZigPacketAdapter, out_buffer: [*
     out_buffer[copy_len] = 0; // Null terminate
 
     return copy_len;
+}
+
+/// Set gateway IP and MAC in translator (for learning gateway MAC from ARP)
+/// ip_network_order: Gateway IP in network byte order (big-endian)
+export fn zig_adapter_set_gateway(adapter: *ZigPacketAdapter, ip_network_order: u32) void {
+    adapter.translator.setGateway(ip_network_order, [_]u8{0} ** 6);
 }
 
 /// Configure TUN interface with IP address

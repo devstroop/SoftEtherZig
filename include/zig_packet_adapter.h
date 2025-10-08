@@ -61,6 +61,9 @@ bool zig_adapter_put_packet(ZigPacketAdapter *adapter, const uint8_t *data, size
 // Statistics
 void zig_adapter_print_stats(ZigPacketAdapter *adapter);
 
+// Gateway configuration (for MAC learning from ARP)
+void zig_adapter_set_gateway(ZigPacketAdapter *adapter, uint32_t ip_network_order);
+
 #ifdef __cplusplus
 }
 #endif
