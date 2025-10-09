@@ -64,7 +64,7 @@ pub const ConnectionConfig = struct {
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
-    use_zig_adapter: bool = false, // Use Zig packet adapter (experimental)
+    use_zig_adapter: bool = true, // Use Zig packet adapter (default, better performance)
 
     /// Create a configuration builder
     pub fn builder() ConfigBuilder {

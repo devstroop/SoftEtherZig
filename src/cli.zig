@@ -170,7 +170,7 @@ const CliArgs = struct {
     max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
     daemon: bool = false,
     profile: bool = false, // Enable performance profiling
-    use_zig_adapter: bool = false, // Use Zig packet adapter instead of C adapter
+    use_zig_adapter: bool = true, // Use Zig packet adapter (default for better performance)
     log_level: []const u8 = "info",
 
     // Reconnection settings
@@ -266,6 +266,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.profile = true;
         } else if (std.mem.eql(u8, arg, "--use-zig-adapter")) {
             result.use_zig_adapter = true;
+        } else if (std.mem.eql(u8, arg, "--use-c-adapter")) {
+            result.use_zig_adapter = false;
         } else if (std.mem.eql(u8, arg, "--log-level")) {
             result.log_level = args.next() orelse return error.MissingLogLevel;
         } else if (std.mem.eql(u8, arg, "--reconnect")) {

@@ -6,8 +6,8 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseFast,
     });
 
-    // Build option to use Zig packet adapter
-    const use_zig_adapter = b.option(bool, "use-zig-adapter", "Use Zig packet adapter instead of C adapter (default: false)") orelse false;
+    // Build option to select packet adapter (Zig adapter is default for better performance)
+    const use_zig_adapter = b.option(bool, "use-zig-adapter", "Use Zig packet adapter (default: true)") orelse true;
 
     // Detect target OS
     const target_os = target.result.os.tag;

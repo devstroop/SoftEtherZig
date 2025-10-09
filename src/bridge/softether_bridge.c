@@ -83,7 +83,7 @@ struct VpnBridgeClient {
     int dns_server_count;
     
     // Adapter configuration
-    int use_zig_adapter;                // 0=C adapter (default), 1=Zig adapter (experimental)
+    int use_zig_adapter;                // 0=C adapter (legacy), 1=Zig adapter (default, better performance)
     
     // State
     VpnBridgeStatus status;
@@ -216,7 +216,7 @@ VpnBridgeClient* vpn_bridge_create_client(void) {
     client->last_error = VPN_BRIDGE_SUCCESS;
     client->port = 443;
     client->max_connection = 1;  // Default to 1 connection
-    client->use_zig_adapter = 0;  // Default to C adapter
+    client->use_zig_adapter = 1;  // Default to Zig adapter (better performance)
     
     // Initialize IP configuration (defaults)
     client->ip_version = VPN_IP_VERSION_AUTO;

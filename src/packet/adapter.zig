@@ -1,6 +1,11 @@
-// High-performance Zig packet adapter
-// Replaces C implementation with lock-free queues and batch processing
-// NOW WITH DYNAMIC ADAPTIVE BUFFER SCALING! 🚀
+// High-performance Zig packet adapter for SoftEther VPN
+// Uses ZigTapTun for TUN device + L2↔L3 translation
+// Adds SoftEther-specific performance optimizations:
+// - Lock-free ring buffers
+// - Packet pooling
+// - Dynamic adaptive buffer scaling
+// - Batch processing
+// - Performance metrics
 
 const std = @import("std");
 const RingBuffer = @import("ring_buffer.zig").RingBuffer;
@@ -12,14 +17,9 @@ const AdaptiveBufferConfig = @import("adaptive_buffer.zig").AdaptiveBufferConfig
 const checksum = @import("checksum.zig");
 const PerfMetrics = @import("metrics.zig").PerfMetrics;
 const taptun = @import("taptun");
-const L2L3Translator = taptun.L2L3Translator;
 
-// C FFI declarations for macOS utun and logging
+// C FFI for logging only
 const c = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("sys/kern_control.h");
-    @cInclude("sys/sys_domain.h");
     @cInclude("logging.h");
 });
 
@@ -41,9 +41,6 @@ fn logError(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
     c.log_message(c.LOG_LEVEL_ERROR, "ADAPTER", "%s", msg.ptr);
 }
-
-const SYSPROTO_CONTROL = 2;
-const AF_SYS_CONTROL = 2;
 
 /// Packet adapter configuration
 pub const Config = struct {
@@ -75,18 +72,17 @@ const PacketBuffer = struct {
     timestamp: i64,
 };
 
-/// High-performance packet adapter using Zig primitives
+/// High-performance packet adapter for SoftEther VPN
+/// Uses ZigTapTun for device I/O and L2↔L3 translation
+/// Adds performance layer: queues, pooling, adaptive scaling, metrics
 pub const ZigPacketAdapter = struct {
     allocator: std.mem.Allocator,
     config: Config,
 
-    // TUN device handle
-    tun_fd: std.posix.fd_t,
-    device_name: []u8,
+    // ZigTapTun high-level adapter (handles device + translation)
+    tun_adapter: *taptun.TunAdapter,
 
-    // L2/L3 Translator for Ethernet ↔ IP conversion
-    translator: L2L3Translator,
-
+    // SoftEther-specific performance layer
     // Lock-free queues (heap-allocated to avoid large stack/struct size)
     recv_queue: *RingBuffer(PacketBuffer, 512),
     send_queue: *RingBuffer(PacketBuffer, 256),
@@ -101,7 +97,7 @@ pub const ZigPacketAdapter = struct {
     // Threads
     read_thread: ?std.Thread = null,
     write_thread: ?std.Thread = null,
-    monitor_thread: ?std.Thread = null, // NEW: Monitors and adjusts buffers
+    monitor_thread: ?std.Thread = null, // Monitors and adjusts buffers
     running: std.atomic.Value(bool),
 
     // Statistics
@@ -148,13 +144,6 @@ pub const ZigPacketAdapter = struct {
         errdefer allocator.destroy(self);
         logDebug("Allocated adapter struct at {*}", .{self});
 
-        // Allocate device name
-        logDebug("About to allocate device name, len={d}", .{config.device_name.len});
-        const device_name = try allocator.alloc(u8, config.device_name.len);
-        errdefer allocator.free(device_name);
-        @memcpy(device_name, config.device_name);
-        logDebug("Device name: {s}", .{device_name});
-
         // Initialize packet pool
         logDebug("Creating packet pool (size={d})", .{config.packet_pool_size});
         var packet_pool = try PacketPool.init(allocator, config.packet_pool_size, MAX_PACKET_SIZE);
@@ -186,24 +175,29 @@ pub const ZigPacketAdapter = struct {
         send_queue.* = try RingBuffer(PacketBuffer, 256).init(allocator);
         errdefer send_queue.deinit();
 
-        // Initialize L2/L3 translator for Ethernet ↔ IP conversion
-        logDebug("Initializing L2/L3 translator", .{});
-        const translator_opts = taptun.TranslatorOptions{
-            .our_mac = [_]u8{ 0x00, 0xAC, 0x00, 0x00, 0x00, 0x01 }, // SoftEther virtual MAC
-            .learn_ip = true, // Auto-learn our IP from DHCP
-            .learn_gateway_mac = true, // Learn gateway MAC from ARP
-            .handle_arp = true, // Handle ARP requests/replies
-            .verbose = true, // Enable verbose logging to see gateway MAC learning
-        };
-        var translator = try L2L3Translator.init(allocator, translator_opts);
-        errdefer translator.deinit();
+        // Open TUN device with L2/L3 translator (ZigTapTun handles everything!)
+        logDebug("Opening TUN device via ZigTapTun", .{});
+        const tun_adapter = try taptun.TunAdapter.open(allocator, .{
+            .device = .{
+                .unit = null, // Auto-assign
+                .mtu = 1500,
+                .non_blocking = true,
+            },
+            .translator = .{
+                .our_mac = [_]u8{ 0x00, 0xAC, 0x00, 0x00, 0x00, 0x01 }, // SoftEther virtual MAC
+                .learn_ip = true, // Auto-learn our IP from DHCP
+                .learn_gateway_mac = true, // Learn gateway MAC from ARP
+                .handle_arp = true, // Handle ARP requests/replies
+                .verbose = true, // Enable verbose logging to see gateway MAC learning
+            },
+        });
+        errdefer tun_adapter.close();
+        logInfo("TUN device opened: {s}", .{tun_adapter.getDeviceName()});
 
         self.* = .{
             .allocator = allocator,
             .config = config,
-            .tun_fd = -1,
-            .device_name = device_name,
-            .translator = translator,
+            .tun_adapter = tun_adapter,
             .recv_queue = recv_queue,
             .send_queue = send_queue,
             .packet_pool = packet_pool,
@@ -221,12 +215,9 @@ pub const ZigPacketAdapter = struct {
     pub fn deinit(self: *ZigPacketAdapter) void {
         self.stop();
 
-        if (self.tun_fd >= 0) {
-            std.posix.close(self.tun_fd);
-        }
+        // Close ZigTapTun adapter (handles device + translator cleanup)
+        self.tun_adapter.close();
 
-        self.allocator.free(self.device_name);
-        self.translator.deinit();
         self.packet_pool.deinit();
 
         // Free heap-allocated ring buffers (items array then struct)
@@ -238,60 +229,11 @@ pub const ZigPacketAdapter = struct {
         self.allocator.destroy(self);
     }
 
-    /// Open TUN device (macOS utun)
+    /// Open TUN device (now handled by ZigTapTun in init, this is a no-op for compatibility)
     pub fn open(self: *ZigPacketAdapter) !void {
-        // Open /dev/utun control socket
-        const fd = try std.posix.socket(std.posix.AF.SYSTEM, std.posix.SOCK.DGRAM, SYSPROTO_CONTROL);
-        errdefer std.posix.close(fd);
-
-        // Get utun control ID
-        var info: c.ctl_info = std.mem.zeroes(c.ctl_info);
-        const utun_control = "com.apple.net.utun_control";
-        @memcpy(info.ctl_name[0..utun_control.len], utun_control);
-
-        if (c.ioctl(fd, c.CTLIOCGINFO, &info) < 0) {
-            return error.IoctlFailed;
-        }
-
-        // Connect to utun
-        var addr: c.sockaddr_ctl = std.mem.zeroes(c.sockaddr_ctl);
-        addr.sc_len = @sizeOf(c.sockaddr_ctl);
-        addr.sc_family = std.posix.AF.SYSTEM;
-        addr.ss_sysaddr = AF_SYS_CONTROL;
-        addr.sc_id = info.ctl_id;
-        addr.sc_unit = 0; // Auto-assign unit number
-
-        const conn_result = c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr_ctl));
-        if (conn_result < 0) {
-            return error.ConnectFailed;
-        }
-
-        // Set non-blocking
-        const O_NONBLOCK: c_int = 0x0004; // macOS O_NONBLOCK
-        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
-
-        // Get the actual interface name (utun0, utun1, etc.)
-        const UTUN_OPT_IFNAME: c_int = 2;
-        var ifname_buf: [c.IFNAMSIZ]u8 = undefined;
-        var ifname_len: c.socklen_t = ifname_buf.len;
-        if (c.getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, &ifname_buf, &ifname_len) == 0) {
-            const ifname_end = std.mem.indexOfScalar(u8, &ifname_buf, 0) orelse ifname_buf.len;
-            if (ifname_end > 0) {
-                // Update device_name with actual interface name
-                self.allocator.free(self.device_name);
-                const new_name = try self.allocator.alloc(u8, ifname_end);
-                @memcpy(new_name, ifname_buf[0..ifname_end]);
-                self.device_name = new_name;
-                logInfo("Opened TUN device: {s} (fd={d})", .{ self.device_name, fd });
-            } else {
-                logInfo("Opened TUN device fd={d} (name query returned empty)", .{fd});
-            }
-        } else {
-            logInfo("Opened TUN device fd={d} (couldn't query interface name)", .{fd});
-        }
-
-        self.tun_fd = fd;
+        _ = self;
+        // Device is already opened in init() via ZigTapTun
+        logDebug("open() called (device already opened in init)", .{});
     }
 
     /// Start read/write threads
@@ -346,15 +288,15 @@ pub const ZigPacketAdapter = struct {
         while (self.running.load(.acquire)) {
             // Get buffer from pool
             const buffer = self.packet_pool.alloc() orelse {
-                std.Thread.sleep(10 * std.time.ns_per_us); // 10 µs (10x faster)
+                std.Thread.sleep(10 * std.time.ns_per_us); // 10 µs
                 continue;
             };
 
-            // Read from TUN device (with 4-byte header on macOS)
-            const bytes_read = std.posix.read(self.tun_fd, buffer) catch |err| {
+            // Read Ethernet frame from ZigTapTun (automatic IP→Ethernet translation!)
+            const eth_frame = self.tun_adapter.readEthernet(buffer) catch |err| {
                 if (err == error.WouldBlock) {
                     self.packet_pool.free(buffer);
-                    std.Thread.sleep(10 * std.time.ns_per_us); // 10 µs (10x faster)
+                    std.Thread.sleep(10 * std.time.ns_per_us); // 10 µs
                     continue;
                 }
 
@@ -363,60 +305,19 @@ pub const ZigPacketAdapter = struct {
                 continue;
             };
 
-            if (bytes_read <= 4) {
-                // Too small or just header
-                self.packet_pool.free(buffer);
-                continue;
-            }
-
-            // Skip 4-byte header (protocol family)
-            const ip_packet = buffer[4..bytes_read];
-
-            // Log packets with protocol details BEFORE converting
+            // Log packets with protocol details
             const read_count = self.stats.packets_read.load(.monotonic);
             if (read_count < 20 or read_count % 10 == 0) {
-                if (ip_packet.len >= 20) {
-                    const ip_version = (ip_packet[0] >> 4) & 0x0F;
-                    const ip_proto = if (ip_version == 4) ip_packet[9] else ip_packet[6];
-                    const src_ip = if (ip_version == 4 and ip_packet.len >= 20)
-                        std.mem.readInt(u32, ip_packet[12..16], .big)
-                    else
-                        0;
-                    const dst_ip = if (ip_version == 4 and ip_packet.len >= 20)
-                        std.mem.readInt(u32, ip_packet[16..20], .big)
-                    else
-                        0;
-
-                    logInfo("📥 READ #{d}: IPv{d}, proto={d}, {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d}, {d} bytes", .{ read_count, ip_version, ip_proto, (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 8) & 0xFF, src_ip & 0xFF, (dst_ip >> 24) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 8) & 0xFF, dst_ip & 0xFF, ip_packet.len });
-                } else {
-                    logInfo("📥 READ: Packet #{d}, IP len={d} bytes", .{ read_count, ip_packet.len });
+                if (eth_frame.len >= 14) {
+                    const ethertype = std.mem.readInt(u16, eth_frame[12..14], .big);
+                    logInfo("📥 READ #{d}: EtherType=0x{X:0>4}, {d} bytes", .{ read_count, ethertype, eth_frame.len });
                 }
             }
 
-            // Convert IP packet to Ethernet frame for SoftEther
-            const eth_frame = self.translator.ipToEthernet(ip_packet) catch |err| {
-                logError("Failed to convert IP→Ethernet: {}", .{err});
-                self.packet_pool.free(buffer);
-                continue;
-            };
-
-            // Copy Ethernet frame to a new buffer from the pool
-            const eth_buffer = self.packet_pool.alloc() orelse {
-                self.allocator.free(eth_frame); // Free translator's allocation
-                self.packet_pool.free(buffer); // Free original buffer
-                _ = self.stats.recv_queue_drops.fetchAdd(1, .monotonic);
-                continue;
-            };
-
-            // Copy frame data - SoftEther expects raw Ethernet frame (no extra header)
-            @memcpy(eth_buffer[0..eth_frame.len], eth_frame);
-            self.allocator.free(eth_frame); // Free translator's allocation
-            self.packet_pool.free(buffer); // Free original buffer
-
             // Create packet buffer with Ethernet frame
             const pkt = PacketBuffer{
-                .data = eth_buffer,
-                .len = eth_frame.len, // Ethernet frame length
+                .data = buffer,
+                .len = eth_frame.len,
                 .timestamp = @intCast(std.time.nanoTimestamp()),
             };
 
@@ -424,21 +325,21 @@ pub const ZigPacketAdapter = struct {
             if (!self.recv_queue.push(pkt)) {
                 // Queue full - drop packet
                 _ = self.stats.recv_queue_drops.fetchAdd(1, .monotonic);
-                self.packet_pool.free(eth_buffer);
+                self.packet_pool.free(buffer);
                 continue;
             }
 
             // Update stats
             _ = self.stats.packets_read.fetchAdd(1, .monotonic);
-            _ = self.stats.bytes_read.fetchAdd(ip_packet.len, .monotonic);
+            _ = self.stats.bytes_read.fetchAdd(eth_frame.len, .monotonic);
 
-            // Update adaptive manager stats (core feature)
+            // Update adaptive manager stats
             _ = self.adaptive_manager.packets_processed.fetchAdd(1, .monotonic);
-            _ = self.adaptive_manager.bytes_processed.fetchAdd(ip_packet.len, .monotonic);
+            _ = self.adaptive_manager.bytes_processed.fetchAdd(eth_frame.len, .monotonic);
 
             // Record in performance metrics
             const latency_us = @as(u64, @intCast(std.time.nanoTimestamp() - pkt.timestamp)) / 1000;
-            self.perf_metrics.recordPacket(ip_packet.len, latency_us);
+            self.perf_metrics.recordPacket(eth_frame.len, latency_us);
         }
 
         logDebug("Read thread stopped", .{});
@@ -455,7 +356,7 @@ pub const ZigPacketAdapter = struct {
             const count = self.send_queue.popBatch(&batch);
 
             if (count == 0) {
-                std.Thread.sleep(10 * std.time.ns_per_us); // 10 µs (10x faster)
+                std.Thread.sleep(10 * std.time.ns_per_us); // 10 µs
                 continue;
             }
 
@@ -463,144 +364,31 @@ pub const ZigPacketAdapter = struct {
             for (batch[0..count]) |pkt_opt| {
                 const pkt = pkt_opt orelse continue;
 
-                // Ethernet frame from SoftEther (no extra header)
+                // Ethernet frame from SoftEther
                 const eth_frame = pkt.data[0..pkt.len];
 
-                // Convert Ethernet frame to IP packet
-                const ip_packet_opt = self.translator.ethernetToIp(eth_frame) catch |err| {
-                    logError("Failed to convert Ethernet→IP: {}", .{err});
-                    self.packet_pool.free(pkt.data);
+                // Log packets with protocol details
+                const write_count = self.stats.packets_written.load(.monotonic);
+                if (write_count < 20 or write_count % 10 == 0) {
+                    if (eth_frame.len >= 14) {
+                        const ethertype = std.mem.readInt(u16, eth_frame[12..14], .big);
+                        logInfo("📤 WRITE #{d}: EtherType=0x{X:0>4}, {d} bytes", .{ write_count, ethertype, eth_frame.len });
+                    }
+                }
+
+                // Write Ethernet frame to ZigTapTun (automatic Ethernet→IP translation + AF header)
+                self.tun_adapter.writeEthernet(eth_frame) catch |err| {
+                    logError("TUN write failed: {}", .{err});
                     _ = self.stats.write_errors.fetchAdd(1, .monotonic);
+                    self.packet_pool.free(pkt.data);
                     continue;
                 };
 
-                if (ip_packet_opt) |ip_packet| {
-                    // We have an IP packet to write to TUN
-                    defer self.allocator.free(ip_packet); // Free translator's allocation
+                // Update stats
+                _ = self.stats.packets_written.fetchAdd(1, .monotonic);
+                _ = self.stats.bytes_written.fetchAdd(eth_frame.len, .monotonic);
 
-                    // Log packets with protocol details
-                    const write_count = self.stats.packets_written.load(.monotonic);
-                    if (write_count < 20 or write_count % 10 == 0) {
-                        if (eth_frame.len >= 14 and ip_packet.len >= 20) {
-                            const ethertype = std.mem.readInt(u16, eth_frame[12..14], .big);
-                            const ip_version = (ip_packet[0] >> 4) & 0x0F;
-                            const ip_proto = if (ip_version == 4) ip_packet[9] else ip_packet[6];
-                            const src_ip = if (ip_version == 4 and ip_packet.len >= 20)
-                                std.mem.readInt(u32, ip_packet[12..16], .big)
-                            else
-                                0;
-                            const dst_ip = if (ip_version == 4 and ip_packet.len >= 20)
-                                std.mem.readInt(u32, ip_packet[16..20], .big)
-                            else
-                                0;
-
-                            logInfo("📤 WRITE #{d}: EtherType=0x{X:0>4}, IPv{d}, proto={d}, {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d}, {d} bytes", .{ write_count, ethertype, ip_version, ip_proto, (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 8) & 0xFF, src_ip & 0xFF, (dst_ip >> 24) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 8) & 0xFF, dst_ip & 0xFF, ip_packet.len });
-                        } else {
-                            logInfo("📤 WRITE: Packet #{d}, Ethernet len={d} → IP len={d} bytes", .{ write_count, eth_frame.len, ip_packet.len });
-                        }
-                    }
-
-                    // Determine IP version for TUN header
-                    // macOS/BSD utun expects: [AF family (4 bytes, NETWORK byte order!)][IP packet]
-                    // Despite documentation saying "host byte order", it actually wants BIG-ENDIAN!
-                    var header: [4]u8 = undefined;
-                    const version = (ip_packet[0] >> 4) & 0x0F;
-
-                    if (version == 4) {
-                        // AF_INET (IPv4) - must write the full 32-bit value!
-                        // This creates: [0x02, 0x00, 0x00, 0x00]
-                        std.mem.writeInt(u32, &header, 0x02000000, .big);
-                    } else {
-                        // AF_INET6 (IPv6) - must write the full 32-bit value!
-                        // This creates: [0x1E, 0x00, 0x00, 0x00]
-                        std.mem.writeInt(u32, &header, 0x1E000000, .big);
-                    }
-
-                    // Log ICMP packets before writing
-                    if (ip_packet.len >= 20 and ip_packet[9] == 1) {
-                        logInfo("📮 writeThreadFn: Writing ICMP to TUN, len={d}", .{ip_packet.len});
-                        // Hex dump first 64 bytes of IP packet
-                        const dump_len = @min(ip_packet.len, 64);
-                        var hex_buf: [256]u8 = undefined;
-                        var pos: usize = 0;
-                        for (ip_packet[0..dump_len]) |byte| {
-                            const written = std.fmt.bufPrint(hex_buf[pos..], "{X:0>2} ", .{byte}) catch break;
-                            pos += written.len;
-                        }
-                        logInfo("   IP packet hex: {s}", .{hex_buf[0..pos]});
-                    }
-
-                    // **CRITICAL FIX**: Write header + packet in ONE atomic write
-                    // TUN device expects: [4-byte AF_INET/AF_INET6][IP packet]
-                    // Two separate writes can cause packet corruption!
-                    var write_buf: [2048]u8 = undefined;
-                    if (ip_packet.len + 4 > write_buf.len) {
-                        logError("Packet too large: {d} bytes", .{ip_packet.len});
-                        self.packet_pool.free(pkt.data);
-                        continue;
-                    }
-
-                    // Copy header + packet into single buffer
-                    @memcpy(write_buf[0..4], &header);
-                    @memcpy(write_buf[4 .. 4 + ip_packet.len], ip_packet);
-
-                    // 🔧 CRITICAL FIX: Recalculate checksums!
-                    // SoftEther sends packets with invalid checksums (likely due to checksum offload)
-                    // We must recalculate ICMP/TCP/UDP checksums before writing to TUN
-                    const ip_in_buf = write_buf[4 .. 4 + ip_packet.len];
-                    if (ip_in_buf.len >= 20) {
-                        const protocol = ip_in_buf[9];
-                        switch (protocol) {
-                            1 => { // ICMP
-                                if (checksum.recalculateIcmpChecksum(ip_in_buf)) {
-                                    logInfo("🔧 Recalculated ICMP checksum", .{});
-                                }
-                            },
-                            6 => { // TCP
-                                if (checksum.recalculateTcpChecksum(ip_in_buf)) {
-                                    logInfo("🔧 Recalculated TCP checksum", .{});
-                                }
-                            },
-                            17 => { // UDP
-                                if (checksum.recalculateUdpChecksum(ip_in_buf)) {
-                                    logInfo("🔧 Recalculated UDP checksum", .{});
-                                }
-                            },
-                            else => {}, // Other protocols (no checksum or unknown)
-                        }
-                    }
-
-                    // Single atomic write to TUN device
-                    const total_written = std.posix.write(self.tun_fd, write_buf[0 .. ip_packet.len + 4]) catch |err| {
-                        logError("TUN write failed: {} (len={d})", .{ err, ip_packet.len + 4 });
-                        _ = self.stats.write_errors.fetchAdd(1, .monotonic);
-                        self.packet_pool.free(pkt.data);
-                        continue;
-                    };
-
-                    // Log successful ICMP writes with TUN header
-                    if (ip_packet.len >= 20 and ip_packet[9] == 1) {
-                        logInfo("✅ ICMP written: {d} bytes total (fd={d})", .{ total_written, self.tun_fd });
-                        // Dump TUN header (first 4 bytes)
-                        var header_hex: [16]u8 = undefined;
-                        _ = std.fmt.bufPrint(&header_hex, "{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
-                            write_buf[0],
-                            write_buf[1],
-                            write_buf[2],
-                            write_buf[3],
-                        }) catch "";
-                        logInfo("   TUN header: {s} (should be 02000000 or 00000002)", .{header_hex});
-                    }
-
-                    // Update stats
-                    _ = self.stats.packets_written.fetchAdd(1, .monotonic);
-                    _ = self.stats.bytes_written.fetchAdd(ip_packet.len, .monotonic);
-                } else {
-                    // Packet was handled internally (e.g., ARP)
-                    // This is normal - ARP is handled by translator
-                }
-
-                // Return buffer to pool
+                // Free packet buffer
                 self.packet_pool.free(pkt.data);
             }
         }
@@ -794,7 +582,7 @@ export fn zig_adapter_start(adapter: *ZigPacketAdapter) bool {
 /// We must ADD a 14-byte Ethernet header to each IP packet read from TUN.
 export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffer_len: usize) isize {
     // Read directly from TUN device (non-blocking)
-    const fd = adapter.tun_fd;
+    const fd = adapter.tun_adapter.device.fd;
 
     // Use a temp buffer to read IP packet (we'll prepend Ethernet header later)
     var temp_buf: [2048]u8 = undefined;
@@ -860,7 +648,7 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
 
     // Dest MAC: Use gateway MAC if learned, otherwise broadcast (FF:FF:FF:FF:FF:FF)
     // For inbound packets, dest should be our MAC, but we use gateway MAC for routing
-    if (adapter.translator.gateway_mac) |gw_mac| {
+    if (adapter.tun_adapter.translator.gateway_mac) |gw_mac| {
         @memcpy(buffer[0..6], &gw_mac);
     } else {
         // Broadcast MAC if gateway not learned yet
@@ -868,7 +656,7 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
     }
 
     // Src MAC: Our MAC address (from translator options)
-    @memcpy(buffer[6..12], &adapter.translator.options.our_mac); // EtherType (big-endian)
+    @memcpy(buffer[6..12], &adapter.tun_adapter.translator.options.our_mac); // EtherType (big-endian)
     buffer[12] = @intCast((ethertype >> 8) & 0xFF);
     buffer[13] = @intCast(ethertype & 0xFF);
 
@@ -924,7 +712,7 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
         @memcpy(write_buf[4..write_len], pkt.data[ETHERNET_HEADER_SIZE..pkt.len]);
 
         // Write to TUN device
-        const fd = adapter.tun_fd;
+        const fd = adapter.tun_adapter.device.fd;
         const bytes_written = std.posix.write(fd, write_buf[0..write_len]) catch |err| {
             if (err == error.WouldBlock) {
                 // TUN device full, re-queue packet and stop
@@ -999,24 +787,39 @@ export fn zig_adapter_print_stats(adapter: *ZigPacketAdapter) void {
 export fn zig_adapter_get_device_name(adapter: *ZigPacketAdapter, out_buffer: [*]u8, buffer_len: usize) usize {
     if (buffer_len == 0) return 0;
 
-    const copy_len = @min(adapter.device_name.len, buffer_len - 1);
-    @memcpy(out_buffer[0..copy_len], adapter.device_name[0..copy_len]);
+    const device_name = adapter.tun_adapter.getDeviceName();
+    const copy_len = @min(device_name.len, buffer_len - 1);
+    @memcpy(out_buffer[0..copy_len], device_name[0..copy_len]);
     out_buffer[copy_len] = 0; // Null terminate
 
     return copy_len;
 }
 
+/// Get learned IP address from ZigTapTun translator
+export fn zig_adapter_get_learned_ip(adapter: *ZigPacketAdapter) u32 {
+    return adapter.tun_adapter.getLearnedIp() orelse 0;
+}
+
+/// Get gateway MAC address from ZigTapTun translator
+export fn zig_adapter_get_gateway_mac(adapter: *ZigPacketAdapter, out_mac: [*]u8) bool {
+    if (adapter.tun_adapter.getGatewayMac()) |mac| {
+        @memcpy(out_mac[0..6], &mac);
+        return true;
+    }
+    return false;
+}
+
 /// Set gateway IP and MAC in translator (for learning gateway MAC from ARP)
 /// ip_network_order: Gateway IP in network byte order (big-endian)
 export fn zig_adapter_set_gateway(adapter: *ZigPacketAdapter, ip_network_order: u32) void {
-    adapter.translator.setGateway(ip_network_order, [_]u8{0} ** 6);
+    adapter.tun_adapter.translator.setGateway(ip_network_order, [_]u8{0} ** 6);
 }
 
 /// Set gateway MAC address (called from C when gateway MAC is learned via ARP)
 export fn zig_adapter_set_gateway_mac(adapter: *ZigPacketAdapter, mac: [*c]const u8) void {
     var mac_array: [6]u8 = undefined;
     @memcpy(&mac_array, mac[0..6]);
-    adapter.translator.gateway_mac = mac_array;
+    adapter.tun_adapter.translator.gateway_mac = mac_array;
 
     logInfo("[L2L3] 🎯 setGatewayMAC: {X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}:{X:0>2}", .{
         mac_array[0], mac_array[1], mac_array[2],
@@ -1060,8 +863,9 @@ export fn zig_adapter_configure_interface(
 
     // Build ifconfig command
     var cmd: [256]u8 = undefined;
+    const device_name = adapter.tun_adapter.getDeviceName();
     const cmd_str = std.fmt.bufPrintZ(&cmd, "ifconfig {s} {s} {s} netmask {s} up", .{
-        adapter.device_name,
+        device_name,
         local_fmt,
         peer_fmt,
         mask_fmt,
