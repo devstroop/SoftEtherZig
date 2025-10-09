@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{
+        .preferred_optimize_mode = .ReleaseFast,
+    });
 
     // Build option to use Zig packet adapter
     const use_zig_adapter = b.option(bool, "use-zig-adapter", "Use Zig packet adapter instead of C adapter (default: false)") orelse false;
