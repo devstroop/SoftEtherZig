@@ -36,6 +36,7 @@ static bool g_dhcp_initialized = false;
 static UINT32 g_offered_ip = 0;
 static UINT32 g_offered_gw = 0;
 static UINT32 g_offered_mask = 0;
+static bool g_threads_started = false;
 static UINT32 g_dhcp_server_ip = 0;
 static UINT32 g_our_ip = 0;
 static bool g_need_gateway_arp = false;  // CRITICAL: Request gateway MAC after DHCP
@@ -215,16 +216,10 @@ static bool ZigAdapterInit(SESSION* s) {
     
     printf("[ZigAdapterInit] TUN device opened successfully\n");
     
-    // Start adapter threads
-    if (!zig_adapter_start(ctx->zig_adapter)) {
-        printf("[ZigAdapterInit] Failed to start adapter threads\n");
-        zig_adapter_destroy(ctx->zig_adapter);
-        ReleaseCancel(ctx->cancel);
-        Free(ctx);
-        return false;
-    }
-    
-    printf("[ZigAdapterInit] Zig adapter started successfully\n");
+    // **CRITICAL FIX**: Do NOT start async threads!
+    // We read synchronously from TUN in GetNextPacket() like C adapter.
+    // This ensures proper packet ordering and session integration.
+    printf("[ZigAdapterInit] Using synchronous TUN reads (no async threads)\n");
     
     // Configure interface: Just bring it UP without an IP - let the L2/L3 translator
     // handle DHCP packets and the adapter will learn the IP automatically
@@ -489,14 +484,20 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
         }
     }
     
-    // Get packet from Zig adapter (normal operation)
-    uint8_t* packet_data = NULL;
-    uint64_t packet_len = 0;
+    // **SYNCHRONOUS TUN READ** (like C adapter)
+    // Read directly from TUN device when session polls - no async threads!
+    // This ensures packets flow through SoftEther's session management properly.
     
-    if (!zig_adapter_get_packet(ctx->zig_adapter, &packet_data, &packet_len)) {
+    uint8_t temp_buf[2048];
+    ssize_t bytes_read = zig_adapter_read_sync(ctx->zig_adapter, temp_buf, sizeof(temp_buf));
+    
+    if (bytes_read <= 0) {
         // No packet available (this is normal - polled frequently)
         return 0;
     }
+    
+    uint64_t packet_len = (uint64_t)bytes_read;
+    uint8_t* packet_data = temp_buf;
     
     // Log first few successful gets
     if (get_count < 5) {
@@ -541,17 +542,13 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
     get_count++;
     
     if (packet_len == 0 || packet_len > 2048) {
-        // Release the packet buffer even if invalid
         printf("[ZigAdapterGetNextPacket] Invalid packet length %llu, dropping\n", packet_len);
-        zig_adapter_release_packet(ctx->zig_adapter, packet_data);
         return 0;
     }
     
     // Allocate buffer for packet
     void* packet_copy = Malloc((UINT)packet_len);
     if (!packet_copy) {
-        // Release the packet buffer on allocation failure
-        zig_adapter_release_packet(ctx->zig_adapter, packet_data);
         return 0;
     }
     
@@ -559,9 +556,6 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
     Copy(packet_copy, packet_data, (UINT)packet_len);
     
     *data = packet_copy;
-    
-    // CRITICAL: Release Zig buffer after copying to prevent leak
-    zig_adapter_release_packet(ctx->zig_adapter, packet_data);
     
     return (UINT)packet_len;
 }
@@ -788,6 +782,9 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
                                g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
                         printf("[ZigAdapterPutPacket]    This enables bidirectional traffic routing!\n");
+                        
+                        // **CRITICAL**: Pass gateway MAC to Zig adapter for Ethernet header construction
+                        zig_adapter_set_gateway_mac(ctx->zig_adapter, g_gateway_mac);
                     }
                 }
             }
@@ -897,11 +894,20 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     }
     packet_count++;
     
-    // Send packet to Zig adapter
+    // Send packet to Zig adapter (queues in send_queue)
     bool result = zig_adapter_put_packet(ctx->zig_adapter, (const uint8_t*)data, (uint64_t)size);
     
     if (is_icmp && !result) {
-        printf("[ZigAdapterPutPacket] ❌ FAILED to send ICMP packet to Zig adapter!\n");
+        printf("[ZigAdapterPutPacket] ❌ FAILED to queue ICMP packet!\n");
+        return false;
+    }
+    
+    // **CRITICAL FIX**: Synchronously write queued packets to TUN device!
+    // This is the missing piece - we queue packets but never write them to TUN!
+    ssize_t written = zig_adapter_write_sync(ctx->zig_adapter);
+    
+    if (is_icmp && written > 0) {
+        printf("[ZigAdapterPutPacket] ✅ Wrote %zd packet(s) to TUN (including ICMP)\n", written);
     }
     
     return result;

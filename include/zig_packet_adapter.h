@@ -63,6 +63,11 @@ void zig_adapter_print_stats(ZigPacketAdapter *adapter);
 
 // Gateway configuration (for MAC learning from ARP)
 void zig_adapter_set_gateway(ZigPacketAdapter *adapter, uint32_t ip_network_order);
+void zig_adapter_set_gateway_mac(ZigPacketAdapter *adapter, const uint8_t mac[6]);
+
+// Synchronous I/O (for non-async operation)
+ssize_t zig_adapter_read_sync(ZigPacketAdapter *adapter, uint8_t *buffer, size_t buffer_len);
+ssize_t zig_adapter_write_sync(ZigPacketAdapter *adapter);
 
 #ifdef __cplusplus
 }
