@@ -29,6 +29,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/../SoftEtherVPN_Stable/src/Mayaqua
     ${CMAKE_SOURCE_DIR}/../SoftEtherVPN_Stable/src/Cedar
     ${CMAKE_SOURCE_DIR}/../src/bridge
+    ${CMAKE_SOURCE_DIR}/../include
     ${OPENSSL_INCLUDE_DIR}
 )
 
@@ -109,7 +110,12 @@ set(BRIDGE_SOURCES
 # JNI sources
 set(JNI_SOURCES
     jni/softether_jni.c
+    jni/mobile_jni.c
 )
+
+# Mobile FFI library (pre-built by Zig)
+# Note: This should be built by `zig build mobile-ffi` before Android build
+set(MOBILE_FFI_LIB ${CMAKE_SOURCE_DIR}/../zig-out/lib/libsoftether_mobile.a)
 
 # Create shared library
 add_library(softether-vpn SHARED
@@ -124,5 +130,6 @@ target_link_libraries(softether-vpn
     ${log-lib}
     ${OPENSSL_CRYPTO_LIBRARY}
     ${OPENSSL_SSL_LIBRARY}
+    ${MOBILE_FFI_LIB}
     z
 )

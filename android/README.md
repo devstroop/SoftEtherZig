@@ -1,21 +1,56 @@
 # SoftEther VPN - Android Implementation
 
-This directory contains the Android implementation of SoftEther VPN client using JNI and VpnService.
+This directory contains the Android implementation of SoftEther VPN client using the Mobile FFI layer.
 
 ## Architecture
+
+**New Mobile FFI Architecture (Recommended)**:
+
+```
+┌──────────────────────────────────────────────┐
+│         Android Application                  │
+│  (Kotlin/Java UI, VPN Management)            │
+└───────────────┬──────────────────────────────┘
+                │
+                ├─ VpnService (Kotlin)
+                │  (Android VpnService integration)
+                │
+                ├─ SoftEtherMobileClient.kt
+                │  (Type-safe Kotlin API)
+                │
+                ▼
+┌──────────────────────────────────────────────┐
+│         JNI Layer (C)                        │
+│  mobile_jni.c                                │
+│  - JNI wrapper for mobile FFI                │
+└───────────────┬──────────────────────────────┘
+                │
+                ▼
+┌──────────────────────────────────────────────┐
+│    Mobile FFI (C API)                        │
+│  libsoftether_mobile.so                      │
+│  - Platform-agnostic C interface             │
+│  - Shared with iOS                           │
+└───────────────┬──────────────────────────────┘
+                │
+                ▼
+┌──────────────────────────────────────────────┐
+│    Zig Packet Adapter (Zig)                  │
+│  - Core VPN logic                            │
+│  - Protocol implementation                   │
+│  - Packet queue management                   │
+└──────────────────────────────────────────────┘
+```
+
+**Legacy Architecture (Deprecated)**:
 
 ```
 ┌─────────────────────────────────────────┐
 │         Android Application             │
-│  (Kotlin/Java UI, VPN Management)       │
 └─────────────┬───────────────────────────┘
               │
               ├─ VpnClientService.kt
-              │  (VpnService implementation)
-              │
               ├─ SoftEtherBridge.kt
-              │  (JNI wrapper)
-              │
               ▼
 ┌─────────────────────────────────────────┐
 │         JNI Layer (C)                   │
@@ -26,8 +61,6 @@ This directory contains the Android implementation of SoftEther VPN client using
 ┌─────────────────────────────────────────┐
 │    Android Packet Adapter (C)           │
 │  packet_adapter_android.c               │
-│  - TUN device I/O via fd                │
-│  - Packet queue management              │
 └─────────────┬───────────────────────────┘
               │
               ▼
@@ -41,20 +74,37 @@ This directory contains the Android implementation of SoftEther VPN client using
 
 ```
 android/
-├── CMakeLists.txt           # Native build configuration
+├── CMakeLists.txt              # Native build configuration
 ├── jni/
-│   └── softether_jni.c      # JNI bindings
+│   ├── mobile_jni.c            # ✨ NEW: Mobile FFI JNI wrapper
+│   └── softether_jni.c         # ⚠️  DEPRECATED: Legacy JNI
 ├── kotlin/
-│   ├── SoftEtherBridge.kt   # Kotlin JNI wrapper
-│   └── VpnClientService.kt  # VpnService implementation
-└── README.md                # This file
+│   ├── SoftEtherMobileClient.kt # ✨ NEW: Modern Kotlin API
+│   ├── SoftEtherBridge.kt       # ⚠️  DEPRECATED: Legacy bridge
+│   └── VpnClientService.kt      # Legacy VpnService (update needed)
+├── INTEGRATION.md              # Complete integration guide
+└── README.md                   # This file
 
-src/bridge/android/
-├── packet_adapter_android.c # Android TUN adapter
-└── packet_adapter_android.h # Header
+Related directories:
+include/
+├── mobile_ffi.h                # Mobile FFI C header
+└── softether_ffi.h             # Legacy FFI header
+
+zig-out/lib/
+└── libsoftether_mobile.a       # Pre-built mobile FFI library
 ```
 
 ## Prerequisites
+
+### Using Mobile FFI (Recommended)
+
+1. **Zig 0.15.1 or later** - For building the mobile FFI library
+2. **Android NDK** (r25 or later)
+3. **Android SDK** (API 24+, target API 34+)
+4. **CMake** (3.18.1 or later)
+5. **Kotlin coroutines** (for async operations)
+
+### Using Legacy Implementation
 
 1. **Android NDK** (r21 or later)
 2. **Android SDK** (API 21+, target API 33+)
@@ -63,7 +113,53 @@ src/bridge/android/
 
 ## Building
 
-### Step 1: Build OpenSSL for Android
+### Mobile FFI Approach (Recommended)
+
+#### Step 1: Build Mobile FFI Library
+
+```bash
+cd /path/to/SoftEtherZig
+
+# Build for Android ARM64
+zig build mobile-ffi -Dtarget=aarch64-linux-android
+
+# Build for Android ARM32
+zig build mobile-ffi -Dtarget=arm-linux-android
+
+# Output: zig-out/lib/libsoftether_mobile.a
+```
+
+#### Step 2: Build Android Native Library
+
+See **[INTEGRATION.md](INTEGRATION.md)** for complete setup instructions including:
+- Android Studio project configuration
+- CMakeLists.txt setup
+- Gradle build configuration
+- VpnService integration
+- Usage examples
+- API reference
+- Troubleshooting
+
+Quick start:
+
+```bash
+# Configure your app/build.gradle
+android {
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+        }
+    }
+}
+
+# Build in Android Studio or via Gradle
+./gradlew assembleDebug
+```
+
+### Legacy Approach (Deprecated)
+
+<details>
+<summary>Click to expand legacy build instructions</summary>
 
 ```bash
 # Download and build OpenSSL for Android
@@ -91,7 +187,9 @@ cmake .. \
 cmake --build .
 ```
 
-### Step 3: Integrate with Android Project
+</details>
+
+
 
 1. **Copy native library** to your Android project:
    ```
@@ -132,9 +230,72 @@ cmake --build .
    </manifest>
    ```
 
-## Usage Example
+## Quick Start
 
-### Kotlin Activity
+### Mobile FFI (Recommended)
+
+```kotlin
+import com.softether.mobile.*
+import kotlinx.coroutines.*
+
+class VpnManager {
+    private val client = SoftEtherMobileClient()
+    
+    suspend fun connect() {
+        // Configure
+        val config = VpnConfig(
+            serverName = "vpn.example.com",
+            serverPort = 443,
+            hubName = "VPN",
+            username = "user@example.com",
+            password = "your_password"
+        )
+        
+        // Create and connect
+        client.create(config)
+        client.connectAsync(timeoutMs = 30000)
+        
+        // Get network info
+        val netInfo = client.getNetworkInfo()
+        println("IP: ${netInfo.ipAddress}")
+        println("Gateway: ${netInfo.gateway}")
+        println("DNS: ${netInfo.dnsServers.joinToString()}")
+    }
+    
+    suspend fun disconnect() {
+        client.disconnectAsync()
+        client.destroy()
+    }
+    
+    // Packet I/O
+    suspend fun forwardPackets(tunFd: Int) {
+        while (client.isConnected()) {
+            try {
+                // VPN → TUN
+                val packet = client.readPacketAsync(timeoutMs = 100)
+                // Write to TUN device...
+                
+                // TUN → VPN
+                // val tunPacket = readFromTun()
+                // client.writePacketAsync(tunPacket)
+            } catch (e: VpnException.NoData) {
+                delay(10)
+            }
+        }
+    }
+}
+```
+
+See **[INTEGRATION.md](INTEGRATION.md)** for:
+- Complete VpnService integration
+- Error handling
+- Performance tuning
+- Full API reference
+
+### Legacy Approach (Deprecated)
+
+<details>
+<summary>Click to expand legacy usage</summary>
 
 ```kotlin
 import android.content.Intent
@@ -183,7 +344,9 @@ class MainActivity : AppCompatActivity() {
 }
 ```
 
-## Key Features
+</details>
+
+
 
 - ✅ **Full VPN Protocol Support**: SSTP, L2TP, OpenVPN compatible
 - ✅ **Native Performance**: C-based packet processing
