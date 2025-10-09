@@ -2,3 +2,8 @@ module SoftEtherVPN {
     header "softether_ios.h"
     export *
 }
+
+module SoftEtherMobile {
+    header "mobile_ffi.h"
+    export *
+}

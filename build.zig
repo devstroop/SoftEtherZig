@@ -385,4 +385,28 @@ pub fn build(b: *std.Build) void {
     // Add a step to build just the library
     const lib_step = b.step("lib", "Build static library for iOS/FFI");
     lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+
+    // ============================================
+    // 6. MOBILE FFI LIBRARY (iOS + Android)
+    // ============================================
+    const mobile_ffi = b.addLibrary(.{
+        .name = "softether_mobile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi/mobile.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    mobile_ffi.root_module.addImport("taptun", taptun.module("taptun"));
+    mobile_ffi.linkLibC();
+    mobile_ffi.addIncludePath(b.path("include"));
+    mobile_ffi.addIncludePath(b.path("src"));
+
+    b.installArtifact(mobile_ffi);
+
+    // Also install the header
+    b.installFile("include/mobile_ffi.h", "include/mobile_ffi.h");
+
+    const mobile_ffi_step = b.step("mobile-ffi", "Build mobile FFI library");
+    mobile_ffi_step.dependOn(&b.addInstallArtifact(mobile_ffi, .{}).step);
 }
