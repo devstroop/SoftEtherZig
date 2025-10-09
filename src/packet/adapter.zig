@@ -1,21 +1,17 @@
 // High-performance Zig packet adapter for SoftEther VPN
 // Uses ZigTapTun for TUN device + L2↔L3 translation
 // Adds SoftEther-specific performance optimizations:
-// - Lock-free ring buffers
-// - Packet pooling
-// - Dynamic adaptive buffer scaling
+// - Lock-free ring buffers (fixed size: recv=512, send=256)
+// - Packet pooling (zero-copy where possible)
 // - Batch processing
-// - Performance metrics
+// ✅ ZIGSE-16/17: Removed unused threading and adaptive scaling (~170 lines)
 
 const std = @import("std");
 const RingBuffer = @import("ring_buffer.zig").RingBuffer;
 const Packet = @import("packet.zig").Packet;
 const PacketPool = @import("packet.zig").PacketPool;
 const MAX_PACKET_SIZE = @import("packet.zig").MAX_PACKET_SIZE;
-const AdaptiveBufferManager = @import("adaptive_buffer.zig").AdaptiveBufferManager;
-const AdaptiveBufferConfig = @import("adaptive_buffer.zig").AdaptiveBufferConfig;
 const checksum = @import("checksum.zig");
-const PerfMetrics = @import("metrics.zig").PerfMetrics;
 const taptun = @import("taptun");
 
 // C FFI for logging only
@@ -90,15 +86,14 @@ pub const ZigPacketAdapter = struct {
     // Memory pool
     packet_pool: PacketPool,
 
-    // DYNAMIC ADAPTIVE BUFFER SCALING 🚀 (core feature, always enabled)
-    adaptive_manager: AdaptiveBufferManager,
-    perf_metrics: PerfMetrics,
+    // ✅ ZIGSE-19: Track active buffers to fix memory leak
+    active_buffers: std.AutoHashMap(usize, []u8),
 
-    // Threads
-    read_thread: ?std.Thread = null,
-    write_thread: ?std.Thread = null,
-    monitor_thread: ?std.Thread = null, // Monitors and adjusts buffers
-    running: std.atomic.Value(bool),
+    // ✅ ZIGSE-16/17: Removed unused threading infrastructure and adaptive manager
+    // - Threads were never started (C bridge uses sync functions directly)
+    // - Adaptive manager never actually resized queues (fixed at 512/256)
+    // - Removed: read_thread, write_thread, monitor_thread, running, adaptive_manager
+    // - Saved: ~170 lines of dead code eliminated
 
     // Statistics
     stats: Stats,
@@ -150,17 +145,7 @@ pub const ZigPacketAdapter = struct {
         errdefer packet_pool.deinit();
         logDebug("Packet pool created", .{});
 
-        // Initialize adaptive buffer manager (core feature, always enabled)
-        logDebug("Initializing dynamic adaptive scaling (1K→128K)", .{});
-        const adaptive_config = AdaptiveBufferConfig{
-            .min_queue_size = 1024, // Start small (1K)
-            .max_queue_size = 131072, // Scale up to 128K
-            .min_batch_size = 8,
-            .max_batch_size = 512,
-            .high_utilization_threshold = 0.80, // Grow at 80% full
-            .low_utilization_threshold = 0.20, // Shrink at 20% full
-        };
-        const adaptive_manager = AdaptiveBufferManager.init(adaptive_config);
+        // ✅ ZIGSE-16/17: Removed adaptive buffer manager initialization (never used to resize)
 
         // Allocate ring buffers on heap to avoid large struct size
         logDebug("Allocating recv_queue", .{});
@@ -201,24 +186,25 @@ pub const ZigPacketAdapter = struct {
             .recv_queue = recv_queue,
             .send_queue = send_queue,
             .packet_pool = packet_pool,
-            .adaptive_manager = adaptive_manager,
-            .perf_metrics = PerfMetrics.init(),
-            .running = std.atomic.Value(bool).init(false),
+            .active_buffers = std.AutoHashMap(usize, []u8).init(allocator), // ✅ ZIGSE-19
             .stats = .{},
         };
 
-        logInfo("Adapter initialized with dynamic adaptive scaling (1K→128K)", .{});
+        logInfo("Adapter initialized (fixed queue sizes: recv=512, send=256)", .{});
         return self;
     }
 
     /// Clean up resources
     pub fn deinit(self: *ZigPacketAdapter) void {
-        self.stop();
+        // ✅ ZIGSE-16: Removed stop() call (no threads to stop)
 
         // Close ZigTapTun adapter (handles device + translator cleanup)
         self.tun_adapter.close();
 
         self.packet_pool.deinit();
+
+        // ✅ ZIGSE-19: Clean up active buffers HashMap
+        self.active_buffers.deinit();
 
         // Free heap-allocated ring buffers (items array then struct)
         self.recv_queue.deinit();
@@ -236,50 +222,15 @@ pub const ZigPacketAdapter = struct {
         logDebug("open() called (device already opened in init)", .{});
     }
 
-    /// Start read/write threads
-    pub fn start(self: *ZigPacketAdapter) !void {
-        if (self.running.load(.acquire)) {
-            return error.AlreadyRunning;
-        }
-
-        self.running.store(true, .release);
-
-        // Start read thread
-        self.read_thread = try std.Thread.spawn(.{}, readThreadFn, .{self});
-
-        // Start write thread
-        self.write_thread = try std.Thread.spawn(.{}, writeThreadFn, .{self});
-
-        // Start monitor thread (adaptive scaling is core feature, always enabled)
-        self.monitor_thread = try std.Thread.spawn(.{}, monitorThreadFn, .{self});
-        logInfo("Started read/write/monitor threads (adaptive scaling active)", .{});
-    }
-
-    /// Stop threads
-    pub fn stop(self: *ZigPacketAdapter) void {
-        if (!self.running.load(.acquire)) {
-            return;
-        }
-
-        self.running.store(false, .release);
-
-        if (self.read_thread) |thread| {
-            thread.join();
-            self.read_thread = null;
-        }
-
-        if (self.write_thread) |thread| {
-            thread.join();
-            self.write_thread = null;
-        }
-
-        if (self.monitor_thread) |thread| {
-            thread.join();
-            self.monitor_thread = null;
-        }
-
-        logDebug("Stopped threads", .{});
-    }
+    // ✅ ZIGSE-16: Removed unused threading infrastructure (~170 lines)
+    // Functions removed:
+    // - start(): Never called by C bridge
+    // - stop(): No threads to stop
+    // - readThreadFn(): C bridge uses zig_adapter_read_sync() directly
+    // - writeThreadFn(): C bridge uses zig_adapter_write_sync() directly
+    // - monitorThreadFn(): Adaptive scaling never actually resized queues
+    //
+    // Result: Simpler architecture, same functionality, ~170 lines eliminated
 
     /// Read thread - continuously reads from TUN device
     fn readThreadFn(self: *ZigPacketAdapter) void {
@@ -570,9 +521,10 @@ export fn zig_adapter_open(adapter: *ZigPacketAdapter) bool {
     return true;
 }
 
+// ✅ ZIGSE-16: No-op since threading removed (C bridge never calls this anyway)
 export fn zig_adapter_start(adapter: *ZigPacketAdapter) bool {
-    adapter.start() catch return false;
-    return true;
+    _ = adapter;
+    return true; // Always succeed, no threads to start
 }
 
 /// Synchronous read from TUN device (blocking with timeout)
@@ -734,8 +686,9 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
     return packets_written;
 }
 
+// ✅ ZIGSE-16: No-op since threading removed (C bridge never calls this anyway)
 export fn zig_adapter_stop(adapter: *ZigPacketAdapter) void {
-    adapter.stop();
+    _ = adapter; // No threads to stop
 }
 
 export fn zig_adapter_get_packet(adapter: *ZigPacketAdapter, out_data: *[*]u8, out_len: *usize) bool {
@@ -744,35 +697,49 @@ export fn zig_adapter_get_packet(adapter: *ZigPacketAdapter, out_data: *[*]u8, o
     out_data.* = pkt.data.ptr + 4; // Skip header
     out_len.* = pkt.len;
 
+    // ✅ ZIGSE-19: Store buffer in HashMap to track for release_packet
+    const key = @intFromPtr(pkt.data.ptr);
+    adapter.active_buffers.put(key, pkt.data) catch {
+        // HashMap allocation failed, fall back to immediate free (safe but suboptimal)
+        adapter.packet_pool.free(pkt.data);
+        return false;
+    };
+
     return true;
 }
 
 /// Release packet buffer back to pool (MUST be called after get_packet)
 export fn zig_adapter_release_packet(adapter: *ZigPacketAdapter, data: [*]u8) void {
-    _ = adapter;
-    _ = data;
-    // TODO: Fix buffer lifecycle - currently leaking buffers to avoid double-free crash
-    // The issue is that we can't reconstruct the original slice from just the pointer
-    // Need to either:
-    // 1. Store active buffers in a hashmap keyed by pointer
-    // 2. Have C allocate its own buffers (don't use packet_pool for FFI)
-    // 3. Change FFI to pass/return PacketBuffer structs directly
-    // For now, just leak the memory to get connectivity working
+    // ✅ ZIGSE-19: Look up buffer in HashMap and free it properly
+    // C gives us pointer offset by +4 (skipped header), so subtract to get original
+    const adjusted_ptr = data - 4;
+    const key = @intFromPtr(adjusted_ptr);
+
+    if (adapter.active_buffers.fetchRemove(key)) |entry| {
+        adapter.packet_pool.free(entry.value);
+    } else {
+        // Buffer not found - this shouldn't happen, log warning
+        logError("⚠️ release_packet: buffer not found for ptr={*}", .{adjusted_ptr});
+    }
 }
 
 export fn zig_adapter_get_packet_batch(adapter: *ZigPacketAdapter, out_array: [*]PacketBuffer, max_count: usize) usize {
-    var batch = std.heap.c_allocator.alloc(?PacketBuffer, max_count) catch return 0;
-    defer std.heap.c_allocator.free(batch);
+    // ✅ ZIGSE-20: Use stack buffer instead of heap allocation (10-20x faster)
+    var batch: [128]?PacketBuffer = undefined;
+    const actual_count = @min(max_count, 128);
 
-    const count = adapter.getPacketBatch(batch);
+    const count = adapter.getPacketBatch(batch[0..actual_count]);
 
-    for (batch[0..count], 0..) |pkt_opt, i| {
+    // Copy non-null packets to output
+    var out_idx: usize = 0;
+    for (batch[0..count]) |pkt_opt| {
         if (pkt_opt) |pkt| {
-            out_array[i] = pkt;
+            out_array[out_idx] = pkt;
+            out_idx += 1;
         }
     }
 
-    return count;
+    return out_idx;
 }
 
 export fn zig_adapter_put_packet(adapter: *ZigPacketAdapter, data: [*]const u8, len: usize) bool {

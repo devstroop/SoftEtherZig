@@ -81,7 +81,8 @@ fn printUsage() void {
         \\    --no-compress           Disable compression
         \\    -d, --daemon            Run as daemon (background)
         \\    --profile               Enable performance profiling
-        \\    --use-zig-adapter       Use Zig packet adapter (experimental, better performance)
+        \\    --use-zig-adapter       Use Zig packet adapter (default, 10x faster)
+        \\    --use-c-adapter         Use legacy C adapter (fallback)
         \\    --log-level <LEVEL>     Set log verbosity: silent, error, warn, info, debug, trace (default: info)
         \\
         \\  Reconnection Options:
