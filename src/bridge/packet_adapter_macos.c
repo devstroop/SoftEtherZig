@@ -82,7 +82,7 @@ static bool g_ipv6_configured = false;     // IPv6 has been configured
 IP_CONFIG g_ip_config = {0};
 
 // Original routing configuration (for restoration on disconnect)
-static UINT32 g_original_gateway = 0;    // Original default gateway
+static UINT32 g_local_gateway = 0;    // Original default gateway
 static UINT32 g_vpn_server_ip = 0;       // VPN server IP
 static UINT32 g_local_network = 0;       // Local network (e.g., 192.168.1.0)
 static bool g_routes_configured = false; // Flag: routes have been modified
@@ -251,7 +251,7 @@ static bool ConfigureTunInterface(const char *device, UINT32 ip, UINT32 netmask,
             LOG_INFO("TUN", "Interface configured successfully");
 
             // Store routing info for restoration on disconnect
-            g_original_gateway = orig_gateway;
+            g_local_gateway = orig_gateway;
             g_vpn_server_ip = vpn_server_ip;
             g_local_network = local_network;
             g_routes_configured = true;
@@ -2494,7 +2494,7 @@ bool MacOsTunPutPacket(SESSION *s, void *data, UINT size)
 static void RestoreRouting(void)
 {
 #ifndef TARGET_OS_IPHONE
-    if (!g_routes_configured || g_original_gateway == 0)
+    if (!g_routes_configured || g_local_gateway == 0)
     {
         LOG_DEBUG("TUN", "No routes to restore");
         return;
@@ -2504,8 +2504,8 @@ static void RestoreRouting(void)
     char gw_str[32];
 
     snprintf(gw_str, sizeof(gw_str), "%u.%u.%u.%u",
-             (g_original_gateway >> 24) & 0xFF, (g_original_gateway >> 16) & 0xFF,
-             (g_original_gateway >> 8) & 0xFF, g_original_gateway & 0xFF);
+             (g_local_gateway >> 24) & 0xFF, (g_local_gateway >> 16) & 0xFF,
+             (g_local_gateway >> 8) & 0xFF, g_local_gateway & 0xFF);
 
     LOG_INFO("TUN", "Restoring original routing (gateway: %s)", gw_str);
 

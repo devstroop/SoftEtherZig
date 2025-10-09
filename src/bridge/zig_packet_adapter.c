@@ -2,11 +2,18 @@
 // Wraps Zig packet adapter to provide SoftEther PACKET_ADAPTER interface
 
 #include "zig_packet_adapter.h"
+#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
 #include "logging.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+// Route restoration state (for cleanup on disconnect)
+static UINT32 g_zig_local_gateway = 0;    // Original default gateway
+static UINT32 g_zig_vpn_server_ip = 0;       // VPN server IP
+static bool g_zig_routes_configured = false; // Routes have been modified
 
 // External function declarations from packet_adapter_macos.c
 extern UCHAR *BuildGratuitousArp(UCHAR *my_mac, UINT32 my_ip, UINT *out_size);
@@ -638,6 +645,14 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                         // Remove newline
                                         original_gw[strcspn(original_gw, "\n")] = 0;
                                         printf("[●] DHCP: Original default gateway: %s\n", original_gw);
+                                        
+                                        // ✅ Parse and store for restoration
+                                        unsigned int a, b, c, d;
+                                        if (sscanf(original_gw, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                                            g_zig_local_gateway = (a << 24) | (b << 16) | (c << 8) | d;
+                                            g_zig_routes_configured = true;
+                                            printf("[●] DHCP: Stored original gateway for restoration: 0x%08X\n", g_zig_local_gateway);
+                                        }
                                     }
                                     pclose(route_output);
                                 }
@@ -841,6 +856,60 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     return result;
 }
 
+// Restore original routing configuration
+static void RestoreZigRouting(void) {
+#ifndef TARGET_OS_IPHONE
+    if (!g_zig_routes_configured || g_zig_local_gateway == 0) {
+        printf("[RestoreZigRouting] No routes to restore\n");
+        return;
+    }
+    
+    char cmd[512];
+    char gw_str[32];
+    
+    snprintf(gw_str, sizeof(gw_str), "%u.%u.%u.%u",
+             (g_zig_local_gateway >> 24) & 0xFF, (g_zig_local_gateway >> 16) & 0xFF,
+             (g_zig_local_gateway >> 8) & 0xFF, g_zig_local_gateway & 0xFF);
+    
+    printf("[RestoreZigRouting] 🔄 Restoring original routing (gateway: %s)\n", gw_str);
+    
+    // Delete VPN default route
+    printf("[RestoreZigRouting] Removing VPN default route...\n");
+    snprintf(cmd, sizeof(cmd), "route delete default 2>&1");
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        char result[256];
+        while (fgets(result, sizeof(result), fp)) { /* discard output */ }
+        pclose(fp);
+    }
+    
+    // Restore original default route
+    printf("[RestoreZigRouting] ✅ Restoring original default route: %s\n", gw_str);
+    snprintf(cmd, sizeof(cmd), "route add default %s 2>&1", gw_str);
+    fp = popen(cmd, "r");
+    if (fp) {
+        char result[256];
+        while (fgets(result, sizeof(result), fp)) { /* discard output */ }
+        pclose(fp);
+    }
+    
+    // Clean up VPN server host route
+    if (g_zig_vpn_server_ip != 0) {
+        char vpn_str[32];
+        snprintf(vpn_str, sizeof(vpn_str), "%u.%u.%u.%u",
+                 (g_zig_vpn_server_ip >> 24) & 0xFF, (g_zig_vpn_server_ip >> 16) & 0xFF,
+                 (g_zig_vpn_server_ip >> 8) & 0xFF, g_zig_vpn_server_ip & 0xFF);
+        printf("[RestoreZigRouting] Cleaning up VPN server route: %s\n", vpn_str);
+        snprintf(cmd, sizeof(cmd), "route delete -host %s 2>&1", vpn_str);
+        fp = popen(cmd, "r");
+        if (fp) pclose(fp);
+    }
+    
+    printf("[RestoreZigRouting] ✅ Routing restored successfully\n");
+    g_zig_routes_configured = false;
+#endif
+}
+
 // Free adapter
 static void ZigAdapterFree(SESSION* s) {
     printf("[ZigAdapterFree] Freeing Zig adapter\n");
@@ -854,6 +923,9 @@ static void ZigAdapterFree(SESSION* s) {
     
     printf("[ZigAdapterFree] ctx=%p, zig_adapter=%p, cancel=%p\n", 
            (void*)ctx, (void*)ctx->zig_adapter, (void*)ctx->cancel);
+    
+    // ✅ CRITICAL FIX: Restore routing BEFORE destroying adapter
+    RestoreZigRouting();
     
     // Clear pointer FIRST to prevent double-free
     s->PacketAdapter->Param = NULL;
