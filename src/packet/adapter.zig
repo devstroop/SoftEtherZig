@@ -175,6 +175,7 @@ pub const ZigPacketAdapter = struct {
                 .handle_arp = true, // Handle ARP requests/replies
                 .verbose = true, // Enable verbose logging to see gateway MAC learning
             },
+            .manage_routes = true, // ✅ ZIGSE-80: Enable automatic route management
         });
         errdefer tun_adapter.close();
         logInfo("TUN device opened: {s}", .{tun_adapter.getDeviceName()});
@@ -453,6 +454,12 @@ pub const ZigPacketAdapter = struct {
         }
 
         return true;
+    }
+
+    /// Configure VPN routing (ZIGSE-80: replaces C bridge route management)
+    /// Call after DHCP assigns VPN gateway
+    pub fn configureRouting(self: *ZigPacketAdapter, vpn_gateway: [4]u8, vpn_server: ?[4]u8) !void {
+        try self.tun_adapter.configureVpnRouting(vpn_gateway, vpn_server);
     }
 
     /// Get statistics
@@ -857,5 +864,37 @@ export fn zig_adapter_configure_interface(
     }
 
     logInfo("Interface configured: {s} -> {s}", .{ local_fmt, peer_fmt });
+    return true;
+}
+
+/// Configure VPN routing (ZIGSE-80: replaces C bridge RestoreZigRouting)
+/// vpn_gateway: VPN gateway IP (network byte order)
+/// vpn_server: VPN server IP (network byte order, 0 = none)
+export fn zig_adapter_configure_routing(
+    adapter: *ZigPacketAdapter,
+    vpn_gateway: u32,
+    vpn_server: u32,
+) bool {
+    // Convert to [4]u8 arrays (big-endian)
+    const gw: [4]u8 = .{
+        @intCast((vpn_gateway >> 24) & 0xFF),
+        @intCast((vpn_gateway >> 16) & 0xFF),
+        @intCast((vpn_gateway >> 8) & 0xFF),
+        @intCast(vpn_gateway & 0xFF),
+    };
+
+    const server: ?[4]u8 = if (vpn_server != 0) .{
+        @intCast((vpn_server >> 24) & 0xFF),
+        @intCast((vpn_server >> 16) & 0xFF),
+        @intCast((vpn_server >> 8) & 0xFF),
+        @intCast(vpn_server & 0xFF),
+    } else null;
+
+    adapter.configureRouting(gw, server) catch |err| {
+        logError("Failed to configure routing: {}", .{err});
+        return false;
+    };
+
+    logInfo("✅ Routing configured: VPN gateway {}.{}.{}.{}", .{ gw[0], gw[1], gw[2], gw[3] });
     return true;
 }

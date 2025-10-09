@@ -15,11 +15,6 @@
 #include <string.h>
 #include <time.h>
 
-// Route restoration state (for cleanup on disconnect)
-static UINT32 g_zig_local_gateway = 0;    // Original default gateway
-static UINT32 g_zig_vpn_server_ip = 0;       // VPN server IP
-static bool g_zig_routes_configured = false; // Routes have been modified
-
 // External function declarations from packet_adapter_macos.c
 extern UCHAR *BuildGratuitousArp(UCHAR *my_mac, UINT32 my_ip, UINT *out_size);
 extern UCHAR *BuildDhcpDiscover(UCHAR *my_mac, UINT32 xid, UINT *out_size);
@@ -639,60 +634,17 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                 printf("[●] DHCP: Executing: %s\n", cmd);
                                 system(cmd);
                                 
-                                // Replace default route: delete old one first, then add VPN route
-                                printf("[●] DHCP: Replacing default route with VPN gateway...\n");
-                                
-                                // Save original default gateway for restoration on disconnect
-                                FILE *route_output = popen("netstat -rn | grep '^default' | grep -v utun | awk '{print $2}' | head -1", "r");
-                                char original_gw[64] = {0};
-                                if (route_output) {
-                                    if (fgets(original_gw, sizeof(original_gw), route_output)) {
-                                        // Remove newline
-                                        original_gw[strcspn(original_gw, "\n")] = 0;
-                                        printf("[●] DHCP: Original default gateway: %s\n", original_gw);
-                                        
-                                        // ✅ Parse and store for restoration
-                                        unsigned int a, b, c, d;
-                                        if (sscanf(original_gw, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                                            g_zig_local_gateway = (a << 24) | (b << 16) | (c << 8) | d;
-                                            g_zig_routes_configured = true;
-                                            printf("[●] DHCP: Stored original gateway for restoration: 0x%08X\n", g_zig_local_gateway);
-                                        }
-                                    }
-                                    pclose(route_output);
-                                }
-                                
-                                // Delete ALL default routes (macOS may have multiple)
-                                printf("[●] DHCP: Deleting existing default routes...\n");
-                                int del_result1 = system("route -n delete default 2>&1");
-                                printf("[●] DHCP: Delete attempt 1, exit code: %d\n", del_result1);
-                                int del_result2 = system("route -n delete default 2>&1");
-                                printf("[●] DHCP: Delete attempt 2, exit code: %d\n", del_result2);
-                                int del_result3 = system("route -n delete default 2>&1");
-                                printf("[●] DHCP: Delete attempt 3, exit code: %d\n", del_result3);
-                                
-                                // Add VPN default route
-                                snprintf(cmd, sizeof(cmd), "route -n add -inet default %u.%u.%u.%u",
-                                        (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
-                                        (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
-                                printf("[●] DHCP: Executing: %s\n", cmd);
-                                int route_result = system(cmd);
-                                printf("[●] DHCP: Route add exit code: %d (0=success)\n", route_result);
-                                if (route_result != 0) {
-                                    printf("[●] DHCP: ⚠️  Failed to add default route (code=%d), trying without -n flag\n", route_result);
-                                    // Fallback: try without -n flag
-                                    snprintf(cmd, sizeof(cmd), "route add -inet default %u.%u.%u.%u",
-                                            (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
-                                            (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
-                                    route_result = system(cmd);
-                                }
-                                
-                                if (route_result == 0) {
-                                    printf("[●] DHCP: ✅ Default route now points to VPN gateway %u.%u.%u.%u\n",
-                                           (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
-                                           (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
+                                // ZIGSE-80: Configure VPN routing through ZigTapTun RouteManager
+                                // This replaces 60+ lines of C routing code with proper Zig implementation
+                                printf("[●] DHCP: Configuring VPN routing through ZigTapTun...\n");
+                                UINT32 gw_network_order = ((g_offered_gw >> 24) & 0xFF) | 
+                                                          (((g_offered_gw >> 16) & 0xFF) << 8) |
+                                                          (((g_offered_gw >> 8) & 0xFF) << 16) |
+                                                          ((g_offered_gw & 0xFF) << 24);
+                                if (zig_adapter_configure_routing(ctx->zig_adapter, gw_network_order, 0)) {
+                                    printf("[●] DHCP: ✅ VPN routing configured by ZigTapTun RouteManager\n");
                                 } else {
-                                    printf("[●] DHCP: ⚠️  Could not change default route, manual routing required\n");
+                                    printf("[●] DHCP: ⚠️  Failed to configure routing, routes may not be set\n");
                                 }
                                 
                                 printf("[●] DHCP: ✅ Interface configured with DHCP IP %u.%u.%u.%u\n",
@@ -861,68 +813,6 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     return result;
 }
 
-// Restore original routing configuration
-static void RestoreZigRouting(void) {
-#ifndef TARGET_OS_IPHONE
-    if (!g_zig_routes_configured || g_zig_local_gateway == 0) {
-        printf("[RestoreZigRouting] No routes to restore (configured=%d, gateway=0x%08X)\n", 
-               g_zig_routes_configured, g_zig_local_gateway);
-        return;
-    }
-    
-    char cmd[512];
-    char gw_str[32];
-    
-    snprintf(gw_str, sizeof(gw_str), "%u.%u.%u.%u",
-             (g_zig_local_gateway >> 24) & 0xFF, (g_zig_local_gateway >> 16) & 0xFF,
-             (g_zig_local_gateway >> 8) & 0xFF, g_zig_local_gateway & 0xFF);
-    
-    printf("[RestoreZigRouting] 🔄 Restoring original routing (gateway: %s)\n", gw_str);
-    
-    // Delete ALL default routes (VPN may have created multiple)
-    printf("[RestoreZigRouting] Deleting ALL default routes...\n");
-    for (int i = 0; i < 5; i++) {
-        snprintf(cmd, sizeof(cmd), "route -n delete default 2>&1");
-        int exit_code = system(cmd);
-        printf("[RestoreZigRouting]   Delete attempt %d: exit_code=%d\n", i + 1, exit_code);
-        if (exit_code != 0 && i > 0) break;  // Stop if failed and not first attempt
-    }
-    
-    // Restore original default route
-    printf("[RestoreZigRouting] Restoring original default route: %s\n", gw_str);
-    snprintf(cmd, sizeof(cmd), "route -n add -inet default %s 2>&1", gw_str);
-    int result = system(cmd);
-    printf("[RestoreZigRouting]   Add route exit_code=%d (0=success)\n", result);
-    
-    if (result != 0) {
-        // Try without -n flag
-        printf("[RestoreZigRouting] Retry without -n flag...\n");
-        snprintf(cmd, sizeof(cmd), "route add -inet default %s 2>&1", gw_str);
-        result = system(cmd);
-        printf("[RestoreZigRouting]   Retry exit_code=%d\n", result);
-    }
-    
-    // Clean up VPN server host routes
-    if (g_zig_vpn_server_ip != 0) {
-        char vpn_str[32];
-        snprintf(vpn_str, sizeof(vpn_str), "%u.%u.%u.%u",
-                 (g_zig_vpn_server_ip >> 24) & 0xFF, (g_zig_vpn_server_ip >> 16) & 0xFF,
-                 (g_zig_vpn_server_ip >> 8) & 0xFF, g_zig_vpn_server_ip & 0xFF);
-        printf("[RestoreZigRouting] Cleaning up VPN server route: %s\n", vpn_str);
-        snprintf(cmd, sizeof(cmd), "route delete -host %s 2>&1", vpn_str);
-        system(cmd);
-    }
-    
-    if (result == 0) {
-        printf("[RestoreZigRouting] ✅ Routing restored successfully to %s\n", gw_str);
-    } else {
-        printf("[RestoreZigRouting] ⚠️  Route restoration may have failed (exit_code=%d)\n", result);
-    }
-    
-    g_zig_routes_configured = false;
-#endif
-}
-
 // Free adapter
 static void ZigAdapterFree(SESSION* s) {
     printf("[ZigAdapterFree] Freeing Zig adapter\n");
@@ -951,13 +841,11 @@ static void ZigAdapterFree(SESSION* s) {
     zig_adapter_stop(ctx->zig_adapter);
     
     // Destroy Zig adapter (this closes the TUN interface)
-    printf("[ZigAdapterFree] Destroying adapter (closing TUN interface)...\n");
+    // ZIGSE-80: TunAdapter.close() now calls RouteManager.deinit() automatically,
+    // which restores routes BEFORE closing the device. No manual restoration needed.
+    printf("[ZigAdapterFree] Destroying adapter (TunAdapter will auto-restore routes)...\n");
     zig_adapter_destroy(ctx->zig_adapter);
     ctx->zig_adapter = NULL;
-    
-    // ✅ CRITICAL: Restore routing AFTER interface is closed
-    printf("[ZigAdapterFree] Interface closed, now restoring routes...\n");
-    RestoreZigRouting();
     
     // NOTE: Don't release cancel here - SoftEther manages it via s->Cancel2
     // ReleaseCancel would cause a double-free since SoftEther calls ReleaseCancel(s->Cancel2)
