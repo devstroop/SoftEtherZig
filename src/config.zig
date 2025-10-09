@@ -240,15 +240,33 @@ fn expandPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 }
 
 /// Load configuration from JSON file
-pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !JsonConfig {
+/// Caller must call result.deinit() to free memory
+pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !std.json.Parsed(JsonConfig) {
     // Expand path (e.g., ~/.config/softether-zig/config.json)
     const expanded_path = try expandPath(allocator, path);
     defer allocator.free(expanded_path);
 
+    // Convert to absolute path if relative
+    const absolute_path = if (std.fs.path.isAbsolute(expanded_path))
+        try allocator.dupe(u8, expanded_path)
+    else blk: {
+        const cwd = try std.process.getCwdAlloc(allocator);
+        defer allocator.free(cwd);
+        break :blk try std.fs.path.join(allocator, &[_][]const u8{ cwd, expanded_path });
+    };
+    defer allocator.free(absolute_path);
+
     // Read file contents
-    const file = std.fs.openFileAbsolute(expanded_path, .{}) catch |err| {
+    const file = std.fs.openFileAbsolute(absolute_path, .{}) catch |err| {
         switch (err) {
-            error.FileNotFound => return JsonConfig{}, // Return empty config if file doesn't exist
+            error.FileNotFound => {
+                // Return empty parsed config if file doesn't exist
+                var empty_parsed: std.json.Parsed(JsonConfig) = undefined;
+                empty_parsed.arena = try allocator.create(std.heap.ArenaAllocator);
+                empty_parsed.arena.* = std.heap.ArenaAllocator.init(allocator);
+                empty_parsed.value = JsonConfig{};
+                return empty_parsed;
+            },
             else => return err,
         }
     };
@@ -265,7 +283,7 @@ pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !JsonConfig 
     });
     // Note: caller must call parsed.deinit() to free the config
 
-    return parsed.value;
+    return parsed; // Return whole Parsed object so caller can deinit()
 }
 
 /// Get default config file path

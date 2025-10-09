@@ -19,44 +19,13 @@ const VERSION = "1.0.0";
 var g_client: ?*VpnClient = null;
 var g_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
 var g_cleanup_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var g_shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 // Signal handler for Ctrl+C (SIGINT) and SIGTERM
 fn signalHandler(sig: c_int) callconv(.c) void {
-    // Prevent double cleanup
-    if (g_cleanup_done.swap(true, .acquire)) {
-        return; // Already cleaning up
-    }
-
-    const sig_name = if (sig == std.posix.SIG.INT) "SIGINT (Ctrl+C)" else if (sig == std.posix.SIG.TERM) "SIGTERM" else "UNKNOWN";
-
-    // Use debug print for signal handler (it's async-signal-safe)
-    std.debug.print("\n\n", .{});
-    std.debug.print("═══════════════════════════════════════════════\n", .{});
-    std.debug.print("🛑 Signal {s} received\n", .{sig_name});
-    std.debug.print("═══════════════════════════════════════════════\n", .{});
-    std.debug.print("\n", .{});
-
-    // Stop the main loop
-    g_running.store(false, .release);
-
-    // Trigger immediate cleanup if we have a client reference
-    if (g_client) |vpn_client| {
-        // Mark as user-requested disconnect to prevent reconnection
-        vpn_client.markUserDisconnect() catch {};
-
-        std.debug.print("[●] Initiating graceful shutdown...\n", .{});
-        std.debug.print("[●] Disconnecting VPN session...\n", .{});
-        vpn_client.deinit();
-        std.debug.print("[✓] VPN connection terminated\n", .{});
-        std.debug.print("[✓] Resources released\n", .{});
-        std.debug.print("\n", .{});
-        std.debug.print("═══════════════════════════════════════════════\n", .{});
-        std.debug.print("Goodbye! VPN session closed cleanly.\n", .{});
-        std.debug.print("═══════════════════════════════════════════════\n", .{});
-    }
-
-    // Force exit to ensure immediate termination
-    std.posix.exit(0);
+    _ = sig;
+    // Just set the flag - the monitoring thread will handle the actual shutdown
+    g_shutdown_requested.store(true, .release);
 }
 
 fn printUsage() void {
@@ -70,6 +39,7 @@ fn printUsage() void {
         \\OPTIONS:
         \\    -h, --help              Show this help message
         \\    -v, --version           Show version information
+        \\    -c, --config <FILE>     Load configuration from JSON file
         \\    -s, --server <HOST>     VPN server hostname (required)
         \\    -p, --port <PORT>       VPN server port (default: 443)
         \\    -H, --hub <HUB>         Virtual hub name (required)
@@ -103,6 +73,12 @@ fn printUsage() void {
         \\    --dns-server <SERVER>   DNS server (can be specified multiple times)
         \\    --gen-hash <USER> <PASS> Generate password hash and exit
         \\
+        \\CONFIGURATION FILE:
+        \\    Default location: ~/.config/softether-zig/config.json
+        \\    Specify custom:   vpnclient --config /path/to/config.json
+        \\
+        \\    Priority: CLI arguments > Environment variables > Config file
+        \\
         \\ENVIRONMENT VARIABLES:
         \\    SOFTETHER_SERVER        VPN server hostname
         \\    SOFTETHER_PORT          VPN server port
@@ -110,11 +86,18 @@ fn printUsage() void {
         \\    SOFTETHER_USER          Username
         \\    SOFTETHER_PASSWORD      Password (plaintext, not recommended)
         \\    SOFTETHER_PASSWORD_HASH Password hash (recommended, use --gen-hash)
+        \\    SOFTETHER_CONFIG        Path to config file (default: ~/.config/softether-zig/config.json)
         \\
-        \\    Note: Command-line arguments override environment variables
+        \\    Note: Command-line arguments override environment > config file
         \\
         \\EXAMPLES:
-        \\    # Connect to VPN server
+        \\    # Use configuration file (recommended)
+        \\    vpnclient --config ~/.config/softether-zig/myprofile.json
+        \\
+        \\    # Use default config file location
+        \\    vpnclient  # Reads ~/.config/softether-zig/config.json automatically
+        \\
+        \\    # Connect to VPN server (explicit args)
         \\    vpnclient -s vpn.example.com -H VPN -u myuser -P mypass
         \\
         \\    # Connect with custom port
@@ -159,6 +142,7 @@ fn getEnvVar(key: []const u8) ?[]const u8 {
 }
 
 const CliArgs = struct {
+    config_file: ?[]const u8 = null,
     server: ?[]const u8 = null,
     port: u16 = 443,
     hub: ?[]const u8 = null,
@@ -231,6 +215,8 @@ fn parseArgs(allocator: std.mem.Allocator) !CliArgs {
             result.help = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             result.version = true;
+        } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
+            result.config_file = args.next() orelse return error.MissingConfigArg;
         } else if (std.mem.eql(u8, arg, "--gen-hash")) {
             result.gen_hash = true;
             result.gen_hash_user = args.next() orelse return error.MissingHashUsername;
@@ -343,6 +329,66 @@ pub fn main() !void {
         }
     };
 
+    // Load configuration file (if specified or default exists)
+    // Priority: CLI > env vars > config file
+    var config_path_buf: ?[]const u8 = null;
+    defer if (config_path_buf) |p| allocator.free(p);
+
+    const config_path = args.config_file orelse (getEnvVar("SOFTETHER_CONFIG") orelse blk: {
+        // Try default config location
+        config_path_buf = config.getDefaultConfigPath(allocator) catch null;
+        break :blk config_path_buf;
+    });
+
+    // Load config file and get merged configuration values
+    var final_server: ?[]const u8 = args.server;
+    var final_port: u16 = args.port;
+    var final_hub: ?[]const u8 = args.hub;
+    var final_username: ?[]const u8 = args.username;
+    var final_password: ?[]const u8 = args.password;
+    var final_password_hash: ?[]const u8 = args.password_hash;
+    var final_account: ?[]const u8 = args.account;
+
+    if (config_path) |path| {
+        std.debug.print("[●] Loading configuration from: {s}\n", .{path});
+        var parsed_config = config.loadFromFile(allocator, path) catch |err| {
+            std.debug.print("Error loading config file: {any}\n", .{err});
+            std.process.exit(1);
+        };
+        defer parsed_config.deinit(); // Free JSON memory
+        const file_config = parsed_config.value;
+
+        // Apply config file values if CLI args not provided
+        // Priority: CLI args > env vars > config file
+        if (final_server == null) {
+            final_server = getEnvVar("SOFTETHER_SERVER") orelse file_config.server;
+        }
+        if (final_port == 443 and args.server == null) { // Default not overridden by CLI
+            if (getEnvVar("SOFTETHER_PORT")) |port_str| {
+                final_port = std.fmt.parseInt(u16, port_str, 10) catch 443;
+            } else if (file_config.port) |p| {
+                final_port = p;
+            }
+        }
+        if (final_hub == null) {
+            final_hub = getEnvVar("SOFTETHER_HUB") orelse file_config.hub;
+        }
+        if (final_username == null) {
+            final_username = getEnvVar("SOFTETHER_USER") orelse file_config.username;
+        }
+        if (final_password == null) {
+            final_password = getEnvVar("SOFTETHER_PASSWORD") orelse file_config.password;
+        }
+        if (final_password_hash == null) {
+            final_password_hash = getEnvVar("SOFTETHER_PASSWORD_HASH") orelse file_config.password_hash;
+        }
+        if (final_account == null) {
+            final_account = getEnvVar("SOFTETHER_ACCOUNT") orelse file_config.account;
+        }
+    }
+
+    // Now use final_* variables instead of args.* for validation and VPN setup
+
     if (args.help) {
         printUsage();
         return;
@@ -382,42 +428,42 @@ pub fn main() !void {
         return;
     }
 
-    // Validate required arguments
-    const server = args.server orelse {
-        std.debug.print("Error: Server hostname is required (-s/--server)\n\n", .{});
+    // Validate required arguments (using config file fallback values)
+    const server = final_server orelse {
+        std.debug.print("Error: Server hostname is required (-s/--server or config file)\n\n", .{});
         printUsage();
         std.process.exit(1);
     };
 
-    const hub = args.hub orelse {
-        std.debug.print("Error: Hub name is required (-H/--hub)\n\n", .{});
+    const hub = final_hub orelse {
+        std.debug.print("Error: Hub name is required (-H/--hub or config file)\n\n", .{});
         printUsage();
         std.process.exit(1);
     };
 
-    const username = args.username orelse {
-        std.debug.print("Error: Username is required (-u/--user)\n\n", .{});
+    const username = final_username orelse {
+        std.debug.print("Error: Username is required (-u/--user or config file)\n\n", .{});
         printUsage();
         std.process.exit(1);
     };
 
     // Either password or password_hash is required
-    if (args.password == null and args.password_hash == null) {
-        std.debug.print("Error: Password is required (-P/--password or --password-hash)\n\n", .{});
+    if (final_password == null and final_password_hash == null) {
+        std.debug.print("Error: Password is required (-P/--password, --password-hash, or config file)\n\n", .{});
         printUsage();
         std.process.exit(1);
     }
 
-    if (args.password != null and args.password_hash != null) {
+    if (final_password != null and final_password_hash != null) {
         std.debug.print("Error: Cannot specify both --password and --password-hash\n\n", .{});
         printUsage();
         std.process.exit(1);
     }
 
-    const password = args.password orelse args.password_hash.?;
-    const use_password_hash = args.password_hash != null;
+    const password = final_password orelse final_password_hash.?;
+    const use_password_hash = final_password_hash != null;
 
-    const account = args.account orelse username;
+    const account = final_account orelse username;
 
     // Initialize logging system
     const log_level_cstr = std.mem.sliceTo(args.log_level, 0);
@@ -456,7 +502,7 @@ pub fn main() !void {
     // Create configuration
     const vpn_config = ConnectionConfig{
         .server_name = server,
-        .server_port = args.port,
+        .server_port = final_port,
         .hub_name = hub,
         .account_name = account,
         .auth = .{ .password = .{
@@ -475,7 +521,7 @@ pub fn main() !void {
     // Initialize VPN client
     std.debug.print("SoftEther VPN Client v{s}\n", .{VERSION});
     std.debug.print("─────────────────────────────────────────────\n", .{});
-    std.debug.print("Connecting to: {s}:{d}\n", .{ server, args.port });
+    std.debug.print("Connecting to: {s}:{d}\n", .{ server, final_port });
     std.debug.print("Virtual Hub:   {s}\n", .{hub});
     std.debug.print("User:          {s}\n", .{username});
     std.debug.print("Encryption:    {s}\n", .{if (args.use_encrypt) "Enabled" else "Disabled"});
@@ -528,21 +574,70 @@ pub fn main() !void {
 
     // Set up signal handler for Ctrl+C and graceful termination
     g_client = &vpn_client;
+
+    // Configure signal handler with proper flags
     const sigaction = std.posix.Sigaction{
         .handler = .{ .handler = signalHandler },
-        .mask = 0,
-        .flags = 0,
+        .mask = std.mem.zeroes(std.posix.sigset_t),
+        .flags = std.posix.SA.RESTART, // Restart syscalls interrupted by signal
     };
-    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null); // Ctrl+C
-    std.posix.sigaction(std.posix.SIG.TERM, &sigaction, null); // kill command
+
+    // Register handlers
+    std.posix.sigaction(std.posix.SIG.INT, &sigaction, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sigaction, null);
 
     // Ignore SIGPIPE (broken pipe when writing to closed socket)
     const sig_ignore = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
-        .mask = 0,
+        .mask = std.mem.zeroes(std.posix.sigset_t),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.PIPE, &sig_ignore, null);
+
+    std.debug.print("✓ Signal handlers registered (Ctrl+C to disconnect)\n", .{});
+
+    // Start monitoring thread to watch for shutdown signals
+    // This is more reliable than relying on signal delivery to C code
+    const MonitorThread = struct {
+        fn run(vpn_client_ptr: *VpnClient) void {
+            while (true) {
+                std.Thread.sleep(100 * std.time.ns_per_ms); // Check every 100ms
+
+                if (g_shutdown_requested.load(.acquire)) {
+                    // Prevent double handling
+                    if (g_cleanup_done.swap(true, .acquire)) {
+                        return; // Already handling shutdown
+                    }
+
+                    std.debug.print("\n\n", .{});
+                    std.debug.print("═══════════════════════════════════════════════\n", .{});
+                    std.debug.print("🛑 Shutdown signal detected (Ctrl+C)\n", .{});
+                    std.debug.print("═══════════════════════════════════════════════\n", .{});
+                    std.debug.print("\n", .{});
+
+                    // Stop the main loop
+                    g_running.store(false, .release);
+
+                    // Mark as user-requested disconnect
+                    vpn_client_ptr.markUserDisconnect() catch {};
+
+                    std.debug.print("[●] Initiating graceful shutdown...\n", .{});
+                    std.debug.print("[●] Disconnecting VPN session...\n", .{});
+
+                    // Call disconnect to trigger StopSession()
+                    vpn_client_ptr.disconnect() catch |err| {
+                        std.debug.print("[!] Disconnect error: {}\n", .{err});
+                    };
+
+                    return;
+                }
+            }
+        }
+    };
+
+    _ = std.Thread.spawn(.{}, MonitorThread.run, .{&vpn_client}) catch |err| {
+        std.debug.print("Warning: Failed to start monitoring thread: {}\n", .{err});
+    };
 
     std.debug.print("✓ VPN connection established\n\n", .{});
 
@@ -745,7 +840,15 @@ pub fn main() !void {
         vpn_client.deinit();
         std.debug.print("[✓] Cleanup complete\n", .{});
     } else {
-        std.debug.print("[✓] Shutdown complete\n", .{});
+        // Signal handler called disconnect(), now call deinit() to free resources
+        std.debug.print("[●] VPN: Disconnected successfully\n", .{});
+        vpn_client.deinit();
+        std.debug.print("[✓] VPN connection terminated\n", .{});
+        std.debug.print("[✓] Resources released\n", .{});
+        std.debug.print("\n", .{});
+        std.debug.print("═══════════════════════════════════════════════\n", .{});
+        std.debug.print("Goodbye! VPN session closed cleanly.\n", .{});
+        std.debug.print("═══════════════════════════════════════════════\n", .{});
     }
 }
 

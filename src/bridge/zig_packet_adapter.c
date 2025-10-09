@@ -635,13 +635,10 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                 system(cmd);
                                 
                                 // ZIGSE-80: Configure VPN routing through ZigTapTun RouteManager
-                                // This replaces 60+ lines of C routing code with proper Zig implementation
+                                // g_offered_gw is already in host byte order (10.21.0.1 = 0x0A150001)
+                                // Just pass it directly - Zig will extract bytes correctly
                                 printf("[●] DHCP: Configuring VPN routing through ZigTapTun...\n");
-                                UINT32 gw_network_order = ((g_offered_gw >> 24) & 0xFF) | 
-                                                          (((g_offered_gw >> 16) & 0xFF) << 8) |
-                                                          (((g_offered_gw >> 8) & 0xFF) << 16) |
-                                                          ((g_offered_gw & 0xFF) << 24);
-                                if (zig_adapter_configure_routing(ctx->zig_adapter, gw_network_order, 0)) {
+                                if (zig_adapter_configure_routing(ctx->zig_adapter, g_offered_gw, 0)) {
                                     printf("[●] DHCP: ✅ VPN routing configured by ZigTapTun RouteManager\n");
                                 } else {
                                     printf("[●] DHCP: ⚠️  Failed to configure routing, routes may not be set\n");
