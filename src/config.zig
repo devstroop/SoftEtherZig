@@ -35,6 +35,21 @@ pub const StaticIpConfig = struct {
     dns_servers: ?[]const []const u8 = null, // e.g., ["8.8.8.8", "8.8.4.4"]
 };
 
+/// Performance tuning configuration
+pub const PerformanceConfig = struct {
+    /// Receive queue buffer size (number of packet slots)
+    /// Default: 128 (down from 512)
+    /// Range: 32-2048
+    /// Memory per slot: ~2KB, so 128 slots = 256KB
+    recv_buffer_slots: u16 = 128,
+
+    /// Send queue buffer size (number of packet slots)
+    /// Default: 128 (balanced with recv, was 64)
+    /// Range: 16-1024
+    /// Memory per slot: ~2KB, so 128 slots = 256KB
+    send_buffer_slots: u16 = 128,
+};
+
 /// Authentication method
 pub const AuthMethod = union(enum) {
     anonymous,
@@ -65,6 +80,7 @@ pub const ConnectionConfig = struct {
     ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
     use_zig_adapter: bool = true, // Use Zig packet adapter (default, better performance)
+    performance: PerformanceConfig = .{}, // Performance tuning options
 
     /// Create a configuration builder
     pub fn builder() ConfigBuilder {
@@ -223,6 +239,10 @@ pub const JsonConfig = struct {
     max_reconnect_attempts: ?u32 = null,
     min_backoff: ?u32 = null,
     max_backoff: ?u32 = null,
+    performance: ?struct {
+        recv_buffer_slots: ?u16 = null,
+        send_buffer_slots: ?u16 = null,
+    } = null,
 };
 
 /// Expand tilde (~) in path to home directory

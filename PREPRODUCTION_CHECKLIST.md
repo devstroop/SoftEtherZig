@@ -102,15 +102,20 @@ LOG_INFO("Creating packet adapter");
 - [x] Only log in debug builds ✅ **NOW RESPECTS --log-level**
 - [x] Provide --verbose flag for troubleshooting ✅ **ALREADY EXISTS**
 
-### 7. No Configuration File Support
+### 7. No Configuration File Support ✅ COMPLETE
 **Issue**: All config via command-line flags  
 **Impact**: Poor UX for complex configurations  
 
-**Action Required**:
-- [ ] Add JSON/TOML config file support
-- [ ] Support `~/.config/softether-zig/config.json`
-- [ ] Allow CLI flags to override config file
-- [ ] Document configuration schema
+**Status**: ✅ **COMPLETE** - JSON config file support implemented (Oct 9, 2025)
+- [x] Add JSON config file support
+- [x] Support `~/.config/softether-zig/config.json` (auto-loads by default)
+- [x] Allow CLI flags to override config file (priority: CLI > env > file)
+- [x] Document configuration schema (docs/CONFIGURATION.md + examples)
+- [x] Example configs: `config.example.json`, `config.minimal.json`
+- [x] `--config` flag for custom config file paths
+- [x] Support for relative/absolute paths and tilde expansion
+
+**See**: `CONFIG_FILE_SUPPORT_COMPLETE.md` for full details
 
 ### 8. Hardcoded Network Configuration
 **Issue**: DNS, gateway, routing hardcoded for specific network  

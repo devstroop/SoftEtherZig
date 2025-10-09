@@ -40,12 +40,13 @@ fn logError(comptime fmt: []const u8, args: anytype) void {
 
 /// Packet adapter configuration
 pub const Config = struct {
-    /// Initial buffer sizes (will be adjusted dynamically by adaptive manager)
-    /// These are STARTING values - actual sizes scale up based on load!
-    recv_queue_size: usize = 512, // Small start, scales up
-    send_queue_size: usize = 256, // Small start, scales up
-    packet_pool_size: usize = 32, // 32 buffers = 64KB
-    batch_size: usize = 32, // 32 starting point
+    /// Buffer sizes (ZIGSE-25: Now configurable at runtime!)
+    /// Default: 128/128 slots (balanced for bidirectional traffic)
+    /// Memory per slot: ~2KB, so 128 slots = 256KB per queue
+    recv_queue_size: usize = 128, // Configurable receive buffer
+    send_queue_size: usize = 128, // Configurable send buffer (increased from 64)
+    packet_pool_size: usize = 256, // CRITICAL: Must be >= recv+send (was 32, causing pool exhaustion!)
+    batch_size: usize = 128, // Match queue size for better throughput (was 32)
 
     /// TUN device name
     device_name: []const u8 = "utun",
@@ -80,8 +81,9 @@ pub const ZigPacketAdapter = struct {
 
     // SoftEther-specific performance layer
     // Lock-free queues (heap-allocated to avoid large stack/struct size)
-    recv_queue: *RingBuffer(PacketBuffer, 512),
-    send_queue: *RingBuffer(PacketBuffer, 256),
+    // ZIGSE-25: Now runtime-sized based on config
+    recv_queue: *RingBuffer(PacketBuffer),
+    send_queue: *RingBuffer(PacketBuffer),
 
     // Memory pool
     packet_pool: PacketPool,
@@ -147,17 +149,17 @@ pub const ZigPacketAdapter = struct {
 
         // ✅ ZIGSE-16/17: Removed adaptive buffer manager initialization (never used to resize)
 
-        // Allocate ring buffers on heap to avoid large struct size
-        logDebug("Allocating recv_queue", .{});
-        const recv_queue = try allocator.create(RingBuffer(PacketBuffer, 512));
+        // ZIGSE-25: Allocate ring buffers with runtime sizes from config
+        logDebug("Allocating recv_queue (size={d})", .{config.recv_queue_size});
+        const recv_queue = try allocator.create(RingBuffer(PacketBuffer));
         errdefer allocator.destroy(recv_queue);
-        recv_queue.* = try RingBuffer(PacketBuffer, 512).init(allocator);
+        recv_queue.* = try RingBuffer(PacketBuffer).init(allocator, config.recv_queue_size);
         errdefer recv_queue.deinit();
 
-        logDebug("Allocating send_queue", .{});
-        const send_queue = try allocator.create(RingBuffer(PacketBuffer, 256));
+        logDebug("Allocating send_queue (size={d})", .{config.send_queue_size});
+        const send_queue = try allocator.create(RingBuffer(PacketBuffer));
         errdefer allocator.destroy(send_queue);
-        send_queue.* = try RingBuffer(PacketBuffer, 256).init(allocator);
+        send_queue.* = try RingBuffer(PacketBuffer).init(allocator, config.send_queue_size);
         errdefer send_queue.deinit();
 
         // Open TUN device with L2/L3 translator (ZigTapTun handles everything!)
@@ -191,7 +193,7 @@ pub const ZigPacketAdapter = struct {
             .stats = .{},
         };
 
-        logInfo("Adapter initialized (fixed queue sizes: recv=512, send=256)", .{});
+        logInfo("Adapter initialized (recv={d} slots, send={d} slots)", .{ config.recv_queue_size, config.send_queue_size });
         return self;
     }
 
@@ -474,8 +476,8 @@ pub const ZigPacketAdapter = struct {
 
     pub const StatsSnapshot = struct {
         adapter: Stats,
-        recv_queue: RingBuffer(PacketBuffer, 512).Stats,
-        send_queue: RingBuffer(PacketBuffer, 256).Stats,
+        recv_queue: RingBuffer(PacketBuffer).Stats,
+        send_queue: RingBuffer(PacketBuffer).Stats,
         packet_pool: PacketPool.Stats,
 
         pub fn print(self: StatsSnapshot) void {
@@ -557,8 +559,9 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
         },
     };
 
-    // Poll with 0ms timeout (non-blocking check)
-    const ready_count = std.posix.poll(&fds, 0) catch |err| {
+    // Poll with 1ms timeout for better responsiveness (was 0ms)
+    // ZIGSE-25: Small timeout prevents missing packets during bursts
+    const ready_count = std.posix.poll(&fds, 1) catch |err| {
         std.debug.print("[zig_adapter_read_sync] ⚠️  Poll error: {}\n", .{err});
         return -1;
     };
@@ -630,7 +633,7 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
 /// Returns number of packets written
 export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
     var packets_written: isize = 0;
-    const max_batch = 32; // Drain up to 32 packets per call
+    const max_batch = 128; // ZIGSE-25: Match queue size for better throughput (was 32)
 
     var i: usize = 0;
     while (i < max_batch) : (i += 1) {

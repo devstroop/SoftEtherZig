@@ -7,7 +7,8 @@ const atomic = std.atomic;
 
 /// Lock-free ring buffer for packet data
 /// Uses atomic operations for synchronization between reader/writer threads
-pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
+/// ZIGSE-25: Refactored to support runtime capacity (was comptime)
+pub fn RingBuffer(comptime T: type) type {
     return struct {
         const Self = @This();
 
@@ -16,6 +17,9 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
 
         // Ring buffer storage (heap-allocated to avoid large struct size)
         items: []?T,
+
+        // Runtime capacity (was comptime)
+        capacity: usize,
 
         // Atomic indices for lock-free operation
         write_idx: atomic.Value(usize),
@@ -26,8 +30,11 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
         total_pushed: atomic.Value(u64),
         total_popped: atomic.Value(u64),
 
-        /// Initialize empty ring buffer (allocates items array on heap)
-        pub fn init(allocator: Allocator) !Self {
+        /// Initialize empty ring buffer with runtime capacity
+        /// ZIGSE-25: Capacity is now a runtime parameter (was comptime)
+        pub fn init(allocator: Allocator, capacity: usize) !Self {
+            if (capacity == 0) return error.InvalidCapacity;
+
             const items = try allocator.alloc(?T, capacity);
             errdefer allocator.free(items);
 
@@ -39,6 +46,7 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             return Self{
                 .allocator = allocator,
                 .items = items,
+                .capacity = capacity,
                 .write_idx = atomic.Value(usize).init(0),
                 .read_idx = atomic.Value(usize).init(0),
                 .drops = atomic.Value(u64).init(0),
@@ -58,7 +66,7 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             const read = self.read_idx.load(.acquire);
 
             // Check if buffer is full
-            const next_write = (write + 1) % capacity;
+            const next_write = (write + 1) % self.capacity;
             if (next_write == read) {
                 _ = self.drops.fetchAdd(1, .monotonic);
                 return false; // Full
@@ -89,7 +97,7 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             self.items[read] = null;
 
             // Update read index
-            const next_read = (read + 1) % capacity;
+            const next_read = (read + 1) % self.capacity;
             self.read_idx.store(next_read, .release);
             _ = self.total_popped.fetchAdd(1, .monotonic);
 
@@ -120,13 +128,13 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
             if (write >= read) {
                 return write - read;
             } else {
-                return capacity - read + write;
+                return self.capacity - read + write;
             }
         }
 
         /// Get free space available
         pub fn freeSpace(self: *Self) usize {
-            return capacity - 1 - self.available();
+            return self.capacity - 1 - self.available();
         }
 
         /// Check if empty
@@ -138,14 +146,14 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
         pub fn isFull(self: *Self) bool {
             const write = self.write_idx.load(.acquire);
             const read = self.read_idx.load(.acquire);
-            const next_write = (write + 1) % capacity;
+            const next_write = (write + 1) % self.capacity;
             return next_write == read;
         }
 
         /// Get statistics
         pub fn getStats(self: *Self) Stats {
             return .{
-                .capacity = capacity,
+                .capacity = self.capacity,
                 .available = self.available(),
                 .free_space = self.freeSpace(),
                 .total_pushed = self.total_pushed.load(.monotonic),
@@ -180,8 +188,10 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
 // Tests
 test "RingBuffer basic operations" {
     const testing = std.testing;
+    const allocator = testing.allocator;
 
-    var ring = RingBuffer(u32, 4).init();
+    var ring = try RingBuffer(u32).init(allocator, 4);
+    defer ring.deinit();
 
     // Test empty
     try testing.expect(ring.isEmpty());
@@ -217,8 +227,10 @@ test "RingBuffer basic operations" {
 
 test "RingBuffer batch operations" {
     const testing = std.testing;
+    const allocator = testing.allocator;
 
-    var ring = RingBuffer(u32, 8).init();
+    var ring = try RingBuffer(u32).init(allocator, 8);
+    defer ring.deinit();
 
     // Push multiple items
     for (0..5) |i| {
@@ -240,8 +252,10 @@ test "RingBuffer batch operations" {
 
 test "RingBuffer wrapping" {
     const testing = std.testing;
+    const allocator = testing.allocator;
 
-    var ring = RingBuffer(u32, 4).init();
+    var ring = try RingBuffer(u32).init(allocator, 4);
+    defer ring.deinit();
 
     // Fill and empty multiple times to test wrapping
     for (0..10) |cycle| {

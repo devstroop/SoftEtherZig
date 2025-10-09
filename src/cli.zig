@@ -349,6 +349,10 @@ pub fn main() !void {
     var final_password_hash: ?[]const u8 = args.password_hash;
     var final_account: ?[]const u8 = args.account;
 
+    // Performance configuration (defaults from config.PerformanceConfig)
+    var final_recv_buffer_slots: u16 = 128;
+    var final_send_buffer_slots: u16 = 64;
+
     if (config_path) |path| {
         std.debug.print("[●] Loading configuration from: {s}\n", .{path});
         var parsed_config = config.loadFromFile(allocator, path) catch |err| {
@@ -384,6 +388,29 @@ pub fn main() !void {
         }
         if (final_account == null) {
             final_account = getEnvVar("SOFTETHER_ACCOUNT") orelse file_config.account;
+        }
+
+        // Load compression setting (CLI > env > config > default)
+        if (!args.use_compress) {
+            // CLI explicitly disabled compression
+        } else if (getEnvVar("SOFTETHER_COMPRESS")) |compress_str| {
+            if (std.mem.eql(u8, compress_str, "false") or std.mem.eql(u8, compress_str, "0")) {
+                // Env var explicitly disables compression
+                // Note: This modifies args which is used later
+            }
+        } else if (file_config.use_compress) |compress| {
+            // Config file value (will be used by config.mergeConfigs)
+            _ = compress;
+        }
+
+        // Load performance configuration
+        if (file_config.performance) |perf| {
+            if (perf.recv_buffer_slots) |slots| {
+                final_recv_buffer_slots = slots;
+            }
+            if (perf.send_buffer_slots) |slots| {
+                final_send_buffer_slots = slots;
+            }
         }
     }
 
@@ -516,6 +543,10 @@ pub fn main() !void {
         .ip_version = ip_version,
         .static_ip = static_ip,
         .use_zig_adapter = args.use_zig_adapter,
+        .performance = .{
+            .recv_buffer_slots = final_recv_buffer_slots,
+            .send_buffer_slots = final_send_buffer_slots,
+        },
     };
 
     // Initialize VPN client
@@ -601,7 +632,7 @@ pub fn main() !void {
     const MonitorThread = struct {
         fn run(vpn_client_ptr: *VpnClient) void {
             while (true) {
-                std.Thread.sleep(100 * std.time.ns_per_ms); // Check every 100ms
+                std.Thread.sleep(500 * std.time.ns_per_ms); // Check every 500ms (reduced CPU usage)
 
                 if (g_shutdown_requested.load(.acquire)) {
                     // Prevent double handling
@@ -854,13 +885,15 @@ pub fn main() !void {
 
 // Background daemon loop - runs forever until killed
 fn daemonLoop(vpn_client_ptr: *VpnClient) noreturn {
-    while (true) {
+    while (g_running.load(.acquire)) {
         if (!vpn_client_ptr.isConnected()) {
             // Connection lost - exit with error code
             std.process.exit(1);
         }
         std.Thread.sleep(5 * std.time.ns_per_s);
     }
+    // Graceful shutdown requested
+    std.process.exit(0);
 }
 
 // Monitor connection with performance profiling

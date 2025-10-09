@@ -189,11 +189,12 @@ static bool ZigAdapterInit(SESSION* s) {
     }
     
     // Configure Zig adapter
+    // ZIGSE-25: Optimized for high-throughput bidirectional traffic
     ZigAdapterConfig config = {
-        .recv_queue_size = 512,
-        .send_queue_size = 256,
-        .packet_pool_size = 2,  // Start with just 2 packets (4KB total)
-        .batch_size = 32,
+        .recv_queue_size = 128,   // Balanced for downloads
+        .send_queue_size = 128,   // Balanced for uploads
+        .packet_pool_size = 256,  // CRITICAL: Must be >= recv+send (was 32!)
+        .batch_size = 128,        // Match queue size (was 32)
         .device_name = "utun",
         .device_name_len = 4,  // MUST match device_name string length
     };
