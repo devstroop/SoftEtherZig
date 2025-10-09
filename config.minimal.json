@@ -1,9 +1,9 @@
 {
-  "server": "worxvpn.662.cloud",
+  "server": "vpn.example.com",
   "port": 443,
   "hub": "VPN",
-  "username": "devstroop",
-  "password_hash": "T2kl2mB84H5y2tn7n9qf65/8jXI=",
+  "username": "myuser",
+  "password_hash": "generate-with-gen-hash-command",
   "use_compress": true,
   "performance": {
     "recv_buffer_slots": 128,
