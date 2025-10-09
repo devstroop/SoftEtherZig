@@ -827,19 +827,11 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
             // Should not happen after poll() said readable, but handle it anyway
             return 0;
         }
-        // Log other errors for debugging
-        std.debug.print("[zig_adapter_read_sync] ⚠️  Read error: {}\n", .{err});
         return -1;
     };
 
     if (bytes_read == 0) return 0;
     if (bytes_read < 4) return 0; // Too small - need at least 4-byte AF_INET header
-
-    // Log successful reads (first 10 packets only to avoid spam)
-    const read_count = @atomicRmw(usize, &adapter.debug_read_count, .Add, 1, .monotonic);
-    if (read_count < 10) {
-        std.debug.print("[zig_adapter_read_sync] 📖 Read packet from TUN: {} bytes (fd={})\n", .{ bytes_read, fd });
-    }
 
     // Skip 4-byte AF_INET header from macOS utun to get raw IP packet
     const ip_packet_start = 4;
@@ -893,9 +885,6 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
     var packets_written: isize = 0;
     const max_batch = 32; // Drain up to 32 packets per call
 
-    // Log TUN fd at start
-    std.debug.print("[zig_adapter_write_sync] 📤 Called, tun_fd={}\n", .{adapter.tun_fd});
-
     var i: usize = 0;
     while (i < max_batch) : (i += 1) {
         // Pop packet from send queue
@@ -910,8 +899,6 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
 
         // Skip Ethernet header if packet is large enough
         if (pkt.len < ETHERNET_HEADER_SIZE) {
-            // Packet too small to have Ethernet header, skip it
-            std.debug.print("[zig_adapter_write_sync] ⚠️  Packet too small ({} bytes), skipping\n", .{pkt.len});
             adapter.packet_pool.free(pkt.data);
             continue;
         }
@@ -936,31 +923,15 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
 
         @memcpy(write_buf[4..write_len], pkt.data[ETHERNET_HEADER_SIZE..pkt.len]);
 
-        // **DEBUG**: Log first few bytes of IP packet for ICMP debugging
-        if (write_len >= 24 and pkt.data[ETHERNET_HEADER_SIZE] == 0x45) {
-            // IPv4 packet, check protocol
-            const ip_proto = pkt.data[ETHERNET_HEADER_SIZE + 9];
-            if (ip_proto == 1) { // ICMP
-                std.debug.print("[zig_adapter_write_sync] 🐛 ICMP packet: ", .{});
-                std.debug.print("IP: ", .{});
-                for (pkt.data[ETHERNET_HEADER_SIZE..(ETHERNET_HEADER_SIZE + 20)]) |b| {
-                    std.debug.print("{X:0>2} ", .{b});
-                }
-                std.debug.print("\n", .{});
-            }
-        }
-
         // Write to TUN device
         const fd = adapter.tun_fd;
         const bytes_written = std.posix.write(fd, write_buf[0..write_len]) catch |err| {
             if (err == error.WouldBlock) {
                 // TUN device full, re-queue packet and stop
-                std.debug.print("[zig_adapter_write_sync] ⚠️  TUN WouldBlock, re-queuing packet\n", .{});
                 _ = adapter.send_queue.push(pkt);
                 break;
             }
             // Other error, free buffer and continue
-            std.debug.print("[zig_adapter_write_sync] ❌ Write error: {}, packet len={}, fd={}\n", .{ err, pkt.len, fd });
             adapter.packet_pool.free(pkt.data);
             continue;
         };
@@ -970,11 +941,8 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
 
         if (bytes_written > 0) {
             packets_written += 1;
-            std.debug.print("[zig_adapter_write_sync] ✅ Wrote packet #{} to TUN ({} bytes total with header)\n", .{ packets_written, bytes_written });
         }
     }
-
-    std.debug.print("[zig_adapter_write_sync] 📊 Finished: wrote {} packets to TUN\n", .{packets_written});
     return packets_written;
 }
 
