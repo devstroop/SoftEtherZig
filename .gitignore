@@ -41,3 +41,5 @@ main
 
 # Temporary build files
 *.dSYM/
+
+config.json
