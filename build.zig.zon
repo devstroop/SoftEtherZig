@@ -64,6 +64,9 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        .openssl = .{
+            .path = "deps/openssl",
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

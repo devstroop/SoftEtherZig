@@ -349,6 +349,24 @@ pub fn main() !void {
     var final_password_hash: ?[]const u8 = args.password_hash;
     var final_account: ?[]const u8 = args.account;
 
+    // Track which strings need to be freed (only those allocated from config file)
+    var needs_free_server = false;
+    var needs_free_hub = false;
+    var needs_free_username = false;
+    var needs_free_password = false;
+    var needs_free_password_hash = false;
+    var needs_free_account = false;
+
+    // Defer cleanup of allocated strings
+    defer {
+        if (needs_free_server and final_server != null) allocator.free(final_server.?);
+        if (needs_free_hub and final_hub != null) allocator.free(final_hub.?);
+        if (needs_free_username and final_username != null) allocator.free(final_username.?);
+        if (needs_free_password and final_password != null) allocator.free(final_password.?);
+        if (needs_free_password_hash and final_password_hash != null) allocator.free(final_password_hash.?);
+        if (needs_free_account and final_account != null) allocator.free(final_account.?);
+    }
+
     // Performance configuration (defaults from config.PerformanceConfig)
     var final_recv_buffer_slots: u16 = 128;
     var final_send_buffer_slots: u16 = 64;
@@ -364,8 +382,17 @@ pub fn main() !void {
 
         // Apply config file values if CLI args not provided
         // Priority: CLI args > env vars > config file
+        // IMPORTANT: Duplicate strings from JSON before parsed_config.deinit() frees them
         if (final_server == null) {
-            final_server = getEnvVar("SOFTETHER_SERVER") orelse file_config.server;
+            if (getEnvVar("SOFTETHER_SERVER")) |env_val| {
+                final_server = env_val;
+            } else if (file_config.server) |s| {
+                final_server = allocator.dupe(u8, s) catch |err| {
+                    std.debug.print("Error duplicating server string: {any}\n", .{err});
+                    std.process.exit(1);
+                };
+                needs_free_server = true;
+            }
         }
         if (final_port == 443 and args.server == null) { // Default not overridden by CLI
             if (getEnvVar("SOFTETHER_PORT")) |port_str| {
@@ -375,19 +402,59 @@ pub fn main() !void {
             }
         }
         if (final_hub == null) {
-            final_hub = getEnvVar("SOFTETHER_HUB") orelse file_config.hub;
+            if (getEnvVar("SOFTETHER_HUB")) |env_val| {
+                final_hub = env_val;
+            } else if (file_config.hub) |h| {
+                final_hub = allocator.dupe(u8, h) catch |err| {
+                    std.debug.print("Error duplicating hub string: {any}\n", .{err});
+                    std.process.exit(1);
+                };
+                needs_free_hub = true;
+            }
         }
         if (final_username == null) {
-            final_username = getEnvVar("SOFTETHER_USER") orelse file_config.username;
+            if (getEnvVar("SOFTETHER_USER")) |env_val| {
+                final_username = env_val;
+            } else if (file_config.username) |u| {
+                final_username = allocator.dupe(u8, u) catch |err| {
+                    std.debug.print("Error duplicating username string: {any}\n", .{err});
+                    std.process.exit(1);
+                };
+                needs_free_username = true;
+            }
         }
         if (final_password == null) {
-            final_password = getEnvVar("SOFTETHER_PASSWORD") orelse file_config.password;
+            if (getEnvVar("SOFTETHER_PASSWORD")) |env_val| {
+                final_password = env_val;
+            } else if (file_config.password) |p| {
+                final_password = allocator.dupe(u8, p) catch |err| {
+                    std.debug.print("Error duplicating password string: {any}\n", .{err});
+                    std.process.exit(1);
+                };
+                needs_free_password = true;
+            }
         }
         if (final_password_hash == null) {
-            final_password_hash = getEnvVar("SOFTETHER_PASSWORD_HASH") orelse file_config.password_hash;
+            if (getEnvVar("SOFTETHER_PASSWORD_HASH")) |env_val| {
+                final_password_hash = env_val;
+            } else if (file_config.password_hash) |ph| {
+                final_password_hash = allocator.dupe(u8, ph) catch |err| {
+                    std.debug.print("Error duplicating password_hash string: {any}\n", .{err});
+                    std.process.exit(1);
+                };
+                needs_free_password_hash = true;
+            }
         }
         if (final_account == null) {
-            final_account = getEnvVar("SOFTETHER_ACCOUNT") orelse file_config.account;
+            if (getEnvVar("SOFTETHER_ACCOUNT")) |env_val| {
+                final_account = env_val;
+            } else if (file_config.account) |a| {
+                final_account = allocator.dupe(u8, a) catch |err| {
+                    std.debug.print("Error duplicating account string: {any}\n", .{err});
+                    std.process.exit(1);
+                };
+                needs_free_account = true;
+            }
         }
 
         // Load compression setting (CLI > env > config > default)

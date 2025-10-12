@@ -239,9 +239,11 @@ static bool ZigAdapterInit(SESSION* s) {
     if (dev_name_len > 0 && dev_name_len < sizeof(dev_name_buf)) {
         dev_name_buf[dev_name_len] = '\0';  // Null terminate
         
+#ifndef UNIX_IOS
         // Strategy: DON'T configure IP initially - DHCP will handle it
         // For utun interfaces, setting IP requires destination address (point-to-point)
         // Just bring interface UP without IP configuration
+        // NOTE: On iOS, NEPacketTunnelProvider handles all network configuration
         char cmd[512];
         
         // Bring interface UP without IP - DHCP will configure it properly later
@@ -264,6 +266,9 @@ static bool ZigAdapterInit(SESSION* s) {
         
         snprintf(cmd, sizeof(cmd), "route add -host 62.24.65.213 192.168.1.1 2>/dev/null");
         system(cmd);
+#else
+        printf("[●] ADAPTER: iOS mode - network configuration handled by NEPacketTunnelProvider\n");
+#endif
     }
     
     // Store context in session
@@ -624,7 +629,9 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                             if (dev_name_len > 0 && dev_name_len < sizeof(dev_name_buf)) {
                                 dev_name_buf[dev_name_len] = '\0';
                                 
+#ifndef UNIX_IOS
                                 // Configure interface with DHCP-assigned IP
+                                // NOTE: On iOS, NEPacketTunnelProvider handles interface configuration
                                 char cmd[512];
                                 snprintf(cmd, sizeof(cmd), "ifconfig %s inet %u.%u.%u.%u %u.%u.%u.%u netmask 255.255.0.0 up",
                                         (char*)dev_name_buf,
@@ -634,6 +641,14 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                         (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
                                 printf("[●] DHCP: Executing: %s\n", cmd);
                                 system(cmd);
+#else
+                                printf("[●] DHCP: iOS mode - interface configured by NEPacketTunnelProvider\n");
+                                printf("[●] DHCP: IP=%u.%u.%u.%u GW=%u.%u.%u.%u\n",
+                                       (g_our_ip >> 24) & 0xFF, (g_our_ip >> 16) & 0xFF,
+                                       (g_our_ip >> 8) & 0xFF, g_our_ip & 0xFF,
+                                       (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
+                                       (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
+#endif
                                 
                                 // ZIGSE-80: Configure VPN routing through ZigTapTun RouteManager
                                 // g_offered_gw is already in host byte order (10.21.0.1 = 0x0A150001)

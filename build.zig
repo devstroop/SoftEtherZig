@@ -13,14 +13,57 @@ pub fn build(b: *std.Build) void {
     const target_os = target.result.os.tag;
     const is_ios = target_os == .ios;
 
-    // Platform-specific OpenSSL paths
-    const openssl_prefix = switch (target_os) {
-        .macos => "/opt/homebrew/opt/openssl@3",
-        .ios => "/opt/homebrew/opt/openssl@3", // Will use macOS OpenSSL for now
-        .linux => "/usr",
-        .windows => "C:/OpenSSL-Win64",
-        else => "/usr",
-    };
+    // Build option for SSL: use system OpenSSL on native macOS/Linux, OpenSSL-Zig for iOS/cross-compile
+    const is_native_desktop = (target_os == .macos or target_os == .linux) and
+        target.result.cpu.arch == std.Target.Cpu.Arch.aarch64;
+    const use_system_ssl = b.option(bool, "system-ssl", "Use system OpenSSL instead of OpenSSL-Zig (default: true for native macOS/Linux)") orelse
+        is_native_desktop;
+
+    // iOS SDK configuration for OpenSSL-Zig
+    const ios_sdk_path = if (is_ios) blk: {
+        if (target.result.cpu.arch == .aarch64 and target.result.abi == .simulator) {
+            break :blk "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk";
+        } else if (target.result.cpu.arch == .x86_64) {
+            break :blk "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk";
+        } else {
+            break :blk "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk";
+        }
+    } else null;
+
+    // Get OpenSSL dependency (conditional based on use_system_ssl)
+    const openssl_dep = if (!use_system_ssl) b.dependency("openssl", .{
+        .target = target,
+        .optimize = optimize,
+    }) else null;
+    const openssl = if (openssl_dep) |dep| blk: {
+        const ssl_lib = dep.artifact("ssl");
+        // Add iOS SDK sysroot for OpenSSL-Zig
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
+            ssl_lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
+            ssl_lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
+            // iOS doesn't have CoreServices, use Foundation instead
+            ssl_lib.linkFramework("Foundation");
+            ssl_lib.linkFramework("Security");
+        }
+        break :blk ssl_lib;
+    } else null;
+
+    const crypto = if (openssl_dep) |dep| blk: {
+        const crypto_lib = dep.artifact("crypto");
+        // Add iOS SDK sysroot for OpenSSL-Zig
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
+            crypto_lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
+            crypto_lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
+            // iOS doesn't have CoreServices, use Foundation instead
+            crypto_lib.linkFramework("Foundation");
+            crypto_lib.linkFramework("Security");
+        }
+        break :blk crypto_lib;
+    } else null;
 
     // Base C flags (common to all platforms)
     const base_c_flags = &[_][]const u8{
@@ -176,12 +219,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Get the taptun module and configure it for iOS if needed
+    const taptun_module = taptun.module("taptun");
+    if (is_ios) {
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            taptun_module.addSystemIncludePath(.{ .cwd_relative = ios_include });
+        }
+    }
+
     const lib_module = b.addModule("softether", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
     });
     lib_module.addIncludePath(b.path("src"));
-    lib_module.addImport("taptun", taptun.module("taptun"));
+    lib_module.addImport("taptun", taptun_module);
     lib_module.link_libc = true;
 
     // ============================================
@@ -205,9 +257,14 @@ pub fn build(b: *std.Build) void {
     cli.addIncludePath(b.path("SoftEtherVPN_Stable/src/Mayaqua"));
     cli.addIncludePath(b.path("SoftEtherVPN_Stable/src/Cedar"));
 
-    // Add OpenSSL include path (platform-specific)
-    const openssl_include = b.fmt("{s}/include", .{openssl_prefix});
-    cli.addIncludePath(.{ .cwd_relative = openssl_include });
+    // Link OpenSSL (system or bundled)
+    if (use_system_ssl) {
+        cli.linkSystemLibrary("ssl");
+        cli.linkSystemLibrary("crypto");
+    } else {
+        if (crypto) |c| cli.linkLibrary(c);
+        if (openssl) |s| cli.linkLibrary(s);
+    }
 
     cli.addCSourceFiles(.{
         .files = c_sources,
@@ -228,7 +285,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    taptun_wrapper_module.addImport("taptun", taptun.module("taptun"));
+    taptun_wrapper_module.addImport("taptun", taptun_module);
 
     const taptun_wrapper = b.addObject(.{
         .name = "taptun_wrapper",
@@ -242,23 +299,34 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Add iOS SDK paths to the module itself (for @cImport in dependencies)
+    if (is_ios) {
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            packet_adapter_module.addSystemIncludePath(.{ .cwd_relative = ios_include });
+        }
+    }
+
     // Add taptun dependency for L2/L3 translation
-    packet_adapter_module.addImport("taptun", taptun.module("taptun"));
+    packet_adapter_module.addImport("taptun", taptun_module);
 
     const packet_adapter_obj = b.addObject(.{
         .name = "zig_packet_adapter",
         .root_module = packet_adapter_module,
     });
     packet_adapter_obj.addIncludePath(b.path("src/bridge"));
+
+    // Add iOS SDK paths for C imports
+    if (is_ios) {
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            packet_adapter_obj.addSystemIncludePath(.{ .cwd_relative = ios_include });
+        }
+    }
     cli.addObject(packet_adapter_obj);
 
-    // Add OpenSSL library path (platform-specific)
-    const openssl_lib = b.fmt("{s}/lib", .{openssl_prefix});
-    cli.addLibraryPath(.{ .cwd_relative = openssl_lib });
-
-    // Link OpenSSL (all platforms)
-    cli.linkSystemLibrary("ssl");
-    cli.linkSystemLibrary("crypto");
+    // Link C library
     cli.linkLibC();
 
     // Platform-specific system libraries
@@ -314,22 +382,28 @@ pub fn build(b: *std.Build) void {
     lib.addIncludePath(b.path("SoftEtherVPN_Stable/src"));
     lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Mayaqua"));
     lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Cedar"));
-    lib.addIncludePath(.{ .cwd_relative = openssl_include });
+
+    // Link OpenSSL (system or bundled)
+    if (use_system_ssl) {
+        lib.linkSystemLibrary("ssl");
+        lib.linkSystemLibrary("crypto");
+    } else {
+        if (crypto) |c| lib.linkLibrary(c);
+        if (openssl) |s| lib.linkLibrary(s);
+    }
 
     // Add iOS SDK includes when cross-compiling for iOS
     if (is_ios) {
         // Add our iOS stub headers FIRST (before system includes)
         lib.addIncludePath(b.path("src/bridge/ios_include"));
 
-        const ios_sdk_path = if (target.result.cpu.arch == .aarch64 and target.result.abi == .simulator)
-            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk"
-        else if (target.result.cpu.arch == .x86_64)
-            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk"
-        else
-            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk";
-
-        const ios_include = b.fmt("{s}/usr/include", .{ios_sdk_path});
-        lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
+        // Use the ios_sdk_path defined at the top of build()
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
+            lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
+            lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
+        }
     }
 
     // Add C sources
@@ -352,19 +426,14 @@ pub fn build(b: *std.Build) void {
         .flags = c_flags,
     });
 
-    // For iOS builds, skip OpenSSL linking (will be provided by XCFramework or system)
-    if (!is_ios) {
-        lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
-        lib.linkSystemLibrary("ssl");
-        lib.linkSystemLibrary("crypto");
-    }
+    // OpenSSL is linked via openssl variable above
     lib.linkLibC();
 
     // For iOS, use iOS SDK system libraries instead of macOS ones
     if (is_ios) {
-        // For iOS cross-compilation, don't link any system libraries
-        // They will be linked by Xcode when building the final app
-        // Just link libc
+        // iOS needs Foundation and Security frameworks for OpenSSL integration
+        lib.linkFramework("Foundation");
+        lib.linkFramework("Security");
     } else if (target_os == .macos) {
         lib.linkSystemLibrary("pthread");
         lib.linkSystemLibrary("z");
@@ -397,10 +466,32 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    mobile_ffi.root_module.addImport("taptun", taptun.module("taptun"));
+    mobile_ffi.root_module.addImport("taptun", taptun_module);
     mobile_ffi.linkLibC();
     mobile_ffi.addIncludePath(b.path("include"));
     mobile_ffi.addIncludePath(b.path("src"));
+
+    // Add iOS SDK configuration for mobile FFI
+    if (is_ios) {
+        mobile_ffi.addIncludePath(b.path("src/bridge/ios_include"));
+        if (ios_sdk_path) |sdk| {
+            const ios_include = b.fmt("{s}/usr/include", .{sdk});
+            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
+            mobile_ffi.addSystemIncludePath(.{ .cwd_relative = ios_include });
+            mobile_ffi.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
+            mobile_ffi.linkFramework("Foundation");
+            mobile_ffi.linkFramework("Security");
+        }
+    }
+
+    // Link OpenSSL (system or bundled)
+    if (use_system_ssl) {
+        mobile_ffi.linkSystemLibrary("ssl");
+        mobile_ffi.linkSystemLibrary("crypto");
+    } else {
+        if (crypto) |c| mobile_ffi.linkLibrary(c);
+        if (openssl) |s| mobile_ffi.linkLibrary(s);
+    }
 
     b.installArtifact(mobile_ffi);
 
