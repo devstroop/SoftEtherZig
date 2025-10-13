@@ -1,18 +1,34 @@
-# Cross-Platform Architecture
+# SoftEtherZig Architecture
 
 ## Overview
 
-The SoftEther VPN Zig client is designed for seamless cross-platform operation. The architecture separates platform-agnostic logic from platform-specific implementations using compile-time selection.
+SoftEtherZig is a **progressive rewrite** of SoftEther VPN from C to pure Zig. The architecture is designed for seamless cross-platform operation while systematically replacing C code with idiomatic Zig implementations.
+
+**Current State**: Hybrid C/Zig architecture (Phase 1 - 2% complete)  
+**Target State**: 100% Pure Zig by Q2 2025  
+**Strategy**: Bottom-up porting from platform adapters to application layer
+
+See [Zig Porting Roadmap](docs/ZIG_PORTING_ROADMAP.md) for the complete migration plan.
+
+### Current Hybrid Architecture (Phase 1)
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│              Zig Application Layer                  │
-│  (cli.zig, client.zig, config.zig - Platform Free)  │
+│         Zig Application Layer (PURE ZIG)            │
+│  cli.zig, client.zig, config.zig, ffi/ffi.zig      │
+│  ✅ 1,200 lines - Platform Free                     │
 └────────────────┬────────────────────────────────────┘
                  │
 ┌────────────────▼────────────────────────────────────┐
-│           SoftEther C Bridge Layer                  │
-│        (softether_bridge.c - Platform Free)         │
+│      C Bridge Layer (TO BE ELIMINATED)              │
+│  softether_bridge.c, unix_bridge.c                  │
+│  ⚠️ Temporary - Being replaced by pure Zig          │
+└────────────────┬────────────────────────────────────┘
+                 │
+┌────────────────▼────────────────────────────────────┐
+│    SoftEther Core (C → Zig Migration in Progress)   │
+│  Cedar + Mayaqua libraries                          │
+│  ⏳ ~150,000 lines C → ~50,000 lines Zig            │
 └────────────────┬────────────────────────────────────┘
                  │
          ┌───────┴───────┐
@@ -26,6 +42,9 @@ The SoftEther VPN Zig client is designed for seamless cross-platform operation. 
 ┌───▼───┐   ┌───▼────┐  ┌───▼─────┐
 │ macOS │   │ Linux  │  │ Windows │
 │Adapter│   │Adapter │  │ Adapter │
+│(C→Zig)│   │(C→Zig) │  │(C→Zig)  │
+│⏳Phase│   │⏳Phase │  │⏳Phase  │
+│   1   │   │   1    │  │   1     │
 └───┬───┘   └───┬────┘  └───┬─────┘
     │           │            │
 ┌───▼───┐   ┌───▼────┐  ┌───▼─────┐
@@ -34,74 +53,153 @@ The SoftEther VPN Zig client is designed for seamless cross-platform operation. 
 └───────┘   └────────┘  └─────────┘
 ```
 
+### Target Pure Zig Architecture (Phase 5 - Q2 2028)
+
+```
+┌─────────────────────────────────────────────────────┐
+│         Zig Application Layer (PURE ZIG)            │
+│  Client, Server, Bridge Applications                │
+└────────────────┬────────────────────────────────────┘
+                 │
+┌────────────────▼────────────────────────────────────┐
+│      Protocol Layer (PURE ZIG)                      │
+│  SSTP, L2TP/IPsec, OpenVPN implementations          │
+└────────────────┬────────────────────────────────────┘
+                 │
+┌────────────────▼────────────────────────────────────┐
+│    Session Management (PURE ZIG)                    │
+│  Connection pooling, Keep-alive, Reconnection       │
+└────────────────┬────────────────────────────────────┘
+                 │
+┌────────────────▼────────────────────────────────────┐
+│    Network Stack (PURE ZIG)                         │
+│  TCP/UDP, HTTP, TLS via std.crypto                  │
+└────────────────┬────────────────────────────────────┘
+                 │
+┌────────────────▼────────────────────────────────────┐
+│    Core Infrastructure (PURE ZIG)                   │
+│  Threading, Memory, Collections, Crypto             │
+└────────────────┬────────────────────────────────────┘
+                 │
+         ┌───────┴───────┐
+         │  Compile-Time │
+         │   Platform    │
+         │   Selection   │
+         └───────┬───────┘
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+┌───▼───┐   ┌───▼────┐  ┌───▼─────┐
+│ macOS │   │ Linux  │  │ Windows │
+│Adapter│   │Adapter │  │ Adapter │
+│  ZIG  │   │  ZIG   │  │   ZIG   │
+│  ✅   │   │  ✅    │  │   ✅    │
+└───┬───┘   └───┬────┘  └───┬─────┘
+    │           │            │
+┌───▼───┐   ┌───▼────┐  ┌───▼─────┐
+│ utun  │   │ TUN/TAP│  │   TAP   │
+│(Zig)  │   │ (Zig)  │  │  (Zig)  │
+└───────┘   └────────┘  └─────────┘
+
+100% Pure Zig - No C except system libraries
+```
+
 ## Component Breakdown
 
 ### Platform-Agnostic Components
 
-#### Zig Layer (100% Platform Independent)
+#### Zig Layer (Pure Zig - Growing)
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `src/main.zig` | 39 | Library entry point, public API exports |
-| `src/cli.zig` | 231 | Command-line interface, argument parsing |
-| `src/client.zig` | 170 | VPN client logic, state management |
-| `src/config.zig` | 148 | Configuration types and validation |
-| `src/types.zig` | 67 | Common data structures |
-| `src/errors.zig` | 70 | Error definitions and handling |
-| `src/ffi.zig` | 97 | C FFI interface (language bindings) |
-| `src/c.zig` | 32 | C import declarations |
+**Status**: ✅ Complete for Phase 1 application layer
 
-**Total**: 854 lines of pure Zig code that works on any platform.
+| File | Lines | Status | Purpose |
+|------|-------|--------|---------|
+| `src/main.zig` | 39 | ✅ Complete | Library entry point, public API exports |
+| `src/cli.zig` | 231 | ✅ Complete | Command-line interface, argument parsing |
+| `src/client.zig` | 170 | ⏳ Partial | VPN client logic skeleton (needs session mgmt) |
+| `src/config.zig` | 148 | ✅ Complete | Configuration types and validation |
+| `src/types.zig` | 67 | ✅ Complete | Common data structures |
+| `src/errors.zig` | 70 | ✅ Complete | Error definitions and handling |
+| `src/ffi/ffi.zig` | 339 | ✅ Complete | Cross-platform FFI for mobile/embedded |
+| `src/packet/*.zig` | ~800 | ✅ Complete | Packet infrastructure (zero-alloc) |
+| `src/bridge/*.zig` | ~300 | ⏳ Temporary | C interop (to be eliminated) |
 
-#### C Bridge Layer (Platform Detection Only)
+**Total**: ~1,200 lines of pure Zig code (2% of final target).
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `src/bridge/softether_bridge.c` | 638 | Main bridge to SoftEther VPN |
-| `src/bridge/unix_bridge.c` | 600+ | POSIX OS abstraction (macOS/Linux) |
+**Next**: Port platform adapters and Mayaqua utilities (Phase 1 - 6 months).
 
-These files contain minimal platform-specific code, mainly `#ifdef` switches for platform detection.
+#### C Bridge Layer (Being Eliminated)
 
-### Platform-Specific Components
+**Status**: ⚠️ Temporary - Will be replaced by pure Zig implementations
 
-#### macOS Implementation
+| File | Lines | Status | Purpose |
+|------|-------|--------|---------|
+| `src/bridge/softether_bridge.c` | 638 | ⏳ Phase 2-3 | Bridge to SoftEther C core |
+| `src/bridge/unix_bridge.c` | 600+ | ⏳ Phase 2 | POSIX OS abstraction |
+| `src/bridge/packet_adapter_*.c` | 1,250 | ⏳ Phase 1 | **Priority porting target** |
 
-| File | Lines | Purpose | APIs Used |
-|------|-------|---------|-----------|
-| `packet_adapter_macos.c` | 420 | TUN device management | `utun`, `SYSPROTO_CONTROL` |
-| `packet_adapter_macos.h` | 55 | Type definitions | - |
-| `tick64_macos.c` | 78 | High-resolution timing | `mach_absolute_time()` |
+These files exist only to interface with the legacy SoftEther C codebase and will be eliminated as Zig implementations replace C components.
 
-**Key Features**:
+### Platform-Specific Components (Phase 1 Priority)
+
+**Porting Status**: These components are the **first priority** for Zig conversion.
+
+#### macOS Implementation (Current: C → Target: Zig)
+
+| File | Lines | Status | Purpose | Target |
+|------|-------|--------|---------|---------|
+| `packet_adapter_macos.c` | 420 | ⏳ **Phase 1** | TUN device management | `src/platform/macos.zig` |
+| `packet_adapter_macos.h` | 55 | ⏳ **Phase 1** | Type definitions | (eliminated in Zig) |
+| `tick64_macos.c` | 78 | ⏳ **Phase 1** | High-resolution timing | `src/platform/time.zig` |
+
+**Current Implementation** (C):
 - Uses macOS kernel control interfaces (`utun0`-`utun15`)
 - Native `mach_absolute_time()` for nanosecond precision
-- No external dependencies beyond system frameworks
+- Depends on C headers and manual memory management
 
-#### Linux Implementation
+**Target Implementation** (Zig - Q1 2026):
+- Pure Zig using ZigTapTun library
+- `std.time` for timing with platform-specific optimizations
+- Type-safe, bounds-checked, memory-safe
+- Zero external dependencies except system frameworks
 
-| File | Lines | Purpose | APIs Used |
-|------|-------|---------|-----------|
-| `packet_adapter_linux.c` | 382 | TUN device management | `/dev/net/tun`, `ioctl()` |
-| `packet_adapter_linux.h` | 33 | Type definitions | - |
-| `tick64_linux.c` | 69 | High-resolution timing | `clock_gettime(CLOCK_MONOTONIC)` |
+#### Linux Implementation (Current: C → Target: Zig)
 
-**Key Features**:
-- Uses standard Linux TUN/TAP interface
+| File | Lines | Status | Purpose | Target |
+|------|-------|--------|---------|---------|
+| `packet_adapter_linux.c` | 382 | ⏳ **Phase 1** | TUN device management | `src/platform/linux.zig` |
+| `packet_adapter_linux.h` | 33 | ⏳ **Phase 1** | Type definitions | (eliminated in Zig) |
+| `tick64_linux.c` | 69 | ⏳ **Phase 1** | High-resolution timing | `src/platform/time.zig` |
+
+**Current Implementation** (C):
+- Uses standard Linux TUN/TAP interface via `/dev/net/tun`
 - POSIX `clock_gettime()` for reliable timing
+- Manual ioctl() calls and error handling
+
+**Target Implementation** (Zig - Q1 2026):
+- Pure Zig using ZigTapTun library
+- Native `std.os.linux` APIs with error unions
+- Type-safe ioctl() wrappers
 - Compatible with all Linux distributions
 
-#### Windows Implementation
+#### Windows Implementation (Current: C → Target: Zig)
 
-| File | Lines | Purpose | APIs Used |
-|------|-------|---------|-----------|
-| `packet_adapter_windows.c` | 448 | TAP device management | TAP-Windows6, `DeviceIoControl()` |
-| `packet_adapter_windows.h` | 39 | Type definitions | - |
-| `tick64_windows.c` | 62 | High-resolution timing | `QueryPerformanceCounter()` |
+| File | Lines | Status | Purpose | Target |
+|------|-------|--------|---------|---------|
+| `packet_adapter_windows.c` | 448 | ⏳ **Phase 1** | TAP device management | `src/platform/windows.zig` |
+| `packet_adapter_windows.h` | 39 | ⏳ **Phase 1** | Type definitions | (eliminated in Zig) |
+| `tick64_windows.c` | 62 | ⏳ **Phase 1** | High-resolution timing | `src/platform/time.zig` |
 
-**Key Features**:
+**Current Implementation** (C):
 - Uses OpenVPN's TAP-Windows6 adapter
 - Overlapped I/O for async packet operations
 - Windows-native performance counters
+
+**Target Implementation** (Zig - Q1 2026):
+- Pure Zig using `std.os.windows` APIs
+- Async I/O with Zig's async/await (when stable)
+- Type-safe Windows API bindings
+- No header file dependencies
 
 ## Build System Integration
 
@@ -255,25 +353,51 @@ The build system automatically:
 3. Applies correct compiler flags
 4. Links platform-specific libraries
 
-## Code Statistics
+## Code Statistics & Porting Progress
 
-### Total Implementation
+### Current Implementation (Hybrid C/Zig)
 
-| Category | Files | Lines | Percentage |
-|----------|-------|-------|------------|
-| Platform-agnostic Zig | 8 | 854 | 35% |
-| Platform-agnostic C | 2 | 1,238 | 50% |
-| macOS-specific C | 3 | 553 | 9% |
-| Linux-specific C | 3 | 484 | 6% |
-| Windows-specific C | 3 | 549 | 11% |
-| **Total** | **19** | **2,440** | **100%** |
+| Category | Files | Lines | Status | Target State |
+|----------|-------|-------|--------|-------------|
+| **Pure Zig** | 15+ | ~1,200 | ✅ Growing | ~50,000 lines |
+| Platform-agnostic C | 2 | 1,238 | ⏳ Phase 2-3 | → Zig |
+| macOS-specific C | 3 | 553 | ⏳ **Phase 1** | → `src/platform/macos.zig` |
+| Linux-specific C | 3 | 484 | ⏳ **Phase 1** | → `src/platform/linux.zig` |
+| Windows-specific C | 3 | 549 | ⏳ **Phase 1** | → `src/platform/windows.zig` |
+| SoftEther Core (C) | 100+ | ~150,000 | ⏳ Phase 2-5 | → Pure Zig |
 
-### Platform-Specific Code Ratio
+### Porting Progress
 
-- **Platform-independent**: 85% (2,092 lines)
-- **Platform-specific**: 15% (1,586 lines, split across 3 platforms)
+**Overall**: 2% complete (~1,200 of ~70,000 target lines)
 
-This high ratio of platform-independent code makes the project highly maintainable and portable.
+| Phase | Component | Lines to Port | Status | ETA |
+|-------|-----------|---------------|--------|-----|
+| 1 | Platform Adapters | ~1,600 | ⏳ **Current** | Q1 2026 |
+| 1 | Mayaqua Core | ~6,400 | ⏳ In Queue | Q2 2026 |
+| 2 | Network Stack | ~15,000 | ⏸️ Planned | Q4 2026 |
+| 3 | Session Management | ~12,000 | ⏸️ Planned | Q2 2027 |
+| 4 | Protocols | ~20,000 | ⏸️ Planned | Q4 2027 |
+| 5 | Applications | ~15,000 | ⏸️ Planned | Q2 2028 |
+
+### Benefits of Zig Migration
+
+**Code Reduction**: Zig code is typically 20-30% shorter than equivalent C
+- Fewer lines to maintain
+- No header files needed
+- Less boilerplate
+
+**Safety Improvements**:
+- ✅ Bounds checking (eliminates buffer overflows)
+- ✅ Null safety (optional types)
+- ✅ Memory safety (compile-time lifetime analysis)
+- ✅ Integer overflow detection
+- ✅ No undefined behavior
+
+**Performance Gains**:
+- ✅ Zero-cost abstractions
+- ✅ Compile-time execution
+- ✅ LLVM optimization backend
+- ✅ Native SIMD support
 
 ## Design Principles
 
@@ -365,14 +489,75 @@ strategy:
 3. **Hardware Acceleration**: AES-NI, ARM Crypto Extensions
 4. **Zero-Copy**: splice() on Linux, TransmitFile() on Windows
 
+## Porting Strategy
+
+### Phase-Based Approach
+
+We port from bottom-up, maintaining C interop at phase boundaries:
+
+```
+Phase 5: Applications        (30-36 months)
+    ↑
+Phase 4: Protocols           (18-30 months)
+    ↑
+Phase 3: Session Management  (12-18 months)
+    ↑
+Phase 2: Core Infrastructure (6-12 months)
+    ↑
+Phase 1: Foundation          (0-6 months) ← Current Phase
+```
+
+### Current Sprint (October-November 2025)
+
+**Goal**: Port macOS packet adapter to pure Zig
+
+**Tasks**:
+1. Create `src/platform/` directory structure
+2. Implement `src/platform/macos.zig`
+3. Integrate with ZigTapTun library
+4. Write comprehensive tests (100% coverage)
+5. Benchmark against C version (within 5%)
+
+**Success Criteria**:
+- ✅ All macOS packet operations work in pure Zig
+- ✅ No C code except system APIs
+- ✅ Performance parity with C version
+- ✅ Memory-safe and bounds-checked
+
+### Why Pure Zig?
+
+**Safety**:
+- Eliminate entire classes of vulnerabilities (buffer overflows, use-after-free, null pointers)
+- Compile-time memory safety guarantees
+- No undefined behavior
+
+**Performance**:
+- Zero-cost abstractions (as fast as C)
+- Modern LLVM optimizations
+- Native SIMD support
+- Compile-time code generation
+
+**Maintainability**:
+- 20-30% less code than C
+- No header files to sync
+- Built-in testing framework
+- Clear error handling (no errno hunting)
+
+**Portability**:
+- Native cross-compilation to any platform
+- Single toolchain (no autotools/CMake complexity)
+- Consistent behavior across platforms
+
 ## Conclusion
 
-The cross-platform architecture achieves:
+SoftEtherZig is on a clear path from a C-based VPN implementation to a **100% pure Zig** implementation by Q2 2028. The architecture:
 
-✅ **85% shared code** across all platforms
-✅ **Native performance** on each platform  
-✅ **Easy maintenance** - most changes are platform-agnostic
-✅ **Simple cross-compilation** using Zig's toolchain
-✅ **Extensible design** for future platforms
+✅ **Current**: Hybrid C/Zig providing production-ready VPN functionality  
+✅ **Progressive**: Bottom-up porting maintains stability at each phase  
+✅ **Safe**: Each Zig component eliminates entire classes of C vulnerabilities  
+✅ **Fast**: Zero-cost abstractions ensure native performance  
+✅ **Maintainable**: 20-30% code reduction, no header files, clear errors
 
-This architecture demonstrates that with careful design, it's possible to build truly portable systems code without sacrificing performance or maintainability.
+**Next Milestone**: Complete Phase 1 platform adapters by Q1 2026
+
+See [Zig Porting Roadmap](docs/ZIG_PORTING_ROADMAP.md) for detailed migration plan.
