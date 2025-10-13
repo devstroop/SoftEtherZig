@@ -60,7 +60,7 @@ SoftEtherZig is a complete rewrite of SoftEther VPN in pure Zig. While currently
 - ✅ **Configuration System**: Type-safe JSON parsing with validation
 - ✅ **macOS Packet Adapter** (NEW!): Foundation layer complete with device lifecycle, packet I/O, and thread-safe queue
   - **Status**: Phase 1a complete (500 lines), Phase 1b in progress (DHCP/ARP/IPv6)
-  - **Next**: Linux and Windows adapters (Q1 2026)
+  - **Next**: Linux and Windows adapters (Q1 2025)
 - ⏳ **Mayaqua Library**: In planning - memory management, collections, strings, threading
 
 **VPN Capabilities** (via SoftEther C core, being ported):
