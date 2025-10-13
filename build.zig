@@ -1,13 +1,22 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    // Print build banner
+    std.debug.print("\n", .{});
+    std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
+    std.debug.print("║           SoftEtherZig - Pure Zig VPN Client                ║\n", .{});
+    std.debug.print("║              Progressive C to Zig Migration                 ║\n", .{});
+    std.debug.print("║                  Phase 1: 3% Complete                       ║\n", .{});
+    std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
+    std.debug.print("\n", .{});
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
         .preferred_optimize_mode = .ReleaseFast,
     });
 
     // Build option to select packet adapter (Zig adapter is default for better performance)
-    const use_zig_adapter = b.option(bool, "use-zig-adapter", "Use Zig packet adapter (default: true)") orelse true;
+    const use_zig_adapter = b.option(bool, "use-zig-adapter", "Use Zig packet adapter instead of C (default: true)") orelse true;
 
     // Detect target OS
     const target_os = target.result.os.tag;
@@ -116,6 +125,14 @@ pub fn build(b: *std.Build) void {
     }
 
     const c_flags = c_flags_list.items;
+
+    // Print build configuration
+    std.debug.print("Build Configuration:\n", .{});
+    std.debug.print("  Target: {s}\n", .{@tagName(target_os)});
+    std.debug.print("  Optimize: {s}\n", .{@tagName(optimize)});
+    std.debug.print("  SSL: {s}\n", .{if (use_system_ssl) "system" else "OpenSSL-Zig"});
+    std.debug.print("  Packet Adapter: {s}\n", .{if (use_zig_adapter) "Zig (native)" else "C (legacy)"});
+    std.debug.print("\n", .{});
 
     // Platform-specific packet adapter and timing files
     const packet_adapter_file = switch (target_os) {
@@ -407,4 +424,87 @@ pub fn build(b: *std.Build) void {
 
     const ffi_step = b.step("ffi", "Build FFI library (cross-platform)");
     ffi_step.dependOn(&b.addInstallArtifact(ffi_lib, .{}).step);
+
+    // ============================================
+    // 4. TESTS
+    // ============================================
+
+    // Test for macOS platform adapter
+    const macos_adapter_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/test_macos_adapter.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    macos_adapter_tests.root_module.addImport("taptun", taptun_module);
+
+    const run_macos_adapter_tests = b.addRunArtifact(macos_adapter_tests);
+
+    // Main test step
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_macos_adapter_tests.step);
+
+    // ============================================
+    // 5. HELP AND INFORMATION
+    // ============================================
+
+    const help_step = b.step("help", "Show build system help");
+    const help_run = b.addSystemCommand(&[_][]const u8{
+        "echo",
+        \\
+        \\SoftEtherZig Build System
+        \\========================
+        \\
+        \\Available Build Targets:
+        \\  zig build                  - Build all targets (default)
+        \\  zig build run              - Build and run VPN client CLI
+        \\  zig build ffi              - Build FFI library only
+        \\  zig build test             - Run unit tests
+        \\  zig build clean            - Clean build artifacts
+        \\
+        \\Build Options:
+        \\  -Doptimize=<mode>          - Build mode: Debug, ReleaseSafe, ReleaseFast, ReleaseSmall
+        \\                               (default: ReleaseFast)
+        \\  -Dtarget=<triple>          - Target platform (e.g., aarch64-macos, x86_64-linux)
+        \\  -Dsystem-ssl=<bool>        - Use system OpenSSL (default: true for macOS/Linux)
+        \\  -Duse-zig-adapter=<bool>   - Use Zig packet adapter (default: true)
+        \\
+        \\Examples:
+        \\  # Build optimized CLI
+        \\  zig build -Doptimize=ReleaseFast
+        \\
+        \\  # Build for iOS simulator
+        \\  zig build -Dtarget=aarch64-ios-simulator -Dsystem-ssl=false
+        \\
+        \\  # Run tests
+        \\  zig build test
+        \\
+        \\  # Run CLI with arguments
+        \\  zig build run -- -h
+        \\
+        \\  # Cross-compile for Linux from macOS
+        \\  zig build -Dtarget=x86_64-linux-gnu
+        \\
+        \\Documentation:
+        \\  README.md                  - Quick start guide
+        \\  docs/ZIG_PORTING_ROADMAP.md - Complete porting strategy
+        \\  docs/ZIG_PORTING_PROGRESS.md - Task-by-task progress
+        \\  docs/MACOS_ADAPTER_MILESTONE.md - Phase 1a completion report
+        \\  SECURITY.md                - Security best practices
+        \\
+        \\Current Status:
+        \\  Phase 1: Foundation Layer (20% complete)
+        \\  Overall Migration: 3% (2,100/70,000 lines)
+        \\  Latest: macOS adapter Phase 1a complete ✓
+        \\
+        \\Need Help?
+        \\  zig build --help           - Standard Zig build help
+        \\  zig build help             - This message
+        \\
+    });
+    help_step.dependOn(&help_run.step);
+
+    // Print completion message
+    std.debug.print("Build targets prepared. Use 'zig build help' for usage.\n\n", .{});
 }

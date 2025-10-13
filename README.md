@@ -4,13 +4,16 @@ A modern, cross-platform VPN client implementation in **pure Zig**, progressivel
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Zig Version](https://img.shields.io/badge/zig-0.15.1+-blue)](https://ziglang.org/)
-[![Zig Porting](https://img.shields.io/badge/Zig%20Port-2%25-yellow)](docs/ZIG_PORTING_ROADMAP.md)
+[![Zig Porting](https://img.shields.io/badge/Zig%20Port-3%25-yellow)](docs/ZIG_PORTING_ROADMAP.md)
+[![Phase 1](https://img.shields.io/badge/Phase%201-20%25-orange)](docs/ZIG_PORTING_PROGRESS.md)
 
 ## 🎯 Project Vision: 100% Pure Zig
 
-**Goal**: Complete rewrite of SoftEther VPN from C to Zig by Q2 2028
+**Goal**: Complete rewrite of SoftEther VPN from C to Zig by Q2 2025
 
-**Current Status**: Phase 1 (Foundation) - 2% complete (1,200/70,000 lines ported)
+**Current Status**: Phase 1 (Foundation) - 3% complete (2,100/70,000 lines ported)
+
+**Latest Milestone**: macOS packet adapter Phase 1a complete! 🎉 (October 13, 2025)
 
 This project is actively porting all C code to idiomatic Zig, achieving:
 - ✅ Memory safety without garbage collection
@@ -50,12 +53,15 @@ SoftEtherZig is a complete rewrite of SoftEther VPN in pure Zig. While currently
 
 ## Features
 
-**Zig Components (Pure Zig)**:
+**Zig Components (Pure Zig - Phase 1)**:
 - ✅ **FFI Layer**: Cross-platform C API (`include/ffi.h`) for iOS, Android, and other platforms
 - ✅ **CLI Interface**: Command-line tool with secure credential handling
 - ✅ **Packet Infrastructure**: Zero-allocation packet processing (10-20x faster than C)
 - ✅ **Configuration System**: Type-safe JSON parsing with validation
-- ⏳ **Platform Adapters**: In progress - porting TUN/TAP handling to pure Zig
+- ✅ **macOS Packet Adapter** (NEW!): Foundation layer complete with device lifecycle, packet I/O, and thread-safe queue
+  - **Status**: Phase 1a complete (500 lines), Phase 1b in progress (DHCP/ARP/IPv6)
+  - **Next**: Linux and Windows adapters (Q1 2026)
+- ⏳ **Mayaqua Library**: In planning - memory management, collections, strings, threading
 
 **VPN Capabilities** (via SoftEther C core, being ported):
 - 🔒 **Secure**: SSL/TLS 1.3 encryption with SoftEther's proven security model
