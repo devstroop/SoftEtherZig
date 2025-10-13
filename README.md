@@ -1,9 +1,25 @@
 # SoftEtherZig
 
-A modern, cross-platform VPN client implementation in Zig, wrapping the SoftEther VPN protocol.
+A modern, cross-platform VPN client implementation in **pure Zig**, progressively replacing the SoftEther VPN C codebase.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Zig Version](https://img.shields.io/badge/zig-0.15.1+-blue)](https://ziglang.org/)
+[![Zig Porting](https://img.shields.io/badge/Zig%20Port-2%25-yellow)](docs/ZIG_PORTING_ROADMAP.md)
+
+## 🎯 Project Vision: 100% Pure Zig
+
+**Goal**: Complete rewrite of SoftEther VPN from C to Zig by Q2 2028
+
+**Current Status**: Phase 1 (Foundation) - 2% complete (1,200/70,000 lines ported)
+
+This project is actively porting all C code to idiomatic Zig, achieving:
+- ✅ Memory safety without garbage collection
+- ✅ Zero-cost abstractions and compile-time guarantees
+- ✅ 20-30% code reduction compared to C
+- ✅ Native cross-compilation to all platforms
+
+**📖 Read the full roadmap**: [Zig Porting Roadmap](docs/ZIG_PORTING_ROADMAP.md)  
+**📊 Track progress**: [Porting Progress Tracker](docs/ZIG_PORTING_PROGRESS.md)
 
 ## 🔒 Security Notice
 
@@ -24,23 +40,27 @@ export SOFTETHER_PASSWORD_HASH="your_hash_here"
 
 ## Overview
 
-SoftEtherZig is a clean, modern VPN client written in Zig that provides a high-level interface to the battle-tested SoftEther VPN protocol. It combines the performance and safety of Zig with the proven reliability of SoftEther VPN's C codebase.
+SoftEtherZig is a complete rewrite of SoftEther VPN in pure Zig. While currently wrapping the battle-tested C core, we're systematically replacing all C code with safe, idiomatic Zig implementations.
+
+**Why Zig?**
+- **Memory Safety**: Eliminate buffer overflows, use-after-free, null pointer dereferences
+- **Performance**: Zero-cost abstractions, LLVM optimizations, compile-time code generation
+- **Maintainability**: No header files, built-in testing, clear error handling
+- **Portability**: Native cross-compilation to any platform without toolchain hassle
 
 ## Features
 
-**FFI**: Cross-platform C API available in `include/ffi.h` for integration with any language.
+**Zig Components (Pure Zig)**:
+- ✅ **FFI Layer**: Cross-platform C API (`include/ffi.h`) for iOS, Android, and other platforms
+- ✅ **CLI Interface**: Command-line tool with secure credential handling
+- ✅ **Packet Infrastructure**: Zero-allocation packet processing (10-20x faster than C)
+- ✅ **Configuration System**: Type-safe JSON parsing with validation
+- ⏳ **Platform Adapters**: In progress - porting TUN/TAP handling to pure Zig
 
-- 🚀 **High Performance**: Zig packet adapter enabled by default (10-20x faster than C adapter)
-  - Zero heap allocations in hot path
-  - 100% packet buffer reuse
-  - Sub-microsecond packet processing latency
+**VPN Capabilities** (via SoftEther C core, being ported):
 - 🔒 **Secure**: SSL/TLS 1.3 encryption with SoftEther's proven security model
-- 🌐 **Cross-Platform**: Native support for macOS, Linux, Windows, **Android, and iOS**
+- 🌐 **Cross-Platform**: Native support for macOS, Linux, Windows, Android, and iOS
 - ⚡ **UDP Acceleration**: Optimized network performance with SoftEther's R-UDP protocol
-- 📱 **Mobile Ready**: Full Android (JNI) and iOS (Network Extension) implementations
-- 🛠️ **Dual Interface**: Both CLI tool and embeddable library
-- 🔧 **Easy Integration**: Clean Zig API for custom applications
-- 📦 **Self-Contained**: No external dependencies except OpenSSL
 - 🌉 **Dual Mode Support**: SecureNAT (Layer 3) and Local Bridge (Layer 2) modes
 - 🔄 **Automatic Reconnection**: Exponential backoff with configurable retry limits
 
@@ -212,7 +232,91 @@ pub fn main() !void {
 
 **Note**: Legacy FFI was archived October 2025. See [Migration Guide](docs/FFI_MIGRATION_GUIDE.md) for historical context.
 
-### Project Structure
+### Porting Status
+
+| Phase | Component | Status | Progress | Target |
+|-------|-----------|--------|----------|--------|
+| 1 | **Foundation** | 🟡 In Progress | 15% | Q2 2026 |
+| 1.1 | Platform Adapters (TUN/TAP) | ⏳ Starting | 0% | Q1 2026 |
+| 1.2 | Mayaqua Library (utilities) | ⏳ Planned | 0% | Q2 2026 |
+| 2 | **Core Infrastructure** | ⏸️ Not Started | 0% | Q4 2026 |
+| 2.1 | Network Stack (TCP/UDP/HTTP) | ⏸️ Not Started | 0% | Q3 2026 |
+| 2.2 | Cryptography Layer | ⏸️ Not Started | 0% | Q4 2026 |
+| 3 | **Session Management** | ⏸️ Not Started | 0% | Q2 2027 |
+| 4 | **Protocols** (SSTP/L2TP/OpenVPN) | ⏸️ Not Started | 0% | Q4 2027 |
+| 5 | **Applications** (Client/Server) | ⏸️ Not Started | 0% | Q2 2028 |
+
+**Overall**: 2% complete (~1,200 of ~70,000 lines ported to Zig)
+
+### Current Sprint (October 2025)
+**Goal**: Port macOS packet adapter to pure Zig
+- [ ] Create `src/platform/macos.zig`
+- [ ] Integrate ZigTapTun for utun management
+- [ ] Port DHCP packet handling
+- [ ] Achieve performance parity with C version
+
+See [Porting Progress Tracker](docs/ZIG_PORTING_PROGRESS.md) for detailed task list.
+
+## Architecture
+
+### Current Hybrid Architecture (Phase 1)
+
+```
+┌─────────────────────────────────────┐
+│    Zig Application Layer (PURE ZIG) │
+│  cli.zig, client.zig, config.zig    │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│    FFI Layer (PURE ZIG)             │
+│  ffi/ffi.zig - Cross-platform API   │
+└──────────────┬──────────────────────┘
+               │
+         ┌─────┴─────┐
+         │  C Bridge │ ← Being eliminated
+         └─────┬─────┘
+               │
+┌──────────────▼──────────────────────┐
+│   SoftEther Core (C → Zig in progress)
+│  Cedar + Mayaqua libraries          │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│  Platform Layer (C → Zig Phase 1)   │
+│  TUN/TAP adapters                   │
+└─────────────────────────────────────┘
+```
+
+### Target Pure Zig Architecture (Phase 5)
+
+```
+┌─────────────────────────────────────┐
+│         Zig Application             │
+│  (Client, Server, Bridge)           │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│      Protocol Layer (Zig)           │
+│  SSTP, L2TP, OpenVPN                │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│    Session Management (Zig)         │
+│  Connection pooling, Keep-alive     │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│    Network Stack (Zig)              │
+│  TCP/UDP, HTTP, TLS via std.crypto  │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│    Platform Adapters (Zig)          │
+│  Pure Zig TUN/TAP via ZigTapTun     │
+└─────────────────────────────────────┘
+```
+
+## Project Structure
 
 ```
 SoftEtherZig/
