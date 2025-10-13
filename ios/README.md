@@ -27,6 +27,16 @@ SoftEther Core (Cedar + Mayaqua - C)
 - ✅ iOS/Objective-C bridging works seamlessly with pure C
 - ✅ SoftEther core is already pure C
 
+## ⚠️ Migration Required: Legacy FFI Removed
+
+**Status**: The legacy `softether_ffi.h` was archived in October 2025.
+
+**Action Required**: Integrate the cross-platform FFI from `include/ffi.h` instead.
+
+See the [FFI Migration Guide](../docs/FFI_MIGRATION_GUIDE.md) for step-by-step instructions.
+
+---
+
 ## Components
 
 ### Swift Layer

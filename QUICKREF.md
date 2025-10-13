@@ -25,7 +25,8 @@ SoftEtherZig/
 │   ├── config.zig         # Configuration types
 │   ├── errors.zig         # Error handling
 │   ├── types.zig          # Common types
-│   ├── ffi.zig            # C FFI interface
+│   ├── ffi/
+│   │   └── ffi.zig        # ✅ FFI (cross-platform C API)
 │   ├── c.zig              # C imports
 │   └── bridge/
 │       ├── softether_bridge.c     # Main C bridge layer

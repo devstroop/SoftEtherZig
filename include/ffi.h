@@ -1,13 +1,13 @@
 /**
- * SoftEtherZig - Generic Mobile VPN FFI
+ * SoftEtherZig - FFI (Foreign Function Interface)
  * 
- * Platform-agnostic C API for iOS PacketTunnelProvider and Android VpnService
+ * Platform-agnostic C API for mobile (iOS/Android) and desktop platforms
  * 
- * This header can be used from both iOS (Swift/Objective-C) and Android (JNI/Kotlin)
+ * This header can be used from Swift, Objective-C, Kotlin, Java, Python, Rust, and other languages
  */
 
-#ifndef SOFTETHER_MOBILE_FFI_H
-#define SOFTETHER_MOBILE_FFI_H
+#ifndef SOFTETHER_FFI_H
+#define SOFTETHER_FFI_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -236,4 +236,4 @@ const char* mobile_vpn_get_build_info(void);
 }
 #endif
 
-#endif // SOFTETHER_MOBILE_FFI_H
+#endif // SOFTETHER_FFI_H

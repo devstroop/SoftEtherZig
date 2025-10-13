@@ -363,141 +363,48 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cli.step);
 
     // ============================================
-    // 3. STATIC LIBRARY (for iOS/FFI)
+    // 3. FFI LIBRARY (Cross-Platform)
     // ============================================
-    const lib = b.addLibrary(.{
-        .name = "SoftEtherClient",
+    const ffi_lib = b.addLibrary(.{
+        .name = "softether_ffi",
         .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi/ffi.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    ffi_lib.root_module.addImport("taptun", taptun_module);
+    ffi_lib.linkLibC();
+    ffi_lib.addIncludePath(b.path("include"));
+    ffi_lib.addIncludePath(b.path("src"));
 
-    lib.linkLibC();
-
-    // Add all the same includes and sources as CLI
-    lib.addIncludePath(b.path("src"));
-    lib.addIncludePath(b.path("src/bridge"));
-    lib.addIncludePath(b.path("include"));
-    lib.addIncludePath(b.path("SoftEtherVPN_Stable/src"));
-    lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Mayaqua"));
-    lib.addIncludePath(b.path("SoftEtherVPN_Stable/src/Cedar"));
-
-    // Link OpenSSL (system or bundled)
-    if (use_system_ssl) {
-        lib.linkSystemLibrary("ssl");
-        lib.linkSystemLibrary("crypto");
-    } else {
-        if (crypto) |c| lib.linkLibrary(c);
-        if (openssl) |s| lib.linkLibrary(s);
-    }
-
-    // Add iOS SDK includes when cross-compiling for iOS
+    // Add iOS SDK configuration for FFI
     if (is_ios) {
-        // Add our iOS stub headers FIRST (before system includes)
-        lib.addIncludePath(b.path("src/bridge/ios_include"));
-
-        // Use the ios_sdk_path defined at the top of build()
+        ffi_lib.addIncludePath(b.path("src/bridge/ios_include"));
         if (ios_sdk_path) |sdk| {
             const ios_include = b.fmt("{s}/usr/include", .{sdk});
             const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
-            lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
-            lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
-        }
-    }
-
-    // Add C sources
-    lib.addCSourceFiles(.{
-        .files = c_sources,
-        .flags = c_flags,
-    });
-
-    // Add NativeStack for non-iOS builds
-    if (!is_ios) {
-        lib.addCSourceFiles(.{
-            .files = native_stack_sources,
-            .flags = c_flags,
-        });
-    }
-
-    // Add FFI implementation
-    lib.addCSourceFile(.{
-        .file = b.path("src/bridge/ios_ffi.c"),
-        .flags = c_flags,
-    });
-
-    // OpenSSL is linked via openssl variable above
-    lib.linkLibC();
-
-    // For iOS, use iOS SDK system libraries instead of macOS ones
-    if (is_ios) {
-        // iOS needs Foundation and Security frameworks for OpenSSL integration
-        lib.linkFramework("Foundation");
-        lib.linkFramework("Security");
-    } else if (target_os == .macos) {
-        lib.linkSystemLibrary("pthread");
-        lib.linkSystemLibrary("z");
-        lib.linkSystemLibrary("iconv");
-    } else if (target_os == .linux) {
-        lib.linkSystemLibrary("pthread");
-        lib.linkSystemLibrary("z");
-        lib.linkSystemLibrary("rt");
-        lib.linkSystemLibrary("dl");
-    } else if (target_os == .windows) {
-        lib.linkSystemLibrary("ws2_32");
-        lib.linkSystemLibrary("iphlpapi");
-        lib.linkSystemLibrary("advapi32");
-    }
-
-    b.installArtifact(lib);
-
-    // Add a step to build just the library
-    const lib_step = b.step("lib", "Build static library for iOS/FFI");
-    lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
-
-    // ============================================
-    // 6. MOBILE FFI LIBRARY (iOS + Android)
-    // ============================================
-    const mobile_ffi = b.addLibrary(.{
-        .name = "softether_mobile",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ffi/mobile.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    mobile_ffi.root_module.addImport("taptun", taptun_module);
-    mobile_ffi.linkLibC();
-    mobile_ffi.addIncludePath(b.path("include"));
-    mobile_ffi.addIncludePath(b.path("src"));
-
-    // Add iOS SDK configuration for mobile FFI
-    if (is_ios) {
-        mobile_ffi.addIncludePath(b.path("src/bridge/ios_include"));
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
-            mobile_ffi.addSystemIncludePath(.{ .cwd_relative = ios_include });
-            mobile_ffi.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
-            mobile_ffi.linkFramework("Foundation");
-            mobile_ffi.linkFramework("Security");
+            ffi_lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
+            ffi_lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
+            ffi_lib.linkFramework("Foundation");
+            ffi_lib.linkFramework("Security");
         }
     }
 
     // Link OpenSSL (system or bundled)
     if (use_system_ssl) {
-        mobile_ffi.linkSystemLibrary("ssl");
-        mobile_ffi.linkSystemLibrary("crypto");
+        ffi_lib.linkSystemLibrary("ssl");
+        ffi_lib.linkSystemLibrary("crypto");
     } else {
-        if (crypto) |c| mobile_ffi.linkLibrary(c);
-        if (openssl) |s| mobile_ffi.linkLibrary(s);
+        if (crypto) |c| ffi_lib.linkLibrary(c);
+        if (openssl) |s| ffi_lib.linkLibrary(s);
     }
 
-    b.installArtifact(mobile_ffi);
+    b.installArtifact(ffi_lib);
 
     // Also install the header
-    b.installFile("include/mobile_ffi.h", "include/mobile_ffi.h");
+    b.installFile("include/ffi.h", "include/ffi.h");
 
-    const mobile_ffi_step = b.step("mobile-ffi", "Build mobile FFI library");
-    mobile_ffi_step.dependOn(&b.addInstallArtifact(mobile_ffi, .{}).step);
+    const ffi_step = b.step("ffi", "Build FFI library (cross-platform)");
+    ffi_step.dependOn(&b.addInstallArtifact(ffi_lib, .{}).step);
 }

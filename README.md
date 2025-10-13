@@ -28,6 +28,8 @@ SoftEtherZig is a clean, modern VPN client written in Zig that provides a high-l
 
 ## Features
 
+**FFI**: Cross-platform C API available in `include/ffi.h` for integration with any language.
+
 - 🚀 **High Performance**: Zig packet adapter enabled by default (10-20x faster than C adapter)
   - Zero heap allocations in hot path
   - 100% packet buffer reuse
@@ -201,6 +203,15 @@ pub fn main() !void {
 
 ## Architecture
 
+### FFI Status
+
+| FFI Layer | Status | Platforms | Implementation | Recommended |
+|-----------|--------|-----------|----------------|-------------|
+| **ffi.h** | ✅ Active | All platforms | Pure Zig | ✅ **YES** |
+| ~~softether_ffi.h~~ | ❌ Removed | iOS only | C | ❌ No |
+
+**Note**: Legacy FFI was archived October 2025. See [Migration Guide](docs/FFI_MIGRATION_GUIDE.md) for historical context.
+
 ### Project Structure
 
 ```
@@ -214,13 +225,19 @@ SoftEtherZig/
 │   ├── config.zig                # Configuration types
 │   ├── types.zig                 # Common data structures
 │   ├── errors.zig                # Error definitions
-│   ├── ffi.zig                   # C foreign function interface
+│   ├── ffi/
+│   │   └── ffi.zig               # ✅ FFI (cross-platform C API)
 │   ├── c.zig                     # C imports and bindings
 │   └── bridge/                   # C bridge layer
 │       ├── softether_bridge.c    # Main SoftEther interface
 │       ├── unix_bridge.c         # POSIX system abstraction
 │       ├── packet_adapter_*.c    # Platform-specific TUN/TAP
 │       └── tick64_*.c            # High-resolution timing
+├── legacy/                       # Archived deprecated code
+│   └── ffi/                      # Legacy FFI (archived Oct 2025)
+│       ├── ios_ffi.c.archived    # Old iOS FFI implementation
+│       ├── softether_ffi.h.archived  # Old FFI header
+│       └── ffi.zig.archived      # Old Zig FFI stubs
 ├── build.zig                     # Build configuration
 ├── build.zig.zon                 # Zig package dependencies
 └── zig-out/                      # Build artifacts
