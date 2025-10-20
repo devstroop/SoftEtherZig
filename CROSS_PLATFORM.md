@@ -84,7 +84,7 @@ sudo dnf install openssl-devel gcc make
 
 ```bash
 # Clone repository
-cd /path/to/SoftEtherVPN_Stable/zig
+cd /path/to/SoftEtherVPN/zig
 
 # Build (release mode)
 zig build -Doptimize=ReleaseFast

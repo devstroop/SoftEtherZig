@@ -78,7 +78,7 @@ This document describes how the SoftEtherZig VPN client is integrated with the W
   - Connection state management
 
 ### 4. **SoftEther C Core**
-- **Location:** `SoftEtherZig/SoftEtherVPN_Stable/src/`
+- **Location:** `SoftEtherZig/SoftEtherVPN/src/`
 - **Key Modules:**
   - **Cedar:** VPN protocol implementation
   - **Mayaqua:** Cross-platform utilities, crypto, networking

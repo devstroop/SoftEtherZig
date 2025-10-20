@@ -13,58 +13,6 @@ pub fn build(b: *std.Build) void {
     const target_os = target.result.os.tag;
     const is_ios = target_os == .ios;
 
-    // Build option for SSL: use system OpenSSL on native macOS/Linux, OpenSSL-Zig for iOS/cross-compile
-    const is_native_desktop = (target_os == .macos or target_os == .linux) and
-        target.result.cpu.arch == std.Target.Cpu.Arch.aarch64;
-    const use_system_ssl = b.option(bool, "system-ssl", "Use system OpenSSL instead of OpenSSL-Zig (default: true for native macOS/Linux)") orelse
-        is_native_desktop;
-
-    // iOS SDK configuration for OpenSSL-Zig
-    const ios_sdk_path = if (is_ios) blk: {
-        if (target.result.cpu.arch == .aarch64 and target.result.abi == .simulator) {
-            break :blk "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk";
-        } else if (target.result.cpu.arch == .x86_64) {
-            break :blk "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk";
-        } else {
-            break :blk "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk";
-        }
-    } else null;
-
-    // Get OpenSSL dependency (conditional based on use_system_ssl)
-    const openssl_dep = if (!use_system_ssl) b.dependency("openssl", .{
-        .target = target,
-        .optimize = optimize,
-    }) else null;
-    const openssl = if (openssl_dep) |dep| blk: {
-        const ssl_lib = dep.artifact("ssl");
-        // Add iOS SDK sysroot for OpenSSL-Zig
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
-            ssl_lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
-            ssl_lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
-            // iOS doesn't have CoreServices, use Foundation instead
-            ssl_lib.linkFramework("Foundation");
-            ssl_lib.linkFramework("Security");
-        }
-        break :blk ssl_lib;
-    } else null;
-
-    const crypto = if (openssl_dep) |dep| blk: {
-        const crypto_lib = dep.artifact("crypto");
-        // Add iOS SDK sysroot for OpenSSL-Zig
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
-            crypto_lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
-            crypto_lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
-            // iOS doesn't have CoreServices, use Foundation instead
-            crypto_lib.linkFramework("Foundation");
-            crypto_lib.linkFramework("Security");
-        }
-        break :blk crypto_lib;
-    } else null;
-
     // Base C flags (common to all platforms)
     const base_c_flags = &[_][]const u8{
         "-std=c99",
@@ -121,7 +69,7 @@ pub fn build(b: *std.Build) void {
     std.debug.print("Build Configuration:\n", .{});
     std.debug.print("  Target: {s}\n", .{@tagName(target_os)});
     std.debug.print("  Optimize: {s}\n", .{@tagName(optimize)});
-    std.debug.print("  SSL: {s}\n", .{if (use_system_ssl) "system" else "OpenSSL-Zig"});
+    std.debug.print("  SSL: system OpenSSL\n", .{});
     std.debug.print("  Packet Adapter: {s}\n", .{if (use_zig_adapter) "Zig (native)" else "C (legacy)"});
     std.debug.print("\n", .{});
 
@@ -153,68 +101,68 @@ pub fn build(b: *std.Build) void {
         "src/bridge/zig_bridge.c", // NEW: C wrapper for Zig packet adapter
         "src/bridge/Mayaqua/Mayaqua.c",
         "src/bridge/Mayaqua/Memory.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Str.c",
+        "SoftEtherVPN/src/Mayaqua/Str.c",
         "src/bridge/Mayaqua/Object.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/OS.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/FileIO.c",
+        "SoftEtherVPN/src/Mayaqua/OS.c",
+        "SoftEtherVPN/src/Mayaqua/FileIO.c",
         "src/bridge/Mayaqua/Kernel.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Network.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/TcpIp.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Encrypt.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Secure.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Pack.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Cfg.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Table.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Tracking.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Microsoft.c",
-        "SoftEtherVPN_Stable/src/Mayaqua/Internat.c",
-        "SoftEtherVPN_Stable/src/Cedar/Cedar.c",
+        "SoftEtherVPN/src/Mayaqua/Network.c",
+        "SoftEtherVPN/src/Mayaqua/TcpIp.c",
+        "SoftEtherVPN/src/Mayaqua/Encrypt.c",
+        "SoftEtherVPN/src/Mayaqua/Secure.c",
+        "SoftEtherVPN/src/Mayaqua/Pack.c",
+        "SoftEtherVPN/src/Mayaqua/Cfg.c",
+        "SoftEtherVPN/src/Mayaqua/Table.c",
+        "SoftEtherVPN/src/Mayaqua/Tracking.c",
+        "SoftEtherVPN/src/Mayaqua/Microsoft.c",
+        "SoftEtherVPN/src/Mayaqua/Internat.c",
+        "SoftEtherVPN/src/Cedar/Cedar.c",
         "src/bridge/Cedar/Client.c",
         "src/bridge/Cedar/Protocol.c",
-        "SoftEtherVPN_Stable/src/Cedar/Connection.c",
+        "SoftEtherVPN/src/Cedar/Connection.c",
         "src/bridge/Cedar/Session.c",
-        "SoftEtherVPN_Stable/src/Cedar/Account.c",
-        "SoftEtherVPN_Stable/src/Cedar/Admin.c",
-        "SoftEtherVPN_Stable/src/Cedar/Command.c",
-        "SoftEtherVPN_Stable/src/Cedar/Hub.c",
-        "SoftEtherVPN_Stable/src/Cedar/Listener.c",
-        "SoftEtherVPN_Stable/src/Cedar/Logging.c",
-        "SoftEtherVPN_Stable/src/Cedar/Sam.c",
-        "SoftEtherVPN_Stable/src/Cedar/Server.c",
-        "SoftEtherVPN_Stable/src/Cedar/Virtual.c",
-        "SoftEtherVPN_Stable/src/Cedar/Link.c",
-        "SoftEtherVPN_Stable/src/Cedar/SecureNAT.c",
-        "SoftEtherVPN_Stable/src/Cedar/NullLan.c",
-        "SoftEtherVPN_Stable/src/Cedar/Bridge.c",
-        "SoftEtherVPN_Stable/src/Cedar/BridgeUnix.c",
-        "SoftEtherVPN_Stable/src/Cedar/Nat.c",
-        "SoftEtherVPN_Stable/src/Cedar/UdpAccel.c",
-        "SoftEtherVPN_Stable/src/Cedar/Database.c",
-        "SoftEtherVPN_Stable/src/Cedar/Remote.c",
-        "SoftEtherVPN_Stable/src/Cedar/DDNS.c",
-        "SoftEtherVPN_Stable/src/Cedar/AzureClient.c",
-        "SoftEtherVPN_Stable/src/Cedar/AzureServer.c",
-        "SoftEtherVPN_Stable/src/Cedar/Radius.c",
-        "SoftEtherVPN_Stable/src/Cedar/Console.c",
-        "SoftEtherVPN_Stable/src/Cedar/Layer3.c",
-        "SoftEtherVPN_Stable/src/Cedar/Interop_OpenVPN.c",
-        "SoftEtherVPN_Stable/src/Cedar/Interop_SSTP.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec_IKE.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec_IkePacket.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec_L2TP.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec_PPP.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec_EtherIP.c",
-        "SoftEtherVPN_Stable/src/Cedar/IPsec_IPC.c",
-        "SoftEtherVPN_Stable/src/Cedar/EtherLog.c",
-        "SoftEtherVPN_Stable/src/Cedar/WebUI.c",
-        "SoftEtherVPN_Stable/src/Cedar/WaterMark.c",
+        "SoftEtherVPN/src/Cedar/Account.c",
+        "SoftEtherVPN/src/Cedar/Admin.c",
+        "SoftEtherVPN/src/Cedar/Command.c",
+        "SoftEtherVPN/src/Cedar/Hub.c",
+        "SoftEtherVPN/src/Cedar/Listener.c",
+        "SoftEtherVPN/src/Cedar/Logging.c",
+        "SoftEtherVPN/src/Cedar/Sam.c",
+        "SoftEtherVPN/src/Cedar/Server.c",
+        "SoftEtherVPN/src/Cedar/Virtual.c",
+        "SoftEtherVPN/src/Cedar/Link.c",
+        "SoftEtherVPN/src/Cedar/SecureNAT.c",
+        "SoftEtherVPN/src/Cedar/NullLan.c",
+        "SoftEtherVPN/src/Cedar/Bridge.c",
+        "SoftEtherVPN/src/Cedar/BridgeUnix.c",
+        "SoftEtherVPN/src/Cedar/Nat.c",
+        "SoftEtherVPN/src/Cedar/UdpAccel.c",
+        "SoftEtherVPN/src/Cedar/Database.c",
+        "SoftEtherVPN/src/Cedar/Remote.c",
+        "SoftEtherVPN/src/Cedar/DDNS.c",
+        "SoftEtherVPN/src/Cedar/AzureClient.c",
+        "SoftEtherVPN/src/Cedar/AzureServer.c",
+        "SoftEtherVPN/src/Cedar/Radius.c",
+        "SoftEtherVPN/src/Cedar/Console.c",
+        "SoftEtherVPN/src/Cedar/Layer3.c",
+        "SoftEtherVPN/src/Cedar/Interop_OpenVPN.c",
+        "SoftEtherVPN/src/Cedar/Interop_SSTP.c",
+        "SoftEtherVPN/src/Cedar/IPsec.c",
+        "SoftEtherVPN/src/Cedar/IPsec_IKE.c",
+        "SoftEtherVPN/src/Cedar/IPsec_IkePacket.c",
+        "SoftEtherVPN/src/Cedar/IPsec_L2TP.c",
+        "SoftEtherVPN/src/Cedar/IPsec_PPP.c",
+        "SoftEtherVPN/src/Cedar/IPsec_EtherIP.c",
+        "SoftEtherVPN/src/Cedar/IPsec_IPC.c",
+        "SoftEtherVPN/src/Cedar/EtherLog.c",
+        "SoftEtherVPN/src/Cedar/WebUI.c",
+        "SoftEtherVPN/src/Cedar/WaterMark.c",
     };
 
     // NativeStack.c uses system() which is unavailable on iOS
     // It's only needed for server-side routing, not client VPN
     const native_stack_sources = &[_][]const u8{
-        "SoftEtherVPN_Stable/src/Cedar/NativeStack.c",
+        "SoftEtherVPN/src/Cedar/NativeStack.c",
     };
 
     // ============================================
@@ -227,14 +175,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Get the taptun module and configure it for iOS if needed
+    // Get the taptun module
     const taptun_module = taptun.module("taptun");
-    if (is_ios) {
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            taptun_module.addSystemIncludePath(.{ .cwd_relative = ios_include });
-        }
-    }
 
     const lib_module = b.addModule("softether", .{
         .root_source_file = b.path("src/main.zig"),
@@ -261,18 +203,13 @@ pub fn build(b: *std.Build) void {
 
     cli.addIncludePath(b.path("src"));
     cli.addIncludePath(b.path("src/bridge"));
-    cli.addIncludePath(b.path("SoftEtherVPN_Stable/src"));
-    cli.addIncludePath(b.path("SoftEtherVPN_Stable/src/Mayaqua"));
-    cli.addIncludePath(b.path("SoftEtherVPN_Stable/src/Cedar"));
+    cli.addIncludePath(b.path("SoftEtherVPN/src"));
+    cli.addIncludePath(b.path("SoftEtherVPN/src/Mayaqua"));
+    cli.addIncludePath(b.path("SoftEtherVPN/src/Cedar"));
 
-    // Link OpenSSL (system or bundled)
-    if (use_system_ssl) {
-        cli.linkSystemLibrary("ssl");
-        cli.linkSystemLibrary("crypto");
-    } else {
-        if (crypto) |c| cli.linkLibrary(c);
-        if (openssl) |s| cli.linkLibrary(s);
-    }
+    // Link system OpenSSL
+    cli.linkSystemLibrary("ssl");
+    cli.linkSystemLibrary("crypto");
 
     cli.addCSourceFiles(.{
         .files = c_sources,
@@ -308,14 +245,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Add iOS SDK paths to the module itself (for @cImport in dependencies)
-    if (is_ios) {
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            packet_adapter_module.addSystemIncludePath(.{ .cwd_relative = ios_include });
-        }
-    }
-
     // Add taptun dependency for L2/L3 translation
     packet_adapter_module.addImport("taptun", taptun_module);
 
@@ -324,14 +253,6 @@ pub fn build(b: *std.Build) void {
         .root_module = packet_adapter_module,
     });
     packet_adapter_obj.addIncludePath(b.path("src/bridge"));
-
-    // Add iOS SDK paths for C imports
-    if (is_ios) {
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            packet_adapter_obj.addSystemIncludePath(.{ .cwd_relative = ios_include });
-        }
-    }
     cli.addObject(packet_adapter_obj);
 
     // Link C library
@@ -389,24 +310,13 @@ pub fn build(b: *std.Build) void {
     // Add iOS SDK configuration for FFI
     if (is_ios) {
         ffi_lib.addIncludePath(b.path("src/bridge/ios_include"));
-        if (ios_sdk_path) |sdk| {
-            const ios_include = b.fmt("{s}/usr/include", .{sdk});
-            const ios_frameworks = b.fmt("{s}/System/Library/Frameworks", .{sdk});
-            ffi_lib.addSystemIncludePath(.{ .cwd_relative = ios_include });
-            ffi_lib.addFrameworkPath(.{ .cwd_relative = ios_frameworks });
-            ffi_lib.linkFramework("Foundation");
-            ffi_lib.linkFramework("Security");
-        }
+        ffi_lib.linkFramework("Foundation");
+        ffi_lib.linkFramework("Security");
     }
 
-    // Link OpenSSL (system or bundled)
-    if (use_system_ssl) {
-        ffi_lib.linkSystemLibrary("ssl");
-        ffi_lib.linkSystemLibrary("crypto");
-    } else {
-        if (crypto) |c| ffi_lib.linkLibrary(c);
-        if (openssl) |s| ffi_lib.linkLibrary(s);
-    }
+    // Link system OpenSSL
+    ffi_lib.linkSystemLibrary("ssl");
+    ffi_lib.linkSystemLibrary("crypto");
 
     b.installArtifact(ffi_lib);
 

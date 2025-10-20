@@ -8,8 +8,8 @@
 
 #include "packet_adapter_macos.h"
 #include "logging.h"
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/kern_control.h>

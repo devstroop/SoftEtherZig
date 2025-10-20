@@ -8,8 +8,8 @@
 extern "C" {
 #endif
 
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 
 // Forward declarations - these are defined in CedarType.h, don't redefine them
 // typedef struct SESSION SESSION;

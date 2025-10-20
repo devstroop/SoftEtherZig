@@ -25,9 +25,9 @@ find_package(OpenSSL REQUIRED)
 
 # Include directories
 include_directories(
-    ${CMAKE_SOURCE_DIR}/../SoftEtherVPN_Stable/src
-    ${CMAKE_SOURCE_DIR}/../SoftEtherVPN_Stable/src/Mayaqua
-    ${CMAKE_SOURCE_DIR}/../SoftEtherVPN_Stable/src/Cedar
+    ${CMAKE_SOURCE_DIR}/../SoftEtherVPN/src
+    ${CMAKE_SOURCE_DIR}/../SoftEtherVPN/src/Mayaqua
+    ${CMAKE_SOURCE_DIR}/../SoftEtherVPN/src/Cedar
     ${CMAKE_SOURCE_DIR}/../src/bridge
     ${CMAKE_SOURCE_DIR}/../include
     ${OPENSSL_INCLUDE_DIR}
@@ -35,66 +35,66 @@ include_directories(
 
 # Mayaqua library sources
 set(MAYAQUA_SOURCES
-    ../SoftEtherVPN_Stable/src/Mayaqua/Encrypt.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/FileIO.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Internat.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Kernel.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Memory.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Microsoft.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Network.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Object.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/OS.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Pack.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Secure.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Str.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Table.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/TcpIp.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Tracking.c
-    ../SoftEtherVPN_Stable/src/Mayaqua/Cfg.c
+    ../SoftEtherVPN/src/Mayaqua/Encrypt.c
+    ../SoftEtherVPN/src/Mayaqua/FileIO.c
+    ../SoftEtherVPN/src/Mayaqua/Internat.c
+    ../SoftEtherVPN/src/Mayaqua/Kernel.c
+    ../SoftEtherVPN/src/Mayaqua/Mayaqua.c
+    ../SoftEtherVPN/src/Mayaqua/Memory.c
+    ../SoftEtherVPN/src/Mayaqua/Microsoft.c
+    ../SoftEtherVPN/src/Mayaqua/Network.c
+    ../SoftEtherVPN/src/Mayaqua/Object.c
+    ../SoftEtherVPN/src/Mayaqua/OS.c
+    ../SoftEtherVPN/src/Mayaqua/Pack.c
+    ../SoftEtherVPN/src/Mayaqua/Secure.c
+    ../SoftEtherVPN/src/Mayaqua/Str.c
+    ../SoftEtherVPN/src/Mayaqua/Table.c
+    ../SoftEtherVPN/src/Mayaqua/TcpIp.c
+    ../SoftEtherVPN/src/Mayaqua/Tracking.c
+    ../SoftEtherVPN/src/Mayaqua/Cfg.c
 )
 
 # Cedar library sources
 set(CEDAR_SOURCES
-    ../SoftEtherVPN_Stable/src/Cedar/Account.c
-    ../SoftEtherVPN_Stable/src/Cedar/Admin.c
-    ../SoftEtherVPN_Stable/src/Cedar/AzureClient.c
-    ../SoftEtherVPN_Stable/src/Cedar/AzureServer.c
-    ../SoftEtherVPN_Stable/src/Cedar/Bridge.c
-    ../SoftEtherVPN_Stable/src/Cedar/BridgeUnix.c
-    ../SoftEtherVPN_Stable/src/Cedar/Cedar.c
-    ../SoftEtherVPN_Stable/src/Cedar/Command.c
-    ../SoftEtherVPN_Stable/src/Cedar/Connection.c
-    ../SoftEtherVPN_Stable/src/Cedar/Console.c
-    ../SoftEtherVPN_Stable/src/Cedar/Database.c
-    ../SoftEtherVPN_Stable/src/Cedar/DDNS.c
-    ../SoftEtherVPN_Stable/src/Cedar/EtherLog.c
-    ../SoftEtherVPN_Stable/src/Cedar/Hub.c
-    ../SoftEtherVPN_Stable/src/Cedar/Interop_OpenVPN.c
-    ../SoftEtherVPN_Stable/src/Cedar/Interop_SSTP.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec_EtherIP.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec_IKE.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec_IkePacket.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec_IPC.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec_L2TP.c
-    ../SoftEtherVPN_Stable/src/Cedar/IPsec_PPP.c
-    ../SoftEtherVPN_Stable/src/Cedar/Layer3.c
-    ../SoftEtherVPN_Stable/src/Cedar/Link.c
-    ../SoftEtherVPN_Stable/src/Cedar/Listener.c
-    ../SoftEtherVPN_Stable/src/Cedar/Logging.c
-    ../SoftEtherVPN_Stable/src/Cedar/Nat.c
-    ../SoftEtherVPN_Stable/src/Cedar/NativeStack.c
-    ../SoftEtherVPN_Stable/src/Cedar/NullLan.c
-    ../SoftEtherVPN_Stable/src/Cedar/Radius.c
-    ../SoftEtherVPN_Stable/src/Cedar/Remote.c
-    ../SoftEtherVPN_Stable/src/Cedar/Sam.c
-    ../SoftEtherVPN_Stable/src/Cedar/SecureNAT.c
-    ../SoftEtherVPN_Stable/src/Cedar/Server.c
-    ../SoftEtherVPN_Stable/src/Cedar/UdpAccel.c
-    ../SoftEtherVPN_Stable/src/Cedar/Virtual.c
-    ../SoftEtherVPN_Stable/src/Cedar/WaterMark.c
-    ../SoftEtherVPN_Stable/src/Cedar/WebUI.c
+    ../SoftEtherVPN/src/Cedar/Account.c
+    ../SoftEtherVPN/src/Cedar/Admin.c
+    ../SoftEtherVPN/src/Cedar/AzureClient.c
+    ../SoftEtherVPN/src/Cedar/AzureServer.c
+    ../SoftEtherVPN/src/Cedar/Bridge.c
+    ../SoftEtherVPN/src/Cedar/BridgeUnix.c
+    ../SoftEtherVPN/src/Cedar/Cedar.c
+    ../SoftEtherVPN/src/Cedar/Command.c
+    ../SoftEtherVPN/src/Cedar/Connection.c
+    ../SoftEtherVPN/src/Cedar/Console.c
+    ../SoftEtherVPN/src/Cedar/Database.c
+    ../SoftEtherVPN/src/Cedar/DDNS.c
+    ../SoftEtherVPN/src/Cedar/EtherLog.c
+    ../SoftEtherVPN/src/Cedar/Hub.c
+    ../SoftEtherVPN/src/Cedar/Interop_OpenVPN.c
+    ../SoftEtherVPN/src/Cedar/Interop_SSTP.c
+    ../SoftEtherVPN/src/Cedar/IPsec.c
+    ../SoftEtherVPN/src/Cedar/IPsec_EtherIP.c
+    ../SoftEtherVPN/src/Cedar/IPsec_IKE.c
+    ../SoftEtherVPN/src/Cedar/IPsec_IkePacket.c
+    ../SoftEtherVPN/src/Cedar/IPsec_IPC.c
+    ../SoftEtherVPN/src/Cedar/IPsec_L2TP.c
+    ../SoftEtherVPN/src/Cedar/IPsec_PPP.c
+    ../SoftEtherVPN/src/Cedar/Layer3.c
+    ../SoftEtherVPN/src/Cedar/Link.c
+    ../SoftEtherVPN/src/Cedar/Listener.c
+    ../SoftEtherVPN/src/Cedar/Logging.c
+    ../SoftEtherVPN/src/Cedar/Nat.c
+    ../SoftEtherVPN/src/Cedar/NativeStack.c
+    ../SoftEtherVPN/src/Cedar/NullLan.c
+    ../SoftEtherVPN/src/Cedar/Radius.c
+    ../SoftEtherVPN/src/Cedar/Remote.c
+    ../SoftEtherVPN/src/Cedar/Sam.c
+    ../SoftEtherVPN/src/Cedar/SecureNAT.c
+    ../SoftEtherVPN/src/Cedar/Server.c
+    ../SoftEtherVPN/src/Cedar/UdpAccel.c
+    ../SoftEtherVPN/src/Cedar/Virtual.c
+    ../SoftEtherVPN/src/Cedar/WaterMark.c
+    ../SoftEtherVPN/src/Cedar/WebUI.c
 )
 
 # Bridge layer sources (modified for Android)

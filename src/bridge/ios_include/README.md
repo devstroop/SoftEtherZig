@@ -1,7 +1,7 @@
 # iOS Build Compatibility Layer
 
 ## Overview
-This directory contains compatibility headers and stubs that allow building SoftEther VPN for iOS without modifying the original `SoftEtherVPN_Stable` source code.
+This directory contains compatibility headers and stubs that allow building SoftEther VPN for iOS without modifying the original `SoftEtherVPN` source code.
 
 ## Problem
 iOS lacks certain headers and functions that are present on macOS and Linux:
@@ -11,7 +11,7 @@ iOS lacks certain headers and functions that are present on macOS and Linux:
 - `system()` function - Not available on iOS for security reasons
 
 ## Solution
-Instead of modifying `SoftEtherVPN_Stable` code, we provide stub headers in this directory that get included BEFORE system headers during compilation.
+Instead of modifying `SoftEtherVPN` code, we provide stub headers in this directory that get included BEFORE system headers during compilation.
 
 ## Directory Structure
 ```
@@ -53,7 +53,7 @@ For code that can't be stubbed (like `system()` calls), we exclude those source 
 ```zig
 // NativeStack.c uses system() which is unavailable on iOS
 const native_stack_sources = &[_][]const u8{
-    "SoftEtherVPN_Stable/src/Cedar/NativeStack.c",
+    "SoftEtherVPN/src/Cedar/NativeStack.c",
 };
 
 // Only compile for non-iOS platforms
@@ -78,7 +78,7 @@ iOS uses a dedicated packet adapter:
 - **Defines**: `-DUNIX_IOS -DTARGET_OS_IPHONE=1`
 
 ## Files NOT Modified
-✅ **No changes to `SoftEtherVPN_Stable/`** - Original source code remains untouched  
+✅ **No changes to `SoftEtherVPN/`** - Original source code remains untouched  
 ✅ All compatibility is in `src/bridge/ios_include/` and `build.zig`  
 ✅ Clean separation between original code and iOS-specific compatibility
 
@@ -94,7 +94,7 @@ For iOS, we build:
 The built `libSoftEtherClient.a` can be linked into iOS apps. The Xcode build uses the framework created by `scripts/build_ios.sh`.
 
 ## Maintenance
-When updating SoftEtherVPN_Stable:
+When updating SoftEtherVPN:
 1. ✅ No need to patch the original source
 2. ✅ Stub headers continue to work
 3. ⚠️ Check if new files use unavailable APIs

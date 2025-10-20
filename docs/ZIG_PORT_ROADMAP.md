@@ -89,7 +89,7 @@ const PacketAdapter = struct {
 - **Expected**: 2-3x throughput improvement
 
 #### 1.2 Session Layer Protocol Handler
-**File**: `SoftEtherVPN_Stable/src/Cedar/Session.c` → `src/protocol/session.zig`
+**File**: `SoftEtherVPN/src/Cedar/Session.c` → `src/protocol/session.zig`
 
 **Current State**:
 - Polls GetNextPacket() in loop
@@ -124,7 +124,7 @@ const Session = struct {
 - **Expected**: 3-5x throughput improvement
 
 #### 1.3 Protocol Framing/Deframing
-**File**: `SoftEtherVPN_Stable/src/Cedar/Protocol.c` → `src/protocol/framing.zig`
+**File**: `SoftEtherVPN/src/Cedar/Protocol.c` → `src/protocol/framing.zig`
 
 **Current State**:
 - Packet-by-packet framing

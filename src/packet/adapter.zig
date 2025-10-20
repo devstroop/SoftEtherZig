@@ -471,68 +471,76 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
 /// Synchronous write to TUN device (called from PutPacket)
 /// Drains send_queue and writes packets to TUN device
 /// Returns number of packets written
+/// PERFORMANCE: Uses vectored I/O (writev) for batch writes
 export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
     var packets_written: isize = 0;
-    const max_batch = 128; // ZIGSE-25: Match queue size for better throughput (was 32)
+    const max_batch = 128; // ZIGSE-25: Match queue size for better throughput
 
-    var i: usize = 0;
-    while (i < max_batch) : (i += 1) {
-        // Pop packet from send queue
+    // Allocate iovec array on stack for vectored I/O
+    var iov_array: [128]std.posix.iovec_const = undefined;
+    var write_bufs: [128][2048]u8 = undefined;
+    var packets_to_free: [128][]u8 = undefined;
+    var batch_size: usize = 0;
+
+    // Build batch of packets
+    while (batch_size < max_batch) {
         const pkt = adapter.send_queue.pop() orelse break;
 
-        // Write to TUN device (prepend 4-byte AF_INET header for macOS)
-        var write_buf: [2048]u8 = undefined;
-
         // **CRITICAL**: TUN expects raw IP packets, but SoftEther sends Ethernet frames!
-        // We must strip the 14-byte Ethernet header before writing to TUN.
         const ETHERNET_HEADER_SIZE = 14;
-
-        // Skip Ethernet header if packet is large enough
         if (pkt.len < ETHERNET_HEADER_SIZE) {
             adapter.packet_pool.free(pkt.data);
             continue;
         }
 
-        // macOS utun requires 4-byte AF_INET header in **network byte order (big-endian)**
-        // AF_INET = 2, so htonl(2) = 0x00000002 in network order
-        // CRITICAL: Must be big-endian, not little-endian!
+        // macOS utun requires 4-byte AF_INET header (big-endian)
+        var write_buf = &write_bufs[batch_size];
         write_buf[0] = 0x00;
         write_buf[1] = 0x00;
         write_buf[2] = 0x00;
         write_buf[3] = 0x02; // AF_INET = 2
 
-        // Copy IP packet (skip Ethernet header) after AF_INET header
+        // Copy IP packet (skip Ethernet header)
         const ip_packet_len = pkt.len - ETHERNET_HEADER_SIZE;
-        const write_len = ip_packet_len + 4; // 4-byte AF_INET + IP packet
+        const write_len = ip_packet_len + 4;
 
         if (write_len > write_buf.len) {
-            // Packet too large, free buffer and skip
             adapter.packet_pool.free(pkt.data);
             continue;
         }
 
         @memcpy(write_buf[4..write_len], pkt.data[ETHERNET_HEADER_SIZE..pkt.len]);
 
-        // Write to TUN device
+        // Add to iovec array
+        iov_array[batch_size] = .{
+            .base = write_buf,
+            .len = write_len,
+        };
+        packets_to_free[batch_size] = pkt.data;
+        batch_size += 1;
+    }
+
+    // Write batch using writev for better performance
+    if (batch_size > 0) {
         const fd = adapter.tun_adapter.device.fd;
-        const bytes_written = std.posix.write(fd, write_buf[0..write_len]) catch |err| {
-            if (err == error.WouldBlock) {
-                // TUN device full, re-queue packet and stop
-                _ = adapter.send_queue.push(pkt);
-                break;
+        const bytes_written = std.posix.writev(fd, iov_array[0..batch_size]) catch {
+            // On error, free all packets
+            for (packets_to_free[0..batch_size]) |buf| {
+                adapter.packet_pool.free(buf);
             }
-            // Other error, free buffer and continue
-            adapter.packet_pool.free(pkt.data);
-            continue;
+            return 0;
         };
 
-        // Free packet buffer
-        adapter.packet_pool.free(pkt.data);
-
-        if (bytes_written > 0) {
-            packets_written += 1;
+        // Free all packet buffers
+        for (packets_to_free[0..batch_size]) |buf| {
+            adapter.packet_pool.free(buf);
         }
+
+        _ = adapter.stats.packets_written.fetchAdd(batch_size, .monotonic);
+        _ = adapter.stats.bytes_written.fetchAdd(@intCast(bytes_written), .monotonic);
+        packets_written = @intCast(batch_size);
     }
+
     return packets_written;
 }
 

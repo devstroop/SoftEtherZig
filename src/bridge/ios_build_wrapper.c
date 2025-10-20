@@ -5,7 +5,7 @@
  * the iOS compatibility header before any SoftEther code.
  * 
  * This allows us to build SoftEther on iOS without modifying
- * the original SoftEtherVPN_Stable source code.
+ * the original SoftEtherVPN source code.
  */
 
 // Include iOS compatibility definitions FIRST

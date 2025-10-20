@@ -4,8 +4,8 @@
 #ifdef BUILDING_FOR_IOS
 
 #include "packet_adapter_macos.h"
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 
 // Forward declarations for stub functions
 static void IosPaInit(SESSION *s, void *param);

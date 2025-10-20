@@ -326,7 +326,7 @@ See [Porting Progress Tracker](docs/ZIG_PORTING_PROGRESS.md) for detailed task l
 
 ```
 SoftEtherZig/
-├── SoftEtherVPN_Stable/          # SoftEther C source (submodule)
+├── SoftEtherVPN/          # SoftEther C source (submodule)
 │   └── src/                      # Original SoftEther VPN codebase
 ├── src/                          # Zig implementation
 │   ├── main.zig                  # Library entry point
@@ -548,7 +548,7 @@ sudo ./zig-out/bin/vpnclient -s server -H hub -u user -P pass 2>&1 | tee debug.l
 
 - **`src/`**: Zig source code
 - **`src/bridge/`**: C bridge code interfacing with SoftEther
-- **`SoftEtherVPN_Stable/`**: Upstream SoftEther VPN source
+- **`SoftEtherVPN/`**: Upstream SoftEther VPN source
 
 ### Adding Features
 

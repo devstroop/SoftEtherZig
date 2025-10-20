@@ -7,8 +7,8 @@
 #endif
 
 #include "zig_packet_adapter.h"
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 #include "logging.h"
 #include <stdio.h>
 #include <stdlib.h>

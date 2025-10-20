@@ -3,8 +3,8 @@
 #ifndef PACKET_ADAPTER_LINUX_H
 #define PACKET_ADAPTER_LINUX_H
 
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 
 // Packet structure for queuing
 typedef struct TUN_PACKET {

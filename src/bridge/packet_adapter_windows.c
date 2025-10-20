@@ -4,8 +4,8 @@
 #ifdef _WIN32
 
 #include "packet_adapter_windows.h"
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <stdio.h>

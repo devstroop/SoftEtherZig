@@ -11,7 +11,7 @@ This guide shows how to quickly get started with the VPN client on each platform
 brew install zig openssl@3
 
 # Clone and build
-cd /path/to/SoftEtherVPN_Stable/zig
+cd /path/to/SoftEtherVPN/zig
 zig build -Doptimize=ReleaseFast
 
 # Optional: Install system-wide
@@ -65,7 +65,7 @@ sudo apt install libssl-dev build-essential
 sudo modprobe tun
 
 # Clone and build
-cd /path/to/SoftEtherVPN_Stable/zig
+cd /path/to/SoftEtherVPN/zig
 zig build -Doptimize=ReleaseFast
 
 # Optional: Install system-wide
@@ -124,7 +124,7 @@ sudo dnf install openssl-devel gcc make
 # TUN/TAP is built into kernel (no module needed)
 
 # Clone and build
-cd /path/to/SoftEtherVPN_Stable/zig
+cd /path/to/SoftEtherVPN/zig
 zig build -Doptimize=ReleaseFast
 
 # Optional: Install system-wide
@@ -167,7 +167,7 @@ Option B - Install TAP driver only:
 
 ```powershell
 # Open PowerShell or Command Prompt
-cd C:\path\to\SoftEtherVPN_Stable\zig
+cd C:\path\to\SoftEtherVPN\zig
 zig build -Doptimize=ReleaseFast
 
 # Optional: Copy to system directory

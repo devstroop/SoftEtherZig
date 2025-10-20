@@ -640,7 +640,7 @@ cmake_minimum_required(VERSION 3.4.1)
 project(softether-jni)
 
 # Add SoftEther source paths
-set(SOFTETHER_ROOT ../../../../../SoftEtherVPN_Stable/src)
+set(SOFTETHER_ROOT ../../../../../SoftEtherVPN/src)
 
 include_directories(
     ${SOFTETHER_ROOT}
@@ -983,7 +983,7 @@ uint32_t softether_get_learned_ip(void *client) {
 ```c
 // iOS-specific packet adapter using NEPacketTunnelFlow
 #include "packet_adapter_ios.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 
 static QUEUE *g_vpn_to_ios_queue = NULL;
 static LOCK *g_queue_lock = NULL;

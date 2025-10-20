@@ -134,8 +134,8 @@ make && make install
 - ios/C/softether_ios.h
 - src/bridge/ios/packet_adapter_ios.c
 - src/bridge/ios/packet_adapter_ios.h
-- SoftEtherVPN_Stable/src/Cedar/*.c
-- SoftEtherVPN_Stable/src/Mayaqua/*.c
+- SoftEtherVPN/src/Cedar/*.c
+- SoftEtherVPN/src/Mayaqua/*.c
 
 # Add Swift sources
 - ios/Swift/SoftEtherBridge.swift
@@ -144,8 +144,8 @@ make && make install
 - Header Search Paths: 
   - $(PROJECT_DIR)/ios/C
   - $(PROJECT_DIR)/src/bridge/ios
-  - $(PROJECT_DIR)/SoftEtherVPN_Stable/src/Cedar
-  - $(PROJECT_DIR)/SoftEtherVPN_Stable/src/Mayaqua
+  - $(PROJECT_DIR)/SoftEtherVPN/src/Cedar
+  - $(PROJECT_DIR)/SoftEtherVPN/src/Mayaqua
   - /path/to/openssl/include
 
 - Library Search Paths:

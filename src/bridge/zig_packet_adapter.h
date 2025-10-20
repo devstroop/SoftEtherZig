@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 // Include SoftEther headers first (they define bool and other types)
-#include "../../SoftEtherVPN_Stable/src/Mayaqua/Mayaqua.h"
-#include "../../SoftEtherVPN_Stable/src/Cedar/Cedar.h"
+#include "../../SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+#include "../../SoftEtherVPN/src/Cedar/Cedar.h"
 
 // Standard headers (after SoftEther to avoid bool conflicts)
 #include <stdint.h>

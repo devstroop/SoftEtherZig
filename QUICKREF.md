@@ -33,7 +33,7 @@ SoftEtherZig/
 │       ├── unix_bridge.c          # POSIX OS abstraction
 │       ├── packet_adapter_*.c     # Platform-specific TUN/TAP
 │       └── tick64_*.c             # Platform-specific timing
-├── SoftEtherVPN_Stable/   # Git submodule (SoftEther C source)
+├── SoftEtherVPN/   # Git submodule (SoftEther C source)
 │   └── src/               # SoftEther VPN core
 ├── zig-out/bin/
 │   └── vpnclient          # Compiled executable
