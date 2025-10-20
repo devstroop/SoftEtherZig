@@ -22,7 +22,7 @@ extern UCHAR *BuildDhcpRequest(UCHAR *my_mac, UINT32 xid, UINT32 requested_ip, U
 extern UCHAR *BuildArpRequest(UCHAR *my_mac, UINT32 my_ip, UINT32 target_ip, UINT *out_size);
 extern UCHAR *BuildArpReply(UCHAR *my_mac, UINT32 my_ip, UCHAR *target_mac, UINT32 target_ip, UINT *out_size);
 
-// DHCP state machine (mirrors packet_adapter_macos.c)
+// DHCP state machine states
 typedef enum {
     DHCP_STATE_INIT = 0,
     DHCP_STATE_ARP_ANNOUNCE_SENT = 1,
@@ -32,37 +32,7 @@ typedef enum {
     DHCP_STATE_CONFIGURED = 5
 } DHCP_STATE;
 
-// DHCP state tracking
-static DHCP_STATE g_dhcp_state = DHCP_STATE_INIT;
-static UINT32 g_dhcp_xid = 0;
-static UCHAR g_my_mac[6] = {0};
-static UINT64 g_connection_start_time = 0;
-static UINT64 g_last_dhcp_send_time = 0;
-static UINT g_dhcp_retry_count = 0;
-static bool g_dhcp_initialized = false;
-static UINT32 g_offered_ip = 0;
-static UINT32 g_offered_gw = 0;
-static UINT32 g_offered_mask = 0;
-static bool g_threads_started = false;
-static UINT32 g_dhcp_server_ip = 0;
-static UINT32 g_our_ip = 0;
-static bool g_need_gateway_arp = false;  // CRITICAL: Request gateway MAC after DHCP
-static bool g_need_gratuitous_arp_configured = false;  // CRITICAL: Announce our IP after DHCP
-static bool g_need_arp_reply = false;    // CRITICAL: Reply to ARP Request from server
-static UCHAR g_arp_reply_to_mac[6] = {0};  // MAC to send ARP Reply to
-static UINT32 g_arp_reply_to_ip = 0;      // IP to send ARP Reply to
-static UINT64 g_last_keepalive_time = 0;  // CRITICAL: Periodic GARP for local bridge mode
-static UCHAR g_gateway_mac[6] = {0};      // CRITICAL: Gateway MAC address learned from ARP replies
-static bool g_need_reactive_garp = false;  // NEW: Send GARP immediately when ARP requests arrive
-
-// Packet type counters for diagnostics
-static UINT64 g_put_arp_count = 0;
-static UINT64 g_put_dhcp_count = 0;
-static UINT64 g_put_icmp_count = 0;
-static UINT64 g_put_tcp_count = 0;
-static UINT64 g_put_udp_count = 0;
-static UINT64 g_put_other_count = 0;
-
+// Constants
 #define KEEPALIVE_INTERVAL_MS 10000  // Send Gratuitous ARP every 10 seconds for local bridge
 #define REACTIVE_GARP_INTERVAL_MS 1000  // Minimum 1 second between reactive GARPs
 
@@ -180,6 +150,26 @@ static bool ZigAdapterInit(SESSION* s) {
     ctx->session = s;
     ctx->halt = false;
     
+    // Initialize DHCP state
+    ctx->dhcp_state = DHCP_STATE_INIT;
+    ctx->dhcp_initialized = false;
+    ctx->dhcp_retry_count = 0;
+    ctx->need_gateway_arp = false;
+    ctx->need_gratuitous_arp_configured = false;
+    ctx->need_arp_reply = false;
+    ctx->need_reactive_garp = false;
+    memset(ctx->my_mac, 0, sizeof(ctx->my_mac));
+    memset(ctx->gateway_mac, 0, sizeof(ctx->gateway_mac));
+    memset(ctx->arp_reply_to_mac, 0, sizeof(ctx->arp_reply_to_mac));
+    
+    // Initialize packet counters
+    ctx->put_arp_count = 0;
+    ctx->put_dhcp_count = 0;
+    ctx->put_icmp_count = 0;
+    ctx->put_tcp_count = 0;
+    ctx->put_udp_count = 0;
+    ctx->put_other_count = 0;
+    
     // Create cancel handle
     ctx->cancel = NewCancel();
     if (!ctx->cancel) {
@@ -257,17 +247,21 @@ static bool ZigAdapterInit(SESSION* s) {
             printf("[●] ADAPTER: Interface %s UP (waiting for DHCP to configure IP)\n", (char*)dev_name_buf);
         }
         
-        // Add route to VPN server IPs via local gateway to prevent routing loop
-        // This ensures we can still reach the VPN server even when default route changes
-        // TODO: Get these IPs from VPN session config instead of hardcoding
-        snprintf(cmd, sizeof(cmd), "route add -host 62.24.65.211 192.168.1.1 2>/dev/null");
-        printf("[●] ADAPTER: Adding VPN server bypass route\n");
-        system(cmd);
-        
-        snprintf(cmd, sizeof(cmd), "route add -host 62.24.65.213 192.168.1.1 2>/dev/null");
-        system(cmd);
+        // Add route to VPN server via local gateway to prevent routing loop
+        // Use ServerName from connection (hostname or IP address string)
+        if (s->Connection && s->Connection->ServerName[0] != '\0') {
+            const char* server_addr = s->Connection->ServerName;
+            
+            // Get original gateway (before VPN routing changes)
+            char gw_ip[64] = "192.168.1.1";  // Default fallback
+            // TODO: Extract actual gateway from RouteManager or system routes
+            
+            snprintf(cmd, sizeof(cmd), "route add -host %s %s 2>/dev/null", server_addr, gw_ip);
+            LOG_DEBUG("ZigAdapter", "[●] ADAPTER: Adding VPN server bypass route: %s\n", cmd);
+            system(cmd);
+        }
 #else
-        printf("[●] ADAPTER: iOS mode - network configuration handled by NEPacketTunnelProvider\n");
+        LOG_DEBUG("ZigAdapter", "[●] ADAPTER: iOS mode - network configuration handled by NEPacketTunnelProvider\n");
 #endif
     }
     
@@ -303,102 +297,102 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
     }
     
     // Initialize DHCP state machine once
-    if (!g_dhcp_initialized) {
-        g_dhcp_initialized = true;
-        g_connection_start_time = Tick64();
-        g_dhcp_xid = (UINT32)time(NULL); // Use timestamp as transaction ID
+    if (!ctx->dhcp_initialized) {
+        ctx->dhcp_initialized = true;
+        ctx->connection_start_time = Tick64();
+        ctx->dhcp_xid = (UINT32)time(NULL); // Use timestamp as transaction ID
         
         // Generate MAC address matching iPhone/iOS app format
         // Format: 02:00:5E:XX:XX:XX (matches iPhone Network Extension implementation)
         // 02 = Locally administered address, 00:5E = SoftEther prefix
-        g_my_mac[0] = 0x02; // Locally administered
-        g_my_mac[1] = 0x00;
-        g_my_mac[2] = 0x5E; // SoftEther prefix
+        ctx->my_mac[0] = 0x02; // Locally administered
+        ctx->my_mac[1] = 0x00;
+        ctx->my_mac[2] = 0x5E; // SoftEther prefix
         for (int i = 3; i < 6; i++) {
-            g_my_mac[i] = (UCHAR)(rand() % 256);
+            ctx->my_mac[i] = (UCHAR)(rand() % 256);
         }
         
         printf("[ZigAdapterGetNextPacket] 🔄 DHCP initialized: xid=0x%08x, MAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
-               g_dhcp_xid, g_my_mac[0], g_my_mac[1], g_my_mac[2], g_my_mac[3], g_my_mac[4], g_my_mac[5]);
+               ctx->dhcp_xid, ctx->my_mac[0], ctx->my_mac[1], ctx->my_mac[2], ctx->my_mac[3], ctx->my_mac[4], ctx->my_mac[5]);
     }
     
     // DHCP state machine: Send Gratuitous ARP first (after 2s delay)
     UINT64 now = Tick64();
-    UINT64 time_since_start = now - g_connection_start_time;
+    UINT64 time_since_start = now - ctx->connection_start_time;
     
-    if (g_dhcp_state == DHCP_STATE_INIT && time_since_start >= 2000) {
+    if (ctx->dhcp_state == DHCP_STATE_INIT && time_since_start >= 2000) {
         UINT pkt_size = 0;
-        UCHAR* pkt = BuildGratuitousArp(g_my_mac, 0x00000000, &pkt_size); // 0.0.0.0
+        UCHAR* pkt = BuildGratuitousArp(ctx->my_mac, 0x00000000, &pkt_size); // 0.0.0.0
         if (pkt && pkt_size > 0) {
             printf("[ZigAdapterGetNextPacket] 📡 Sending Gratuitous ARP (size=%u)\n", pkt_size);
             UCHAR* pkt_copy = Malloc(pkt_size);
             memcpy(pkt_copy, pkt, pkt_size);
             *data = pkt_copy;
-            g_dhcp_state = DHCP_STATE_ARP_ANNOUNCE_SENT;
-            g_last_dhcp_send_time = now;
+            ctx->dhcp_state = DHCP_STATE_ARP_ANNOUNCE_SENT;
+            ctx->last_dhcp_send_time = now;
             return pkt_size;
         }
     }
     
     // DHCP state machine: Send DHCP DISCOVER (300ms after ARP, then retry every 3s)
-    if (g_dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT || g_dhcp_state == DHCP_STATE_DISCOVER_SENT) {
+    if (ctx->dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT || ctx->dhcp_state == DHCP_STATE_DISCOVER_SENT) {
         bool should_send = false;
         
-        if (g_dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT) {
+        if (ctx->dhcp_state == DHCP_STATE_ARP_ANNOUNCE_SENT) {
             // First send after 300ms delay
-            if ((now - g_last_dhcp_send_time) >= 300) {
+            if ((now - ctx->last_dhcp_send_time) >= 300) {
                 should_send = true;
-                g_dhcp_state = DHCP_STATE_DISCOVER_SENT;
-                g_dhcp_retry_count = 0;
+                ctx->dhcp_state = DHCP_STATE_DISCOVER_SENT;
+                ctx->dhcp_retry_count = 0;
             }
-        } else if (g_dhcp_state == DHCP_STATE_DISCOVER_SENT) {
+        } else if (ctx->dhcp_state == DHCP_STATE_DISCOVER_SENT) {
             // Retry every 3 seconds, up to 5 attempts
-            if (g_dhcp_retry_count < 5 && (now - g_last_dhcp_send_time) >= 3000) {
+            if (ctx->dhcp_retry_count < 5 && (now - ctx->last_dhcp_send_time) >= 3000) {
                 should_send = true;
-                g_dhcp_retry_count++;
-                printf("[ZigAdapterGetNextPacket] 🔄 DHCP DISCOVER retry #%u\n", g_dhcp_retry_count);
+                ctx->dhcp_retry_count++;
+                printf("[ZigAdapterGetNextPacket] 🔄 DHCP DISCOVER retry #%u\n", ctx->dhcp_retry_count);
             }
         }
         
         if (should_send) {
             UINT dhcp_size = 0;
-            UCHAR* dhcp_pkt = BuildDhcpDiscover(g_my_mac, g_dhcp_xid, &dhcp_size);
+            UCHAR* dhcp_pkt = BuildDhcpDiscover(ctx->my_mac, ctx->dhcp_xid, &dhcp_size);
             if (dhcp_pkt && dhcp_size > 0) {
                 printf("[ZigAdapterGetNextPacket] 📡 Sending DHCP DISCOVER #%u (xid=0x%08x, size=%u)\n",
-                       g_dhcp_retry_count + 1, g_dhcp_xid, dhcp_size);
+                       ctx->dhcp_retry_count + 1, ctx->dhcp_xid, dhcp_size);
                 UCHAR* pkt_copy = Malloc(dhcp_size);
                 memcpy(pkt_copy, dhcp_pkt, dhcp_size);
                 *data = pkt_copy;
-                g_last_dhcp_send_time = now;
+                ctx->last_dhcp_send_time = now;
                 return dhcp_size;
             }
         }
     }
     
     // DHCP state machine: Send DHCP REQUEST after receiving OFFER (500ms delay)
-    if (g_dhcp_state == DHCP_STATE_OFFER_RECEIVED && (now - g_last_dhcp_send_time) >= 500) {
+    if (ctx->dhcp_state == DHCP_STATE_OFFER_RECEIVED && (now - ctx->last_dhcp_send_time) >= 500) {
         UINT dhcp_size = 0;
-        UCHAR* dhcp_pkt = BuildDhcpRequest(g_my_mac, g_dhcp_xid, g_offered_ip, g_dhcp_server_ip, &dhcp_size);
+        UCHAR* dhcp_pkt = BuildDhcpRequest(ctx->my_mac, ctx->dhcp_xid, ctx->offered_ip, ctx->dhcp_server_ip, &dhcp_size);
         if (dhcp_pkt && dhcp_size > 0) {
             printf("[ZigAdapterGetNextPacket] 📡 Sending DHCP REQUEST for IP %u.%u.%u.%u (size=%u)\n",
-                   (g_offered_ip >> 24) & 0xFF, (g_offered_ip >> 16) & 0xFF,
-                   (g_offered_ip >> 8) & 0xFF, g_offered_ip & 0xFF, dhcp_size);
+                   (ctx->offered_ip >> 24) & 0xFF, (ctx->offered_ip >> 16) & 0xFF,
+                   (ctx->offered_ip >> 8) & 0xFF, ctx->offered_ip & 0xFF, dhcp_size);
             UCHAR* pkt_copy = Malloc(dhcp_size);
             memcpy(pkt_copy, dhcp_pkt, dhcp_size);
             *data = pkt_copy;
-            g_dhcp_state = DHCP_STATE_REQUEST_SENT;
-            g_last_dhcp_send_time = now;
+            ctx->dhcp_state = DHCP_STATE_REQUEST_SENT;
+            ctx->last_dhcp_send_time = now;
             return dhcp_size;
         }
     }
     
     // **PRIORITY 1**: Send ARP Reply if server asked for our IP
     // This is CRITICAL - server sends ARP Request before sending traffic back!
-    if (g_need_arp_reply && g_dhcp_state == DHCP_STATE_CONFIGURED) {
-        g_need_arp_reply = false;  // Send only once per request
+    if (ctx->need_arp_reply && ctx->dhcp_state == DHCP_STATE_CONFIGURED) {
+        ctx->need_arp_reply = false;  // Send only once per request
         
         UINT reply_size = 0;
-        UCHAR* reply_pkt = BuildArpReply(g_my_mac, g_our_ip, g_arp_reply_to_mac, g_arp_reply_to_ip, &reply_size);
+        UCHAR* reply_pkt = BuildArpReply(ctx->my_mac, ctx->our_ip, ctx->arp_reply_to_mac, ctx->arp_reply_to_ip, &reply_size);
         if (reply_pkt && reply_size > 0) {
             UCHAR* pkt_copy = Malloc(reply_size);
             memcpy(pkt_copy, reply_pkt, reply_size);
@@ -409,27 +403,27 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
     
     // **PRIORITY 2**: Send reactive Gratuitous ARP (triggered by incoming ARP requests)
     // This is CRITICAL for local bridge mode - refreshes MAC/IP association on demand
-    if (g_need_reactive_garp && g_dhcp_state == DHCP_STATE_CONFIGURED) {
-        g_need_reactive_garp = false;  // Reset flag
+    if (ctx->need_reactive_garp && ctx->dhcp_state == DHCP_STATE_CONFIGURED) {
+        ctx->need_reactive_garp = false;  // Reset flag
         
         UINT garp_size = 0;
-        UCHAR* garp_pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &garp_size);
+        UCHAR* garp_pkt = BuildGratuitousArp(ctx->my_mac, ctx->our_ip, &garp_size);
         if (garp_pkt && garp_size > 0) {
             UCHAR* pkt_copy = Malloc(garp_size);
             memcpy(pkt_copy, garp_pkt, garp_size);
             *data = pkt_copy;
-            g_last_keepalive_time = Tick64();  // Update timestamp to prevent rapid-fire
+            ctx->last_keepalive_time = Tick64();  // Update timestamp to prevent rapid-fire
             return garp_size;
         }
     }
     
     // **PRIORITY 3**: Send Gratuitous ARP with configured IP to announce ourselves
     // This is CRITICAL for SoftEther bridge to learn our MAC-to-IP mapping!
-    if (g_need_gratuitous_arp_configured && g_dhcp_state == DHCP_STATE_CONFIGURED) {
-        g_need_gratuitous_arp_configured = false;  // Send only once
+    if (ctx->need_gratuitous_arp_configured && ctx->dhcp_state == DHCP_STATE_CONFIGURED) {
+        ctx->need_gratuitous_arp_configured = false;  // Send only once
         
         UINT garp_size = 0;
-        UCHAR* garp_pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &garp_size);
+        UCHAR* garp_pkt = BuildGratuitousArp(ctx->my_mac, ctx->our_ip, &garp_size);
         if (garp_pkt && garp_size > 0) {
             UCHAR* pkt_copy = Malloc(garp_size);
             memcpy(pkt_copy, garp_pkt, garp_size);
@@ -440,15 +434,15 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
     
     // **PRIORITY 3**: Send ARP Request to resolve gateway MAC after DHCP completes
     // This populates SoftEther server's MAC/IP table, enabling bidirectional traffic!
-    if (g_need_gateway_arp && g_dhcp_state == DHCP_STATE_CONFIGURED) {
-        g_need_gateway_arp = false;  // Send only once
+    if (ctx->need_gateway_arp && ctx->dhcp_state == DHCP_STATE_CONFIGURED) {
+        ctx->need_gateway_arp = false;  // Send only once
         
         UINT arp_size = 0;
-        UCHAR* arp_pkt = BuildArpRequest(g_my_mac, g_our_ip, g_offered_gw, &arp_size);
+        UCHAR* arp_pkt = BuildArpRequest(ctx->my_mac, ctx->our_ip, ctx->offered_gw, &arp_size);
         if (arp_pkt && arp_size > 0) {
             printf("[ZigAdapterGetNextPacket] 🔍 Sending ARP Request to resolve gateway MAC %u.%u.%u.%u\n",
-                   (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
-                   (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
+                   (ctx->offered_gw >> 24) & 0xFF, (ctx->offered_gw >> 16) & 0xFF,
+                   (ctx->offered_gw >> 8) & 0xFF, ctx->offered_gw & 0xFF);
             printf("[ZigAdapterGetNextPacket]    This ARP Request populates SoftEther's MAC/IP table!\n");
             UCHAR* pkt_copy = Malloc(arp_size);
             memcpy(pkt_copy, arp_pkt, arp_size);
@@ -461,22 +455,22 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
     // This maintains our MAC/IP entry in SoftEther's session table, which is required
     // for Local Bridge mode to forward our traffic to the external router.
     // Without this, SoftEther doesn't know about our MAC/IP and won't bridge traffic!
-    if (g_dhcp_state == DHCP_STATE_CONFIGURED && g_our_ip != 0) {
+    if (ctx->dhcp_state == DHCP_STATE_CONFIGURED && ctx->our_ip != 0) {
         UINT64 now = Tick64();
-        if (g_last_keepalive_time == 0) {
-            g_last_keepalive_time = now; // Initialize on first call
+        if (ctx->last_keepalive_time == 0) {
+            ctx->last_keepalive_time = now; // Initialize on first call
         }
         
-        if ((now - g_last_keepalive_time) >= KEEPALIVE_INTERVAL_MS) {
+        if ((now - ctx->last_keepalive_time) >= KEEPALIVE_INTERVAL_MS) {
             // Build Gratuitous ARP packet
             UINT arp_size = 0;
-            UCHAR* arp_pkt = BuildGratuitousArp(g_my_mac, g_our_ip, &arp_size);
+            UCHAR* arp_pkt = BuildGratuitousArp(ctx->my_mac, ctx->our_ip, &arp_size);
             
             if (arp_size > 0 && arp_pkt != NULL) {
                 UCHAR* pkt_copy = Malloc(arp_size);
                 memcpy(pkt_copy, arp_pkt, arp_size);
                 *data = pkt_copy;
-                g_last_keepalive_time = now; // Update timestamp
+                ctx->last_keepalive_time = now; // Update timestamp
                 printf("[ZigAdapterGetNextPacket] 🔄 Sent keep-alive Gratuitous ARP (local bridge mode)\n");
                 return arp_size;
             }
@@ -545,7 +539,7 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     }
     
     // Check for DHCP OFFER packet (only when expecting one)
-    if (g_dhcp_state == DHCP_STATE_DISCOVER_SENT && size >= 282) { // Min DHCP packet size
+    if (ctx->dhcp_state == DHCP_STATE_DISCOVER_SENT && size >= 282) { // Min DHCP packet size
         // Check if this is a DHCP packet: UDP port 68 (BOOTP client)
         if (size >= 42 && data != NULL) {
             const UCHAR* pkt = (const UCHAR*)data;
@@ -566,12 +560,12 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                    (offered_ip >> 8) & 0xFF, offered_ip & 0xFF, msg_type);
                             // Only process OFFER (type=2), not ACK (type=5)
                             if (msg_type == 2) {
-                                g_offered_ip = offered_ip;
-                                g_offered_gw = gw;
-                                g_offered_mask = mask;
-                                g_dhcp_server_ip = server_ip;
-                                g_dhcp_state = DHCP_STATE_OFFER_RECEIVED;
-                                g_last_dhcp_send_time = Tick64();
+                                ctx->offered_ip = offered_ip;
+                                ctx->offered_gw = gw;
+                                ctx->offered_mask = mask;
+                                ctx->dhcp_server_ip = server_ip;
+                                ctx->dhcp_state = DHCP_STATE_OFFER_RECEIVED;
+                                ctx->last_dhcp_send_time = Tick64();
                                 printf("[ZigAdapterPutPacket] ✅ DHCP OFFER received: IP=%u.%u.%u.%u, GW=%u.%u.%u.%u, Server=%u.%u.%u.%u\n",
                                        (offered_ip >> 24) & 0xFF, (offered_ip >> 16) & 0xFF,
                                        (offered_ip >> 8) & 0xFF, offered_ip & 0xFF,
@@ -597,7 +591,7 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     }
     
     // Check for DHCP ACK packet
-    if (g_dhcp_state == DHCP_STATE_REQUEST_SENT && size >= 282) {
+    if (ctx->dhcp_state == DHCP_STATE_REQUEST_SENT && size >= 282) {
         if (size >= 42 && data != NULL) {
             const UCHAR* pkt = (const UCHAR*)data;
             if (pkt[12] == 0x08 && pkt[13] == 0x00 && pkt[23] == 17) {
@@ -613,9 +607,9 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                (acked_ip >> 8) & 0xFF, acked_ip & 0xFF, msg_type);
                         if (msg_type == 5) {
                             // DHCP ACK (type=5) received! Configure interface
-                            g_our_ip = acked_ip;
-                            g_offered_gw = gw;  // Update gateway from ACK
-                            g_dhcp_state = DHCP_STATE_CONFIGURED;
+                            ctx->our_ip = acked_ip;
+                            ctx->offered_gw = gw;  // Update gateway from ACK
+                            ctx->dhcp_state = DHCP_STATE_CONFIGURED;
                             printf("[ZigAdapterPutPacket] ✅ DHCP ACK received! Configuring interface...\n");
                             
                             // Tell Zig translator the gateway IP (in case it changed from OFFER)
@@ -635,44 +629,44 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                 char cmd[512];
                                 snprintf(cmd, sizeof(cmd), "ifconfig %s inet %u.%u.%u.%u %u.%u.%u.%u netmask 255.255.0.0 up",
                                         (char*)dev_name_buf,
-                                        (g_our_ip >> 24) & 0xFF, (g_our_ip >> 16) & 0xFF,
-                                        (g_our_ip >> 8) & 0xFF, g_our_ip & 0xFF,
-                                        (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
-                                        (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
+                                        (ctx->our_ip >> 24) & 0xFF, (ctx->our_ip >> 16) & 0xFF,
+                                        (ctx->our_ip >> 8) & 0xFF, ctx->our_ip & 0xFF,
+                                        (ctx->offered_gw >> 24) & 0xFF, (ctx->offered_gw >> 16) & 0xFF,
+                                        (ctx->offered_gw >> 8) & 0xFF, ctx->offered_gw & 0xFF);
                                 printf("[●] DHCP: Executing: %s\n", cmd);
                                 system(cmd);
 #else
                                 printf("[●] DHCP: iOS mode - interface configured by NEPacketTunnelProvider\n");
                                 printf("[●] DHCP: IP=%u.%u.%u.%u GW=%u.%u.%u.%u\n",
-                                       (g_our_ip >> 24) & 0xFF, (g_our_ip >> 16) & 0xFF,
-                                       (g_our_ip >> 8) & 0xFF, g_our_ip & 0xFF,
-                                       (g_offered_gw >> 24) & 0xFF, (g_offered_gw >> 16) & 0xFF,
-                                       (g_offered_gw >> 8) & 0xFF, g_offered_gw & 0xFF);
+                                       (ctx->our_ip >> 24) & 0xFF, (ctx->our_ip >> 16) & 0xFF,
+                                       (ctx->our_ip >> 8) & 0xFF, ctx->our_ip & 0xFF,
+                                       (ctx->offered_gw >> 24) & 0xFF, (ctx->offered_gw >> 16) & 0xFF,
+                                       (ctx->offered_gw >> 8) & 0xFF, ctx->offered_gw & 0xFF);
 #endif
                                 
                                 // ZIGSE-80: Configure VPN routing through ZigTapTun RouteManager
-                                // g_offered_gw is already in host byte order (10.21.0.1 = 0x0A150001)
+                                // ctx->offered_gw is already in host byte order (10.21.0.1 = 0x0A150001)
                                 // Just pass it directly - Zig will extract bytes correctly
                                 printf("[●] DHCP: Configuring VPN routing through ZigTapTun...\n");
-                                if (zig_adapter_configure_routing(ctx->zig_adapter, g_offered_gw, 0)) {
+                                if (zig_adapter_configure_routing(ctx->zig_adapter, ctx->offered_gw, 0)) {
                                     printf("[●] DHCP: ✅ VPN routing configured by ZigTapTun RouteManager\n");
                                 } else {
                                     printf("[●] DHCP: ⚠️  Failed to configure routing, routes may not be set\n");
                                 }
                                 
                                 printf("[●] DHCP: ✅ Interface configured with DHCP IP %u.%u.%u.%u\n",
-                                       (g_our_ip >> 24) & 0xFF, (g_our_ip >> 16) & 0xFF,
-                                       (g_our_ip >> 8) & 0xFF, g_our_ip & 0xFF);
+                                       (ctx->our_ip >> 24) & 0xFF, (ctx->our_ip >> 16) & 0xFF,
+                                       (ctx->our_ip >> 8) & 0xFF, ctx->our_ip & 0xFF);
                                 
                                 // **CRITICAL**: Send Gratuitous ARP to announce our IP
                                 // This updates SoftEther server's bridge learning table with our MAC-to-IP mapping!
-                                g_need_gratuitous_arp_configured = true;
+                                ctx->need_gratuitous_arp_configured = true;
                                 
                                 // **CRITICAL FOR MAC/IP TABLE**: Request gateway MAC resolution
                                 // Even in local bridge mode, sending this ARP Request populates
                                 // SoftEther's MAC/IP table, enabling return traffic routing!
                                 // The gateway won't reply, but the REQUEST itself registers us.
-                                g_need_gateway_arp = true;
+                                ctx->need_gateway_arp = true;
                             }
                         } else {
                             printf("[ZigAdapterPutPacket] ⚠️  Ignoring DHCP packet with msg_type=%u (not ACK)\n", msg_type);
@@ -689,7 +683,7 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     // Server sends ARP Request before sending traffic back to us!
     // Server sends ARP Reply when we request gateway MAC!
     // We MUST respond with ARP Reply or server won't know our MAC address
-    if (size >= 42 && data != NULL && g_dhcp_state == DHCP_STATE_CONFIGURED) {
+    if (size >= 42 && data != NULL && ctx->dhcp_state == DHCP_STATE_CONFIGURED) {
         const UCHAR* pkt = (const UCHAR*)data;
         // Check Ethernet type (0x0806 = ARP) at offset 12-13
         if (pkt[12] == 0x08 && pkt[13] == 0x06) {
@@ -703,19 +697,19 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                    ((UINT32)pkt[30] << 8) | pkt[31];
                 
                 // If this is from the gateway (learned from DHCP), learn its MAC!
-                if (g_offered_gw != 0 && sender_ip == g_offered_gw) {
+                if (ctx->offered_gw != 0 && sender_ip == ctx->offered_gw) {
                     // Check if MAC changed or is being learned for first time
-                    bool mac_changed = (memcmp(g_gateway_mac, pkt + 22, 6) != 0);
-                    if (mac_changed || g_gateway_mac[0] == 0) {
+                    bool mac_changed = (memcmp(ctx->gateway_mac, pkt + 22, 6) != 0);
+                    if (mac_changed || ctx->gateway_mac[0] == 0) {
                         // Copy gateway MAC from ARP reply (sender MAC at offset 22-27)
-                        memcpy(g_gateway_mac, pkt + 22, 6);
+                        memcpy(ctx->gateway_mac, pkt + 22, 6);
                         printf("[ZigAdapterPutPacket] 🎯 LEARNED GATEWAY MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-                               g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
-                               g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
+                               ctx->gateway_mac[0], ctx->gateway_mac[1], ctx->gateway_mac[2],
+                               ctx->gateway_mac[3], ctx->gateway_mac[4], ctx->gateway_mac[5]);
                         printf("[ZigAdapterPutPacket]    This enables bidirectional traffic routing!\n");
                         
                         // **CRITICAL**: Pass gateway MAC to Zig adapter for Ethernet header construction
-                        zig_adapter_set_gateway_mac(ctx->zig_adapter, g_gateway_mac);
+                        zig_adapter_set_gateway_mac(ctx->zig_adapter, ctx->gateway_mac);
                     }
                 }
             }
@@ -726,7 +720,7 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                                    ((UINT32)pkt[40] << 8) | pkt[41];
                 
                 // Check if they're asking for OUR IP
-                if (target_ip == g_offered_ip) {
+                if (target_ip == ctx->offered_ip) {
                     // Extract sender MAC and IP
                     UCHAR sender_mac[6];
                     memcpy(sender_mac, pkt + 22, 6); // Sender MAC at offset 22-27
@@ -743,20 +737,20 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
                     // CRITICAL: Refresh bridge MAC/IP association with Gratuitous ARP
                     // This prevents the bridge from forgetting our MAC address
                     UINT64 now = Tick64();
-                    if (now - g_last_keepalive_time >= REACTIVE_GARP_INTERVAL_MS) {
-                        g_need_reactive_garp = true;  // Trigger GARP on next GetNextPacket
+                    if (now - ctx->last_keepalive_time >= REACTIVE_GARP_INTERVAL_MS) {
+                        ctx->need_reactive_garp = true;  // Trigger GARP on next GetNextPacket
                     }
                     
                     // Set flag to send ARP Reply in GetNextPacket
                     // (We can't modify GetNextPacket's return value here, so we'll send it on next poll)
-                    g_need_arp_reply = true;
-                    g_arp_reply_to_mac[0] = sender_mac[0];
-                    g_arp_reply_to_mac[1] = sender_mac[1];
-                    g_arp_reply_to_mac[2] = sender_mac[2];
-                    g_arp_reply_to_mac[3] = sender_mac[3];
-                    g_arp_reply_to_mac[4] = sender_mac[4];
-                    g_arp_reply_to_mac[5] = sender_mac[5];
-                    g_arp_reply_to_ip = sender_ip;
+                    ctx->need_arp_reply = true;
+                    ctx->arp_reply_to_mac[0] = sender_mac[0];
+                    ctx->arp_reply_to_mac[1] = sender_mac[1];
+                    ctx->arp_reply_to_mac[2] = sender_mac[2];
+                    ctx->arp_reply_to_mac[3] = sender_mac[3];
+                    ctx->arp_reply_to_mac[4] = sender_mac[4];
+                    ctx->arp_reply_to_mac[5] = sender_mac[5];
+                    ctx->arp_reply_to_ip = sender_ip;
                 }
             }
             // **CRITICAL FIX**: Send ARP packets to Zig adapter so translator can learn gateway MAC!
@@ -783,45 +777,40 @@ static bool ZigAdapterPutPacket(SESSION* s, void* data, UINT size) {
     if (size >= 14) {
         const UCHAR* pkt = (const UCHAR*)data;
         if (pkt[12] == 0x08 && pkt[13] == 0x06) {
-            g_put_arp_count++;
+            ctx->put_arp_count++;
         } else if (pkt[12] == 0x08 && pkt[13] == 0x00 && size >= 34) {
             UCHAR ip_proto = pkt[23];
-            if (ip_proto == 1) g_put_icmp_count++;
-            else if (ip_proto == 6) g_put_tcp_count++;
+            if (ip_proto == 1) ctx->put_icmp_count++;
+            else if (ip_proto == 6) ctx->put_tcp_count++;
             else if (ip_proto == 17) {
                 // Check if DHCP
                 if (size >= 42 && (pkt[36] == 0 && pkt[37] == 68)) {
-                    g_put_dhcp_count++;
+                    ctx->put_dhcp_count++;
                 } else {
-                    g_put_udp_count++;
+                    ctx->put_udp_count++;
                 }
-            } else g_put_other_count++;
+            } else ctx->put_other_count++;
         }
     }
     
-    if (packet_count < 5 || (is_icmp && packet_count < 50)) {
-        printf("[ZigAdapterPutPacket] Packet #%llu, size=%u%s\n", packet_count, size, is_icmp ? " [ICMP]" : "");
-    } else if (packet_count % 5000 == 0) {
-        printf("[ZigAdapterPutPacket] RX Stats - ARP:%llu DHCP:%llu ICMP:%llu TCP:%llu UDP:%llu Other:%llu\n",
-               g_put_arp_count, g_put_dhcp_count, g_put_icmp_count, g_put_tcp_count, g_put_udp_count, g_put_other_count);
+    // Reduced logging frequency for better performance
+    LOG_DEBUG("ZigAdapter", "[ZigAdapterPutPacket] Packet #%llu, size=%u%s\n", packet_count, size, is_icmp ? " [ICMP]" : "");
+    
+    if (packet_count % 50000 == 0) {  // Only every 50K packets (was 5000)
+        LOG_INFO("ZigAdapter", "[ZigAdapterPutPacket] RX Stats - ARP:%llu DHCP:%llu ICMP:%llu TCP:%llu UDP:%llu Other:%llu\n",
+               ctx->put_arp_count, ctx->put_dhcp_count, ctx->put_icmp_count, ctx->put_tcp_count, ctx->put_udp_count, ctx->put_other_count);
     }
     packet_count++;
     
     // Send packet to Zig adapter (queues in send_queue)
     bool result = zig_adapter_put_packet(ctx->zig_adapter, (const uint8_t*)data, (uint64_t)size);
     
-    if (is_icmp && !result) {
-        printf("[ZigAdapterPutPacket] ❌ FAILED to queue ICMP packet!\n");
-        return false;
-    }
+    LOG_DEBUG("ZigAdapter", "[ZigAdapterPutPacket] %s queue ICMP packet\n", result ? "✅ Queued" : "❌ FAILED to queue");
     
     // **CRITICAL FIX**: Synchronously write queued packets to TUN device!
-    // This is the missing piece - we queue packets but never write them to TUN!
     ssize_t written = zig_adapter_write_sync(ctx->zig_adapter);
     
-    if (is_icmp && written > 0) {
-        printf("[ZigAdapterPutPacket] ✅ Wrote %zd packet(s) to TUN (including ICMP)\n", written);
-    }
+    LOG_DEBUG("ZigAdapter", "[ZigAdapterPutPacket] ✅ Wrote %zd packet(s) to TUN%s\n", written, is_icmp ? " (including ICMP)" : "");
     
     return result;
 }

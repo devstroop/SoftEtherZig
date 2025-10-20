@@ -1,6 +1,6 @@
 # SoftEtherZig
 
-A modern, cross-platform VPN client implementation in **pure Zig**, progressively replacing the SoftEther VPN C codebase.
+A modern, cross-platform VPN client implementation in **Zig**, progressively replacing the SoftEther VPN C codebase to pure Zig.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Zig Version](https://img.shields.io/badge/zig-0.15.1+-blue)](https://ziglang.org/)

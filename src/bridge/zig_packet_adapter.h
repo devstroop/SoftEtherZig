@@ -58,6 +58,38 @@ typedef struct {
     ZigPacketAdapter* zig_adapter;
     CANCEL* cancel;
     bool halt;
+    
+    // DHCP state machine (moved from globals for thread safety)
+    int dhcp_state;  // DHCP_STATE enum
+    uint32_t dhcp_xid;
+    uint8_t my_mac[6];
+    uint64_t connection_start_time;
+    uint64_t last_dhcp_send_time;
+    uint32_t dhcp_retry_count;
+    bool dhcp_initialized;
+    uint32_t offered_ip;
+    uint32_t offered_gw;
+    uint32_t offered_mask;
+    uint32_t dhcp_server_ip;
+    uint32_t our_ip;
+    
+    // ARP state
+    bool need_gateway_arp;
+    bool need_gratuitous_arp_configured;
+    bool need_arp_reply;
+    uint8_t arp_reply_to_mac[6];
+    uint32_t arp_reply_to_ip;
+    uint64_t last_keepalive_time;
+    uint8_t gateway_mac[6];
+    bool need_reactive_garp;
+    
+    // Packet counters
+    uint64_t put_arp_count;
+    uint64_t put_dhcp_count;
+    uint64_t put_icmp_count;
+    uint64_t put_tcp_count;
+    uint64_t put_udp_count;
+    uint64_t put_other_count;
 } ZIG_ADAPTER_CONTEXT;
 
 #ifdef __cplusplus

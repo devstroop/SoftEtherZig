@@ -112,6 +112,7 @@ pub const ZigPacketAdapter = struct {
         write_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         recv_queue_drops: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         send_queue_drops: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+        buffer_tracking_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // New metric
 
         pub fn format(
             self: Stats,
@@ -560,6 +561,8 @@ export fn zig_adapter_get_packet(adapter: *ZigPacketAdapter, out_data: *[*]u8, o
     adapter.active_buffers.put(key, pkt.data) catch {
         // HashMap allocation failed, fall back to immediate free (safe but suboptimal)
         adapter.packet_pool.free(pkt.data);
+        _ = adapter.stats.buffer_tracking_failures.fetchAdd(1, .monotonic);
+        logError("⚠️ Buffer tracking HashMap full - freed immediately", .{});
         return false;
     };
 
