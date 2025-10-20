@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .taptun = .{
-            .path = "ZigTapTun",
+            .path = "deps/taptun",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
@@ -80,7 +80,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "ZigTapTun",
+        "deps",
         // For example...
         //"LICENSE",
         //"README.md",

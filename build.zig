@@ -1,15 +1,6 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // Print build banner
-    std.debug.print("\n", .{});
-    std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║           SoftEtherZig - Pure Zig VPN Client                ║\n", .{});
-    std.debug.print("║              Progressive C to Zig Migration                 ║\n", .{});
-    std.debug.print("║                  Phase 1: 3% Complete                       ║\n", .{});
-    std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
-    std.debug.print("\n", .{});
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
         .preferred_optimize_mode = .ReleaseFast,
@@ -504,7 +495,4 @@ pub fn build(b: *std.Build) void {
         \\
     });
     help_step.dependOn(&help_run.step);
-
-    // Print completion message
-    std.debug.print("Build targets prepared. Use 'zig build help' for usage.\n\n", .{});
 }
