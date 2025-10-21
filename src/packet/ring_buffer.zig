@@ -22,10 +22,15 @@ pub fn RingBuffer(comptime T: type) type {
         capacity: usize,
 
         // Atomic indices for lock-free operation
-        write_idx: atomic.Value(usize),
-        read_idx: atomic.Value(usize),
+        // PERFORMANCE: Cache line padding prevents false sharing between threads
+        // ARM64/x86-64 cache lines are 64 bytes
+        _pad1: [56]u8 align(64) = undefined,
+        write_idx: atomic.Value(usize) align(64),
+        _pad2: [56]u8 = undefined,
+        read_idx: atomic.Value(usize) align(64),
+        _pad3: [56]u8 = undefined,
 
-        // Statistics
+        // Statistics (less critical, can share cache lines)
         drops: atomic.Value(u64),
         total_pushed: atomic.Value(u64),
         total_popped: atomic.Value(u64),

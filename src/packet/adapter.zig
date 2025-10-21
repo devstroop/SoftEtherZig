@@ -472,10 +472,23 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
 /// Synchronous write to TUN device (called from PutPacket)
 /// Drains send_queue and writes packets to TUN device
 /// Returns number of packets written
-/// PERFORMANCE: Uses vectored I/O (writev) for batch writes
+/// PERFORMANCE: Uses vectored I/O (writev) with dynamic batch sizing
 export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
     var packets_written: isize = 0;
-    const max_batch = 128; // ZIGSE-25: Match queue size for better throughput
+
+    // PHASE 1.2 BALANCED: Smart batching for both upload and download
+    // Calculate available packets in queue
+    const write_idx = adapter.send_queue.write_idx.load(.acquire);
+    const read_idx = adapter.send_queue.read_idx.load(.acquire);
+    const available_packets = if (write_idx >= read_idx)
+        write_idx - read_idx
+    else
+        adapter.send_queue.capacity - read_idx + write_idx;
+
+    // Use minimum of 128 or available packets (don't wait for queue to fill)
+    // This ensures we write immediately when packets arrive (low latency)
+    // while still batching efficiently when queue is full (high throughput)
+    const max_batch: usize = @min(128, if (available_packets > 0) available_packets else 1);
 
     // Allocate iovec array on stack for vectored I/O
     var iov_array: [128]std.posix.iovec_const = undefined;
