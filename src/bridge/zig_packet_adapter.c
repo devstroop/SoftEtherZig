@@ -339,41 +339,41 @@ static UINT ZigAdapterGetNextPacket(SESSION* s, void** data) {
             size_t zig_size = 0;
             bool zig_ok = zig_build_dhcp_discover(ctx->my_mac, ctx->dhcp_xid, g_packet_buffer, MAX_PACKET_SIZE, &zig_size);
             
-            if (c_pkt && zig_ok) {
-                printf("\n=== PACKET COMPARISON ===\n");
-                printf("C size: %u, Zig size: %zu\n", c_size, zig_size);
+            // if (c_pkt && zig_ok) {
+            //     printf("\n=== PACKET COMPARISON ===\n");
+            //     printf("C size: %u, Zig size: %zu\n", c_size, zig_size);
                 
-                // Dump IP header (bytes 14-33)
-                printf("C   IP header: ");
-                for (int i = 14; i < 34; i++) printf("%02x ", c_pkt[i]);
-                printf("\nZig IP header: ");
-                for (int i = 14; i < 34; i++) printf("%02x ", g_packet_buffer[i]);
-                printf("\n");
+            //     // Dump IP header (bytes 14-33)
+            //     printf("C   IP header: ");
+            //     for (int i = 14; i < 34; i++) printf("%02x ", c_pkt[i]);
+            //     printf("\nZig IP header: ");
+            //     for (int i = 14; i < 34; i++) printf("%02x ", g_packet_buffer[i]);
+            //     printf("\n");
                 
-                // Extract checksums
-                USHORT c_csum = (c_pkt[24] << 8) | c_pkt[25];
-                USHORT zig_csum = (g_packet_buffer[24] << 8) | g_packet_buffer[25];
-                printf("C checksum: 0x%04x, Zig checksum: 0x%04x\n", c_csum, zig_csum);
+            //     // Extract checksums
+            //     USHORT c_csum = (c_pkt[24] << 8) | c_pkt[25];
+            //     USHORT zig_csum = (g_packet_buffer[24] << 8) | g_packet_buffer[25];
+            //     printf("C checksum: 0x%04x, Zig checksum: 0x%04x\n", c_csum, zig_csum);
                 
-                if (c_size != zig_size) {
-                    printf("❌ SIZE MISMATCH!\n");
-                } else {
-                    printf("✅ Sizes match\n");
-                    // Compare byte by byte
-                    bool identical = true;
-                    for (UINT i = 0; i < c_size; i++) {
-                        if (c_pkt[i] != g_packet_buffer[i]) {
-                            printf("❌ Byte %u differs: C=0x%02x, Zig=0x%02x\n", i, c_pkt[i], g_packet_buffer[i]);
-                            identical = false;
-                            if (i > 10) break; // Limit output
-                        }
-                    }
-                    if (identical) {
-                        printf("✅ Packets are IDENTICAL!\n");
-                    }
-                }
-                printf("=========================\n\n");
-            }
+            //     if (c_size != zig_size) {
+            //         printf("❌ SIZE MISMATCH!\n");
+            //     } else {
+            //         printf("✅ Sizes match\n");
+            //         // Compare byte by byte
+            //         bool identical = true;
+            //         for (UINT i = 0; i < c_size; i++) {
+            //             if (c_pkt[i] != g_packet_buffer[i]) {
+            //                 printf("❌ Byte %u differs: C=0x%02x, Zig=0x%02x\n", i, c_pkt[i], g_packet_buffer[i]);
+            //                 identical = false;
+            //                 if (i > 10) break; // Limit output
+            //             }
+            //         }
+            //         if (identical) {
+            //             printf("✅ Packets are IDENTICAL!\n");
+            //         }
+            //     }
+            //     printf("=========================\n\n");
+            // }
             
             // Use C builder for now
             if (c_pkt && c_size > 0) {

@@ -41,12 +41,12 @@ fn logError(comptime fmt: []const u8, args: anytype) void {
 /// Packet adapter configuration
 pub const Config = struct {
     /// Buffer sizes (ZIGSE-25: Now configurable at runtime!)
-    /// Default: 128/128 slots (balanced for bidirectional traffic)
-    /// Memory per slot: ~2KB, so 128 slots = 256KB per queue
-    recv_queue_size: usize = 128, // Configurable receive buffer
-    send_queue_size: usize = 128, // Configurable send buffer (increased from 64)
-    packet_pool_size: usize = 256, // CRITICAL: Must be >= recv+send (was 32, causing pool exhaustion!)
-    batch_size: usize = 128, // Match queue size for better throughput (was 32)
+    /// Optimized for high throughput: 256/256 slots (balanced for bidirectional traffic)
+    /// Memory per slot: ~2KB, so 256 slots = 512KB per queue
+    recv_queue_size: usize = 256, // Doubled for better download throughput
+    send_queue_size: usize = 256, // Doubled for better upload throughput
+    packet_pool_size: usize = 512, // CRITICAL: Must be >= recv+send (doubled from 256)
+    batch_size: usize = 256, // Match queue size for better throughput (doubled from 128)
 
     /// TUN device name
     device_name: []const u8 = "utun",
@@ -257,14 +257,6 @@ pub const ZigPacketAdapter = struct {
 
     /// Put packet for transmission
     pub fn putPacket(self: *ZigPacketAdapter, data: []const u8) bool {
-        // Log ALL incoming packets for debugging
-        if (data.len >= 34) {
-            const ip_proto = data[14 + 9]; // IP protocol at offset 23 (14 Ethernet + 9 IP header)
-            if (ip_proto == 1) { // ICMP
-                logInfo("📥 putPacket: RECEIVED ICMP packet from SoftEther, len={d} bytes", .{data.len});
-            }
-        }
-
         // Get buffer from pool
         const buffer = self.packet_pool.alloc() orelse return false;
 
@@ -281,14 +273,6 @@ pub const ZigPacketAdapter = struct {
             .len = data.len,
             .timestamp = @intCast(std.time.nanoTimestamp()),
         };
-
-        // Log ICMP packets being queued
-        if (data.len >= 14 + 20) {
-            const ip_proto = data[14 + 9];
-            if (ip_proto == 1) {
-                logInfo("📬 putPacket: Queuing ICMP packet for TUN write, len={d} bytes", .{data.len});
-            }
-        }
 
         if (!self.send_queue.push(pkt)) {
             _ = self.stats.send_queue_drops.fetchAdd(1, .monotonic);
@@ -400,8 +384,8 @@ export fn zig_adapter_read_sync(adapter: *ZigPacketAdapter, buffer: [*]u8, buffe
         },
     };
 
-    // Poll with 1ms timeout for better responsiveness (was 0ms)
-    // ZIGSE-25: Small timeout prevents missing packets during bursts
+    // Poll with 1ms timeout - optimal balance for macOS TUN
+    // 0ms causes high latency, 1ms works well
     const ready_count = std.posix.poll(&fds, 1) catch |err| {
         std.debug.print("[zig_adapter_read_sync] ⚠️  Poll error: {}\n", .{err});
         return -1;
@@ -485,12 +469,12 @@ export fn zig_adapter_write_sync(adapter: *ZigPacketAdapter) isize {
     else
         adapter.send_queue.capacity - read_idx + write_idx;
 
-    // Use minimum of 128 or available packets (don't wait for queue to fill)
+    // Use minimum of 128 or available packets (256 causes stack overflow)
     // This ensures we write immediately when packets arrive (low latency)
     // while still batching efficiently when queue is full (high throughput)
     const max_batch: usize = @min(128, if (available_packets > 0) available_packets else 1);
 
-    // Allocate iovec array on stack for vectored I/O
+    // Stack allocation for reasonable batch size (128 * 2KB = 256KB - acceptable)
     var iov_array: [128]std.posix.iovec_const = undefined;
     var write_bufs: [128][2048]u8 = undefined;
     var packets_to_free: [128][]u8 = undefined;

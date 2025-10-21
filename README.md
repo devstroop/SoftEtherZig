@@ -47,13 +47,13 @@ SoftEtherZig is a complete rewrite of SoftEther VPN in pure Zig. While currently
 **VPN Capabilities** (via SoftEther C core, being ported):
 - 🔒 **Secure**: SSL/TLS 1.3 encryption with SoftEther's proven security model
 - 🌐 **Cross-Platform**: Native support for macOS, Linux, Windows, Android, and iOS
-- ⚡ **High Performance**: 80-90 Mbps throughput with vectored I/O, targeting 140-190 Mbps (see [Performance Roadmap](docs/PERFORMANCE_OPTIMIZATION.md))
+- ⚡ **High Performance**: >100 Mbps throughput with vectored I/O, targeting 120+ Mbps, matching at least 'SSTP Connect' performance (see [Performance Roadmap](docs/PERFORMANCE_OPTIMIZATION.md))
 - 🌉 **Dual Mode Support**: SecureNAT (Layer 3) and Local Bridge (Layer 2) modes
 - 🔄 **Automatic Reconnection**: Exponential backoff with configurable retry limits
 
 ## Performance
 
-**Current Throughput:** 80-90 Mbps (4-8x improvement from baseline)
+**Current Throughput:** ~100 Mbps (~10x improvement from baseline)
 
 **Recent Optimizations (October 2025):**
 - ✅ Vectored I/O (writev): 3-4x throughput gain

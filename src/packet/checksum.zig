@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// Calculate Internet checksum (RFC 1071)
 /// Used for IP, ICMP, TCP, UDP checksums
-pub fn calculateChecksum(data: []const u8) u16 {
+pub inline fn calculateChecksum(data: []const u8) u16 {
     var sum: u32 = 0;
     var i: usize = 0;
 
@@ -28,7 +28,7 @@ pub fn calculateChecksum(data: []const u8) u16 {
 
 /// Recalculate ICMP checksum in-place
 /// Returns true if checksum was updated
-pub fn recalculateIcmpChecksum(ip_packet: []u8) bool {
+pub inline fn recalculateIcmpChecksum(ip_packet: []u8) bool {
     if (ip_packet.len < 20) return false;
 
     const ihl = (ip_packet[0] & 0x0F) * 4;
@@ -56,7 +56,7 @@ pub fn recalculateIcmpChecksum(ip_packet: []u8) bool {
 
 /// Recalculate TCP checksum in-place with pseudo-header
 /// Returns true if checksum was updated
-pub fn recalculateTcpChecksum(ip_packet: []u8) bool {
+pub inline fn recalculateTcpChecksum(ip_packet: []u8) bool {
     if (ip_packet.len < 20) return false;
 
     const ihl = (ip_packet[0] & 0x0F) * 4;
@@ -117,7 +117,7 @@ pub fn recalculateTcpChecksum(ip_packet: []u8) bool {
 
 /// Recalculate UDP checksum in-place with pseudo-header
 /// Returns true if checksum was updated
-pub fn recalculateUdpChecksum(ip_packet: []u8) bool {
+pub inline fn recalculateUdpChecksum(ip_packet: []u8) bool {
     if (ip_packet.len < 20) return false;
 
     const ihl = (ip_packet[0] & 0x0F) * 4;

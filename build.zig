@@ -216,6 +216,11 @@ pub fn build(b: *std.Build) void {
         .flags = c_flags,
     });
 
+    // Aggressive optimizations for release builds
+    if (optimize != .Debug) {
+        cli.want_lto = true; // Link-time optimization for better performance
+    }
+
     // Add NativeStack for non-iOS builds
     if (!is_ios) {
         cli.addCSourceFiles(.{
