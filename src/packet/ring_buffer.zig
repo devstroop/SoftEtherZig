@@ -7,7 +7,7 @@ const atomic = std.atomic;
 
 /// Lock-free ring buffer for packet data
 /// Uses atomic operations for synchronization between reader/writer threads
-/// ZIGSE-25: Refactored to support runtime capacity (was comptime)
+/// Refactored to support runtime capacity (was comptime)
 pub fn RingBuffer(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -36,7 +36,7 @@ pub fn RingBuffer(comptime T: type) type {
         total_popped: atomic.Value(u64),
 
         /// Initialize empty ring buffer with runtime capacity
-        /// ZIGSE-25: Capacity is now a runtime parameter (was comptime)
+        /// Capacity is a runtime parameter (was comptime)
         pub fn init(allocator: Allocator, capacity: usize) !Self {
             if (capacity == 0) return error.InvalidCapacity;
 
