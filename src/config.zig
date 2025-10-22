@@ -35,6 +35,24 @@ pub const StaticIpConfig = struct {
     dns_servers: ?[]const []const u8 = null, // e.g., ["8.8.8.8", "8.8.4.4"]
 };
 
+/// Routing configuration
+pub const RoutingConfig = struct {
+    /// Send ALL traffic through VPN (set VPN as default gateway)
+    default_route: bool = true,
+    /// Accept routes pushed by VPN server (DHCP option 121/249)
+    accept_pushed_routes: bool = true,
+    /// Enable custom route includes/excludes
+    enable_custom_routes: bool = false,
+    /// IPv4 routes to include (CIDR notation) - only these routes through VPN
+    ipv4_include: ?[]const []const u8 = null,
+    /// IPv4 routes to exclude (CIDR notation) - these routes NOT through VPN
+    ipv4_exclude: ?[]const []const u8 = null,
+    /// IPv6 routes to include (CIDR notation)
+    ipv6_include: ?[]const []const u8 = null,
+    /// IPv6 routes to exclude (CIDR notation)
+    ipv6_exclude: ?[]const []const u8 = null,
+};
+
 /// Performance tuning configuration
 pub const PerformanceConfig = struct {
     /// Receive queue buffer size (number of packet slots)
@@ -79,6 +97,7 @@ pub const ConnectionConfig = struct {
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
+    routing: RoutingConfig = .{}, // Routing configuration
     use_zig_adapter: bool = true, // Use Zig packet adapter (default, better performance)
     performance: PerformanceConfig = .{}, // Performance tuning options
 
@@ -102,6 +121,7 @@ pub const ConfigBuilder = struct {
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
+    routing: RoutingConfig = .{}, // Routing configuration
 
     /// Set VPN server address and port
     pub fn setServer(self: *ConfigBuilder, name: []const u8, port: u16) *ConfigBuilder {
@@ -178,6 +198,7 @@ pub const ConfigBuilder = struct {
             .additional_connection_interval = self.additional_connection_interval,
             .ip_version = self.ip_version,
             .static_ip = self.static_ip,
+            .routing = self.routing,
         };
     }
 };
@@ -239,6 +260,15 @@ pub const JsonConfig = struct {
     max_reconnect_attempts: ?u32 = null,
     min_backoff: ?u32 = null,
     max_backoff: ?u32 = null,
+    routing: ?struct {
+        default_route: ?bool = null,
+        accept_pushed_routes: ?bool = null,
+        enable_custom_routes: ?bool = null,
+        ipv4_include: ?[]const []const u8 = null,
+        ipv4_exclude: ?[]const []const u8 = null,
+        ipv6_include: ?[]const []const u8 = null,
+        ipv6_exclude: ?[]const []const u8 = null,
+    } = null,
     performance: ?struct {
         recv_buffer_slots: ?u16 = null,
         send_buffer_slots: ?u16 = null,
@@ -411,6 +441,32 @@ pub fn mergeConfigs(
         }
 
         builder.static_ip = static_config;
+    }
+
+    // Routing configuration
+    const has_routing = file_config.routing != null or env_config.routing != null or cli_config.routing != null;
+    if (has_routing) {
+        var routing_config = RoutingConfig{};
+
+        const file_routing = file_config.routing;
+        const env_routing = env_config.routing;
+        const cli_routing = cli_config.routing;
+
+        routing_config.default_route = pickVal(bool, if (cli_routing) |r| r.default_route else null, if (env_routing) |r| r.default_route else null, if (file_routing) |r| r.default_route else null, true); // Default: send all traffic through VPN
+
+        routing_config.accept_pushed_routes = pickVal(bool, if (cli_routing) |r| r.accept_pushed_routes else null, if (env_routing) |r| r.accept_pushed_routes else null, if (file_routing) |r| r.accept_pushed_routes else null, true);
+
+        routing_config.enable_custom_routes = pickVal(bool, if (cli_routing) |r| r.enable_custom_routes else null, if (env_routing) |r| r.enable_custom_routes else null, if (file_routing) |r| r.enable_custom_routes else null, false);
+
+        routing_config.ipv4_include = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv4_include else null, if (env_routing) |r| r.ipv4_include else null, if (file_routing) |r| r.ipv4_include else null, null);
+
+        routing_config.ipv4_exclude = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv4_exclude else null, if (env_routing) |r| r.ipv4_exclude else null, if (file_routing) |r| r.ipv4_exclude else null, null);
+
+        routing_config.ipv6_include = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv6_include else null, if (env_routing) |r| r.ipv6_include else null, if (file_routing) |r| r.ipv6_include else null, null);
+
+        routing_config.ipv6_exclude = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv6_exclude else null, if (env_routing) |r| r.ipv6_exclude else null, if (file_routing) |r| r.ipv6_exclude else null, null);
+
+        builder.routing = routing_config;
     }
 
     return builder;

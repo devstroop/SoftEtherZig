@@ -129,6 +129,62 @@
       "minimum": 1,
       "default": 300
     },
+    "routing": {
+      "type": "object",
+      "description": "Routing configuration",
+      "properties": {
+        "default_route": {
+          "type": "boolean",
+          "description": "Send ALL traffic through VPN (sets VPN as default gateway)",
+          "default": true
+        },
+        "accept_pushed_routes": {
+          "type": "boolean",
+          "description": "Accept routes pushed by VPN server (DHCP option 121/249)",
+          "default": true
+        },
+        "enable_custom_routes": {
+          "type": "boolean",
+          "description": "Enable custom route includes/excludes",
+          "default": false
+        },
+        "ipv4_include": {
+          "type": ["array", "null"],
+          "description": "IPv4 routes to include (CIDR notation). Only these networks will be routed through VPN.",
+          "items": {
+            "type": "string",
+            "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/(3[0-2]|[12]?[0-9])$"
+          },
+          "examples": [["10.0.0.0/8", "192.168.0.0/16"]]
+        },
+        "ipv4_exclude": {
+          "type": ["array", "null"],
+          "description": "IPv4 routes to exclude (CIDR notation). These networks will NOT be routed through VPN.",
+          "items": {
+            "type": "string",
+            "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/(3[0-2]|[12]?[0-9])$"
+          },
+          "examples": [["192.168.1.0/24", "10.0.0.0/8"]]
+        },
+        "ipv6_include": {
+          "type": ["array", "null"],
+          "description": "IPv6 routes to include (CIDR notation)",
+          "items": {
+            "type": "string"
+          },
+          "examples": [["2001:db8::/32", "fd00::/8"]]
+        },
+        "ipv6_exclude": {
+          "type": ["array", "null"],
+          "description": "IPv6 routes to exclude (CIDR notation)",
+          "items": {
+            "type": "string"
+          },
+          "examples": [["fe80::/10", "ff00::/8"]]
+        }
+      },
+      "additionalProperties": false
+    },
     "performance": {
       "type": "object",
       "description": "Performance tuning options",
