@@ -642,12 +642,10 @@ export fn zig_adapter_get_gateway_mac(adapter: *ZigPacketAdapter, out_mac: [*]u8
     return false;
 }
 
-/// Set gateway IP and MAC in translator (for learning gateway MAC from ARP)
+/// Set gateway IP in translator (MAC will be learned from ARP/packets)
 /// ip_network_order: Gateway IP in network byte order (big-endian)
 export fn zig_adapter_set_gateway(adapter: *ZigPacketAdapter, ip_network_order: u32) void {
-    // Default MAC (will be learned via ARP)
-    const default_mac = [_]u8{0} ** 6;
-    adapter.tun_adapter.translator.setGateway(ip_network_order, default_mac);
+    adapter.tun_adapter.translator.setGateway(ip_network_order);
 }
 
 /// Set gateway MAC address (called from C when gateway MAC is learned via ARP)
