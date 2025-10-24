@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .taptun = .{
-            .path = "deps/taptun",
+            .path = "TapTun",
         },
     },
     // Specifies the set of files and directories that are included in this package.
@@ -48,7 +48,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "deps",
+        "TapTun",
         // For example...
         //"LICENSE",
         //"README.md",
