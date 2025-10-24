@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, dev ]
+  pull_request:
+    branches: [ '**' ]
+
+jobs:
+  build-macos:
+    name: Build SoftEtherClient (macOS)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup Zig
+        run: |
+          cd /tmp
+          curl -LO https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
+          tar -xf zig-aarch64-macos-0.15.2.tar.xz
+          sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
+          echo "/usr/local/zig" >> $GITHUB_PATH
+
+      - name: Show Zig version
+        run: zig version
+
+      - name: Install dependencies
+        run: brew install openssl@3
+
+      - name: Build TapTun library
+        run: |
+          cd TapTun
+          zig build
+          ls -lh zig-out/lib/
+
+      - name: Build SoftEtherClient
+        run: |
+          zig build
+          ls -lh zig-out/lib/
+
+      - name: Run tests
+        run: zig build test
+
+  build-linux:
+    name: Build SoftEtherClient (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup Zig
+        run: |
+          cd /tmp
+          wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar -xf zig-x86_64-linux-0.15.2.tar.xz
+          sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
+          echo "/usr/local/zig" >> $GITHUB_PATH
+
+      - name: Show Zig version
+        run: zig version
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Build TapTun library
+        run: |
+          cd TapTun
+          zig build
+          ls -lh zig-out/lib/
+
+      - name: Build SoftEtherClient
+        run: |
+          zig build
+          ls -lh zig-out/lib/
+
+      - name: Run tests
+        run: zig build test
+
+  build-windows:
+    name: Build SoftEtherClient (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup Zig
+        run: |
+          curl -LO https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip
+          Expand-Archive zig-x86_64-windows-0.15.2.zip -DestinationPath C:\
+          echo "C:\zig-x86_64-windows-0.15.2" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Show Zig version
+        run: zig version
+
+      - name: Build TapTun library
+        run: |
+          cd TapTun
+          zig build
+          ls zig-out/lib/
+
+      - name: Build SoftEtherClient
+        run: |
+          zig build
+          ls zig-out/lib/
+
+      - name: Run tests
+        run: zig build test
