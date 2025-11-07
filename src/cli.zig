@@ -371,6 +371,11 @@ pub fn main() !void {
     var final_recv_buffer_slots: u16 = 128;
     var final_send_buffer_slots: u16 = 64;
 
+    // Connection settings (mutable for config file override)
+    var final_max_connection: u32 = args.max_connection;
+    var final_use_encrypt: bool = args.use_encrypt;
+    var final_use_compress: bool = args.use_compress;
+
     if (config_path) |path| {
         std.debug.print("[●] Loading configuration from: {s}\n", .{path});
         var parsed_config = config.loadFromFile(allocator, path) catch |err| {
@@ -457,17 +462,35 @@ pub fn main() !void {
             }
         }
 
-        // Load compression setting (CLI > env > config > default)
-        if (!args.use_compress) {
-            // CLI explicitly disabled compression
-        } else if (getEnvVar("SOFTETHER_COMPRESS")) |compress_str| {
-            if (std.mem.eql(u8, compress_str, "false") or std.mem.eql(u8, compress_str, "0")) {
-                // Env var explicitly disables compression
-                // Note: This modifies args which is used later
+        // Load max_connection from config file (CLI > env > config)
+        if (final_max_connection == 0) { // Only if not set via CLI
+            if (getEnvVar("SOFTETHER_MAX_CONNECTION")) |max_str| {
+                final_max_connection = std.fmt.parseInt(u32, max_str, 10) catch 0;
+            } else if (file_config.max_connection) |max| {
+                final_max_connection = max;
             }
-        } else if (file_config.use_compress) |compress| {
-            // Config file value (will be used by config.mergeConfigs)
-            _ = compress;
+        }
+
+        // Load use_encrypt from config file (CLI > env > config)
+        if (final_use_encrypt) { // Default is true
+            if (getEnvVar("SOFTETHER_ENCRYPT")) |encrypt_str| {
+                if (std.mem.eql(u8, encrypt_str, "false") or std.mem.eql(u8, encrypt_str, "0")) {
+                    final_use_encrypt = false;
+                }
+            } else if (file_config.use_encrypt) |encrypt| {
+                final_use_encrypt = encrypt;
+            }
+        }
+
+        // Load use_compress from config file (CLI > env > config)
+        if (final_use_compress) { // Default is true
+            if (getEnvVar("SOFTETHER_COMPRESS")) |compress_str| {
+                if (std.mem.eql(u8, compress_str, "false") or std.mem.eql(u8, compress_str, "0")) {
+                    final_use_compress = false;
+                }
+            } else if (file_config.use_compress) |compress| {
+                final_use_compress = compress;
+            }
         }
 
         // Load performance configuration
@@ -604,9 +627,9 @@ pub fn main() !void {
             .password = password,
             .is_hashed = use_password_hash,
         } },
-        .use_encrypt = args.use_encrypt,
-        .use_compress = args.use_compress,
-        .max_connection = args.max_connection,
+        .use_encrypt = final_use_encrypt,
+        .use_compress = final_use_compress,
+        .max_connection = final_max_connection,
         .ip_version = ip_version,
         .static_ip = static_ip,
         .use_zig_adapter = args.use_zig_adapter,
@@ -622,12 +645,12 @@ pub fn main() !void {
     std.debug.print("Connecting to: {s}:{d}\n", .{ server, final_port });
     std.debug.print("Virtual Hub:   {s}\n", .{hub});
     std.debug.print("User:          {s}\n", .{username});
-    std.debug.print("Encryption:    {s}\n", .{if (args.use_encrypt) "Enabled" else "Disabled"});
-    std.debug.print("Compression:   {s}\n", .{if (args.use_compress) "Enabled" else "Disabled"});
-    if (args.max_connection == 0) {
+    std.debug.print("Encryption:    {s}\n", .{if (final_use_encrypt) "Enabled" else "Disabled"});
+    std.debug.print("Compression:   {s}\n", .{if (final_use_compress) "Enabled" else "Disabled"});
+    if (final_max_connection == 0) {
         std.debug.print("Max Connections: Server Policy\n", .{});
     } else {
-        std.debug.print("Max Connections: {d}\n", .{args.max_connection});
+        std.debug.print("Max Connections: {d}\n", .{final_max_connection});
     }
     std.debug.print("IP Version:    {s}\n", .{args.ip_version});
 

@@ -322,40 +322,40 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the VPN client CLI");
     run_step.dependOn(&run_cli.step);
 
-    // ============================================
-    // 3. FFI LIBRARY (Cross-Platform)
-    // ============================================
-    const ffi_lib = b.addLibrary(.{
-        .name = "softether_ffi",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ffi/ffi.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    ffi_lib.root_module.addImport("taptun", taptun_module);
-    ffi_lib.linkLibC();
-    ffi_lib.addIncludePath(b.path("include"));
-    ffi_lib.addIncludePath(b.path("src"));
+    // // ============================================
+    // // 3. FFI LIBRARY (Cross-Platform)
+    // // ============================================
+    // const ffi_lib = b.addLibrary(.{
+    //     .name = "softether_ffi",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("src/ffi/ffi.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //     }),
+    // });
+    // ffi_lib.root_module.addImport("taptun", taptun_module);
+    // ffi_lib.linkLibC();
+    // ffi_lib.addIncludePath(b.path("include"));
+    // ffi_lib.addIncludePath(b.path("src"));
 
-    // Add iOS SDK configuration for FFI
-    if (is_ios) {
-        ffi_lib.addIncludePath(b.path("src/bridge/ios_include"));
-        ffi_lib.linkFramework("Foundation");
-        ffi_lib.linkFramework("Security");
-    }
+    // // Add iOS SDK configuration for FFI
+    // if (is_ios) {
+    //     ffi_lib.addIncludePath(b.path("src/bridge/ios_include"));
+    //     ffi_lib.linkFramework("Foundation");
+    //     ffi_lib.linkFramework("Security");
+    // }
 
-    // Link system OpenSSL
-    ffi_lib.linkSystemLibrary("ssl");
-    ffi_lib.linkSystemLibrary("crypto");
+    // // Link system OpenSSL
+    // ffi_lib.linkSystemLibrary("ssl");
+    // ffi_lib.linkSystemLibrary("crypto");
 
-    b.installArtifact(ffi_lib);
+    // b.installArtifact(ffi_lib);
 
-    // Also install the header
-    b.installFile("include/ffi.h", "include/ffi.h");
+    // // Also install the header
+    // b.installFile("include/ffi.h", "include/ffi.h");
 
-    const ffi_step = b.step("ffi", "Build FFI library (cross-platform)");
-    ffi_step.dependOn(&b.addInstallArtifact(ffi_lib, .{}).step);
+    // const ffi_step = b.step("ffi", "Build FFI library (cross-platform)");
+    // ffi_step.dependOn(&b.addInstallArtifact(ffi_lib, .{}).step);
 
     // ============================================
     // 4. TESTS
