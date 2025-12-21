@@ -32,9 +32,7 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .taptun = .{
-            .path = "TapTun",
-        },
+        // TapTun removed - pure client uses src/adapter/utun.zig directly
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
@@ -48,7 +46,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "TapTun",
         // For example...
         //"LICENSE",
         //"README.md",

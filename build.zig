@@ -168,25 +168,27 @@ pub fn build(b: *std.Build) void {
     // };
 
     // ============================================
-    // 1. LIBRARY MODULE (for Zig programs)
+    // 1. LIBRARY MODULE (for C-based client - DISABLED)
+    // TapTun dependency only needed for C-based client
+    // Pure client uses src/adapter/utun.zig directly
     // ============================================
 
-    // Add ZigTapTun dependency
-    const taptun = b.dependency("taptun", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // // Add ZigTapTun dependency
+    // const taptun = b.dependency("taptun", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
 
-    // Get the taptun module
-    const taptun_module = taptun.module("taptun");
+    // // Get the taptun module
+    // const taptun_module = taptun.module("taptun");
 
-    const lib_module = b.addModule("softether", .{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-    });
-    lib_module.addIncludePath(b.path("src"));
-    lib_module.addImport("taptun", taptun_module);
-    lib_module.link_libc = true;
+    // const lib_module = b.addModule("softether", .{
+    //     .root_source_file = b.path("src/main.zig"),
+    //     .target = target,
+    // });
+    // lib_module.addIncludePath(b.path("src"));
+    // lib_module.addImport("taptun", taptun_module);
+    // lib_module.link_libc = true;
 
     // ============================================
     // 2. CLI CLIENT (C-based - DISABLED)
@@ -354,8 +356,8 @@ pub fn build(b: *std.Build) void {
     }
     pure_client.linkLibC();
 
-    // Add TapTun module for network interface
-    pure_client.root_module.addImport("taptun", taptun_module);
+    // TapTun module is NOT needed - pure client uses src/adapter/utun.zig instead
+    // pure_client.root_module.addImport("taptun", taptun_module);
 
     b.installArtifact(pure_client);
 
@@ -412,21 +414,22 @@ pub fn build(b: *std.Build) void {
     // 4. TESTS
     // ============================================
 
-    // Test for macOS platform adapter
-    const macos_adapter_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/test_macos_adapter.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    macos_adapter_tests.root_module.addImport("taptun", taptun_module);
+    // Test for macOS platform adapter (DISABLED - uses TapTun)
+    // const macos_adapter_tests = b.addTest(.{
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("src/platform/test_macos_adapter.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //     }),
+    // });
+    // macos_adapter_tests.root_module.addImport("taptun", taptun_module);
 
-    const run_macos_adapter_tests = b.addRunArtifact(macos_adapter_tests);
+    // const run_macos_adapter_tests = b.addRunArtifact(macos_adapter_tests);
 
-    // Main test step
+    // Main test step (currently empty - add pure Zig tests here)
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_macos_adapter_tests.step);
+    _ = test_step;
+    // test_step.dependOn(&run_macos_adapter_tests.step);
 
     // ============================================
     // 5. HELP AND INFORMATION
