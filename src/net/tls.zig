@@ -105,6 +105,13 @@ pub const TlsSocket = struct {
         }
         errdefer std.posix.close(tcp_fd);
 
+        // CRITICAL: Disable Nagle's algorithm for low latency
+        // Nagle buffers small packets for up to 200ms, causing latency spikes
+        const nodelay: u32 = 1;
+        std.posix.setsockopt(tcp_fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
+            std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
+        };
+
         // Apply timeout
         if (config.timeout_ms > 0) {
             TcpSocket.setReadTimeout(tcp_fd, config.timeout_ms) catch {};
