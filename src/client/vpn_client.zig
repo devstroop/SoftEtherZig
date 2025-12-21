@@ -870,15 +870,18 @@ pub const VpnClient = struct {
         const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
         const garp_interval: i64 = 10000; // 10 seconds - periodic GARP for bridge mode
 
-        // Receive buffers
+        // Receive buffers (zero-copy: reused each iteration)
         var recv_scratch: [512 * 1600]u8 = undefined;
         var recv_slices: [512][]u8 = undefined;
 
-        // Outbound packet buffer
+        // Outbound packet buffer (zero-copy: build Ethernet frame in-place)
         var tun_read_buf: [2048]u8 = undefined;
         var outbound_eth_buf: [2048]u8 = undefined;
 
-        // Packet buffer for ARP/GARP
+        // Send buffer for zero-copy tunnel send (avoid per-packet allocation)
+        var send_buffer: [4 + 4 + 1600]u8 = undefined; // header + size + max eth frame
+
+        // Packet buffer for ARP/GARP (small, reused)
         var arp_buf: [64]u8 = undefined;
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
@@ -918,170 +921,61 @@ pub const VpnClient = struct {
         const POLL_TUN = 1;
         _ = POLL_TLS; // Used implicitly via index 0
 
+        // Cache the configured state check
+        var is_configured = false;
+
         // Main packet loop
         while (!self.should_stop and self.isConnected()) {
-            const now = std.time.milliTimestamp();
-
-            // Poll both TLS and TUN with 10ms timeout
+            // Poll both TLS and TUN with 1ms timeout for low latency
             poll_fds[0].revents = 0;
             poll_fds[1].revents = 0;
-            const poll_result = std.posix.poll(&poll_fds, 10) catch 0;
-            _ = poll_result;
+            _ = std.posix.poll(&poll_fds, 1) catch 0;
             const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
             const tun_readable = (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
 
             // ============================================================
-            // PRIORITY 1: Send ARP Reply if server asked for our IP
+            // FAST PATH: Data plane (process packets first for low latency)
             // ============================================================
-            if (loop_state.need_arp_reply and loop_state.dhcp.state.isConfigured()) {
-                loop_state.need_arp_reply = false;
-                const reply_size = adapter_mod.buildArpReply(mac, loop_state.our_ip, loop_state.arp_reply_target_mac, loop_state.arp_reply_target_ip, &arp_buf) catch 0;
-                if (reply_size > 0) {
-                    const blocks = [_][]const u8{arp_buf[0..reply_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
-                    const ip = tunnel_mod.formatIpForLog(loop_state.arp_reply_target_ip);
-                    std.log.debug("Sent ARP Reply to {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
-                }
-            }
 
-            // ============================================================
-            // PRIORITY 2: Send Gratuitous ARP with our IP (after DHCP)
-            // ============================================================
-            if (loop_state.need_gratuitous_arp and loop_state.dhcp.state.isConfigured()) {
-                loop_state.need_gratuitous_arp = false;
-                const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
-                if (garp_size > 0) {
-                    const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
-                    loop_state.timing.last_garp_time = now;
-                    const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
-                    std.log.debug("Sent Gratuitous ARP (IP={d}.{d}.{d}.{d})", .{ ip.a, ip.b, ip.c, ip.d });
-                }
-            }
-
-            // ============================================================
-            // PRIORITY 3: Send ARP Request to resolve gateway MAC
-            // ============================================================
-            if (loop_state.need_gateway_arp and loop_state.dhcp.state.isConfigured()) {
-                loop_state.need_gateway_arp = false;
-                const arp_size = adapter_mod.buildArpRequest(mac, loop_state.our_ip, loop_state.our_gateway, &arp_buf) catch 0;
-                if (arp_size > 0) {
-                    const blocks = [_][]const u8{arp_buf[0..arp_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
-                    const ip = tunnel_mod.formatIpForLog(loop_state.our_gateway);
-                    std.log.debug("Sent ARP Request for gateway {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
-                }
-            }
-
-            // ============================================================
-            // Periodic Gratuitous ARP keepalive (for bridge mode)
-            // ============================================================
-            if (loop_state.dhcp.state.isConfigured() and loop_state.our_ip != 0) {
-                if (loop_state.timing.shouldSendGarp(now, garp_interval)) {
-                    const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
-                    if (garp_size > 0) {
-                        const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                        tunnel.sendBlocks(&blocks) catch {};
-                        loop_state.timing.last_garp_time = now;
-                    }
-                }
-            }
-
-            // Send SoftEther keep-alive if needed
-            if (loop_state.timing.shouldSendKeepalive(now, keepalive_interval)) {
-                tunnel.sendKeepalive() catch |err| {
-                    std.log.warn("Failed to send keepalive: {}", .{err});
-                };
-                std.log.debug("Sent keepalive", .{});
-                loop_state.timing.last_keepalive = now;
-            }
-
-            // DHCP retry logic
-            // DHCP retry logic
-            if (loop_state.dhcp.state == .discover_sent and loop_state.dhcp_retry_count < 5) {
-                if (loop_state.timing.shouldRetryDhcp(now, 3000)) {
-                    var dhcp_buf: [512]u8 = undefined;
-                    const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
-                    if (dhcp_size > 0) {
-                        const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                        tunnel.sendBlocks(&blocks) catch {};
-                        loop_state.timing.last_dhcp_time = now;
-                        loop_state.dhcp_retry_count += 1;
-                        std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});
-                    }
-                }
-            }
-
-            // ============================================================
-            // OUTBOUND: Read from TUN device and send to VPN server
-            // ============================================================
-            if (loop_state.dhcp.state.isConfigured() and tun_readable) {
-                if (adapter.real_adapter) |*real| {
-                    if (real.device) |dev| {
-                        if (dev.read(&tun_read_buf)) |maybe_len| {
-                            if (maybe_len) |ip_len| {
-                                if (ip_len > 0 and ip_len <= 1500) {
-                                    // Log outbound packet using helper
-                                    if (tunnel_mod.parseIpv4Header(tun_read_buf[0..ip_len])) |info| {
-                                        const src = tunnel_mod.formatIpForLog(info.src_ip);
-                                        const dst = tunnel_mod.formatIpForLog(info.dst_ip);
-                                        std.log.scoped(.packet_trace).debug("TUN→VPN: {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d} proto={d} len={d}", .{
-                                            src.a,         src.b,  src.c, src.d,
-                                            dst.a,         dst.b,  dst.c, dst.d,
-                                            info.protocol, ip_len,
-                                        });
-                                    }
-
-                                    // Wrap IP packet in Ethernet frame using helper
-                                    if (tunnel_mod.wrapIpInEthernet(
-                                        tun_read_buf[0..ip_len],
-                                        loop_state.gateway_mac,
-                                        mac,
-                                        &outbound_eth_buf,
-                                    )) |eth_frame| {
-                                        const blocks = [_][]const u8{eth_frame};
-                                        tunnel.sendBlocks(&blocks) catch |err| {
-                                            std.log.debug("Failed to send outbound packet: {}", .{err});
-                                        };
-                                        self.stats.recordSent(eth_frame.len);
-                                    }
-                                }
-                            }
-                        } else |err| {
-                            std.log.debug("TUN read error: {}", .{err});
-                        }
-                    }
-                }
-            }
-
-            // ============================================================
-            // INBOUND: Receive packets from VPN server
-            // ============================================================
-            // Check if we should stop before blocking on network read
-            if (self.should_stop) {
-                std.log.info("Stop requested, exiting data loop", .{});
-                break;
-            }
-
-            // Only try to receive if TLS has data available (poll told us)
+            // INBOUND: Receive packets from VPN server (highest priority)
             if (tls_readable) {
                 const recv_count = tunnel.receiveBlocksBatch(&recv_slices, &recv_scratch) catch |err| {
-                    if (self.should_stop) {
-                        std.log.info("Stop requested during receive, exiting", .{});
-                        break;
-                    }
+                    if (self.should_stop) break;
                     if (err == error.ConnectionClosed) {
                         std.log.info("Server closed connection", .{});
                         break;
                     }
-                    std.log.warn("Receive error: {}", .{err});
                     continue;
                 };
 
-                // Process received packets
                 for (recv_slices[0..recv_count]) |block_data| {
-                    // Check for DHCP response
-                    if (!loop_state.dhcp.state.isConfigured()) {
+                    if (block_data.len <= 14) continue;
+
+                    // Fast EtherType dispatch
+                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+
+                    if (is_configured) {
+                        // Configured: fast path for IP packets
+                        if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                            // IPv4/IPv6 - direct to TUN (zero-copy slice)
+                            if (adapter.real_adapter) |*real| {
+                                if (real.device) |dev| {
+                                    _ = dev.write(block_data[14..]) catch {};
+                                }
+                            }
+                        } else if (ethertype == 0x0806) {
+                            // ARP
+                            if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
+                                if (arp_op == 2) {
+                                    loop_state.processArpReply(block_data);
+                                    self.gateway_mac = loop_state.gateway_mac;
+                                } else if (arp_op == 1) {
+                                    loop_state.processArpRequest(block_data);
+                                }
+                            }
+                        }
+                    } else {
+                        // Not configured: check for DHCP
                         const maybe_response = adapter_mod.parseDhcpResponse(block_data, dhcp_xid) catch null;
                         if (maybe_response) |response| {
                             if (response.msg_type == .offer and loop_state.dhcp.state == .discover_sent) {
@@ -1089,13 +983,7 @@ pub const VpnClient = struct {
                                 std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
 
                                 var req_buf: [512]u8 = undefined;
-                                const req_size = adapter_mod.buildDhcpRequest(
-                                    mac,
-                                    dhcp_xid,
-                                    response.config.ip_address,
-                                    response.config.server_id,
-                                    &req_buf,
-                                ) catch 0;
+                                const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid, response.config.ip_address, response.config.server_id, &req_buf) catch 0;
                                 if (req_size > 0) {
                                     const blocks = [_][]const u8{req_buf[0..req_size]};
                                     tunnel.sendBlocks(&blocks) catch {};
@@ -1104,23 +992,15 @@ pub const VpnClient = struct {
                                 }
                             } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
                                 std.log.info("DHCP ACK received!", .{});
-
-                                // Store our IP and gateway in loop_state
                                 loop_state.configure(response.config.ip_address, response.config.gateway);
                                 loop_state.dhcp.state = .configured;
-
-                                // Also store in VpnClient for external access
+                                is_configured = true;
                                 self.assigned_ip = loop_state.our_ip;
                                 self.gateway_ip = loop_state.our_gateway;
 
-                                // Configure TUN device
                                 if (adapter.real_adapter) |*real| {
                                     if (real.device) |dev| {
-                                        dev.configure(
-                                            response.config.ip_address,
-                                            response.config.subnet_mask,
-                                            response.config.gateway,
-                                        ) catch |err| {
+                                        dev.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
                                             std.log.err("Failed to configure interface: {}", .{err});
                                         };
                                     }
@@ -1129,12 +1009,9 @@ pub const VpnClient = struct {
                                 const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
                                 std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
 
-                                // CRITICAL: Configure VPN routing now that we have the gateway
                                 if (self.config.full_tunnel and loop_state.our_gateway != 0) {
                                     const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                                     std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
-                                    // Convert server_ip from little-endian (Pack protocol) to big-endian (network byte order)
-                                    // for routing commands. DHCP gateway is already in big-endian.
                                     const server_ip_be = @byteSwap(self.server_ip);
                                     adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
                                 }
@@ -1149,46 +1026,104 @@ pub const VpnClient = struct {
                             }
                         }
                     }
-
-                    // Check for ARP packets using helpers
-                    if (tunnel_mod.isArpPacket(block_data)) {
-                        if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
-                            if (arp_op == 2) { // ARP Reply
-                                loop_state.processArpReply(block_data);
-                                self.gateway_mac = loop_state.gateway_mac;
-                            } else if (arp_op == 1) { // ARP Request
-                                loop_state.processArpRequest(block_data);
-                            }
-                        }
-                    }
-
-                    // Write IP packets to TUN device using helper
-                    if (adapter.real_adapter) |*real| {
-                        if (real.device) |dev| {
-                            if (tunnel_mod.unwrapEthernetToIp(block_data)) |ip_packet| {
-                                // Log inbound IP packet details
-                                if (tunnel_mod.parseIpv4Header(ip_packet)) |info| {
-                                    const src = tunnel_mod.formatIpForLog(info.src_ip);
-                                    const dst = tunnel_mod.formatIpForLog(info.dst_ip);
-                                    std.log.scoped(.packet_trace).debug("VPN→TUN: {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d} proto={d} len={d}", .{
-                                        src.a,         src.b,         src.c, src.d,
-                                        dst.a,         dst.b,         dst.c, dst.d,
-                                        info.protocol, ip_packet.len,
-                                    });
-                                }
-
-                                _ = dev.write(ip_packet) catch |err| {
-                                    std.log.debug("TUN write error: {}", .{err});
-                                };
-                            }
-                        }
-                    }
-
                     self.stats.recordReceived(block_data.len);
                 }
-            } // end if (tls_readable)
+            }
 
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            // OUTBOUND: Read from TUN and send to VPN (second priority)
+            if (is_configured and tun_readable) {
+                if (adapter.real_adapter) |*real| {
+                    if (real.device) |dev| {
+                        if (dev.read(&tun_read_buf)) |maybe_len| {
+                            if (maybe_len) |ip_len| {
+                                if (ip_len > 0 and ip_len <= 1500) {
+                                    if (tunnel_mod.wrapIpInEthernet(tun_read_buf[0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_buf)) |eth_frame| {
+                                        const blocks = [_][]const u8{eth_frame};
+                                        tunnel.sendBlocksZeroCopy(&blocks, &send_buffer) catch {};
+                                        self.stats.recordSent(eth_frame.len);
+                                    }
+                                }
+                            }
+                        } else |_| {}
+                    }
+                }
+            }
+
+            // ============================================================
+            // SLOW PATH: Control plane (ARP/DHCP/keepalive - less frequent)
+            // ============================================================
+            const now = std.time.milliTimestamp();
+
+            // ARP Reply (urgent - server is waiting)
+            if (loop_state.need_arp_reply and is_configured) {
+                loop_state.need_arp_reply = false;
+                const reply_size = adapter_mod.buildArpReply(mac, loop_state.our_ip, loop_state.arp_reply_target_mac, loop_state.arp_reply_target_ip, &arp_buf) catch 0;
+                if (reply_size > 0) {
+                    const blocks = [_][]const u8{arp_buf[0..reply_size]};
+                    tunnel.sendBlocks(&blocks) catch {};
+                    const ip = tunnel_mod.formatIpForLog(loop_state.arp_reply_target_ip);
+                    std.log.debug("Sent ARP Reply to {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                }
+            }
+
+            // Gratuitous ARP (post-DHCP)
+            if (loop_state.need_gratuitous_arp and is_configured) {
+                loop_state.need_gratuitous_arp = false;
+                const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
+                if (garp_size > 0) {
+                    const blocks = [_][]const u8{arp_buf[0..garp_size]};
+                    tunnel.sendBlocks(&blocks) catch {};
+                    loop_state.timing.last_garp_time = now;
+                    const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
+                    std.log.debug("Sent Gratuitous ARP (IP={d}.{d}.{d}.{d})", .{ ip.a, ip.b, ip.c, ip.d });
+                }
+            }
+
+            // Gateway ARP request
+            if (loop_state.need_gateway_arp and is_configured) {
+                loop_state.need_gateway_arp = false;
+                const arp_size = adapter_mod.buildArpRequest(mac, loop_state.our_ip, loop_state.our_gateway, &arp_buf) catch 0;
+                if (arp_size > 0) {
+                    const blocks = [_][]const u8{arp_buf[0..arp_size]};
+                    tunnel.sendBlocks(&blocks) catch {};
+                    const ip = tunnel_mod.formatIpForLog(loop_state.our_gateway);
+                    std.log.debug("Sent ARP Request for gateway {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                }
+            }
+
+            // Periodic GARP (every 10s)
+            if (is_configured and loop_state.timing.shouldSendGarp(now, garp_interval)) {
+                const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
+                if (garp_size > 0) {
+                    const blocks = [_][]const u8{arp_buf[0..garp_size]};
+                    tunnel.sendBlocks(&blocks) catch {};
+                    loop_state.timing.last_garp_time = now;
+                }
+            }
+
+            // SoftEther keepalive (every 5s)
+            if (loop_state.timing.shouldSendKeepalive(now, keepalive_interval)) {
+                tunnel.sendKeepalive() catch |err| {
+                    std.log.warn("Failed to send keepalive: {}", .{err});
+                };
+                std.log.debug("Sent keepalive", .{});
+                loop_state.timing.last_keepalive = now;
+            }
+
+            // DHCP retry
+            if (loop_state.dhcp.state == .discover_sent and loop_state.dhcp_retry_count < 5) {
+                if (loop_state.timing.shouldRetryDhcp(now, 3000)) {
+                    var dhcp_buf: [512]u8 = undefined;
+                    const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
+                    if (dhcp_size > 0) {
+                        const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
+                        tunnel.sendBlocks(&blocks) catch {};
+                        loop_state.timing.last_dhcp_time = now;
+                        loop_state.dhcp_retry_count += 1;
+                        std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});
+                    }
+                }
+            }
         }
 
         std.log.info("Data channel loop ended", .{});
