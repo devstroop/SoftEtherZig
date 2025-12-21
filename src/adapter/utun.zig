@@ -420,6 +420,45 @@ pub const UtunDevice = struct {
         return payload_len;
     }
 
+    /// Read a packet directly into buffer at offset (zero-copy for Ethernet framing)
+    /// Caller provides buffer with space at beginning for Ethernet header (14 bytes)
+    /// Returns slice of the IP packet within buffer, or null if no packet
+    pub fn readDirect(self: *UtunDevice, buffer: []u8, offset: usize) UtunError!?[]u8 {
+        if (!self.is_open) {
+            return UtunError.DeviceNotOpen;
+        }
+
+        if (offset + 4 >= buffer.len) {
+            return UtunError.PacketTooLarge;
+        }
+
+        // Read directly into buffer at offset-4 (to capture the 4-byte header)
+        const read_start = if (offset >= 4) offset - 4 else 0;
+        const read_slice = buffer[read_start..];
+
+        const n = posix.read(self.fd, read_slice) catch |err| {
+            switch (err) {
+                error.WouldBlock => return null,
+                else => return UtunError.ReadFailed,
+            }
+        };
+
+        if (n < 4) {
+            return null;
+        }
+
+        const payload_len = n - 4;
+        if (offset + payload_len > buffer.len) {
+            return UtunError.PacketTooLarge;
+        }
+
+        self.stats.bytes_received += payload_len;
+        self.stats.packets_received += 1;
+
+        // Return slice starting at offset (after 4-byte header)
+        return buffer[offset..][0..payload_len];
+    }
+
     /// Write a packet to the utun device
     pub fn write(self: *UtunDevice, data: []const u8) UtunError!usize {
         if (!self.is_open) {
