@@ -1,463 +1,43 @@
-# SoftEtherClient (Zig)
+# SoftEtherZig
 
-A modern, cross-platform VPN client implementation in **Zig**, progressively replacing the SoftEther VPN C codebase to pure Zig.
+A high-performance SoftEther VPN client written in pure Zig.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Zig Version](https://img.shields.io/badge/zig-0.15.1+-blue)](https://ziglang.org/)
-
-## 🔒 Security Notice
-
-**IMPORTANT**: Never use plaintext passwords on the command line! See [SECURITY.md](SECURITY.md) for secure credential management best practices.
-
-**Recommended**: Use pre-hashed passwords or environment variables:
-```bash
-# Generate hash (do this once)
-./vpnclient --gen-hash username password
-
-# Use hash instead of plaintext password
-./vpnclient -u username --password-hash "your_hash_here"
-
-# Or use environment variables
-export SOFTETHER_PASSWORD_HASH="your_hash_here"
-./vpnclient
-```
-
-## Overview
-
-SoftEtherZig is a complete rewrite of SoftEther VPN in pure Zig. While currently wrapping the battle-tested C core, we're systematically replacing all C code with safe, idiomatic Zig implementations.
-
-**Why Zig?**
-- **Memory Safety**: Eliminate buffer overflows, use-after-free, null pointer dereferences
-- **Performance**: Zero-cost abstractions, LLVM optimizations, compile-time code generation
-- **Maintainability**: No header files, built-in testing, clear error handling
-- **Portability**: Native cross-compilation to any platform without toolchain hassle
+[![Zig](https://img.shields.io/badge/Zig-0.15+-orange)](https://ziglang.org/)
 
 ## Features
-
-**Zig Components (Pure Zig - Phase 1)**:
-- ✅ **FFI Layer**: Cross-platform C API (`include/ffi.h`) for iOS, Android, and other platforms
-- ✅ **CLI Interface**: Command-line tool with secure credential handling
-- ✅ **Packet Infrastructure**: Zero-allocation packet processing (10-20x faster than C)
-- ✅ **Configuration System**: Type-safe JSON parsing with validation
-- ✅ **macOS Packet Adapter** (NEW!): Foundation layer complete with device lifecycle, packet I/O, and thread-safe queue
-  - **Status**: Phase 1a complete (500 lines), Phase 1b in progress (DHCP/ARP/IPv6)
-  - **Next**: Linux and Windows adapters (Q1 2025)
-- ⏳ **Mayaqua Library**: In planning - memory management, collections, strings, threading
-
-**VPN Capabilities** (via SoftEther C core, being ported):
-- 🔒 **Secure**: SSL/TLS 1.3 encryption with SoftEther's proven security model
-- 🌐 **Cross-Platform**: Native support for macOS, Linux, Windows, Android, and iOS
-- ⚡ **High Performance**: >100 Mbps throughput with vectored I/O, targeting 120+ Mbps, matching at least 'SSTP Connect' performance (see [Performance Roadmap](docs/PERFORMANCE_OPTIMIZATION.md))
-- 🌉 **Dual Mode Support**: SecureNAT (Layer 3) and Local Bridge (Layer 2) modes
-- 🔄 **Automatic Reconnection**: Exponential backoff with configurable retry limits
-
-## Performance
-
-**Current Throughput:** ~100 Mbps (~10x improvement from baseline)
-
-**Recent Optimizations (October 2025):**
-- ✅ Vectored I/O (writev): 3-4x throughput gain
-- ✅ Pre-allocated packet buffers: Eliminated 100+ malloc/free calls per second
-- ✅ Global state removal: Thread-safe concurrent sessions
-- ✅ Optimized logging: Reduced frequency from 5K to 50K packets
-
-**Roadmap:** 40-90% additional improvement planned through DHCP/ARP migration to Zig, SIMD checksums, and zero-copy processing. See [PERFORMANCE_OPTIMIZATION.md](docs/PERFORMANCE_OPTIMIZATION.md) for details.
+- A pure Zig SoftEther VPN client
+- Fast, low-latency tunnel implementation
+- macOS native (Linux/Windows planned)
 
 ## Quick Start
 
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/SoftEtherZig.git
-cd SoftEtherZig
-
-# Build the client
-zig build -Doptimize=ReleaseFast
-
-# Generate password hash (recommended for security)
-./zig-out/bin/vpnclient --gen-hash username password
-# Copy the generated hash
-
-# Connect to a VPN server (using hash)
-sudo ./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u username --password-hash "your_hash_here"
-
-# Or use environment variables (most secure)
-export SOFTETHER_SERVER="vpn.example.com"
-export SOFTETHER_HUB="VPN"
-export SOFTETHER_USER="username"
-export SOFTETHER_PASSWORD_HASH="your_hash_here"
-sudo -E ./zig-out/bin/vpnclient
-```
-
-> ⚠️ **Security Warning**: The examples in the rest of this README may show `-P password` for simplicity, but you should **always use `--password-hash`** in production. See [SECURITY.md](SECURITY.md) for details.
-
-## Installation
-
 ### Prerequisites
 
-- **Zig**: 0.15.1 or later ([download](https://ziglang.org/download/))
-- **OpenSSL**: 3.0+ (system package manager)
-- **Root/Admin privileges**: Required for TUN device creation
+- **Zig 0.15+**: [Download](https://ziglang.org/download/)
+- **OpenSSL 3.0+**: `brew install openssl@3` (macOS)
 
-### System Dependencies
-
-```bash
-# macOS
-brew install openssl@3
-
-# Ubuntu/Debian
-sudo apt update
-sudo apt install libssl-dev
-
-# Fedora/RHEL
-sudo dnf install openssl-devel
-
-# Windows
-# Download OpenSSL from https://slproweb.com/products/Win32OpenSSL.html
-```
-
-### Build
+### Build & Run
 
 ```bash
-# Development build
-zig build
+# Clone
+git clone https://github.com/user/SoftEtherZig.git
+cd SoftEtherZig
 
-# Optimized release build
-zig build -Doptimize=ReleaseFast
+# Build (release for best performance)
+zig build --release=fast
 
-# Install system-wide (optional)
-sudo cp zig-out/bin/vpnclient /usr/local/bin/
+# Connect to VPN server
+sudo ./zig-out/bin/vpnclient \
+  --server vpn.example.com \
+  --hub VPN \
+  --user myuser \
+  --password mypassword
 ```
 
-## Usage
+### Using Config File
 
-### Command Line Interface
-
-```bash
-# Basic connection
-sudo vpnclient -s vpn.example.com -H VPN -u username -P password
-
-# Custom port
-sudo vpnclient -s vpn.example.com -p 8443 -H VPN -u username -P password
-
-# Daemon mode (background)
-sudo vpnclient -s vpn.example.com -H VPN -u username -P password -d
-
-# Show help
-vpnclient --help
-```
-
-### CLI Options
-
-#### Connection Options
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-s, --server <HOST>` | VPN server hostname | *required* |
-| `-p, --port <PORT>` | VPN server port | 443 |
-| `-H, --hub <HUB>` | Virtual hub name | *required* |
-| `-u, --user <USERNAME>` | Username | *required* |
-| `-P, --password <PASS>` | Password (use `--password-hash` instead!) | *required* |
-| `--password-hash <HASH>` | Pre-hashed password (recommended) | |
-| `-a, --account <NAME>` | Account name | username |
-| `--no-encrypt` | Disable encryption | false |
-| `--no-compress` | Disable compression | false |
-| `-d, --daemon` | Run as daemon | false |
-
-#### Reconnection Options
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--reconnect` | Enable auto-reconnection | true |
-| `--no-reconnect` | Disable auto-reconnection | false |
-| `--max-retries <N>` | Max reconnection attempts (0=infinite) | 0 |
-| `--min-backoff <SEC>` | Min backoff delay (seconds) | 5 |
-| `--max-backoff <SEC>` | Max backoff delay (seconds) | 300 |
-
-#### Other Options
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--log-level <LEVEL>` | Log verbosity: silent, error, warn, info, debug, trace | info |
-| `-h, --help` | Show help | |
-| `-v, --version` | Show version | |
-
-### Library Usage
-
-```zig
-const softether = @import("softether");
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const config = softether.ConnectionConfig{
-        .server_name = "vpn.example.com",
-        .server_port = 443,
-        .hub_name = "VPN",
-        .account_name = "myaccount",
-        .auth = .{ .password = .{
-            .username = "user",
-            .password = "pass",
-        } },
-        .use_encrypt = true,
-        .use_compress = true,
-    };
-
-    var client = try softether.VpnClient.init(allocator, config);
-    defer client.deinit();
-
-    try client.connect();
-
-    // Your application logic here
-    while (client.isConnected()) {
-        std.time.sleep(1 * std.time.ns_per_s);
-    }
-}
-```
-
-## Architecture
-
-### FFI Status
-
-| FFI Layer | Status | Platforms | Implementation | Recommended |
-|-----------|--------|-----------|----------------|-------------|
-| **ffi.h** | ✅ Active | All platforms | Pure Zig | ✅ **YES** |
-| ~~softether_ffi.h~~ | ❌ Removed | iOS only | C | ❌ No |
-
-**Note**: Legacy FFI was archived October 2025. See [Migration Guide](docs/FFI_MIGRATION_GUIDE.md) for historical context.
-
-### Porting Status
-
-| Phase | Component | Status | Progress | Target |
-|-------|-----------|--------|----------|--------|
-| 1 | **Foundation** | 🟡 In Progress | 15% | Q2 2026 |
-| 1.1 | Platform Adapters (TUN/TAP) | ⏳ Starting | 0% | Q1 2026 |
-| 1.2 | Mayaqua Library (utilities) | ⏳ Planned | 0% | Q2 2026 |
-| 2 | **Core Infrastructure** | ⏸️ Not Started | 0% | Q4 2026 |
-| 2.1 | Network Stack (TCP/UDP/HTTP) | ⏸️ Not Started | 0% | Q3 2026 |
-| 2.2 | Cryptography Layer | ⏸️ Not Started | 0% | Q4 2026 |
-| 3 | **Session Management** | ⏸️ Not Started | 0% | Q2 2027 |
-| 4 | **Protocols** (SSTP/L2TP/OpenVPN) | ⏸️ Not Started | 0% | Q4 2027 |
-| 5 | **Applications** (Client/Server) | ⏸️ Not Started | 0% | Q2 2028 |
-
-**Overall**: 2% complete (~1,200 of ~70,000 lines ported to Zig)
-
-### Current Sprint (October 2025)
-**Goal**: Port macOS packet adapter to pure Zig
-- [ ] Create `src/platform/macos.zig`
-- [ ] Integrate ZigTapTun for utun management
-- [ ] Port DHCP packet handling
-- [ ] Achieve performance parity with C version
-
-See [Porting Progress Tracker](docs/ZIG_PORTING_PROGRESS.md) for detailed task list.
-
-## Architecture
-
-### Current Hybrid Architecture (Phase 1)
-
-```
-┌─────────────────────────────────────┐
-│    Zig Application Layer (PURE ZIG) │
-│  cli.zig, client.zig, config.zig    │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│    FFI Layer (PURE ZIG)             │
-│  ffi/ffi.zig - Cross-platform API   │
-└──────────────┬──────────────────────┘
-               │
-         ┌─────┴─────┐
-         │  C Bridge │ ← Being eliminated
-         └─────┬─────┘
-               │
-┌──────────────▼──────────────────────┐
-│   SoftEther Core (C → Zig in progress)
-│  Cedar + Mayaqua libraries          │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│  Platform Layer (C → Zig Phase 1)   │
-│  TUN/TAP adapters                   │
-└─────────────────────────────────────┘
-```
-
-### Target Pure Zig Architecture (Phase 5)
-
-```
-┌─────────────────────────────────────┐
-│         Zig Application             │
-│  (Client, Server, Bridge)           │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│      Protocol Layer (Zig)           │
-│  SSTP, L2TP, OpenVPN                │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│    Session Management (Zig)         │
-│  Connection pooling, Keep-alive     │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│    Network Stack (Zig)              │
-│  TCP/UDP, HTTP, TLS via std.crypto  │
-└──────────────┬──────────────────────┘
-               │
-┌──────────────▼──────────────────────┐
-│    Platform Adapters (Zig)          │
-│  Pure Zig TUN/TAP via ZigTapTun     │
-└─────────────────────────────────────┘
-```
-
-## Project Structure
-
-```
-SoftEtherZig/
-├── SoftEtherVPN/          # SoftEther C source (submodule)
-│   └── src/                      # Original SoftEther VPN codebase
-├── src/                          # Zig implementation
-│   ├── main.zig                  # Library entry point
-│   ├── cli.zig                   # Command-line interface
-│   ├── client.zig                # VPN client logic
-│   ├── config.zig                # Configuration types
-│   ├── types.zig                 # Common data structures
-│   ├── errors.zig                # Error definitions
-│   ├── ffi/
-│   │   └── ffi.zig               # ✅ FFI (cross-platform C API)
-│   ├── c.zig                     # C imports and bindings
-│   └── bridge/                   # C bridge layer
-│       ├── softether_bridge.c    # Main SoftEther interface
-│       ├── unix_bridge.c         # POSIX system abstraction
-│       ├── packet_adapter_*.c    # Platform-specific TUN/TAP
-│       └── tick64_*.c            # High-resolution timing
-├── legacy/                       # Archived deprecated code
-│   └── ffi/                      # Legacy FFI (archived Oct 2025)
-│       ├── ios_ffi.c.archived    # Old iOS FFI implementation
-│       ├── softether_ffi.h.archived  # Old FFI header
-│       └── ffi.zig.archived      # Old Zig FFI stubs
-├── build.zig                     # Build configuration
-├── build.zig.zon                 # Zig package dependencies
-└── zig-out/                      # Build artifacts
-    └── bin/
-        └── vpnclient             # Compiled executable
-```
-
-### Component Overview
-
-1. **CLI Layer** (`cli.zig`): Command-line argument parsing and user interaction
-2. **Client Layer** (`client.zig`): High-level VPN connection management
-3. **Bridge Layer** (`bridge/`): C code that interfaces with SoftEther VPN
-4. **FFI Layer** (`ffi.zig`): Safe Zig bindings to C functions
-
-### Network Architecture
-
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Application   │────│   Zig Client     │────│   C Bridge      │
-│   (CLI/Library) │    │   Logic          │    │   Layer         │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌────────────────────┐
-                    │  SoftEther VPN     │
-                    │  Core (C)          │
-                    └────────────────────┘
-                             │
-                    ┌────────────────────┐
-                    │  SSL/TLS 1.3       │
-                    │  (OpenSSL)         │
-                    └────────────────────┘
-                             │
-                    ┌────────────────────┐
-                    │  TUN/TAP Device    │
-                    │  (Platform)        │
-                    └────────────────────┘
-```
-
-## Platform Support
-
-### Desktop Platforms
-
-| Platform | Architecture | TUN Device | Status |
-|----------|--------------|------------|--------|
-| macOS | x86_64, ARM64 | utun | ✅ Tested |
-| Linux | x86_64, ARM64 | TUN/TAP | 🚧 Planned |
-| Windows | x86_64 | TAP-Windows6 | 🚧 Planned |
-
-### Mobile Platforms
-
-| Platform | Architecture | Implementation | Status |
-|----------|--------------|----------------|--------|
-| Android | ARM64, ARMv7, x86_64 | JNI + VpnService | ✅ Complete |
-| iOS | ARM64, x86_64 | PacketTunnelProvider | ✅ Complete |
-
-**Mobile implementations are production-ready!** See:
-- [`android/README.md`](android/README.md) - Android integration guide
-- [`ios/README.md`](ios/README.md) - iOS integration guide
-
-### Building for Different Platforms
-
-Zig enables seamless cross-compilation:
-
-```bash
-# Build for Linux from macOS
-zig build -Dtarget=x86_64-linux-gnu
-
-# Build for Windows from macOS
-zig build -Dtarget=x86_64-windows-gnu
-
-# Build for ARM64 Linux
-zig build -Dtarget=aarch64-linux-gnu
-```
-
-## Building from Source
-
-### Standard Build
-
-```bash
-# Debug build (with symbols)
-zig build
-
-# Release build (optimized)
-zig build -Doptimize=ReleaseFast
-
-# Safe release build
-zig build -Doptimize=ReleaseSafe
-```
-
-### Custom Build Options
-
-```bash
-# Build with custom target
-zig build -Dtarget=aarch64-linux-gnu
-
-# Build with specific CPU features
-zig build -Dcpu=baseline
-
-# Clean build artifacts
-rm -rf zig-cache zig-out
-```
-
-### Build Dependencies
-
-The build system automatically:
-- Downloads and compiles SoftEther C sources
-- Links with system OpenSSL
-- Creates platform-specific TUN adapters
-- Generates optimized binaries
-
-## Configuration
-
-### Configuration Methods
-
-SoftEtherZig supports three configuration methods with priority order:
-1. **Command-line arguments** (highest priority)
-2. **Environment variables** (medium priority)
-3. **Configuration file** (lowest priority)
-
-### Configuration File (NEW in v1.1)
-
-Create `~/.config/softether-zig/config.json`:
+Create `config.json`:
 
 ```json
 {
@@ -465,157 +45,189 @@ Create `~/.config/softether-zig/config.json`:
   "port": 443,
   "hub": "VPN",
   "username": "myuser",
-  "password_hash": "base64-hashed-password"
+  "password": "mypassword"
 }
 ```
 
-Then simply run:
+Then run:
+
 ```bash
-vpnclient  # Uses config file
+sudo ./zig-out/bin/vpnclient --config config.json
 ```
 
-**See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for complete configuration guide.**
+## CLI Options
 
-Example configurations:
-- `config.example.json` - Full configuration with all options
-- `config.minimal.json` - Minimal working configuration
+```
+USAGE:
+  vpnclient [OPTIONS]
+
+CONNECTION:
+  -s, --server <HOST>      VPN server hostname (required)
+  -p, --port <PORT>        VPN server port (default: 443)
+  -H, --hub <HUB>          Virtual hub name (required)
+  -u, --user <USER>        Username (required)
+  -P, --password <PASS>    Password (required)
+
+OPTIONS:
+  -c, --config <FILE>      Load configuration from JSON file
+  -f, --full-tunnel        Route all traffic through VPN
+  -d, --daemon             Run in background
+  -h, --help               Show this help
+  -v, --version            Show version
+```
+
+## Configuration
+
+### Config File (`config.json`)
+
+```json
+{
+  "server": "vpn.example.com",
+  "port": 443,
+  "hub": "VPN",
+  "username": "myuser",
+  "password": "mypassword",
+  "full_tunnel": true
+}
+```
 
 ### Environment Variables
 
-Connection settings:
-- `SOFTETHER_SERVER`: VPN server hostname
-- `SOFTETHER_PORT`: VPN server port
-- `SOFTETHER_HUB`: Virtual hub name
-- `SOFTETHER_USER`: Username
-- `SOFTETHER_PASSWORD`: Password (plaintext, not recommended)
-- `SOFTETHER_PASSWORD_HASH`: Pre-hashed password (recommended)
+```bash
+export SOFTETHER_SERVER="vpn.example.com"
+export SOFTETHER_PORT="443"
+export SOFTETHER_HUB="VPN"
+export SOFTETHER_USER="myuser"
+export SOFTETHER_PASSWORD="mypassword"
 
-SSL/TLS settings:
-- `SSL_CERT_FILE`: Path to custom CA certificate bundle
-- `SSL_CERT_DIR`: Directory containing CA certificates
+sudo -E ./zig-out/bin/vpnclient
+```
+
+**Priority:** CLI args > Environment variables > Config file
+
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| **macOS** (ARM64/x64) | ✅ Working | Primary development platform |
+| **Linux** | 🚧 Planned | TUN device support in progress |
+| **Windows** | 🚧 Planned | TAP adapter support planned |
+
+## Architecture
+
+```
+┌─────────────────────────────────────┐
+│         CLI / Config                │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│         VPN Client                  │
+│  • Connection management            │
+│  • DHCP/ARP handling                │
+│  • Reconnection logic               │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│     SoftEther Protocol              │
+│  • Authentication (RPC)             │
+│  • Block-based tunnel format        │
+│  • Keepalive                        │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│      TLS / TCP Transport            │
+│  • OpenSSL TLS 1.2/1.3              │
+│  • TCP with NODELAY                 │
+└──────────────┬──────────────────────┘
+               │
+┌──────────────▼──────────────────────┐
+│       TUN Device (utun)             │
+│  • IP packet injection              │
+│  • Non-blocking I/O                 │
+└─────────────────────────────────────┘
+```
+
+## Project Structure
+
+```
+SoftEtherZig/
+├── src/
+│   ├── main.zig           # Entry point
+│   ├── config.zig         # Configuration parsing
+│   ├── client/
+│   │   └── vpn_client.zig # Main VPN client
+│   ├── protocol/
+│   │   ├── auth.zig       # Authentication
+│   │   ├── rpc.zig        # RPC protocol
+│   │   └── tunnel.zig     # Data tunnel
+│   ├── adapter/
+│   │   ├── utun.zig       # macOS TUN device
+│   │   └── dhcp.zig       # DHCP client
+│   ├── net/
+│   │   ├── tls.zig        # TLS wrapper
+│   │   └── socket.zig     # TCP socket
+│   └── crypto/
+│       └── ...            # Cryptographic utilities
+├── build.zig
+├── config.json
+└── README.md
+```
+
+## Building
+
+```bash
+# Debug build
+zig build
+
+# Release build (recommended)
+zig build --release=fast
+
+# Run tests
+zig build test
+```
 
 ## Troubleshooting
 
-### Common Issues
+### Permission Denied
 
-**Permission Denied**
-```bash
-# Solution: Run with sudo for TUN device access
-sudo vpnclient -s server -H hub -u user -P pass
-```
-
-**Connection Timeout**
-- Verify server hostname and port
-- Check firewall settings
-- Ensure VPN server is accessible
-
-**Authentication Failed**
-- Confirm username and password
-- Check virtual hub name
-- Verify account permissions
-
-**TUN Device Busy**
-- macOS: Wait for utun device to become available
-- Linux: Check `/dev/net/tun` permissions
-
-### Debug Mode
+TUN devices require root privileges:
 
 ```bash
-# Build with debug symbols
-zig build -Doptimize=Debug
-
-# Run with verbose logging
-sudo ./zig-out/bin/vpnclient -s server -H hub -u user -P pass 2>&1 | tee debug.log
+sudo ./zig-out/bin/vpnclient ...
 ```
 
-## Development
+### Connection Timeout
 
-### Code Organization
+1. Verify server is reachable: `ping vpn.example.com`
+2. Check port is open: `nc -zv vpn.example.com 443`
+3. Confirm hub name is correct
 
-- **`src/`**: Zig source code
-- **`src/bridge/`**: C bridge code interfacing with SoftEther
-- **`SoftEtherVPN/`**: Upstream SoftEther VPN source
+### Authentication Failed
 
-### Adding Features
+- Double-check username/password
+- Verify hub name matches server configuration
+- Ensure account is enabled on server
 
-**CLI Features:**
-- Edit `src/cli.zig` for new command-line options
+### High Latency
 
-**Client Features:**
-- Modify `src/client.zig` for connection logic
-
-**Bridge Features:**
-- Update `src/bridge/softether_bridge.c` for new SoftEther integration
-
-### Testing
+Build with release optimizations:
 
 ```bash
-# Run tests
-zig build test
-
-# Build and test specific target
-zig build -Dtarget=x86_64-linux-gnu test
+zig build --release=fast
 ```
 
-### Code Style
+## Security
 
-- **Zig**: Follow official Zig style guide
-- **C**: Follow SoftEther VPN conventions
-- **Documentation**: Use Zig doc comments for public APIs
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-### Areas for Contribution
-
-- 🐧 Linux TUN/TAP implementation
-- 🪟 Windows TAP-Windows6 support
-- 🔐 Additional authentication methods (certificate, RADIUS)
-- 📊 Performance optimizations
-- 🧪 Comprehensive test suite
-- 📚 Documentation improvements
+- Passwords can be passed via environment variables (preferred over CLI)
+- TLS 1.2+ with certificate verification
+- See [SECURITY.md](SECURITY.md) for security best practices
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-The SoftEther VPN components are licensed under Apache License 2.0 by the SoftEther VPN Project.
+Apache License 2.0
 
 ## Credits
 
-- **SoftEther VPN Project**: Original VPN implementation
-- **Zig Programming Language**: Modern systems programming language
-- **OpenSSL Project**: Cryptography library
-
-## Related Projects
-
-- [SoftEther VPN Official](https://www.softether.org/) - Original SoftEther VPN
-- [Zig Language](https://ziglang.org/) - Programming language
-- [OpenSSL](https://www.openssl.org/) - Cryptography toolkit
-
-## Documentation
-
-### Performance & Optimization
-- **[PERFORMANCE_OPTIMIZATION.md](docs/PERFORMANCE_OPTIMIZATION.md)** - ⭐ Performance roadmap and optimization opportunities (40-90% improvement potential)
-
-### Server Mode Comparison
-- **[DOCS_INDEX.md](DOCS_INDEX.md)** - Documentation navigation and overview
-- **[SECURENAT_VS_LOCALBRIDGE.md](SECURENAT_VS_LOCALBRIDGE.md)** - Complete technical comparison of server modes
-- **[LOCALBRIDGE_QUICKREF.md](LOCALBRIDGE_QUICKREF.md)** - Quick reference for Local Bridge implementation
-- **[PACKET_FLOW_DIAGRAMS.md](PACKET_FLOW_DIAGRAMS.md)** - Visual diagrams of packet flows
-
-### Architecture
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Cross-platform architecture
-- **[PROGRESS.md](PROGRESS.md)** - Implementation progress and roadmap
-- **[ZigTapTun/](ZigTapTun/)** - Layer 2/3 translation library
-
----
-
-**SoftEtherZig** - Bringing modern programming practices to enterprise VPN connectivity.
+- [SoftEther VPN Project](https://www.softether.org/) - Protocol specification
+- [Zig](https://ziglang.org/) - Programming language
+- [OpenSSL](https://www.openssl.org/) - TLS implementation
