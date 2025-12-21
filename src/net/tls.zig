@@ -257,6 +257,39 @@ pub const TlsSocket = struct {
             const err = c.SSL_get_error(ssl, ret);
             switch (err) {
                 c.SSL_ERROR_WANT_READ, c.SSL_ERROR_WANT_WRITE => {
+                    return 0; // Let caller retry
+                },
+                else => {
+                    self.connected = false;
+                    return error.BrokenPipe;
+                },
+            }
+        }
+
+        return @intCast(ret);
+    }
+
+    /// Write with poll-based waiting (avoids busy spin)
+    pub fn writeWithPoll(self: *TlsSocket, data: []const u8) !usize {
+        if (!self.connected) return error.BrokenPipe;
+
+        const ssl = self.ssl orelse return error.BrokenPipe;
+        const ret = c.SSL_write(ssl, data.ptr, @intCast(data.len));
+
+        if (ret <= 0) {
+            const err = c.SSL_get_error(ssl, ret);
+            switch (err) {
+                c.SSL_ERROR_WANT_WRITE => {
+                    // Wait for socket to be writable (max 1ms to avoid blocking too long)
+                    var pfd = [_]std.posix.pollfd{.{
+                        .fd = self.tcp_fd,
+                        .events = std.posix.POLL.OUT,
+                        .revents = 0,
+                    }};
+                    _ = std.posix.poll(&pfd, 1) catch {};
+                    return 0;
+                },
+                c.SSL_ERROR_WANT_READ => {
                     return 0;
                 },
                 else => {
@@ -269,12 +302,12 @@ pub const TlsSocket = struct {
         return @intCast(ret);
     }
 
-    /// Write all data
+    /// Write all data (blocking until complete)
     pub fn writeAll(self: *TlsSocket, data: []const u8) !void {
         var index: usize = 0;
         while (index < data.len) {
             const n = try self.write(data[index..]);
-            if (n == 0) continue; // Retry on WANT_READ/WANT_WRITE
+            if (n == 0) continue;
             index += n;
         }
     }
