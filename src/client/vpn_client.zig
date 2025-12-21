@@ -7,7 +7,7 @@
 //! Architecture:
 //! - VpnClient: Main client facade
 //! - ClientConfig: Connection configuration
-//! - ClientState: Connection state machine
+//! - ClientState: Connection state machine (see state.zig)
 //! - PacketProcessor: Packet processing pipeline
 
 const std = @import("std");
@@ -18,6 +18,23 @@ const Mutex = Thread.Mutex;
 const builtin = @import("builtin");
 const net = std.net;
 
+// Import core utilities
+const core = @import("../core/mod.zig");
+const parseIpv4 = core.parseIpv4;
+const formatIpv4Buf = core.formatIpv4;
+
+// Import extracted client modules
+const state_mod = @import("state.zig");
+const stats_mod = @import("stats.zig");
+const events_mod = @import("events.zig");
+
+pub const ClientState = state_mod.ClientState;
+pub const ConnectionStats = stats_mod.ConnectionStats;
+pub const DisconnectReason = stats_mod.DisconnectReason;
+pub const ClientEvent = events_mod.ClientEvent;
+pub const ClientError = events_mod.ClientError;
+pub const EventCallback = events_mod.EventCallback;
+
 // Import real networking modules
 const net_mod = @import("../net/net.zig");
 const socket = net_mod.socket;
@@ -27,60 +44,25 @@ const tls = net_mod.tls;
 const session_mod = @import("../session/mod.zig");
 const RealSession = session_mod.Session;
 const SessionOptions = session_mod.SessionOptions;
+const SessionWrapper = session_mod.SessionWrapper;
 
 // Import adapter module
 const adapter_mod = @import("../adapter/mod.zig");
 const VirtualAdapter = adapter_mod.VirtualAdapter;
+const AdapterWrapper = adapter_mod.AdapterWrapper;
 
 // Import protocol modules
 const auth_mod = @import("../protocol/auth.zig");
 const rpc = @import("../protocol/rpc.zig");
 const softether_proto = @import("../protocol/softether_protocol.zig");
 const pack_mod = @import("../protocol/pack.zig");
-const tunnel_mod = @import("../protocol/tunnel.zig");
+const protocol_tunnel_mod = @import("../protocol/tunnel.zig");
+
+// Import tunnel module (data loop helpers)
+const tunnel_mod = @import("../tunnel/mod.zig");
 
 // Import DHCP parsing
 const dhcp_mod = @import("../adapter/dhcp.zig");
-
-// ============================================================================
-// Self-Contained Helper Types (for modularity)
-// ============================================================================
-
-/// Parse IPv4 address string to u32 in host byte order (little-endian on x86/ARM)
-fn parseIpv4(str: []const u8) ?u32 {
-    var octets: [4]u8 = [_]u8{ 0, 0, 0, 0 };
-    var octet: u32 = 0;
-    var octet_idx: usize = 0;
-
-    for (str) |c| {
-        if (c == '.') {
-            if (octet > 255 or octet_idx >= 4) return null;
-            octets[octet_idx] = @truncate(octet);
-            octet_idx += 1;
-            octet = 0;
-        } else if (c >= '0' and c <= '9') {
-            octet = octet * 10 + (c - '0');
-        } else {
-            return null;
-        }
-    }
-
-    if (octet > 255 or octet_idx != 3) return null;
-    octets[3] = @truncate(octet);
-
-    // Return in host byte order (little-endian) using bitcast
-    return @as(u32, @bitCast(octets));
-}
-
-/// Format u32 IPv4 address to string
-/// Pack protocol stores IPs in host byte order (little-endian on x86/ARM)
-fn formatIpv4Buf(ip: u32, buffer: []u8) []const u8 {
-    const ip_bytes: [4]u8 = @bitCast(ip);
-    const result = std.fmt.bufPrint(buffer, "{d}.{d}.{d}.{d}", .{
-        ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3],
-    }) catch return "";
-    return result;
-}
 
 // ============================================================================
 // Client Configuration
@@ -164,384 +146,6 @@ pub const ClientConfig = struct {
     connect_timeout_ms: u32 = 30000,
     read_timeout_ms: u32 = 60000,
     keepalive_interval_ms: u32 = 10000,
-};
-
-// ============================================================================
-// Client State Machine
-// ============================================================================
-
-/// Connection state
-pub const ClientState = enum {
-    disconnected,
-    resolving_dns,
-    connecting_tcp,
-    ssl_handshake,
-    authenticating,
-    establishing_session,
-    configuring_adapter,
-    connected,
-    reconnecting,
-    disconnecting,
-    error_state,
-
-    pub fn isConnected(self: ClientState) bool {
-        return self == .connected;
-    }
-
-    pub fn isConnecting(self: ClientState) bool {
-        return switch (self) {
-            .resolving_dns, .connecting_tcp, .ssl_handshake, .authenticating, .establishing_session, .configuring_adapter => true,
-            else => false,
-        };
-    }
-
-    pub fn canTransitionTo(self: ClientState, next: ClientState) bool {
-        return switch (self) {
-            .disconnected => next == .resolving_dns or next == .error_state,
-            .resolving_dns => next == .connecting_tcp or next == .error_state or next == .disconnecting,
-            .connecting_tcp => next == .ssl_handshake or next == .error_state or next == .disconnecting,
-            .ssl_handshake => next == .authenticating or next == .error_state or next == .disconnecting,
-            .authenticating => next == .establishing_session or next == .error_state or next == .disconnecting,
-            .establishing_session => next == .configuring_adapter or next == .error_state or next == .disconnecting,
-            .configuring_adapter => next == .connected or next == .error_state or next == .disconnecting,
-            .connected => next == .disconnecting or next == .reconnecting or next == .error_state,
-            .reconnecting => next == .resolving_dns or next == .disconnected or next == .error_state,
-            .disconnecting => next == .disconnected or next == .reconnecting,
-            .error_state => next == .disconnected or next == .reconnecting,
-        };
-    }
-};
-
-/// Connection statistics
-pub const ConnectionStats = struct {
-    bytes_sent: u64 = 0,
-    bytes_received: u64 = 0,
-    packets_sent: u64 = 0,
-    packets_received: u64 = 0,
-    connect_time_ms: i64 = 0,
-    connected_duration_ms: u64 = 0,
-    reconnect_count: u32 = 0,
-    last_activity_time_ms: i64 = 0,
-
-    pub fn updateActivity(self: *ConnectionStats) void {
-        self.last_activity_time_ms = std.time.milliTimestamp();
-    }
-
-    pub fn recordSent(self: *ConnectionStats, bytes: usize) void {
-        self.bytes_sent += bytes;
-        self.packets_sent += 1;
-        self.updateActivity();
-    }
-
-    pub fn recordReceived(self: *ConnectionStats, bytes: usize) void {
-        self.bytes_received += bytes;
-        self.packets_received += 1;
-        self.updateActivity();
-    }
-};
-
-/// Disconnect reason
-pub const DisconnectReason = enum {
-    none,
-    user_requested,
-    server_closed,
-    auth_failed,
-    timeout,
-    network_error,
-    protocol_error,
-    configuration_error,
-};
-
-// ============================================================================
-// Client Events (Callback Interface)
-// ============================================================================
-
-/// Event types for client callbacks
-pub const ClientEvent = union(enum) {
-    state_changed: struct {
-        old_state: ClientState,
-        new_state: ClientState,
-    },
-    connected: struct {
-        server_ip: u32,
-        assigned_ip: u32,
-        gateway_ip: u32,
-    },
-    disconnected: struct {
-        reason: DisconnectReason,
-    },
-    stats_updated: ConnectionStats,
-    error_occurred: struct {
-        code: ClientError,
-        message: []const u8,
-    },
-    dhcp_configured: struct {
-        ip: u32,
-        mask: u32,
-        gateway: u32,
-    },
-};
-
-/// Event callback function type
-pub const EventCallback = *const fn (event: ClientEvent, user_data: ?*anyopaque) void;
-
-// ============================================================================
-// Error Types
-// ============================================================================
-
-pub const ClientError = error{
-    NotInitialized,
-    AlreadyConnected,
-    NotConnected,
-    ConnectionFailed,
-    AuthenticationFailed,
-    DnsResolutionFailed,
-    SslHandshakeFailed,
-    SessionEstablishmentFailed,
-    AdapterConfigurationFailed,
-    Timeout,
-    NetworkError,
-    ProtocolError,
-    InvalidConfiguration,
-    InvalidState,
-    OutOfMemory,
-    OperationCancelled,
-};
-
-// ============================================================================
-// Session Wrapper (bridges to real session module)
-// ============================================================================
-
-const SessionWrapper = struct {
-    allocator: Allocator,
-    real_session: ?RealSession,
-    connected: bool,
-    use_encryption: bool,
-
-    pub fn init(allocator: Allocator, use_encryption: bool) SessionWrapper {
-        return .{
-            .allocator = allocator,
-            .real_session = null,
-            .connected = false,
-            .use_encryption = use_encryption,
-        };
-    }
-
-    /// Initialize with full session options
-    pub fn initWithOptions(allocator: Allocator, options: SessionOptions) SessionWrapper {
-        const wrapper = SessionWrapper{
-            .allocator = allocator,
-            .real_session = RealSession.init(allocator, options),
-            .connected = false,
-            .use_encryption = options.use_encryption,
-        };
-        return wrapper;
-    }
-
-    pub fn deinit(self: *SessionWrapper) void {
-        if (self.real_session) |*sess| {
-            sess.deinit();
-        }
-        self.connected = false;
-    }
-
-    pub fn disconnect(self: *SessionWrapper) void {
-        if (self.real_session) |*sess| {
-            sess.setState(.disconnecting) catch {};
-        }
-        self.connected = false;
-    }
-
-    pub fn connect(self: *SessionWrapper) void {
-        if (self.real_session) |*sess| {
-            sess.setState(.connecting) catch {};
-        }
-        self.connected = true;
-    }
-
-    pub fn isConnected(self: *const SessionWrapper) bool {
-        if (self.real_session) |*sess| {
-            return sess.isConnected();
-        }
-        return self.connected;
-    }
-
-    /// Encrypt data using real session encryption
-    pub fn encrypt(self: *SessionWrapper, allocator: Allocator, data: []const u8) ![]u8 {
-        _ = allocator; // Not needed - session uses its own allocator
-        if (self.real_session) |*sess| {
-            if (self.use_encryption) {
-                return sess.encryptPacket(data);
-            }
-        }
-        // No encryption or no session - return copy
-        return try self.allocator.dupe(u8, data);
-    }
-
-    /// Decrypt data using real session decryption
-    pub fn decrypt(self: *SessionWrapper, allocator: Allocator, data: []const u8) ![]u8 {
-        _ = allocator; // Not needed - session uses its own allocator
-        if (self.real_session) |*sess| {
-            if (self.use_encryption) {
-                return sess.decryptPacket(data);
-            }
-        }
-        // No decryption or no session - return copy
-        return try self.allocator.dupe(u8, data);
-    }
-
-    /// Initialize encryption keys (after authentication)
-    pub fn initEncryption(self: *SessionWrapper, password_hash: *const [20]u8, challenge: *const [20]u8) void {
-        if (self.real_session) |*sess| {
-            sess.initEncryption(password_hash, challenge);
-        }
-    }
-
-    /// Get traffic statistics
-    pub fn getTrafficStats(self: *const SessionWrapper) ?session_mod.TrafficStats {
-        if (self.real_session) |*sess| {
-            return sess.traffic;
-        }
-        return null;
-    }
-};
-
-// ============================================================================
-// Adapter Wrapper (bridges to real adapter module)
-// ============================================================================
-
-const AdapterWrapper = struct {
-    allocator: Allocator,
-    real_adapter: ?VirtualAdapter,
-    is_open: bool,
-    device_name: [32]u8,
-    device_name_len: usize,
-    mac: [6]u8,
-    ip_address: u32,
-    gateway_ip: u32,
-    netmask: u32,
-
-    pub fn init(allocator: Allocator) AdapterWrapper {
-        var mac: [6]u8 = undefined;
-        std.crypto.random.bytes(&mac);
-        mac[0] = 0x02; // Locally administered
-        mac[1] = 0x00;
-        mac[2] = 0x5E;
-
-        return .{
-            .allocator = allocator,
-            .real_adapter = VirtualAdapter.init(allocator),
-            .is_open = false,
-            .device_name = [_]u8{0} ** 32,
-            .device_name_len = 0,
-            .mac = mac,
-            .ip_address = 0,
-            .gateway_ip = 0,
-            .netmask = 0,
-        };
-    }
-
-    pub fn deinit(self: *AdapterWrapper) void {
-        self.close();
-    }
-
-    pub fn open(self: *AdapterWrapper) !void {
-        if (self.real_adapter) |*adapter| {
-            try adapter.open();
-            self.is_open = adapter.isOpen();
-
-            // Copy device name if available
-            if (adapter.getName()) |name| {
-                const len = @min(name.len, self.device_name.len);
-                @memcpy(self.device_name[0..len], name[0..len]);
-                self.device_name_len = len;
-            }
-
-            // Copy MAC if available
-            if (adapter.getMac()) |m| {
-                self.mac = m;
-            }
-        } else {
-            // Fallback stub behavior
-            const name = "utun99";
-            @memcpy(self.device_name[0..name.len], name);
-            self.device_name_len = name.len;
-            self.is_open = true;
-        }
-    }
-
-    pub fn close(self: *AdapterWrapper) void {
-        if (self.real_adapter) |*adapter| {
-            adapter.close();
-        }
-        self.is_open = false;
-    }
-
-    pub fn getName(self: *const AdapterWrapper) ?[]const u8 {
-        if (!self.is_open) return null;
-        return self.device_name[0..self.device_name_len];
-    }
-
-    pub fn getMac(self: *const AdapterWrapper) [6]u8 {
-        return self.mac;
-    }
-
-    pub fn configure(self: *AdapterWrapper, ip: u32, mask: u32, gateway: u32) void {
-        self.ip_address = ip;
-        self.netmask = mask;
-        self.gateway_ip = gateway;
-
-        // Real adapter configuration would be done via DHCP
-        // or explicit configure call on the device
-    }
-
-    pub fn configureFullTunnel(self: *AdapterWrapper, gateway: u32, server_ip: u32) void {
-        self.gateway_ip = gateway;
-        if (self.real_adapter) |*adapter| {
-            adapter.configureFullTunnel(gateway, server_ip) catch |err| {
-                std.log.err("Failed to configure full-tunnel routing: {}", .{err});
-            };
-        }
-    }
-
-    pub fn processIncomingPacket(self: *AdapterWrapper, data: []const u8) ?[]u8 {
-        if (self.real_adapter) |*adapter| {
-            return adapter.processIncomingPacket(data) catch null;
-        }
-        return null;
-    }
-
-    /// Read a packet from the adapter
-    pub fn read(self: *AdapterWrapper, buffer: []u8) !?usize {
-        if (self.real_adapter) |*adapter| {
-            return adapter.read(buffer);
-        }
-        return null;
-    }
-
-    /// Write a packet to the adapter
-    pub fn write(self: *AdapterWrapper, data: []const u8) !usize {
-        if (self.real_adapter) |*adapter| {
-            return adapter.write(data);
-        }
-        return 0;
-    }
-
-    /// Get traffic statistics
-    pub fn getStats(self: *const AdapterWrapper) ?adapter_mod.TunStats {
-        if (self.real_adapter) |*adapter| {
-            return adapter.getStats();
-        }
-        return null;
-    }
-
-    /// Check if DHCP is complete
-    pub fn isDhcpComplete(self: *const AdapterWrapper) bool {
-        if (self.real_adapter) |*adapter| {
-            return adapter.isDhcpComplete();
-        }
-        return false;
-    }
 };
 
 // ============================================================================
@@ -1234,8 +838,8 @@ pub const VpnClient = struct {
 
         std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd, tun_fd });
 
-        // Create tunnel connection
-        var tunnel = tunnel_mod.TunnelConnection.init(
+        // Create tunnel connection (from protocol module)
+        var tunnel = protocol_tunnel_mod.TunnelConnection.init(
             self.allocator,
             @ptrCast(sock),
             struct {
@@ -1252,31 +856,17 @@ pub const VpnClient = struct {
             }.write,
         );
 
-        // DHCP state
-        var dhcp_state = tunnel_mod.DhcpState.init;
-        var dhcp_xid: u32 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&dhcp_xid));
-        var last_dhcp_time: i64 = 0;
-        var dhcp_retry_count: u32 = 0;
-
-        // Our assigned IP (from DHCP)
-        var our_ip: u32 = 0;
-        var our_gateway: u32 = 0;
-
         // Get MAC address
         const mac = adapter.getMac();
 
-        // ARP state - for learning gateway MAC and responding to ARP requests
-        var gateway_mac: [6]u8 = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }; // Default: broadcast
-        var need_gateway_arp: bool = false;
-        var need_gratuitous_arp: bool = false;
-        var need_arp_reply: bool = false;
-        var arp_reply_target_mac: [6]u8 = undefined;
-        var arp_reply_target_ip: u32 = 0;
+        // Initialize data loop state (from tunnel module)
+        var loop_state = tunnel_mod.DataLoopState.init(mac);
 
-        // Timing
-        var last_keepalive: i64 = std.time.milliTimestamp();
-        var last_garp_time: i64 = 0;
+        // DHCP transaction ID
+        var dhcp_xid: u32 = 0;
+        std.crypto.random.bytes(std.mem.asBytes(&dhcp_xid));
+
+        // Configuration constants
         const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
         const garp_interval: i64 = 10000; // 10 seconds - periodic GARP for bridge mode
 
@@ -1313,8 +903,8 @@ pub const VpnClient = struct {
                 tunnel.sendBlocks(&blocks) catch |err| {
                     std.log.err("Failed to send DHCP discover: {}", .{err});
                 };
-                dhcp_state = .discover_sent;
-                last_dhcp_time = std.time.milliTimestamp();
+                loop_state.dhcp.state = .discover_sent;
+                loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
                 std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
             }
         }
@@ -1343,92 +933,81 @@ pub const VpnClient = struct {
             // ============================================================
             // PRIORITY 1: Send ARP Reply if server asked for our IP
             // ============================================================
-            if (need_arp_reply and dhcp_state == .configured) {
-                need_arp_reply = false;
-                const reply_size = adapter_mod.buildArpReply(mac, our_ip, arp_reply_target_mac, arp_reply_target_ip, &arp_buf) catch 0;
+            if (loop_state.need_arp_reply and loop_state.dhcp.state.isConfigured()) {
+                loop_state.need_arp_reply = false;
+                const reply_size = adapter_mod.buildArpReply(mac, loop_state.our_ip, loop_state.arp_reply_target_mac, loop_state.arp_reply_target_ip, &arp_buf) catch 0;
                 if (reply_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..reply_size]};
                     tunnel.sendBlocks(&blocks) catch {};
-                    std.log.debug("Sent ARP Reply to {d}.{d}.{d}.{d}", .{
-                        @as(u8, @truncate(arp_reply_target_ip >> 24)),
-                        @as(u8, @truncate(arp_reply_target_ip >> 16)),
-                        @as(u8, @truncate(arp_reply_target_ip >> 8)),
-                        @as(u8, @truncate(arp_reply_target_ip)),
-                    });
+                    const ip = tunnel_mod.formatIpForLog(loop_state.arp_reply_target_ip);
+                    std.log.debug("Sent ARP Reply to {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
                 }
             }
 
             // ============================================================
             // PRIORITY 2: Send Gratuitous ARP with our IP (after DHCP)
             // ============================================================
-            if (need_gratuitous_arp and dhcp_state == .configured) {
-                need_gratuitous_arp = false;
-                const garp_size = adapter_mod.buildGratuitousArp(mac, our_ip, &arp_buf) catch 0;
+            if (loop_state.need_gratuitous_arp and loop_state.dhcp.state.isConfigured()) {
+                loop_state.need_gratuitous_arp = false;
+                const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
                 if (garp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..garp_size]};
                     tunnel.sendBlocks(&blocks) catch {};
-                    last_garp_time = now;
-                    std.log.debug("Sent Gratuitous ARP (IP={d}.{d}.{d}.{d})", .{
-                        @as(u8, @truncate(our_ip >> 24)),
-                        @as(u8, @truncate(our_ip >> 16)),
-                        @as(u8, @truncate(our_ip >> 8)),
-                        @as(u8, @truncate(our_ip)),
-                    });
+                    loop_state.timing.last_garp_time = now;
+                    const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
+                    std.log.debug("Sent Gratuitous ARP (IP={d}.{d}.{d}.{d})", .{ ip.a, ip.b, ip.c, ip.d });
                 }
             }
 
             // ============================================================
             // PRIORITY 3: Send ARP Request to resolve gateway MAC
             // ============================================================
-            if (need_gateway_arp and dhcp_state == .configured) {
-                need_gateway_arp = false;
-                const arp_size = adapter_mod.buildArpRequest(mac, our_ip, our_gateway, &arp_buf) catch 0;
+            if (loop_state.need_gateway_arp and loop_state.dhcp.state.isConfigured()) {
+                loop_state.need_gateway_arp = false;
+                const arp_size = adapter_mod.buildArpRequest(mac, loop_state.our_ip, loop_state.our_gateway, &arp_buf) catch 0;
                 if (arp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..arp_size]};
                     tunnel.sendBlocks(&blocks) catch {};
-                    std.log.debug("Sent ARP Request for gateway {d}.{d}.{d}.{d}", .{
-                        @as(u8, @truncate(our_gateway >> 24)),
-                        @as(u8, @truncate(our_gateway >> 16)),
-                        @as(u8, @truncate(our_gateway >> 8)),
-                        @as(u8, @truncate(our_gateway)),
-                    });
+                    const ip = tunnel_mod.formatIpForLog(loop_state.our_gateway);
+                    std.log.debug("Sent ARP Request for gateway {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
                 }
             }
 
             // ============================================================
             // Periodic Gratuitous ARP keepalive (for bridge mode)
             // ============================================================
-            if (dhcp_state == .configured and our_ip != 0) {
-                if (now - last_garp_time >= garp_interval) {
-                    const garp_size = adapter_mod.buildGratuitousArp(mac, our_ip, &arp_buf) catch 0;
+            if (loop_state.dhcp.state.isConfigured() and loop_state.our_ip != 0) {
+                if (loop_state.timing.shouldSendGarp(now, garp_interval)) {
+                    const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
                     if (garp_size > 0) {
                         const blocks = [_][]const u8{arp_buf[0..garp_size]};
                         tunnel.sendBlocks(&blocks) catch {};
-                        last_garp_time = now;
+                        loop_state.timing.last_garp_time = now;
                     }
                 }
             }
 
             // Send SoftEther keep-alive if needed
-            if (now - last_keepalive >= keepalive_interval) {
+            if (loop_state.timing.shouldSendKeepalive(now, keepalive_interval)) {
                 tunnel.sendKeepalive() catch |err| {
                     std.log.warn("Failed to send keepalive: {}", .{err});
                 };
                 std.log.debug("Sent keepalive", .{});
-                last_keepalive = now;
+                loop_state.timing.last_keepalive = now;
             }
 
             // DHCP retry logic
-            if (dhcp_state == .discover_sent and dhcp_retry_count < 5) {
-                if (now - last_dhcp_time >= 3000) {
+            // DHCP retry logic
+            if (loop_state.dhcp.state == .discover_sent and loop_state.dhcp_retry_count < 5) {
+                if (loop_state.timing.shouldRetryDhcp(now, 3000)) {
                     var dhcp_buf: [512]u8 = undefined;
                     const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
                     if (dhcp_size > 0) {
                         const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
                         tunnel.sendBlocks(&blocks) catch {};
-                        last_dhcp_time = now;
-                        dhcp_retry_count += 1;
-                        std.log.debug("DHCP DISCOVER retry #{d}", .{dhcp_retry_count});
+                        loop_state.timing.last_dhcp_time = now;
+                        loop_state.dhcp_retry_count += 1;
+                        std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});
                     }
                 }
             }
@@ -1436,62 +1015,36 @@ pub const VpnClient = struct {
             // ============================================================
             // OUTBOUND: Read from TUN device and send to VPN server
             // ============================================================
-            if (dhcp_state == .configured and tun_readable) {
+            if (loop_state.dhcp.state.isConfigured() and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
                         if (dev.read(&tun_read_buf)) |maybe_len| {
                             if (maybe_len) |ip_len| {
                                 if (ip_len > 0 and ip_len <= 1500) {
-                                    // Log outbound packet
-                                    const ip_version = (tun_read_buf[0] >> 4) & 0x0F;
-                                    if (ip_version == 4 and ip_len >= 20) {
-                                        const src_ip = (@as(u32, tun_read_buf[12]) << 24) |
-                                            (@as(u32, tun_read_buf[13]) << 16) |
-                                            (@as(u32, tun_read_buf[14]) << 8) |
-                                            tun_read_buf[15];
-                                        const dst_ip = (@as(u32, tun_read_buf[16]) << 24) |
-                                            (@as(u32, tun_read_buf[17]) << 16) |
-                                            (@as(u32, tun_read_buf[18]) << 8) |
-                                            tun_read_buf[19];
-                                        const proto = tun_read_buf[9];
-                                        // Per-packet logging at trace level to reduce noise
+                                    // Log outbound packet using helper
+                                    if (tunnel_mod.parseIpv4Header(tun_read_buf[0..ip_len])) |info| {
+                                        const src = tunnel_mod.formatIpForLog(info.src_ip);
+                                        const dst = tunnel_mod.formatIpForLog(info.dst_ip);
                                         std.log.scoped(.packet_trace).debug("TUN→VPN: {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d} proto={d} len={d}", .{
-                                            @as(u8, @truncate(src_ip >> 24)),
-                                            @as(u8, @truncate(src_ip >> 16)),
-                                            @as(u8, @truncate(src_ip >> 8)),
-                                            @as(u8, @truncate(src_ip)),
-                                            @as(u8, @truncate(dst_ip >> 24)),
-                                            @as(u8, @truncate(dst_ip >> 16)),
-                                            @as(u8, @truncate(dst_ip >> 8)),
-                                            @as(u8, @truncate(dst_ip)),
-                                            proto,
-                                            ip_len,
+                                            src.a,         src.b,  src.c, src.d,
+                                            dst.a,         dst.b,  dst.c, dst.d,
+                                            info.protocol, ip_len,
                                         });
                                     }
 
-                                    // Wrap IP packet in Ethernet frame for SoftEther
-                                    @memcpy(outbound_eth_buf[0..6], &gateway_mac);
-                                    @memcpy(outbound_eth_buf[6..12], &mac);
-
-                                    if (ip_version == 4) {
-                                        outbound_eth_buf[12] = 0x08;
-                                        outbound_eth_buf[13] = 0x00;
-                                    } else if (ip_version == 6) {
-                                        outbound_eth_buf[12] = 0x86;
-                                        outbound_eth_buf[13] = 0xDD;
-                                    } else {
-                                        continue;
+                                    // Wrap IP packet in Ethernet frame using helper
+                                    if (tunnel_mod.wrapIpInEthernet(
+                                        tun_read_buf[0..ip_len],
+                                        loop_state.gateway_mac,
+                                        mac,
+                                        &outbound_eth_buf,
+                                    )) |eth_frame| {
+                                        const blocks = [_][]const u8{eth_frame};
+                                        tunnel.sendBlocks(&blocks) catch |err| {
+                                            std.log.debug("Failed to send outbound packet: {}", .{err});
+                                        };
+                                        self.stats.recordSent(eth_frame.len);
                                     }
-
-                                    @memcpy(outbound_eth_buf[14..][0..ip_len], tun_read_buf[0..ip_len]);
-
-                                    const eth_frame = outbound_eth_buf[0 .. 14 + ip_len];
-                                    const blocks = [_][]const u8{eth_frame};
-                                    tunnel.sendBlocks(&blocks) catch |err| {
-                                        std.log.debug("Failed to send outbound packet: {}", .{err});
-                                    };
-
-                                    self.stats.recordSent(eth_frame.len);
                                 }
                             }
                         } else |err| {
@@ -1528,16 +1081,12 @@ pub const VpnClient = struct {
                 // Process received packets
                 for (recv_slices[0..recv_count]) |block_data| {
                     // Check for DHCP response
-                    if (dhcp_state != .configured) {
+                    if (!loop_state.dhcp.state.isConfigured()) {
                         const maybe_response = adapter_mod.parseDhcpResponse(block_data, dhcp_xid) catch null;
                         if (maybe_response) |response| {
-                            if (response.msg_type == .offer and dhcp_state == .discover_sent) {
-                                std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{
-                                    @as(u8, @truncate(response.config.ip_address >> 24)),
-                                    @as(u8, @truncate(response.config.ip_address >> 16)),
-                                    @as(u8, @truncate(response.config.ip_address >> 8)),
-                                    @as(u8, @truncate(response.config.ip_address)),
-                                });
+                            if (response.msg_type == .offer and loop_state.dhcp.state == .discover_sent) {
+                                const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
+                                std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
 
                                 var req_buf: [512]u8 = undefined;
                                 const req_size = adapter_mod.buildDhcpRequest(
@@ -1550,18 +1099,19 @@ pub const VpnClient = struct {
                                 if (req_size > 0) {
                                     const blocks = [_][]const u8{req_buf[0..req_size]};
                                     tunnel.sendBlocks(&blocks) catch {};
-                                    dhcp_state = .request_sent;
+                                    loop_state.dhcp.state = .request_sent;
                                     std.log.info("Sent DHCP REQUEST", .{});
                                 }
-                            } else if (response.msg_type == .ack and dhcp_state == .request_sent) {
+                            } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
                                 std.log.info("DHCP ACK received!", .{});
 
-                                // Store our IP and gateway
-                                our_ip = response.config.ip_address;
-                                our_gateway = response.config.gateway;
-                                self.assigned_ip = our_ip;
-                                self.gateway_ip = our_gateway;
-                                dhcp_state = .configured;
+                                // Store our IP and gateway in loop_state
+                                loop_state.configure(response.config.ip_address, response.config.gateway);
+                                loop_state.dhcp.state = .configured;
+
+                                // Also store in VpnClient for external access
+                                self.assigned_ip = loop_state.our_ip;
+                                self.gateway_ip = loop_state.our_gateway;
 
                                 // Configure TUN device
                                 if (adapter.real_adapter) |*real| {
@@ -1576,30 +1126,18 @@ pub const VpnClient = struct {
                                     }
                                 }
 
-                                std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{
-                                    @as(u8, @truncate(our_ip >> 24)),
-                                    @as(u8, @truncate(our_ip >> 16)),
-                                    @as(u8, @truncate(our_ip >> 8)),
-                                    @as(u8, @truncate(our_ip)),
-                                });
+                                const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
+                                std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
 
                                 // CRITICAL: Configure VPN routing now that we have the gateway
-                                if (self.config.full_tunnel and our_gateway != 0) {
-                                    std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{
-                                        @as(u8, @truncate(our_gateway >> 24)),
-                                        @as(u8, @truncate(our_gateway >> 16)),
-                                        @as(u8, @truncate(our_gateway >> 8)),
-                                        @as(u8, @truncate(our_gateway)),
-                                    });
+                                if (self.config.full_tunnel and loop_state.our_gateway != 0) {
+                                    const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
+                                    std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
                                     // Convert server_ip from little-endian (Pack protocol) to big-endian (network byte order)
                                     // for routing commands. DHCP gateway is already in big-endian.
                                     const server_ip_be = @byteSwap(self.server_ip);
-                                    adapter.configureFullTunnel(our_gateway, server_ip_be);
+                                    adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
                                 }
-
-                                // CRITICAL: Queue Gratuitous ARP and Gateway ARP requests
-                                need_gratuitous_arp = true;
-                                need_gateway_arp = true;
 
                                 if (self.event_callback) |cb| {
                                     cb(.{ .dhcp_configured = .{
@@ -1612,93 +1150,36 @@ pub const VpnClient = struct {
                         }
                     }
 
-                    // Check for ARP packets (learn gateway MAC, respond to requests)
-                    if (block_data.len >= 42) {
-                        const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
-                        if (ethertype == 0x0806) { // ARP
-                            const arp_op = (@as(u16, block_data[20]) << 8) | block_data[21];
-
+                    // Check for ARP packets using helpers
+                    if (tunnel_mod.isArpPacket(block_data)) {
+                        if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
                             if (arp_op == 2) { // ARP Reply
-                                // Extract sender IP (bytes 28-31 in big-endian)
-                                const sender_ip = (@as(u32, block_data[28]) << 24) |
-                                    (@as(u32, block_data[29]) << 16) |
-                                    (@as(u32, block_data[30]) << 8) |
-                                    block_data[31];
-
-                                // If from gateway, learn its MAC
-                                if (our_gateway != 0 and sender_ip == our_gateway) {
-                                    @memcpy(&gateway_mac, block_data[22..28]);
-                                    self.gateway_mac = gateway_mac;
-                                    std.log.debug("Learned gateway MAC: {x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{
-                                        gateway_mac[0], gateway_mac[1], gateway_mac[2],
-                                        gateway_mac[3], gateway_mac[4], gateway_mac[5],
-                                    });
-                                }
+                                loop_state.processArpReply(block_data);
+                                self.gateway_mac = loop_state.gateway_mac;
                             } else if (arp_op == 1) { // ARP Request
-                                // Extract target IP (bytes 38-41)
-                                const target_ip = (@as(u32, block_data[38]) << 24) |
-                                    (@as(u32, block_data[39]) << 16) |
-                                    (@as(u32, block_data[40]) << 8) |
-                                    block_data[41];
-
-                                // If asking for our IP, send reply
-                                if (target_ip == our_ip and our_ip != 0) {
-                                    @memcpy(&arp_reply_target_mac, block_data[22..28]);
-                                    arp_reply_target_ip = (@as(u32, block_data[28]) << 24) |
-                                        (@as(u32, block_data[29]) << 16) |
-                                        (@as(u32, block_data[30]) << 8) |
-                                        block_data[31];
-                                    need_arp_reply = true;
-                                }
+                                loop_state.processArpRequest(block_data);
                             }
                         }
                     }
 
-                    // Write IP packets to TUN device (strip Ethernet header)
+                    // Write IP packets to TUN device using helper
                     if (adapter.real_adapter) |*real| {
                         if (real.device) |dev| {
-                            if (block_data.len > 14) {
-                                const ethertype_hi = block_data[12];
-                                const ethertype_lo = block_data[13];
-
-                                if ((ethertype_hi == 0x08 and ethertype_lo == 0x00) or
-                                    (ethertype_hi == 0x86 and ethertype_lo == 0xDD))
-                                {
-                                    const ip_packet = block_data[14..];
-
-                                    // Log inbound IP packet details
-                                    if (ip_packet.len >= 20) {
-                                        const ip_version = (ip_packet[0] >> 4) & 0x0F;
-                                        if (ip_version == 4) {
-                                            const src_ip = (@as(u32, ip_packet[12]) << 24) |
-                                                (@as(u32, ip_packet[13]) << 16) |
-                                                (@as(u32, ip_packet[14]) << 8) |
-                                                ip_packet[15];
-                                            const dst_ip = (@as(u32, ip_packet[16]) << 24) |
-                                                (@as(u32, ip_packet[17]) << 16) |
-                                                (@as(u32, ip_packet[18]) << 8) |
-                                                ip_packet[19];
-                                            const proto = ip_packet[9];
-                                            // Per-packet logging at trace level to reduce noise
-                                            std.log.scoped(.packet_trace).debug("VPN→TUN: {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d} proto={d} len={d}", .{
-                                                @as(u8, @truncate(src_ip >> 24)),
-                                                @as(u8, @truncate(src_ip >> 16)),
-                                                @as(u8, @truncate(src_ip >> 8)),
-                                                @as(u8, @truncate(src_ip)),
-                                                @as(u8, @truncate(dst_ip >> 24)),
-                                                @as(u8, @truncate(dst_ip >> 16)),
-                                                @as(u8, @truncate(dst_ip >> 8)),
-                                                @as(u8, @truncate(dst_ip)),
-                                                proto,
-                                                ip_packet.len,
-                                            });
-                                        }
-                                    }
-
-                                    _ = dev.write(ip_packet) catch |err| {
-                                        std.log.debug("TUN write error: {}", .{err});
-                                    };
+                            if (tunnel_mod.unwrapEthernetToIp(block_data)) |ip_packet| {
+                                // Log inbound IP packet details
+                                if (tunnel_mod.parseIpv4Header(ip_packet)) |info| {
+                                    const src = tunnel_mod.formatIpForLog(info.src_ip);
+                                    const dst = tunnel_mod.formatIpForLog(info.dst_ip);
+                                    std.log.scoped(.packet_trace).debug("VPN→TUN: {d}.{d}.{d}.{d} → {d}.{d}.{d}.{d} proto={d} len={d}", .{
+                                        src.a,         src.b,         src.c, src.d,
+                                        dst.a,         dst.b,         dst.c, dst.d,
+                                        info.protocol, ip_packet.len,
+                                    });
                                 }
+
+                                _ = dev.write(ip_packet) catch |err| {
+                                    std.log.debug("TUN write error: {}", .{err});
+                                };
                             }
                         }
                     }
@@ -1796,29 +1277,6 @@ test "ClientConfigBuilder with static IP" {
     try std.testing.expectEqualStrings("10.0.0.100", config.static_ip.?.ipv4_address.?);
 }
 
-test "ClientState transitions" {
-    try std.testing.expect(ClientState.disconnected.canTransitionTo(.resolving_dns));
-    try std.testing.expect(ClientState.resolving_dns.canTransitionTo(.connecting_tcp));
-    try std.testing.expect(ClientState.connected.canTransitionTo(.disconnecting));
-    try std.testing.expect(!ClientState.disconnected.canTransitionTo(.connected));
-}
-
-test "ClientState predicates" {
-    try std.testing.expect(ClientState.connected.isConnected());
-    try std.testing.expect(!ClientState.disconnected.isConnected());
-    try std.testing.expect(ClientState.resolving_dns.isConnecting());
-    try std.testing.expect(!ClientState.connected.isConnecting());
-}
-
-test "ConnectionStats tracking" {
-    var stats = ConnectionStats{};
-    stats.recordSent(100);
-    try std.testing.expectEqual(@as(u64, 100), stats.bytes_sent);
-    try std.testing.expectEqual(@as(u64, 1), stats.packets_sent);
-    stats.recordReceived(200);
-    try std.testing.expectEqual(@as(u64, 200), stats.bytes_received);
-}
-
 test "VpnClient initialization" {
     const config = ClientConfig{ .server_host = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
     var client = VpnClient.init(std.testing.allocator, config);
@@ -1841,12 +1299,6 @@ test "VpnClient disconnect" {
     defer client.deinit();
     try client.disconnect();
     try std.testing.expectEqual(ClientState.disconnected, client.getState());
-}
-
-test "DisconnectReason values" {
-    const reason = DisconnectReason.user_requested;
-    try std.testing.expect(reason == .user_requested);
-    try std.testing.expect(reason != .server_closed);
 }
 
 test "AuthMethod password" {
@@ -1878,18 +1330,6 @@ test "ReconnectConfig defaults" {
 test "IpVersionPreference" {
     const pref = IpVersionPreference.dual_stack;
     try std.testing.expect(pref == .dual_stack);
-}
-
-test "parseIpv4" {
-    try std.testing.expectEqual(@as(u32, 0xC0A80101), parseIpv4("192.168.1.1").?);
-    try std.testing.expectEqual(@as(u32, 0x7F000001), parseIpv4("127.0.0.1").?);
-    try std.testing.expect(parseIpv4("invalid") == null);
-}
-
-test "formatIpv4Buf" {
-    var buf: [16]u8 = undefined;
-    const str = formatIpv4Buf(0xC0A80101, &buf);
-    try std.testing.expectEqualStrings("192.168.1.1", str);
 }
 
 test "SessionWrapper" {

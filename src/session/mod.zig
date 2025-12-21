@@ -9,6 +9,10 @@
 
 pub const session = @import("session.zig");
 pub const connection = @import("connection.zig");
+pub const wrapper = @import("wrapper.zig");
+
+// Wrapper
+pub const SessionWrapper = wrapper.SessionWrapper;
 
 // Re-export commonly used types
 
