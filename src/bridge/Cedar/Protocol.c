@@ -7238,6 +7238,22 @@ bool ClientUploadAuth(CONNECTION *c)
 	
 	OutRpcWinVer(p, &v);
 	
+	// Debug: count elements and compute pack size
+	{
+		BUF *debug_buf = PackToBuf(p);
+		if (debug_buf != NULL) {
+			printf("[ClientUploadAuth] Auth Pack size: %u bytes, %u elements\n", debug_buf->Size, LIST_NUM(p->elements));
+			// Print all element names
+			printf("[ClientUploadAuth] Elements:\n");
+			for (UINT i = 0; i < LIST_NUM(p->elements); i++) {
+				ELEMENT *e = LIST_DATA(p->elements, i);
+				printf("  %u: %s (type=%u)\n", i, e->name, e->type);
+			}
+			fflush(stdout);
+			FreeBuf(debug_buf);
+		}
+	}
+	
 	printf("[ClientUploadAuth] About to send auth packet via HttpClientSend...\n");
 	fflush(stdout);
 
