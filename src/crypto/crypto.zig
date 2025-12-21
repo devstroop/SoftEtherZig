@@ -1,4 +1,4 @@
-//! SoftEther VPN - Pure Zig Cryptography Library
+//! SoftEther VPN Cryptography Library
 //!
 //! This module provides cryptographic primitives.
 //! Phase 3 of the C-to-Zig migration.

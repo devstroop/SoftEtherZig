@@ -1,5 +1,5 @@
-// SoftEther VPN Zig Client - macOS utun Virtual Adapter
-// Pure Zig implementation of macOS utun kernel interface for packet forwarding
+// SoftEther VPN Client - macOS utun Virtual Adapter
+// macOS utun kernel interface for packet forwarding
 
 const std = @import("std");
 const builtin = @import("builtin");

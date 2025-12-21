@@ -53,21 +53,6 @@ pub const RoutingConfig = struct {
     ipv6_exclude: ?[]const []const u8 = null,
 };
 
-/// Performance tuning configuration
-pub const PerformanceConfig = struct {
-    /// Receive queue buffer size (number of packet slots)
-    /// Default: 128 (down from 512)
-    /// Range: 32-2048
-    /// Memory per slot: ~2KB, so 128 slots = 256KB
-    recv_buffer_slots: u16 = 128,
-
-    /// Send queue buffer size (number of packet slots)
-    /// Default: 128 (balanced with recv, was 64)
-    /// Range: 16-1024
-    /// Memory per slot: ~2KB, so 128 slots = 256KB
-    send_buffer_slots: u16 = 128,
-};
-
 /// Authentication method
 pub const AuthMethod = union(enum) {
     anonymous,
@@ -97,9 +82,7 @@ pub const ConnectionConfig = struct {
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
-    routing: RoutingConfig = .{}, // Routing configuration
-    use_zig_adapter: bool = true, // Use Zig packet adapter (default, better performance)
-    performance: PerformanceConfig = .{}, // Performance tuning options
+    routing: RoutingConfig = .{},
 
     /// Create a configuration builder
     pub fn builder() ConfigBuilder {
@@ -268,10 +251,6 @@ pub const JsonConfig = struct {
         ipv4_exclude: ?[]const []const u8 = null,
         ipv6_include: ?[]const []const u8 = null,
         ipv6_exclude: ?[]const []const u8 = null,
-    } = null,
-    performance: ?struct {
-        recv_buffer_slots: ?u16 = null,
-        send_buffer_slots: ?u16 = null,
     } = null,
 };
 

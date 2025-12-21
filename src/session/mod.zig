@@ -1,6 +1,6 @@
-//! SoftEther VPN - Pure Zig Session Layer
+//! SoftEther VPN Session Layer
 //!
-//! This module implements VPN session management in pure Zig.
+//! VPN session management implementation.
 //! Phase 5 of the C-to-Zig migration.
 //!
 //! Components:

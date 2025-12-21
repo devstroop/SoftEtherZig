@@ -1,8 +1,8 @@
-//! SoftEther VPN Pure Zig Client Module
+//! SoftEther VPN Client Module
 //!
-//! Phase 7: High-level VPN client API integrating all pure Zig layers.
+//! High-level VPN client API.
 //!
-//! This module provides a complete VPN client implementation in pure Zig
+//! This module provides a complete VPN client implementation
 //! without any C dependencies.
 //!
 //! ## Components

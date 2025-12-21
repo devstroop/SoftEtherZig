@@ -1,6 +1,6 @@
-//! SoftEther VPN Pure Zig Client
+//! SoftEther VPN Client
 //!
-//! Phase 7: High-level VPN client API integrating all pure Zig layers.
+//! High-level VPN client API.
 //! This module provides a complete VPN client implementation without
 //! any C dependencies.
 //!
@@ -950,6 +950,7 @@ pub const VpnClient = struct {
             const ticket = redirect.ticket;
             const redirect_ip = redirect.ip;
             const redirect_port = redirect.port;
+            const original_server_ip = self.server_ip; // Save original for fallback
 
             // CRITICAL: Send empty pack to acknowledge redirect before disconnecting
             // This tells the controller we received the redirect info
@@ -992,40 +993,50 @@ pub const VpnClient = struct {
                 self.tls_socket = null;
             }
 
-            // Update server IP and port for redirect
-            self.server_ip = redirect_ip;
-            // self.server_port = redirect_port; // Keep if config supports it
+            // Try redirect IP first, then fallback to original server IP
+            const ips_to_try = [_]u32{ redirect_ip, original_server_ip };
+            var connected = false;
+            var actual_connect_ip: u32 = redirect_ip;
 
-            // Reconnect to the redirect server
-            std.log.debug("Connecting to redirect server...", .{});
+            for (ips_to_try) |try_ip| {
+                // Format IP as hostname string
+                var try_ip_str: [16]u8 = undefined;
+                const try_hostname = formatIpv4Buf(try_ip, &try_ip_str);
 
-            // Format redirect IP as hostname string
-            var redirect_ip_str: [16]u8 = undefined;
-            const redirect_hostname = formatIpv4Buf(redirect_ip, &redirect_ip_str);
+                if (try_ip == redirect_ip) {
+                    std.log.debug("Connecting to redirect server: {s}:{d}", .{ try_hostname, redirect_port });
+                } else {
+                    std.log.info("Redirect server unreachable, trying original server: {s}:{d}", .{ try_hostname, redirect_port });
+                }
 
-            std.log.debug("Redirect hostname: {s}, port: {d}", .{ redirect_hostname, redirect_port });
+                const redirect_tls_config = tls.TlsConfig{
+                    .verify_certificate = self.config.verify_certificate,
+                    .allow_self_signed = !self.config.verify_certificate,
+                    .timeout_ms = self.config.connect_timeout_ms,
+                };
 
-            // Close existing connection before opening new one
-            if (self.tls_socket) |*old_sock| {
-                old_sock.close();
-                self.tls_socket = null;
+                self.tls_socket = tls.TlsSocket.connect(
+                    self.allocator,
+                    try_hostname,
+                    redirect_port,
+                    redirect_tls_config,
+                ) catch |err| {
+                    std.log.warn("Failed to connect to {s}:{d}: {}", .{ try_hostname, redirect_port, err });
+                    continue;
+                };
+
+                connected = true;
+                actual_connect_ip = try_ip;
+                break;
             }
 
-            const redirect_tls_config = tls.TlsConfig{
-                .verify_certificate = self.config.verify_certificate,
-                .allow_self_signed = !self.config.verify_certificate,
-                .timeout_ms = self.config.connect_timeout_ms,
-            };
-
-            self.tls_socket = tls.TlsSocket.connect(
-                self.allocator,
-                redirect_hostname,
-                redirect_port,
-                redirect_tls_config,
-            ) catch |err| {
-                std.log.err("Failed to connect to redirect server: {}", .{err});
+            if (!connected) {
+                std.log.err("Failed to connect to any redirect server", .{});
                 return ClientError.ConnectionFailed;
-            };
+            }
+
+            // Update server IP to what we actually connected to
+            self.server_ip = actual_connect_ip;
 
             // Get username for ticket auth
             const username = switch (self.config.auth) {
@@ -1055,9 +1066,9 @@ pub const VpnClient = struct {
                 }.read,
             };
 
-            // Format redirect IP for HTTP Host header
+            // Format actual connected IP for HTTP Host header
             var redirect_ip_buf: [16]u8 = undefined;
-            const redirect_host = formatIpv4Buf(redirect_ip, &redirect_ip_buf);
+            const redirect_host = formatIpv4Buf(actual_connect_ip, &redirect_ip_buf);
 
             // Upload signature to redirect server
             softether_proto.uploadSignature(self.allocator, redirect_writer, redirect_host) catch |err| {

@@ -1,6 +1,6 @@
 //! CLI Module
 //!
-//! Phase 8: Pure Zig command-line interface
+//! Command-line interface
 //! Provides argument parsing, configuration management, interactive shell,
 //! and display utilities.
 

@@ -1,6 +1,6 @@
-//! SoftEther VPN - Pure Zig Protocol Implementation
+//! SoftEther VPN Protocol Implementation
 //!
-//! This module implements the SoftEther VPN protocol in pure Zig.
+//! This module implements the SoftEther VPN protocol.
 //! Phase 4 of the C-to-Zig migration.
 //!
 //! Components:

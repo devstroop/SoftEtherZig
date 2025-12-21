@@ -162,13 +162,6 @@ vpnclient --help
 | `--no-compress` | Disable compression | false |
 | `-d, --daemon` | Run as daemon | false |
 
-#### Performance Options
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--use-zig-adapter` | Use Zig packet adapter (default, 10x faster) | **true** |
-| `--use-c-adapter` | Use legacy C adapter (fallback) | false |
-| `--profile` | Enable performance profiling | false |
-
 #### Reconnection Options
 | Option | Description | Default |
 |--------|-------------|---------|
