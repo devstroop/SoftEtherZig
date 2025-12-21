@@ -128,12 +128,13 @@ pub const ClientConfig = struct {
     max_connections: u8 = 1,
     use_compression: bool = false,
     use_encryption: bool = true,
+    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
 
     // TLS settings
     verify_certificate: bool = true,
 
     // Routing
-    full_tunnel: bool = true,
+    default_route: bool = true,
     split_tunnel_networks: ?[]const []const u8 = null,
 
     // Reconnection
@@ -757,7 +758,7 @@ pub const VpnClient = struct {
             }
         }
 
-        if (self.config.full_tunnel and self.gateway_ip != 0) {
+        if (self.config.default_route and self.gateway_ip != 0) {
             // Convert server_ip from little-endian (Pack protocol) to big-endian (network byte order)
             const server_ip_be = @byteSwap(self.server_ip);
             ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
@@ -1006,7 +1007,7 @@ pub const VpnClient = struct {
                                 const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
                                 std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
 
-                                if (self.config.full_tunnel and loop_state.our_gateway != 0) {
+                                if (self.config.default_route and loop_state.our_gateway != 0) {
                                     const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                                     std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
                                     const server_ip_be = @byteSwap(self.server_ip);
@@ -1155,7 +1156,7 @@ pub const ClientConfigBuilder = struct {
     }
 
     pub fn setFullTunnel(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
-        self.config.full_tunnel = enabled;
+        self.config.default_route = enabled;
         return self;
     }
 
@@ -1191,7 +1192,7 @@ test "ClientConfig defaults" {
         .auth = .{ .anonymous = {} },
     };
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
-    try std.testing.expect(config.full_tunnel);
+    try std.testing.expect(config.default_route);
     try std.testing.expect(config.use_encryption);
     try std.testing.expect(config.reconnect.enabled);
 }

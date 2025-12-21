@@ -73,11 +73,11 @@ pub const ConnectionConfig = struct {
     server_name: []const u8,
     server_port: u16,
     hub_name: []const u8,
-    account_name: []const u8,
     auth: AuthMethod,
     use_encrypt: bool = true,
     use_compress: bool = true,
     max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
+    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
@@ -95,11 +95,11 @@ pub const ConfigBuilder = struct {
     server_name: ?[]const u8 = null,
     server_port: u16 = 443,
     hub_name: ?[]const u8 = null,
-    account_name: ?[]const u8 = null,
     auth: ?AuthMethod = null,
     use_encrypt: bool = true,
     use_compress: bool = true,
     max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
+    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
     ip_version: IpVersion = .auto,
@@ -116,12 +116,6 @@ pub const ConfigBuilder = struct {
     /// Set virtual hub name
     pub fn setHub(self: *ConfigBuilder, hub: []const u8) *ConfigBuilder {
         self.hub_name = hub;
-        return self;
-    }
-
-    /// Set account name
-    pub fn setAccount(self: *ConfigBuilder, account: []const u8) *ConfigBuilder {
-        self.account_name = account;
         return self;
     }
 
@@ -149,6 +143,12 @@ pub const ConfigBuilder = struct {
         return self;
     }
 
+    /// Set MTU (Maximum Transmission Unit)
+    pub fn setMtu(self: *ConfigBuilder, mtu: u16) *ConfigBuilder {
+        self.mtu = mtu;
+        return self;
+    }
+
     /// Set IP version preference
     pub fn setIpVersion(self: *ConfigBuilder, version: IpVersion) *ConfigBuilder {
         self.ip_version = version;
@@ -165,18 +165,17 @@ pub const ConfigBuilder = struct {
     pub fn build(self: ConfigBuilder) !ConnectionConfig {
         const server_name = self.server_name orelse return VpnError.MissingParameter;
         const hub_name = self.hub_name orelse return VpnError.MissingParameter;
-        const account_name = self.account_name orelse return VpnError.MissingParameter;
         const auth = self.auth orelse return VpnError.MissingParameter;
 
         return ConnectionConfig{
             .server_name = server_name,
             .server_port = self.server_port,
             .hub_name = hub_name,
-            .account_name = account_name,
             .auth = auth,
             .use_encrypt = self.use_encrypt,
             .use_compress = self.use_compress,
             .max_connection = self.max_connection,
+            .mtu = self.mtu,
             .half_connection = self.half_connection,
             .additional_connection_interval = self.additional_connection_interval,
             .ip_version = self.ip_version,
@@ -190,7 +189,6 @@ test "config builder validation" {
     // Missing server should fail
     var builder1 = ConnectionConfig.builder();
     _ = builder1.setHub("HUB")
-        .setAccount("test")
         .setAuth(.anonymous);
     const result1 = builder1.build();
     try std.testing.expectError(VpnError.MissingParameter, result1);
@@ -199,7 +197,6 @@ test "config builder validation" {
     var builder2 = ConnectionConfig.builder();
     _ = builder2.setServer("vpn.example.com", 443)
         .setHub("HUB")
-        .setAccount("test")
         .setAuth(.anonymous);
     const result2 = builder2.build();
     try std.testing.expect(result2 != VpnError.MissingParameter);
@@ -210,7 +207,6 @@ test "config builder chaining" {
     _ = builder
         .setServer("test.vpn.com", 8443)
         .setHub("TEST_HUB")
-        .setAccount("user1")
         .setEncrypt(false)
         .setCompress(false);
 
@@ -224,13 +220,13 @@ pub const JsonConfig = struct {
     server: ?[]const u8 = null,
     port: ?u16 = null,
     hub: ?[]const u8 = null,
-    account: ?[]const u8 = null,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     password_hash: ?[]const u8 = null,
     use_encrypt: ?bool = null,
     use_compress: ?bool = null,
     max_connection: ?u32 = null,
+    mtu: ?u16 = null,
     ip_version: ?[]const u8 = null,
     static_ipv4: ?[]const u8 = null,
     static_ipv4_netmask: ?[]const u8 = null,
@@ -241,8 +237,6 @@ pub const JsonConfig = struct {
     dns_servers: ?[]const []const u8 = null,
     reconnect: ?bool = null,
     max_reconnect_attempts: ?u32 = null,
-    min_backoff: ?u32 = null,
-    max_backoff: ?u32 = null,
     routing: ?struct {
         default_route: ?bool = null,
         accept_pushed_routes: ?bool = null,
@@ -350,16 +344,8 @@ pub fn mergeConfigs(
         builder.hub_name = hub;
     }
 
-    const account = pickOpt([]const u8, cli_config.account, env_config.account, file_config.account, null);
-    const username = pickOpt([]const u8, cli_config.username, env_config.username, file_config.username, null);
-
-    if (account) |acc| {
-        builder.account_name = acc;
-    } else if (username) |user| {
-        builder.account_name = user; // Default account name to username
-    }
-
     // Authentication (password_hash takes precedence over password)
+    const username = pickOpt([]const u8, cli_config.username, env_config.username, file_config.username, null);
     if (username) |user| {
         const password_hash = pickOpt([]const u8, cli_config.password_hash, env_config.password_hash, file_config.password_hash, null);
         const password = pickOpt([]const u8, cli_config.password, env_config.password, file_config.password, null);

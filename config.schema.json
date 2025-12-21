@@ -19,11 +19,7 @@
     "hub": {
       "type": "string",
       "description": "Virtual hub name",
-      "examples": ["VPN", "OFFICE", "PRODUCTION"]
-    },
-    "account": {
-      "type": "string",
-      "description": "Account name (defaults to username if not specified)"
+      "examples": ["VPN", "VPNGATE"]
     },
     "username": {
       "type": "string",
@@ -53,6 +49,14 @@
       "minimum": 0,
       "maximum": 32,
       "default": 0
+    },
+    "mtu": {
+      "type": ["integer", "null"],
+      "description": "Maximum Transmission Unit size in bytes. Default is 1486 (1500 minus 14-byte Ethernet frame header)",
+      "minimum": 576,
+      "maximum": 9000,
+      "default": 1486,
+      "examples": [1486, 1400, 1280]
     },
     "ip_version": {
       "type": "string",
@@ -116,18 +120,6 @@
       "description": "Maximum reconnection attempts (0=infinite)",
       "minimum": 0,
       "default": 0
-    },
-    "min_backoff": {
-      "type": "integer",
-      "description": "Minimum backoff delay in seconds",
-      "minimum": 1,
-      "default": 5
-    },
-    "max_backoff": {
-      "type": "integer",
-      "description": "Maximum backoff delay in seconds",
-      "minimum": 1,
-      "default": 300
     },
     "routing": {
       "type": "object",
