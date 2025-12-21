@@ -8,6 +8,9 @@
 //! ## Components
 //!
 //! - `vpn_client`: Main VPN client facade and configuration
+//! - `state`: Connection state machine
+//! - `stats`: Connection statistics and disconnect reasons
+//! - `events`: Event types and callbacks
 //! - `connection`: TCP/TLS connection management
 //! - `packet_processor`: Packet classification and processing
 //!
@@ -44,25 +47,33 @@ const std = @import("std");
 pub const vpn_client = @import("vpn_client.zig");
 pub const connection = @import("connection.zig");
 pub const packet_processor = @import("packet_processor.zig");
+pub const state = @import("state.zig");
+pub const stats = @import("stats.zig");
+pub const events = @import("events.zig");
 
 // Main client types
 pub const VpnClient = vpn_client.VpnClient;
 pub const ClientConfig = vpn_client.ClientConfig;
 pub const ClientConfigBuilder = vpn_client.ClientConfigBuilder;
-pub const ClientState = vpn_client.ClientState;
-pub const ClientError = vpn_client.ClientError;
-pub const ClientEvent = vpn_client.ClientEvent;
-pub const EventCallback = vpn_client.EventCallback;
+
+// State machine (from state.zig)
+pub const ClientState = state.ClientState;
+
+// Statistics (from stats.zig)
+pub const ConnectionStats = stats.ConnectionStats;
+pub const DisconnectReason = stats.DisconnectReason;
+
+// Events (from events.zig)
+pub const ClientEvent = events.ClientEvent;
+pub const ClientError = events.ClientError;
+pub const EventCallback = events.EventCallback;
+pub const EventDispatcher = events.EventDispatcher;
 
 // Configuration types
 pub const AuthMethod = vpn_client.AuthMethod;
 pub const IpVersionPreference = vpn_client.IpVersionPreference;
 pub const ReconnectConfig = vpn_client.ReconnectConfig;
 pub const StaticIpConfig = vpn_client.StaticIpConfig;
-
-// Statistics
-pub const ConnectionStats = vpn_client.ConnectionStats;
-pub const DisconnectReason = vpn_client.DisconnectReason;
 
 // Connection types
 pub const TcpConnection = connection.TcpConnection;

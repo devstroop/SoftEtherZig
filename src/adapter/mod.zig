@@ -7,6 +7,10 @@ const std = @import("std");
 pub const utun = @import("utun.zig");
 pub const route = @import("route.zig");
 pub const dhcp = @import("dhcp.zig");
+pub const wrapper = @import("wrapper.zig");
+
+// Wrapper
+pub const AdapterWrapper = wrapper.AdapterWrapper;
 
 // Main types
 pub const UtunDevice = utun.UtunDevice;
