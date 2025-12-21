@@ -1,7 +1,3 @@
-[submodule "SoftEtherVPN"]
-	path = SoftEtherVPN
-	url = https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git
-	branch = master
 [submodule "TapTun"]
 	path = TapTun
 	url = https://github.com/SoftEtherUnofficial/ZigTapTun.git
