@@ -7,23 +7,6 @@ const VpnError = errors.VpnError;
 pub const DEFAULT_CONFIG_DIR = "~/.config/softether-zig";
 pub const DEFAULT_CONFIG_FILE = "config.json";
 
-/// IP version selection
-pub const IpVersion = enum {
-    auto, // Auto-detect (prefer IPv4, fallback to IPv6)
-    ipv4, // Force IPv4 only
-    ipv6, // Force IPv6 only
-    dual, // Dual-stack (both IPv4 and IPv6)
-
-    /// Parse IpVersion from string
-    pub fn fromString(s: []const u8) !IpVersion {
-        if (std.mem.eql(u8, s, "auto")) return .auto;
-        if (std.mem.eql(u8, s, "ipv4")) return .ipv4;
-        if (std.mem.eql(u8, s, "ipv6")) return .ipv6;
-        if (std.mem.eql(u8, s, "dual")) return .dual;
-        return error.InvalidIpVersion;
-    }
-};
-
 /// Static IP configuration
 pub const StaticIpConfig = struct {
     ipv4_address: ?[]const u8 = null, // e.g., "192.168.1.10"
@@ -76,11 +59,11 @@ pub const ConnectionConfig = struct {
     auth: AuthMethod,
     use_encrypt: bool = true,
     use_compress: bool = true,
-    max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
+    udp_accel: bool = false,
+    max_connection: u32 = 1, // Number of parallel TCP connections (1-32)
     mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
-    ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
     routing: RoutingConfig = .{},
 
@@ -98,11 +81,11 @@ pub const ConfigBuilder = struct {
     auth: ?AuthMethod = null,
     use_encrypt: bool = true,
     use_compress: bool = true,
-    max_connection: u32 = 0, // 0 = follow server policy, 1-32 = force specific count
+    udp_accel: bool = false,
+    max_connection: u32 = 1, // Number of parallel TCP connections (1-32)
     mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
-    ip_version: IpVersion = .auto,
     static_ip: ?StaticIpConfig = null,
     routing: RoutingConfig = .{}, // Routing configuration
 
@@ -149,12 +132,6 @@ pub const ConfigBuilder = struct {
         return self;
     }
 
-    /// Set IP version preference
-    pub fn setIpVersion(self: *ConfigBuilder, version: IpVersion) *ConfigBuilder {
-        self.ip_version = version;
-        return self;
-    }
-
     /// Set static IP configuration
     pub fn setStaticIp(self: *ConfigBuilder, static_config: StaticIpConfig) *ConfigBuilder {
         self.static_ip = static_config;
@@ -174,11 +151,11 @@ pub const ConfigBuilder = struct {
             .auth = auth,
             .use_encrypt = self.use_encrypt,
             .use_compress = self.use_compress,
+            .udp_accel = self.udp_accel,
             .max_connection = self.max_connection,
             .mtu = self.mtu,
             .half_connection = self.half_connection,
             .additional_connection_interval = self.additional_connection_interval,
-            .ip_version = self.ip_version,
             .static_ip = self.static_ip,
             .routing = self.routing,
         };
@@ -225,9 +202,9 @@ pub const JsonConfig = struct {
     password_hash: ?[]const u8 = null,
     use_encrypt: ?bool = null,
     use_compress: ?bool = null,
+    udp_accel: ?bool = null,
     max_connection: ?u32 = null,
     mtu: ?u16 = null,
-    ip_version: ?[]const u8 = null,
     static_ipv4: ?[]const u8 = null,
     static_ipv4_netmask: ?[]const u8 = null,
     static_ipv4_gateway: ?[]const u8 = null,
@@ -368,12 +345,8 @@ pub fn mergeConfigs(
     // Connection settings
     builder.use_encrypt = pickVal(bool, cli_config.use_encrypt, env_config.use_encrypt, file_config.use_encrypt, true);
     builder.use_compress = pickVal(bool, cli_config.use_compress, env_config.use_compress, file_config.use_compress, true);
+    builder.udp_accel = pickVal(bool, cli_config.udp_accel, env_config.udp_accel, file_config.udp_accel, false);
     builder.max_connection = pickVal(u32, cli_config.max_connection, env_config.max_connection, file_config.max_connection, 0);
-
-    // IP version
-    if (pickOpt([]const u8, cli_config.ip_version, env_config.ip_version, file_config.ip_version, null)) |ip_ver| {
-        builder.ip_version = IpVersion.fromString(ip_ver) catch .auto;
-    }
 
     // Static IP configuration
     const has_static_ip = file_config.static_ipv4 != null or file_config.static_ipv6 != null or

@@ -63,9 +63,6 @@ pub const EventCallback = @import("client/mod.zig").EventCallback;
 /// Authentication methods
 pub const AuthMethod = @import("client/mod.zig").AuthMethod;
 
-/// IP version preference (IPv4, IPv6, dual-stack)
-pub const IpVersionPreference = @import("client/mod.zig").IpVersionPreference;
-
 /// Reconnection behavior configuration
 pub const ReconnectConfig = @import("client/mod.zig").ReconnectConfig;
 
@@ -110,7 +107,6 @@ test "library exports" {
     _ = DisconnectReason;
     _ = EventCallback;
     _ = AuthMethod;
-    _ = IpVersionPreference;
     _ = ReconnectConfig;
     _ = core;
     _ = parseIpv4;

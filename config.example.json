@@ -5,39 +5,52 @@
   "server": "vpn.example.com",
   "port": 443,
   "hub": "VPN",
-  "account": "myaccount",
   "username": "myuser",
   "password_hash": "base64-hashed-password-here",
   
-  "use_encrypt": true,
+  "skip_tls_verify": false,
   "use_compress": true,
-  "max_connection": 0,
+  "udp_accel": false,
+  "max_connection": 1,
+  "mtu": 1486,
   
-  "ip_version": "auto",
+  "static_ip": {
+    "ipv4_address": null,
+    "ipv4_netmask": null,
+    "ipv4_gateway": null,
+    "ipv6_address": null,
+    "ipv6_prefix": null,
+    "ipv6_gateway": null,
+    "dns_servers": ["8.8.8.8", "8.8.4.4"]
+  },
   
-  "static_ipv4": null,
-  "static_ipv4_netmask": null,
-  "static_ipv4_gateway": null,
+  "routing": {
+    "default_route": true,
+    "accept_pushed_routes": true,
+    "enable_custom_routes": false,
+    "ipv4_include": null,
+    "ipv4_exclude": null,
+    "ipv6_include": null,
+    "ipv6_exclude": null
+  },
   
-  "static_ipv6": null,
-  "static_ipv6_prefix": null,
-  "static_ipv6_gateway": null,
+  "reconnect": {
+    "enabled": true,
+    "max_attempts": 0
+  },
   
-  "dns_servers": ["8.8.8.8", "8.8.4.4"],
-  
-  "reconnect": true,
-  "max_reconnect_attempts": 0,
-  "min_backoff": 5,
-  "max_backoff": 300,
+  "log_level": "info",
   
   "notes": [
     "Generate password hash with: ./zig-out/bin/vpnclient --gen-hash username password",
     "Command-line arguments override environment variables",
     "Environment variables override this config file",
     "Set password_hash to null to use password (not recommended)",
-    "ip_version can be: auto, ipv4, ipv6, dual",
-    "max_connection: 0 = server policy, 1-32 = force specific count",
-    "max_reconnect_attempts: 0 = infinite retries",
+    "skip_tls_verify: true = skip certificate verification (INSECURE)",
+    "max_connection: number of parallel TCP connections (1-32)",
+    "mtu: default 1486 (1500 - 14 byte Ethernet header)",
+    "reconnect.max_attempts: 0 = infinite retries",
+    "routing.default_route: true = all traffic through VPN",
     "All fields are optional - CLI args and env vars will be used as fallback"
   ]
 }

@@ -71,9 +71,9 @@ pub const EventDispatcher = events.EventDispatcher;
 
 // Configuration types
 pub const AuthMethod = vpn_client.AuthMethod;
-pub const IpVersionPreference = vpn_client.IpVersionPreference;
 pub const ReconnectConfig = vpn_client.ReconnectConfig;
 pub const StaticIpConfig = vpn_client.StaticIpConfig;
+pub const RoutingConfig = vpn_client.RoutingConfig;
 
 // Connection types
 pub const TcpConnection = connection.TcpConnection;

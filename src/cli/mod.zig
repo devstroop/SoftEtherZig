@@ -14,7 +14,6 @@ pub const shell = @import("shell.zig");
 // Re-export main types
 pub const ArgParser = args.ArgParser;
 pub const CliArgs = args.CliArgs;
-pub const IpVersion = args.IpVersion;
 pub const LogLevel = args.LogLevel;
 pub const ParseError = args.ParseError;
 

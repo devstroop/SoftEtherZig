@@ -16,10 +16,32 @@
       "maximum": 65535,
       "default": 443
     },
+    "skip_tls_verify": {
+      "type": "boolean",
+      "description": "Skip TLS certificate verification (INSECURE - use only for self-signed certs)",
+      "default": false
+    },
     "hub": {
       "type": "string",
       "description": "Virtual hub name",
       "examples": ["VPN", "VPNGATE"]
+    },
+    "max_connection": {
+      "type": "integer",
+      "description": "Number of parallel TCP connections for the VPN tunnel (1-32)",
+      "minimum": 1,
+      "maximum": 32,
+      "default": 1
+    },
+    "use_compress": {
+      "type": "boolean",
+      "description": "Enable data compression",
+      "default": true
+    },
+    "udp_accel": {
+      "type": "boolean",
+      "description": "Enable UDP acceleration (may improve performance on high-latency links)",
+      "default": false
     },
     "username": {
       "type": "string",
@@ -33,93 +55,84 @@
       "type": "string",
       "description": "Pre-hashed password (base64-encoded SHA1). Generate with: vpnclient --gen-hash username password"
     },
-    "use_encrypt": {
-      "type": "boolean",
-      "description": "Enable SSL/TLS encryption",
-      "default": true
-    },
-    "use_compress": {
-      "type": "boolean",
-      "description": "Enable data compression",
-      "default": true
-    },
-    "max_connection": {
-      "type": "integer",
-      "description": "Maximum number of connections (0=server policy, 1-32=force specific count)",
-      "minimum": 0,
-      "maximum": 32,
-      "default": 0
-    },
     "mtu": {
       "type": ["integer", "null"],
-      "description": "Maximum Transmission Unit size in bytes. Default is 1486 (1500 minus 14-byte Ethernet frame header)",
+      "description": "Maximum Transmission Unit size in bytes. Default is 1486 (1500 minus 14-byte L2 frame header). Suggested to keep lower than uplink MTU.",
       "minimum": 576,
       "maximum": 9000,
       "default": 1486,
       "examples": [1486, 1400, 1280]
     },
-    "ip_version": {
-      "type": "string",
-      "description": "IP version preference",
-      "enum": ["auto", "ipv4", "ipv6", "dual"],
-      "default": "auto"
-    },
-    "static_ipv4": {
-      "type": ["string", "null"],
-      "description": "Static IPv4 address",
-      "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
-      "examples": ["10.0.0.2", "192.168.1.10"]
-    },
-    "static_ipv4_netmask": {
-      "type": ["string", "null"],
-      "description": "Static IPv4 netmask",
-      "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
-      "examples": ["255.255.255.0", "255.255.0.0"]
-    },
-    "static_ipv4_gateway": {
-      "type": ["string", "null"],
-      "description": "Static IPv4 gateway",
-      "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
-      "examples": ["10.0.0.1", "192.168.1.1"]
-    },
-    "static_ipv6": {
-      "type": ["string", "null"],
-      "description": "Static IPv6 address",
-      "examples": ["2001:db8::1", "fe80::1"]
-    },
-    "static_ipv6_prefix": {
-      "type": ["integer", "null"],
-      "description": "Static IPv6 prefix length",
-      "minimum": 1,
-      "maximum": 128,
-      "examples": [64, 48]
-    },
-    "static_ipv6_gateway": {
-      "type": ["string", "null"],
-      "description": "Static IPv6 gateway",
-      "examples": ["2001:db8::1", "fe80::1"]
-    },
-    "dns_servers": {
-      "type": ["array", "null"],
-      "description": "DNS server addresses",
-      "items": {
-        "type": "string"
+    "static_ip": {
+      "type": "object",
+      "description": "Static IP configuration (bypass DHCP)",
+      "properties": {
+        "ipv4_address": {
+          "type": ["string", "null"],
+          "description": "Static IPv4 address",
+          "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
+          "examples": ["10.0.0.2", "192.168.1.10"]
+        },
+        "ipv4_netmask": {
+          "type": ["string", "null"],
+          "description": "Static IPv4 netmask",
+          "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
+          "examples": ["255.255.255.0", "255.255.0.0"]
+        },
+        "ipv4_gateway": {
+          "type": ["string", "null"],
+          "description": "Static IPv4 gateway",
+          "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$",
+          "examples": ["10.0.0.1", "192.168.1.1"]
+        },
+        "ipv6_address": {
+          "type": ["string", "null"],
+          "description": "Static IPv6 address",
+          "examples": ["2001:db8::1", "fe80::1"]
+        },
+        "ipv6_prefix": {
+          "type": ["integer", "null"],
+          "description": "Static IPv6 prefix length",
+          "minimum": 1,
+          "maximum": 128,
+          "examples": [64, 48]
+        },
+        "ipv6_gateway": {
+          "type": ["string", "null"],
+          "description": "Static IPv6 gateway",
+          "examples": ["2001:db8::1", "fe80::1"]
+        },
+        "dns_servers": {
+          "type": ["array", "null"],
+          "description": "DNS server addresses",
+          "items": {
+            "type": "string"
+          },
+          "examples": [
+            ["8.8.8.8", "8.8.4.4"],
+            ["2001:4860:4860::8888", "2001:4860:4860::8844"]
+          ]
+        }
       },
-      "examples": [
-        ["8.8.8.8", "8.8.4.4"],
-        ["2001:4860:4860::8888", "2001:4860:4860::8844"]
-      ]
+      "additionalProperties": false
     },
     "reconnect": {
-      "type": "boolean",
-      "description": "Enable automatic reconnection",
-      "default": true
-    },
-    "max_reconnect_attempts": {
-      "type": "integer",
-      "description": "Maximum reconnection attempts (0=infinite)",
-      "minimum": 0,
-      "default": 0
+      "type": "object",
+      "description": "Reconnection configuration",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable automatic reconnection",
+          "default": true
+        },
+        "max_attempts": {
+          "type": "integer",
+          "description": "Maximum reconnection attempts (0=infinite)",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "additionalProperties": false
     },
     "routing": {
       "type": "object",
@@ -187,20 +200,22 @@
       "hub": "VPN",
       "username": "myuser",
       "password_hash": "base64-hashed-password-here",
-      "use_encrypt": true,
-      "use_compress": true,
-      "ip_version": "auto"
+      "use_compress": true
     },
     {
       "server": "vpn.example.com",
       "hub": "VPN",
       "username": "myuser",
       "password_hash": "hash",
-      "ip_version": "dual",
-      "static_ipv4": "10.0.0.50",
-      "static_ipv4_netmask": "255.255.255.0",
-      "static_ipv4_gateway": "10.0.0.1",
-      "dns_servers": ["8.8.8.8", "8.8.4.4"]
+      "static_ip": {
+        "ipv4_address": "10.0.0.50",
+        "ipv4_netmask": "255.255.255.0",
+        "ipv4_gateway": "10.0.0.1",
+        "dns_servers": ["8.8.8.8", "8.8.4.4"]
+      },
+      "routing": {
+        "default_route": true
+      }
     }
   ]
 }

@@ -30,8 +30,9 @@ pub const CliArgs = struct {
     password_hash: ?[]const u8 = null,
 
     // Connection options
-    use_encrypt: bool = true,
+    skip_tls_verify: bool = false,
     use_compress: bool = true,
+    udp_accel: bool = false,
     max_connection: u8 = 1,
     mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
 
@@ -40,7 +41,6 @@ pub const CliArgs = struct {
     max_retries: u32 = 0,
 
     // IP configuration
-    ip_version: IpVersion = .auto,
     static_ipv4: ?[]const u8 = null,
     static_ipv4_netmask: ?[]const u8 = null,
     static_ipv4_gateway: ?[]const u8 = null,
@@ -48,6 +48,15 @@ pub const CliArgs = struct {
     static_ipv6_prefix: ?u8 = null,
     static_ipv6_gateway: ?[]const u8 = null,
     dns_servers: []const []const u8 = &.{},
+
+    // Routing
+    default_route: bool = true,
+    accept_pushed_routes: bool = true,
+    enable_custom_routes: bool = false,
+    ipv4_include: ?[]const []const u8 = null,
+    ipv4_exclude: ?[]const []const u8 = null,
+    ipv6_include: ?[]const []const u8 = null,
+    ipv6_exclude: ?[]const []const u8 = null,
 
     // Runtime options
     daemon: bool = false,
@@ -68,21 +77,6 @@ pub const CliArgs = struct {
                 alloc.free(self.dns_servers);
             }
         }
-    }
-};
-
-pub const IpVersion = enum {
-    auto,
-    ipv4,
-    ipv6,
-    dual,
-
-    pub fn fromString(s: []const u8) ?IpVersion {
-        if (std.mem.eql(u8, s, "auto")) return .auto;
-        if (std.mem.eql(u8, s, "ipv4")) return .ipv4;
-        if (std.mem.eql(u8, s, "ipv6")) return .ipv6;
-        if (std.mem.eql(u8, s, "dual")) return .dual;
-        return null;
     }
 };
 
@@ -181,10 +175,12 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--password-hash")) {
                 i += 1;
                 self.args.password_hash = try self.requireValue(argv, i, "--password-hash");
-            } else if (std.mem.eql(u8, arg, "--no-encrypt")) {
-                self.args.use_encrypt = false;
+            } else if (std.mem.eql(u8, arg, "--skip-tls-verify") or std.mem.eql(u8, arg, "-k")) {
+                self.args.skip_tls_verify = true;
             } else if (std.mem.eql(u8, arg, "--no-compress")) {
                 self.args.use_compress = false;
+            } else if (std.mem.eql(u8, arg, "--udp-accel")) {
+                self.args.udp_accel = true;
             } else if (std.mem.eql(u8, arg, "--mtu")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--mtu");
@@ -197,10 +193,6 @@ pub const ArgParser = struct {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--max-retries");
                 self.args.max_retries = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
-            } else if (std.mem.eql(u8, arg, "--ip-version")) {
-                i += 1;
-                const val = try self.requireValue(argv, i, "--ip-version");
-                self.args.ip_version = IpVersion.fromString(val) orelse return ParseError.InvalidValue;
             } else if (std.mem.eql(u8, arg, "--static-ipv4")) {
                 i += 1;
                 self.args.static_ipv4 = try self.requireValue(argv, i, "--static-ipv4");
@@ -379,16 +371,6 @@ test "ArgParser reconnect options" {
     try std.testing.expect(!args.reconnect);
 }
 
-test "ArgParser ip version" {
-    var parser = ArgParser.init(std.testing.allocator);
-    defer parser.deinit();
-
-    const argv = [_][]const u8{ "vpnclient", "--ip-version", "ipv4" };
-    const args = try parser.parse(&argv);
-
-    try std.testing.expectEqual(IpVersion.ipv4, args.ip_version);
-}
-
 test "ArgParser dns servers" {
     var parser = ArgParser.init(std.testing.allocator);
     defer parser.deinit();
@@ -418,12 +400,6 @@ test "ArgParser missing value" {
     const result = parser.parse(&argv);
 
     try std.testing.expectError(ParseError.MissingValue, result);
-}
-
-test "IpVersion fromString" {
-    try std.testing.expectEqual(IpVersion.auto, IpVersion.fromString("auto").?);
-    try std.testing.expectEqual(IpVersion.ipv4, IpVersion.fromString("ipv4").?);
-    try std.testing.expect(IpVersion.fromString("invalid") == null);
 }
 
 test "LogLevel fromString" {
