@@ -431,7 +431,7 @@ pub const SessionPolicy = struct {
     /// Monitoring mode
     monitor_port: bool = false,
     /// Number of TCP connections
-    max_connection: u32 = 32,
+    max_connections: u32 = 32,
     /// Timeout (seconds)
     timeout: u32 = 20,
     /// Auto disconnect (seconds, 0 = disabled)

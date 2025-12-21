@@ -240,7 +240,7 @@ pub const Connection = struct {
     half_connection: bool,
 
     /// Maximum number of TCP connections
-    max_connection: u32,
+    max_connections: u32,
 
     /// Current number of TCP connections
     num_connections: u32,
@@ -289,7 +289,7 @@ pub const Connection = struct {
             .use_encrypt = true,
             .use_compress = false,
             .half_connection = false,
-            .max_connection = 1,
+            .max_connections = 1,
             .num_connections = 0,
             .tcp_sockets = [_]?TcpSocketInfo{null} ** Config.max_connections,
             .send_blocks = BlockQueue.init(allocator),
@@ -351,7 +351,7 @@ pub const Connection = struct {
 
     /// Add a TCP socket to the connection
     pub fn addSocket(self: *Connection, direction: TcpDirection) ?u32 {
-        if (self.num_connections >= self.max_connection) {
+        if (self.num_connections >= self.max_connections) {
             return null;
         }
 
@@ -515,7 +515,7 @@ test "Connection socket management" {
     var conn = Connection.init(testing.allocator, true);
     defer conn.deinit();
 
-    conn.max_connection = 4;
+    conn.max_connections = 4;
 
     // Add sockets
     const id1 = conn.addSocket(.both).?;

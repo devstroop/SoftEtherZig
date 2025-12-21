@@ -60,7 +60,7 @@ pub const ConnectionConfig = struct {
     use_encrypt: bool = true,
     use_compress: bool = true,
     udp_accel: bool = false,
-    max_connection: u32 = 1, // Number of parallel TCP connections (1-32)
+    max_connections: u32 = 1, // Number of parallel TCP connections (1-32)
     mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
@@ -82,7 +82,7 @@ pub const ConfigBuilder = struct {
     use_encrypt: bool = true,
     use_compress: bool = true,
     udp_accel: bool = false,
-    max_connection: u32 = 1, // Number of parallel TCP connections (1-32)
+    max_connections: u32 = 1, // Number of parallel TCP connections (1-32)
     mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
     half_connection: bool = false,
     additional_connection_interval: u32 = 1,
@@ -121,8 +121,8 @@ pub const ConfigBuilder = struct {
     }
 
     /// Set maximum number of connections
-    pub fn setMaxConnection(self: *ConfigBuilder, max: u32) *ConfigBuilder {
-        self.max_connection = max;
+    pub fn setMaxConnections(self: *ConfigBuilder, max: u32) *ConfigBuilder {
+        self.max_connections = max;
         return self;
     }
 
@@ -152,7 +152,7 @@ pub const ConfigBuilder = struct {
             .use_encrypt = self.use_encrypt,
             .use_compress = self.use_compress,
             .udp_accel = self.udp_accel,
-            .max_connection = self.max_connection,
+            .max_connections = self.max_connections,
             .mtu = self.mtu,
             .half_connection = self.half_connection,
             .additional_connection_interval = self.additional_connection_interval,
@@ -203,7 +203,7 @@ pub const JsonConfig = struct {
     use_encrypt: ?bool = null,
     use_compress: ?bool = null,
     udp_accel: ?bool = null,
-    max_connection: ?u32 = null,
+    max_connections: ?u32 = null,
     mtu: ?u16 = null,
     static_ipv4: ?[]const u8 = null,
     static_ipv4_netmask: ?[]const u8 = null,
@@ -346,7 +346,7 @@ pub fn mergeConfigs(
     builder.use_encrypt = pickVal(bool, cli_config.use_encrypt, env_config.use_encrypt, file_config.use_encrypt, true);
     builder.use_compress = pickVal(bool, cli_config.use_compress, env_config.use_compress, file_config.use_compress, true);
     builder.udp_accel = pickVal(bool, cli_config.udp_accel, env_config.udp_accel, file_config.udp_accel, false);
-    builder.max_connection = pickVal(u32, cli_config.max_connection, env_config.max_connection, file_config.max_connection, 0);
+    builder.max_connections = pickVal(u32, cli_config.max_connections, env_config.max_connections, file_config.max_connections, 0);
 
     // Static IP configuration
     const has_static_ip = file_config.static_ipv4 != null or file_config.static_ipv6 != null or

@@ -11,7 +11,7 @@
   "skip_tls_verify": false,
   "use_compress": true,
   "udp_accel": false,
-  "max_connection": 1,
+  "max_connections": 1,
   "mtu": 1486,
   
   "static_ip": {
