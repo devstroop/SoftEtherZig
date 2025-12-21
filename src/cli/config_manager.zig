@@ -21,12 +21,12 @@ pub const ConfigFile = struct {
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     password_hash: ?[]const u8 = null,
-    account: ?[]const u8 = null,
 
     // Connection options
     use_encrypt: ?bool = null,
     use_compress: ?bool = null,
     max_connection: ?u8 = null,
+    mtu: ?u16 = null, // Parsed from JSON, defaults applied later
 
     // Reconnection
     reconnect: ?ReconnectConfig = null,
@@ -42,8 +42,6 @@ pub const ConfigFile = struct {
 pub const ReconnectConfig = struct {
     enabled: ?bool = null,
     max_attempts: ?u32 = null,
-    min_backoff_sec: ?u32 = null,
-    max_backoff_sec: ?u32 = null,
 };
 
 pub const StaticIpConfig = struct {
@@ -157,7 +155,6 @@ pub const ConfigManager = struct {
         if (cli_args.username == null) cli_args.username = self.config.username;
         if (cli_args.password == null) cli_args.password = self.config.password;
         if (cli_args.password_hash == null) cli_args.password_hash = self.config.password_hash;
-        if (cli_args.account == null) cli_args.account = self.config.account;
 
         // Connection options
         if (self.config.use_encrypt) |enc| {
@@ -167,13 +164,12 @@ pub const ConfigManager = struct {
             if (cli_args.use_compress) cli_args.use_compress = comp;
         }
         if (self.config.max_connection) |max| cli_args.max_connection = max;
+        if (self.config.mtu) |m| cli_args.mtu = m;
 
         // Reconnection
         if (self.config.reconnect) |rc| {
             if (rc.enabled) |en| cli_args.reconnect = en;
             if (rc.max_attempts) |ma| cli_args.max_retries = ma;
-            if (rc.min_backoff_sec) |min| cli_args.min_backoff_sec = min;
-            if (rc.max_backoff_sec) |max| cli_args.max_backoff_sec = max;
         }
 
         // IP version
@@ -220,16 +216,14 @@ pub const ConfigManager = struct {
         cfg.username = cli_args.username;
         cfg.password = cli_args.password;
         cfg.password_hash = cli_args.password_hash;
-        cfg.account = cli_args.account;
         cfg.use_encrypt = cli_args.use_encrypt;
         cfg.use_compress = cli_args.use_compress;
         cfg.max_connection = cli_args.max_connection;
+        cfg.mtu = cli_args.mtu;
 
         cfg.reconnect = .{
             .enabled = cli_args.reconnect,
             .max_attempts = cli_args.max_retries,
-            .min_backoff_sec = cli_args.min_backoff_sec,
-            .max_backoff_sec = cli_args.max_backoff_sec,
         };
 
         if (cli_args.static_ipv4 != null or cli_args.static_ipv6 != null) {
@@ -271,20 +265,6 @@ pub fn validateConfig(cfg: *const ConfigFile, allocator: Allocator) ![]Validatio
     if (cfg.max_connection) |mc| {
         if (mc > 32) {
             try errors.append(allocator, .{ .field = "max_connection", .message = "Max connection must be <= 32" });
-        }
-    }
-
-    // Reconnect validation
-    if (cfg.reconnect) |rc| {
-        if (rc.min_backoff_sec) |min| {
-            if (rc.max_backoff_sec) |max| {
-                if (min > max) {
-                    try errors.append(allocator, .{
-                        .field = "reconnect.min_backoff_sec",
-                        .message = "min_backoff_sec must be <= max_backoff_sec",
-                    });
-                }
-            }
         }
     }
 
@@ -345,8 +325,7 @@ test "ConfigManager loadFromString with reconnect" {
         \\  "server": "test.com",
         \\  "reconnect": {
         \\    "enabled": true,
-        \\    "max_attempts": 5,
-        \\    "min_backoff_sec": 10
+        \\    "max_attempts": 5
         \\  }
         \\}
     ;
@@ -430,20 +409,6 @@ test "validateConfig invalid port" {
 test "validateConfig invalid max_connection" {
     const cfg = ConfigFile{
         .max_connection = 100,
-    };
-
-    const errors = try validateConfig(&cfg, std.testing.allocator);
-    defer std.testing.allocator.free(errors);
-
-    try std.testing.expect(errors.len > 0);
-}
-
-test "validateConfig invalid backoff" {
-    const cfg = ConfigFile{
-        .reconnect = .{
-            .min_backoff_sec = 100,
-            .max_backoff_sec = 10,
-        },
     };
 
     const errors = try validateConfig(&cfg, std.testing.allocator);

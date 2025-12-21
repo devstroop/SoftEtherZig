@@ -52,9 +52,7 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
     const reconnect = client.ReconnectConfig{
         .enabled = args.reconnect,
         .max_attempts = args.max_retries,
-        .min_backoff_ms = args.min_backoff_sec * 1000,
-        .max_backoff_ms = args.max_backoff_sec * 1000,
-        .backoff_multiplier = 2.0,
+        // Backoff timing is internal - 1s min, 60s max, 2x multiplier
     };
 
     return .{
@@ -66,7 +64,7 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .max_connections = @intCast(args.max_connection),
         .use_compression = false,
         .use_encryption = true,
-        .full_tunnel = true,
+        .default_route = true,
         .reconnect = reconnect,
         .connect_timeout_ms = 30000,
         .read_timeout_ms = 60000,

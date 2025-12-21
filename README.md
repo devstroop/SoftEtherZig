@@ -87,7 +87,7 @@ OPTIONS:
   "hub": "VPN",
   "username": "myuser",
   "password": "mypassword",
-  "full_tunnel": true
+  "default_route": true
 }
 ```
 

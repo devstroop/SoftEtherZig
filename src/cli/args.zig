@@ -28,18 +28,16 @@ pub const CliArgs = struct {
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     password_hash: ?[]const u8 = null,
-    account: ?[]const u8 = null,
 
     // Connection options
     use_encrypt: bool = true,
     use_compress: bool = true,
     max_connection: u8 = 1,
+    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
 
     // Reconnection
     reconnect: bool = true,
     max_retries: u32 = 0,
-    min_backoff_sec: u32 = 5,
-    max_backoff_sec: u32 = 300,
 
     // IP configuration
     ip_version: IpVersion = .auto,
@@ -183,13 +181,14 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--password-hash")) {
                 i += 1;
                 self.args.password_hash = try self.requireValue(argv, i, "--password-hash");
-            } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--account")) {
-                i += 1;
-                self.args.account = try self.requireValue(argv, i, "--account");
             } else if (std.mem.eql(u8, arg, "--no-encrypt")) {
                 self.args.use_encrypt = false;
             } else if (std.mem.eql(u8, arg, "--no-compress")) {
                 self.args.use_compress = false;
+            } else if (std.mem.eql(u8, arg, "--mtu")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--mtu");
+                self.args.mtu = std.fmt.parseInt(u16, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--reconnect")) {
                 self.args.reconnect = true;
             } else if (std.mem.eql(u8, arg, "--no-reconnect")) {
@@ -198,14 +197,6 @@ pub const ArgParser = struct {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--max-retries");
                 self.args.max_retries = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
-            } else if (std.mem.eql(u8, arg, "--min-backoff")) {
-                i += 1;
-                const val = try self.requireValue(argv, i, "--min-backoff");
-                self.args.min_backoff_sec = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
-            } else if (std.mem.eql(u8, arg, "--max-backoff")) {
-                i += 1;
-                const val = try self.requireValue(argv, i, "--max-backoff");
-                self.args.max_backoff_sec = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--ip-version")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--ip-version");

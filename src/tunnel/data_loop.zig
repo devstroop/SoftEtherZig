@@ -95,7 +95,7 @@ pub const DataLoopConfig = struct {
     /// Maximum DHCP retries
     max_dhcp_retries: u32 = 5,
     /// Enable full tunnel routing
-    full_tunnel: bool = true,
+    default_route: bool = true,
     /// Initial delay before DHCP discover (ms)
     initial_delay_ms: u32 = 300,
 };
