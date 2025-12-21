@@ -92,7 +92,7 @@ jobs:
       - name: Build SoftEtherClient
         run: |
           zig build
-          ls -lh zig-out/
+          ls zig-out/
 
       - name: Run tests
         run: zig build test
