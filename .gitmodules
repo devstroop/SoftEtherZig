@@ -1,4 +1,0 @@
-[submodule "TapTun"]
-	path = TapTun
-	url = https://github.com/SoftEtherUnofficial/ZigTapTun.git
-	branch = master
