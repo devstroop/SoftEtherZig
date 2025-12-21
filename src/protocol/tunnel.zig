@@ -244,15 +244,77 @@ pub const TunnelConnection = struct {
             offset += block.len;
         }
 
-        // Send all at once
-        var sent: usize = 0;
-        while (sent < offset) {
-            const n = try self.write_fn(self.context, send_buffer[sent..offset]);
-            if (n == 0) return error.ConnectionClosed;
-            sent += n;
+        // Single write - TLS/TCP should handle it atomically with TCP_NODELAY
+        const n = try self.write_fn(self.context, send_buffer[0..offset]);
+        if (n == 0) return error.ConnectionClosed;
+        // If partial write, complete it
+        if (n < offset) {
+            var sent = n;
+            while (sent < offset) {
+                const m = try self.write_fn(self.context, send_buffer[sent..offset]);
+                if (m == 0) return error.ConnectionClosed;
+                sent += m;
+            }
         }
 
         self.total_send += offset;
+    }
+
+    /// Send a single IP packet wrapped in Ethernet, directly into send buffer (minimal copy)
+    /// Returns number of bytes written to send_buffer, or 0 on error
+    pub fn sendSinglePacketDirect(
+        self: *TunnelConnection,
+        ip_packet: []const u8,
+        dst_mac: [6]u8,
+        src_mac: [6]u8,
+        send_buffer: []u8,
+    ) !usize {
+        if (ip_packet.len == 0 or ip_packet.len > 1500) return 0;
+
+        const eth_len = 14 + ip_packet.len;
+        const total_len = 4 + 4 + eth_len; // num_blocks + size + eth_frame
+
+        if (total_len > send_buffer.len) return 0;
+
+        // Build packet directly in send buffer
+        // num_blocks = 1
+        mem.writeInt(u32, send_buffer[0..4], 1, .big);
+        // block size
+        mem.writeInt(u32, send_buffer[4..8], @intCast(eth_len), .big);
+
+        // Ethernet header (14 bytes)
+        @memcpy(send_buffer[8..14], &dst_mac); // dst MAC
+        @memcpy(send_buffer[14..20], &src_mac); // src MAC
+
+        // EtherType
+        const ip_version = (ip_packet[0] >> 4) & 0x0F;
+        if (ip_version == 4) {
+            send_buffer[20] = 0x08;
+            send_buffer[21] = 0x00;
+        } else if (ip_version == 6) {
+            send_buffer[20] = 0x86;
+            send_buffer[21] = 0xDD;
+        } else {
+            return 0;
+        }
+
+        // IP packet (single copy from TUN buffer)
+        @memcpy(send_buffer[22..][0..ip_packet.len], ip_packet);
+
+        // Send
+        const n = try self.write_fn(self.context, send_buffer[0..total_len]);
+        if (n == 0) return error.ConnectionClosed;
+        if (n < total_len) {
+            var sent = n;
+            while (sent < total_len) {
+                const m = try self.write_fn(self.context, send_buffer[sent..total_len]);
+                if (m == 0) return error.ConnectionClosed;
+                sent += m;
+            }
+        }
+
+        self.total_send += total_len;
+        return eth_len;
     }
 
     /// Send blocks through the tunnel (allocating version for compatibility)
