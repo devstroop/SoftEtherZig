@@ -1,0 +1,323 @@
+//! SoftEther VPN Tunnel Protocol
+//!
+//! Wire format for data channel after authentication:
+//!
+//! Packet batch format:
+//!   [4 bytes] num_blocks (big-endian) - or KEEP_ALIVE_MAGIC (0xFFFFFFFF)
+//!   For each block:
+//!     [4 bytes] block_size (big-endian)
+//!     [N bytes] block_data (Ethernet frame)
+//!
+//! Keep-alive format:
+//!   [4 bytes] KEEP_ALIVE_MAGIC (0xFFFFFFFF)
+//!   [4 bytes] keep_alive_size
+//!   [N bytes] keep_alive_data (random padding)
+
+const std = @import("std");
+const mem = std.mem;
+const Allocator = mem.Allocator;
+
+/// Magic number indicating keep-alive packet (same as SoftEther's KEEP_ALIVE_MAGIC)
+pub const KEEP_ALIVE_MAGIC: u32 = 0xFFFFFFFF;
+
+/// Maximum packet size (Ethernet frame)
+pub const MAX_PACKET_SIZE: usize = 1514;
+
+/// Maximum keep-alive data size
+pub const MAX_KEEPALIVE_SIZE: usize = 512;
+
+/// Maximum number of blocks to receive at once
+pub const MAX_RECV_BLOCKS: usize = 512; // Server can send many blocks at once
+
+/// Block read from tunnel
+pub const Block = struct {
+    data: []u8,
+    allocator: Allocator,
+
+    pub fn deinit(self: *Block) void {
+        self.allocator.free(self.data);
+    }
+};
+
+/// Tunnel connection for data channel
+pub const TunnelConnection = struct {
+    allocator: Allocator,
+
+    // I/O callbacks
+    read_fn: *const fn (ctx: *anyopaque, buf: []u8) anyerror!usize,
+    write_fn: *const fn (ctx: *anyopaque, data: []const u8) anyerror!usize,
+    context: *anyopaque,
+
+    // Receive state machine
+    recv_state: RecvState = .read_num_blocks,
+    num_blocks: u32 = 0,
+    current_block: u32 = 0,
+    block_size: u32 = 0,
+
+    // Partial read buffer
+    partial_buf: [4]u8 = undefined,
+    partial_len: usize = 0,
+
+    // Stats
+    total_recv: u64 = 0,
+    total_send: u64 = 0,
+    keepalives_recv: u64 = 0,
+    keepalives_sent: u64 = 0,
+
+    const RecvState = enum {
+        read_num_blocks,
+        read_block_size,
+        read_block_data,
+        read_keepalive_size,
+        read_keepalive_data,
+    };
+
+    pub fn init(
+        allocator: Allocator,
+        context: *anyopaque,
+        read_fn: *const fn (*anyopaque, []u8) anyerror!usize,
+        write_fn: *const fn (*anyopaque, []const u8) anyerror!usize,
+    ) TunnelConnection {
+        return .{
+            .allocator = allocator,
+            .context = context,
+            .read_fn = read_fn,
+            .write_fn = write_fn,
+        };
+    }
+
+    /// Read a single u32 (big-endian) from the connection
+    fn readU32(self: *TunnelConnection) !u32 {
+        // First use any partial data
+        while (self.partial_len < 4) {
+            const n = try self.read_fn(self.context, self.partial_buf[self.partial_len..]);
+            if (n == 0) return error.ConnectionClosed;
+            self.partial_len += n;
+        }
+
+        const value = mem.readInt(u32, &self.partial_buf, .big);
+        self.partial_len = 0;
+        self.total_recv += 4;
+        return value;
+    }
+
+    /// Read exact number of bytes
+    fn readExact(self: *TunnelConnection, buf: []u8) !void {
+        var offset: usize = 0;
+        while (offset < buf.len) {
+            const n = try self.read_fn(self.context, buf[offset..]);
+            if (n == 0) return error.ConnectionClosed;
+            offset += n;
+        }
+        self.total_recv += buf.len;
+    }
+
+    /// Receive blocks from the tunnel
+    /// Returns blocks via callback to avoid ArrayList dependency
+    pub fn receiveBlocks(
+        self: *TunnelConnection,
+        comptime callback: fn (data: []u8, ctx: anytype) void,
+        ctx: anytype,
+    ) !void {
+        // Read number of blocks
+        const num_blocks = try self.readU32();
+
+        if (num_blocks == KEEP_ALIVE_MAGIC) {
+            // Keep-alive packet
+            const ka_size = try self.readU32();
+            if (ka_size > MAX_KEEPALIVE_SIZE) {
+                return error.InvalidPacket;
+            }
+
+            // Discard keep-alive data
+            var discard_buf: [MAX_KEEPALIVE_SIZE]u8 = undefined;
+            try self.readExact(discard_buf[0..ka_size]);
+            self.keepalives_recv += 1;
+            return;
+        }
+
+        if (num_blocks > MAX_RECV_BLOCKS) {
+            return error.TooManyBlocks;
+        }
+
+        // Read each block
+        var i: u32 = 0;
+        while (i < num_blocks) : (i += 1) {
+            const block_size = try self.readU32();
+
+            if (block_size == 0) continue;
+            if (block_size > MAX_PACKET_SIZE * 2) {
+                return error.PacketTooLarge;
+            }
+
+            // Allocate and read block data
+            const data = try self.allocator.alloc(u8, block_size);
+            errdefer self.allocator.free(data);
+
+            try self.readExact(data);
+
+            // Call the callback with the block
+            callback(data, ctx);
+        }
+    }
+
+    /// Receive a single batch of blocks into provided buffer
+    /// Returns number of blocks received, fills out_data with slices
+    pub fn receiveBlocksBatch(
+        self: *TunnelConnection,
+        out_data: [][]u8,
+        scratch_buffer: []u8,
+    ) !usize {
+        // Read number of blocks
+        const num_blocks = try self.readU32();
+
+        // Handle keep-alive packet (0xFFFFFFFF followed by size and random data)
+        // This is sent by the server periodically to keep the connection alive
+        if (num_blocks == KEEP_ALIVE_MAGIC) {
+            const ka_size = try self.readU32();
+            if (ka_size > MAX_KEEPALIVE_SIZE) return error.InvalidPacket;
+            var discard_buf: [MAX_KEEPALIVE_SIZE]u8 = undefined;
+            try self.readExact(discard_buf[0..ka_size]);
+            self.keepalives_recv += 1;
+            std.log.debug("Received keep-alive (size={d})", .{ka_size});
+            return 0;
+        }
+
+        if (num_blocks > MAX_RECV_BLOCKS or num_blocks > out_data.len) {
+            std.log.warn("TooManyBlocks: num_blocks={d}, max={d}, out_data.len={d}", .{ num_blocks, MAX_RECV_BLOCKS, out_data.len });
+            return error.TooManyBlocks;
+        }
+
+        var scratch_offset: usize = 0;
+        var block_count: usize = 0;
+
+        var i: u32 = 0;
+        while (i < num_blocks) : (i += 1) {
+            const block_size = try self.readU32();
+            if (block_size == 0) continue;
+            if (block_size > MAX_PACKET_SIZE * 2) {
+                std.log.warn("PacketTooLarge: block_size={d}", .{block_size});
+                return error.PacketTooLarge;
+            }
+            if (scratch_offset + block_size > scratch_buffer.len) {
+                std.log.warn("BufferTooSmall: need {d}, have {d}", .{ scratch_offset + block_size, scratch_buffer.len });
+                return error.BufferTooSmall;
+            }
+
+            try self.readExact(scratch_buffer[scratch_offset..][0..block_size]);
+            out_data[block_count] = scratch_buffer[scratch_offset..][0..block_size];
+            scratch_offset += block_size;
+            block_count += 1;
+        }
+
+        if (block_count > 0) {
+            // Per-receive logging at trace level to reduce noise
+            std.log.scoped(.packet_trace).debug("Received {d} blocks ({d} bytes)", .{ block_count, scratch_offset });
+        }
+
+        return block_count;
+    }
+
+    /// Send blocks through the tunnel
+    pub fn sendBlocks(self: *TunnelConnection, blocks: []const []const u8) !void {
+        if (blocks.len == 0) return;
+
+        // Calculate total size needed
+        var total_size: usize = 4; // num_blocks
+        for (blocks) |block| {
+            total_size += 4 + block.len; // size + data
+        }
+
+        // Build the packet
+        const packet = try self.allocator.alloc(u8, total_size);
+        defer self.allocator.free(packet);
+
+        var offset: usize = 0;
+
+        // Write number of blocks
+        mem.writeInt(u32, packet[0..4], @intCast(blocks.len), .big);
+        offset += 4;
+
+        // Write each block
+        for (blocks) |block| {
+            mem.writeInt(u32, packet[offset..][0..4], @intCast(block.len), .big);
+            offset += 4;
+            @memcpy(packet[offset..][0..block.len], block);
+            offset += block.len;
+        }
+
+        // Send all at once
+        var sent: usize = 0;
+        while (sent < packet.len) {
+            const n = try self.write_fn(self.context, packet[sent..]);
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
+
+        self.total_send += packet.len;
+    }
+
+    /// Send a keep-alive packet
+    pub fn sendKeepalive(self: *TunnelConnection) !void {
+        var packet: [8 + 32]u8 = undefined;
+
+        // KEEP_ALIVE_MAGIC
+        mem.writeInt(u32, packet[0..4], KEEP_ALIVE_MAGIC, .big);
+        // Keep-alive size
+        mem.writeInt(u32, packet[4..8], 32, .big);
+        // Random padding
+        std.crypto.random.bytes(packet[8..40]);
+
+        var sent: usize = 0;
+        while (sent < packet.len) {
+            const n = try self.write_fn(self.context, packet[sent..]);
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
+
+        self.keepalives_sent += 1;
+        self.total_send += packet.len;
+    }
+};
+
+/// DHCP state for packet loop
+pub const DhcpState = enum {
+    init,
+    arp_sent,
+    discover_sent,
+    offer_received,
+    request_sent,
+    configured,
+};
+
+/// DHCP configuration received
+pub const DhcpConfig = struct {
+    ip_address: u32 = 0,
+    subnet_mask: u32 = 0,
+    gateway: u32 = 0,
+    dns_server: u32 = 0,
+    lease_time: u32 = 0,
+    server_id: u32 = 0,
+
+    pub fn isValid(self: *const DhcpConfig) bool {
+        return self.ip_address != 0;
+    }
+};
+
+test "TunnelConnection block format" {
+    // Test that our format matches SoftEther
+    var buf: [100]u8 = undefined;
+
+    // Encode 2 blocks
+    mem.writeInt(u32, buf[0..4], 2, .big);
+    mem.writeInt(u32, buf[4..8], 4, .big); // block 1 size
+    @memcpy(buf[8..12], "TEST"); // block 1 data
+    mem.writeInt(u32, buf[12..16], 3, .big); // block 2 size
+    @memcpy(buf[16..19], "ABC"); // block 2 data
+
+    try std.testing.expectEqual(@as(u32, 2), mem.readInt(u32, buf[0..4], .big));
+}
+
+test "keep-alive magic" {
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), KEEP_ALIVE_MAGIC);
+}
