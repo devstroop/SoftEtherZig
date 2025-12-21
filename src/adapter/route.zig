@@ -1,5 +1,5 @@
-// SoftEther VPN Zig Client - Route Table Management
-// Pure Zig implementation for macOS routing table manipulation
+// SoftEther VPN Client - Route Table Management
+// macOS routing table manipulation
 
 const std = @import("std");
 const builtin = @import("builtin");

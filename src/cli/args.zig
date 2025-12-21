@@ -1,6 +1,6 @@
 //! CLI Argument Parser
 //!
-//! Phase 8: Pure Zig command-line argument parsing
+//! Command-line argument parsing
 //! Replaces std.process.args usage with structured parser
 
 const std = @import("std");

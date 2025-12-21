@@ -1,5 +1,5 @@
-// SoftEther VPN Zig Client - DHCP Protocol Implementation
-// Pure Zig implementation for DHCP packet building and parsing
+// SoftEther VPN Client - DHCP Protocol Implementation
+// DHCP packet building and parsing
 
 const std = @import("std");
 

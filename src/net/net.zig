@@ -1,4 +1,4 @@
-//! SoftEther VPN - Pure Zig Networking Library
+//! SoftEther VPN Networking Library
 //!
 //! This module provides Zig networking utilities.
 //! Phase 2 of the C-to-Zig migration.

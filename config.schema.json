@@ -184,27 +184,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "performance": {
-      "type": "object",
-      "description": "Performance tuning options",
-      "properties": {
-        "recv_buffer_slots": {
-          "type": "integer",
-          "description": "Receive queue buffer size (number of packet slots). Lower values save memory, higher values prevent drops under heavy load. Each slot is ~2KB.",
-          "minimum": 32,
-          "maximum": 2048,
-          "default": 128
-        },
-        "send_buffer_slots": {
-          "type": "integer",
-          "description": "Send queue buffer size (number of packet slots). Lower values save memory, higher values prevent drops when sending bursts. Each slot is ~2KB.",
-          "minimum": 16,
-          "maximum": 1024,
-          "default": 128
-        }
-      },
-      "additionalProperties": false
     }
   },
   "required": [],

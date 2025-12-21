@@ -395,7 +395,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
 
 pub fn displayVersion(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("SoftEther VPN Client v{s}\n", .{version});
-    ctx.print("Pure Zig implementation\n", .{});
+    ctx.print("Zig implementation\n", .{});
     ctx.print("Based on SoftEther VPN protocol\n", .{});
 }
 

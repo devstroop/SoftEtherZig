@@ -1,6 +1,6 @@
 //! Socket Utilities Module
 //!
-//! Pure Zig replacement for Mayaqua/Network.c socket operations
+//! Socket operations
 //! Provides cross-platform TCP/UDP socket abstractions.
 
 const std = @import("std");

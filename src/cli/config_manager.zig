@@ -35,9 +35,6 @@ pub const ConfigFile = struct {
     ip_version: ?[]const u8 = null,
     static_ip: ?StaticIpConfig = null,
 
-    // Performance
-    performance: ?PerformanceConfig = null,
-
     // Logging
     log_level: ?[]const u8 = null,
 };
@@ -57,11 +54,6 @@ pub const StaticIpConfig = struct {
     ipv6_prefix: ?u8 = null,
     ipv6_gateway: ?[]const u8 = null,
     dns_servers: ?[]const []const u8 = null,
-};
-
-pub const PerformanceConfig = struct {
-    recv_buffer_slots: ?u16 = null,
-    send_buffer_slots: ?u16 = null,
 };
 
 // ============================================================================

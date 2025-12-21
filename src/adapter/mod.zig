@@ -1,5 +1,5 @@
-// SoftEther VPN Zig Client - Virtual Adapter Module
-// Pure Zig implementation for network adapter management
+// SoftEther VPN Client - Virtual Adapter Module
+// Network adapter management
 
 const std = @import("std");
 

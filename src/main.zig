@@ -1,13 +1,12 @@
-//! SoftEther VPN Client - Pure Zig Entry Point
+//! SoftEther VPN Client - Zig Implementation
 //!
-//! Phase 9: Main entry point using pure Zig implementation
-//! No C dependencies required.
+//! Main entry point for the VPN client.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-// Pure Zig modules
+// Modules
 const cli = @import("cli/mod.zig");
 const client = @import("client/mod.zig");
 const crypto = @import("crypto/crypto.zig");
@@ -26,8 +25,8 @@ pub const std_options: std.Options = .{
 };
 
 // Version info
-pub const version = "0.2.0-pure";
-pub const build_date = "2024-12-20";
+pub const version = "0.2.0";
+pub const build_date = "2024-12-21";
 
 // ============================================================================
 // Application State
