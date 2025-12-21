@@ -26,23 +26,6 @@
       "description": "Virtual hub name",
       "examples": ["VPN", "VPNGATE"]
     },
-    "max_connection": {
-      "type": "integer",
-      "description": "Number of parallel TCP connections for the VPN tunnel (1-32)",
-      "minimum": 1,
-      "maximum": 32,
-      "default": 1
-    },
-    "use_compress": {
-      "type": "boolean",
-      "description": "Enable data compression",
-      "default": true
-    },
-    "udp_accel": {
-      "type": "boolean",
-      "description": "Enable UDP acceleration (may improve performance on high-latency links)",
-      "default": false
-    },
     "username": {
       "type": "string",
       "description": "Username for authentication"
@@ -54,6 +37,23 @@
     "password_hash": {
       "type": "string",
       "description": "Pre-hashed password (base64-encoded SHA1). Generate with: vpnclient --gen-hash username password"
+    },
+    "use_compress": {
+      "type": "boolean",
+      "description": "Enable data compression",
+      "default": true
+    },
+    "max_connections": {
+      "type": "integer",
+      "description": "Number of parallel TCP connections for the VPN tunnel (1-32)",
+      "minimum": 1,
+      "maximum": 32,
+      "default": 1
+    },
+    "udp_accel": {
+      "type": "boolean",
+      "description": "Enable UDP acceleration (may improve performance on high-latency links)",
+      "default": false
     },
     "mtu": {
       "type": ["integer", "null"],

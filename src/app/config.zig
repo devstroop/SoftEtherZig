@@ -58,12 +58,26 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .ipv6_exclude = args.ipv6_exclude,
     };
 
+    // Build static IP config (if any static IP is configured)
+    const static_ip: ?client.StaticIpConfig = if (args.static_ipv4 != null or args.static_ipv6 != null)
+        .{
+            .ipv4_address = args.static_ipv4,
+            .ipv4_netmask = args.static_ipv4_netmask,
+            .ipv4_gateway = args.static_ipv4_gateway,
+            .ipv6_address = args.static_ipv6,
+            .ipv6_prefix_len = args.static_ipv6_prefix,
+            .ipv6_gateway = args.static_ipv6_gateway,
+            .dns_servers = if (args.dns_servers.len > 0) args.dns_servers else null,
+        }
+    else
+        null;
+
     return .{
         .server_host = server,
         .server_port = args.port,
         .hub_name = hub,
         .auth = auth,
-        .max_connections = @intCast(args.max_connection),
+        .max_connections = @intCast(args.max_connections),
         .use_compression = args.use_compress,
         .use_encryption = true,
         .udp_acceleration = args.udp_accel,
@@ -71,6 +85,7 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .mtu = args.mtu,
         .routing = routing,
         .reconnect = reconnect,
+        .static_ip = static_ip,
         .connect_timeout_ms = 30000,
         .read_timeout_ms = 60000,
         .keepalive_interval_ms = 10000,

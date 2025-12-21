@@ -26,7 +26,7 @@ pub const ConfigFile = struct {
     skip_tls_verify: ?bool = null,
     use_compress: ?bool = null,
     udp_accel: ?bool = null,
-    max_connection: ?u8 = null,
+    max_connections: ?u8 = null,
     mtu: ?u16 = null, // Parsed from JSON, defaults applied later
 
     // Reconnection
@@ -179,7 +179,7 @@ pub const ConfigManager = struct {
         if (self.config.udp_accel) |accel| {
             cli_args.udp_accel = accel;
         }
-        if (self.config.max_connection) |max| cli_args.max_connection = max;
+        if (self.config.max_connections) |max| cli_args.max_connections = max;
         if (self.config.mtu) |m| cli_args.mtu = m;
 
         // Reconnection
@@ -196,6 +196,9 @@ pub const ConfigManager = struct {
             if (sip.ipv6_address) |ip| cli_args.static_ipv6 = ip;
             if (sip.ipv6_prefix) |pf| cli_args.static_ipv6_prefix = pf;
             if (sip.ipv6_gateway) |gw| cli_args.static_ipv6_gateway = gw;
+            if (sip.dns_servers) |dns| {
+                if (cli_args.dns_servers.len == 0) cli_args.dns_servers = dns;
+            }
         }
 
         // Routing
@@ -238,7 +241,7 @@ pub const ConfigManager = struct {
         cfg.password_hash = cli_args.password_hash;
         cfg.skip_tls_verify = cli_args.skip_tls_verify;
         cfg.use_compress = cli_args.use_compress;
-        cfg.max_connection = cli_args.max_connection;
+        cfg.max_connections = cli_args.max_connections;
         cfg.mtu = cli_args.mtu;
 
         cfg.reconnect = .{
@@ -281,10 +284,10 @@ pub fn validateConfig(cfg: *const ConfigFile, allocator: Allocator) ![]Validatio
         }
     }
 
-    // Max connection validation
-    if (cfg.max_connection) |mc| {
+    // Max connections validation
+    if (cfg.max_connections) |mc| {
         if (mc > 32) {
-            try errors.append(allocator, .{ .field = "max_connection", .message = "Max connection must be <= 32" });
+            try errors.append(allocator, .{ .field = "max_connections", .message = "Max connections must be <= 32" });
         }
     }
 
@@ -405,7 +408,7 @@ test "validateConfig valid" {
     const cfg = ConfigFile{
         .server = "test.com",
         .port = 443,
-        .max_connection = 4,
+        .max_connections = 4,
     };
 
     const errors = try validateConfig(&cfg, std.testing.allocator);
@@ -426,9 +429,9 @@ test "validateConfig invalid port" {
     try std.testing.expectEqualStrings("port", errors[0].field);
 }
 
-test "validateConfig invalid max_connection" {
+test "validateConfig invalid max_connections" {
     const cfg = ConfigFile{
-        .max_connection = 100,
+        .max_connections = 100,
     };
 
     const errors = try validateConfig(&cfg, std.testing.allocator);
