@@ -23,8 +23,9 @@ pub const ConfigFile = struct {
     password_hash: ?[]const u8 = null,
 
     // Connection options
-    use_encrypt: ?bool = null,
+    skip_tls_verify: ?bool = null,
     use_compress: ?bool = null,
+    udp_accel: ?bool = null,
     max_connection: ?u8 = null,
     mtu: ?u16 = null, // Parsed from JSON, defaults applied later
 
@@ -32,8 +33,10 @@ pub const ConfigFile = struct {
     reconnect: ?ReconnectConfig = null,
 
     // IP configuration
-    ip_version: ?[]const u8 = null,
     static_ip: ?StaticIpConfig = null,
+
+    // Routing
+    routing: ?RoutingConfig = null,
 
     // Logging
     log_level: ?[]const u8 = null,
@@ -52,6 +55,16 @@ pub const StaticIpConfig = struct {
     ipv6_prefix: ?u8 = null,
     ipv6_gateway: ?[]const u8 = null,
     dns_servers: ?[]const []const u8 = null,
+};
+
+pub const RoutingConfig = struct {
+    default_route: ?bool = null,
+    accept_pushed_routes: ?bool = null,
+    enable_custom_routes: ?bool = null,
+    ipv4_include: ?[]const []const u8 = null,
+    ipv4_exclude: ?[]const []const u8 = null,
+    ipv6_include: ?[]const []const u8 = null,
+    ipv6_exclude: ?[]const []const u8 = null,
 };
 
 // ============================================================================
@@ -157,11 +170,14 @@ pub const ConfigManager = struct {
         if (cli_args.password_hash == null) cli_args.password_hash = self.config.password_hash;
 
         // Connection options
-        if (self.config.use_encrypt) |enc| {
-            if (cli_args.use_encrypt) cli_args.use_encrypt = enc;
+        if (self.config.skip_tls_verify) |stv| {
+            cli_args.skip_tls_verify = stv;
         }
         if (self.config.use_compress) |comp| {
             if (cli_args.use_compress) cli_args.use_compress = comp;
+        }
+        if (self.config.udp_accel) |accel| {
+            cli_args.udp_accel = accel;
         }
         if (self.config.max_connection) |max| cli_args.max_connection = max;
         if (self.config.mtu) |m| cli_args.mtu = m;
@@ -172,13 +188,6 @@ pub const ConfigManager = struct {
             if (rc.max_attempts) |ma| cli_args.max_retries = ma;
         }
 
-        // IP version
-        if (self.config.ip_version) |ipv| {
-            if (args_mod.IpVersion.fromString(ipv)) |v| {
-                cli_args.ip_version = v;
-            }
-        }
-
         // Static IP
         if (self.config.static_ip) |sip| {
             if (sip.ipv4_address) |ip| cli_args.static_ipv4 = ip;
@@ -187,6 +196,17 @@ pub const ConfigManager = struct {
             if (sip.ipv6_address) |ip| cli_args.static_ipv6 = ip;
             if (sip.ipv6_prefix) |pf| cli_args.static_ipv6_prefix = pf;
             if (sip.ipv6_gateway) |gw| cli_args.static_ipv6_gateway = gw;
+        }
+
+        // Routing
+        if (self.config.routing) |rt| {
+            if (rt.default_route) |dr| cli_args.default_route = dr;
+            if (rt.accept_pushed_routes) |apr| cli_args.accept_pushed_routes = apr;
+            if (rt.enable_custom_routes) |ecr| cli_args.enable_custom_routes = ecr;
+            if (rt.ipv4_include) |inc| cli_args.ipv4_include = inc;
+            if (rt.ipv4_exclude) |exc| cli_args.ipv4_exclude = exc;
+            if (rt.ipv6_include) |inc| cli_args.ipv6_include = inc;
+            if (rt.ipv6_exclude) |exc| cli_args.ipv6_exclude = exc;
         }
 
         // Log level
@@ -216,7 +236,7 @@ pub const ConfigManager = struct {
         cfg.username = cli_args.username;
         cfg.password = cli_args.password;
         cfg.password_hash = cli_args.password_hash;
-        cfg.use_encrypt = cli_args.use_encrypt;
+        cfg.skip_tls_verify = cli_args.skip_tls_verify;
         cfg.use_compress = cli_args.use_compress;
         cfg.max_connection = cli_args.max_connection;
         cfg.mtu = cli_args.mtu;

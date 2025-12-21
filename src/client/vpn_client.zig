@@ -85,14 +85,6 @@ pub const AuthMethod = union(enum) {
     anonymous: void,
 };
 
-/// IP version preference
-pub const IpVersionPreference = enum {
-    auto,
-    ipv4_only,
-    ipv6_only,
-    dual_stack,
-};
-
 /// Reconnection configuration
 pub const ReconnectConfig = struct {
     enabled: bool = true,
@@ -113,6 +105,24 @@ pub const StaticIpConfig = struct {
     dns_servers: ?[]const []const u8 = null,
 };
 
+/// Routing configuration
+pub const RoutingConfig = struct {
+    /// Send ALL traffic through VPN (set VPN as default gateway)
+    default_route: bool = true,
+    /// Accept routes pushed by VPN server (DHCP option 121/249)
+    accept_pushed_routes: bool = true,
+    /// Enable custom route includes/excludes
+    enable_custom_routes: bool = false,
+    /// IPv4 routes to include (CIDR notation) - only these routes through VPN
+    ipv4_include: ?[]const []const u8 = null,
+    /// IPv4 routes to exclude (CIDR notation) - these routes NOT through VPN
+    ipv4_exclude: ?[]const []const u8 = null,
+    /// IPv6 routes to include (CIDR notation)
+    ipv6_include: ?[]const []const u8 = null,
+    /// IPv6 routes to exclude (CIDR notation)
+    ipv6_exclude: ?[]const []const u8 = null,
+};
+
 /// VPN Client configuration
 pub const ClientConfig = struct {
     // Server settings
@@ -124,18 +134,17 @@ pub const ClientConfig = struct {
     auth: AuthMethod,
 
     // Connection options
-    ip_version: IpVersionPreference = .auto,
     max_connections: u8 = 1,
     use_compression: bool = false,
     use_encryption: bool = true,
+    udp_acceleration: bool = false,
     mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
 
     // TLS settings
     verify_certificate: bool = true,
 
     // Routing
-    default_route: bool = true,
-    split_tunnel_networks: ?[]const []const u8 = null,
+    routing: RoutingConfig = .{},
 
     // Reconnection
     reconnect: ReconnectConfig = .{},
@@ -504,6 +513,7 @@ pub const VpnClient = struct {
                         p.password, // base64-encoded hash
                         self.config.hub_name,
                         &hello.random,
+                        self.config.udp_acceleration,
                     ) catch return ClientError.OutOfMemory;
                 } else {
                     // Password is plain text, hash it first
@@ -513,12 +523,14 @@ pub const VpnClient = struct {
                         p.password,
                         self.config.hub_name,
                         &hello.random,
+                        self.config.udp_acceleration,
                     ) catch return ClientError.OutOfMemory;
                 }
             },
             .anonymous => softether_proto.buildAnonymousAuth(
                 self.allocator,
                 self.config.hub_name,
+                self.config.udp_acceleration,
             ) catch return ClientError.OutOfMemory,
             .certificate => return ClientError.AuthenticationFailed, // Not implemented yet
         };
@@ -694,6 +706,7 @@ pub const VpnClient = struct {
                 self.config.hub_name,
                 username,
                 &ticket,
+                self.config.udp_acceleration,
             ) catch return ClientError.OutOfMemory;
             defer self.allocator.free(ticket_auth_data);
 
@@ -758,7 +771,7 @@ pub const VpnClient = struct {
             }
         }
 
-        if (self.config.default_route and self.gateway_ip != 0) {
+        if (self.config.routing.default_route and self.gateway_ip != 0) {
             // Convert server_ip from little-endian (Pack protocol) to big-endian (network byte order)
             const server_ip_be = @byteSwap(self.server_ip);
             ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
@@ -1007,7 +1020,7 @@ pub const VpnClient = struct {
                                 const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
                                 std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
 
-                                if (self.config.default_route and loop_state.our_gateway != 0) {
+                                if (self.config.routing.default_route and loop_state.our_gateway != 0) {
                                     const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                                     std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
                                     const server_ip_be = @byteSwap(self.server_ip);
@@ -1156,7 +1169,7 @@ pub const ClientConfigBuilder = struct {
     }
 
     pub fn setFullTunnel(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
-        self.config.default_route = enabled;
+        self.config.routing.default_route = enabled;
         return self;
     }
 
@@ -1260,11 +1273,6 @@ test "ReconnectConfig defaults" {
     try std.testing.expect(rc.enabled);
     try std.testing.expectEqual(@as(u32, 0), rc.max_attempts);
     try std.testing.expectEqual(@as(u32, 1000), rc.min_backoff_ms);
-}
-
-test "IpVersionPreference" {
-    const pref = IpVersionPreference.dual_stack;
-    try std.testing.expect(pref == .dual_stack);
 }
 
 test "SessionWrapper" {

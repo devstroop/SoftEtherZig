@@ -40,14 +40,6 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         }
     };
 
-    // Build IP version preference
-    const ip_version: client.IpVersionPreference = switch (args.ip_version) {
-        .auto => .auto,
-        .ipv4 => .ipv4_only,
-        .ipv6 => .ipv6_only,
-        .dual => .dual_stack,
-    };
-
     // Build reconnect config
     const reconnect = client.ReconnectConfig{
         .enabled = args.reconnect,
@@ -55,16 +47,29 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         // Backoff timing is internal - 1s min, 60s max, 2x multiplier
     };
 
+    // Build routing config
+    const routing = client.RoutingConfig{
+        .default_route = args.default_route,
+        .accept_pushed_routes = args.accept_pushed_routes,
+        .enable_custom_routes = args.enable_custom_routes,
+        .ipv4_include = args.ipv4_include,
+        .ipv4_exclude = args.ipv4_exclude,
+        .ipv6_include = args.ipv6_include,
+        .ipv6_exclude = args.ipv6_exclude,
+    };
+
     return .{
         .server_host = server,
         .server_port = args.port,
         .hub_name = hub,
         .auth = auth,
-        .ip_version = ip_version,
         .max_connections = @intCast(args.max_connection),
-        .use_compression = false,
+        .use_compression = args.use_compress,
         .use_encryption = true,
-        .default_route = true,
+        .udp_acceleration = args.udp_accel,
+        .verify_certificate = !args.skip_tls_verify,
+        .mtu = args.mtu,
+        .routing = routing,
         .reconnect = reconnect,
         .connect_timeout_ms = 30000,
         .read_timeout_ms = 60000,

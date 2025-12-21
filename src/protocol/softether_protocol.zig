@@ -399,6 +399,7 @@ pub fn buildPasswordAuth(
     password: []const u8,
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
+    udp_accel: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -452,12 +453,12 @@ pub fn buildPasswordAuth(
     // QoS flag
     try auth_pack.addBool("qos", true);
 
-    // Bulk transfer support
-    try auth_pack.addBool("support_bulk_on_rudp", true);
-    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", true);
+    // Bulk transfer support (UDP acceleration)
+    try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
+    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
     // UDP recovery support
-    try auth_pack.addBool("support_udp_recovery", true);
+    try auth_pack.addBool("support_udp_recovery", udp_accel);
 
     // Unique ID (machine identifier) - GenerateMachineUniqueHash in C
     var unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -465,7 +466,7 @@ pub fn buildPasswordAuth(
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
-    try auth_pack.addInt("rudp_bulk_max_version", 2);
+    try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
 
     // Cedar->UniqueId is SEPARATE from unique_id in C
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -524,6 +525,7 @@ pub fn buildPasswordAuthWithHash(
     password_hash_base64: []const u8,
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
+    udp_accel: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -581,12 +583,12 @@ pub fn buildPasswordAuthWithHash(
     // QoS flag
     try auth_pack.addBool("qos", true);
 
-    // Bulk transfer support
-    try auth_pack.addBool("support_bulk_on_rudp", true);
-    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", true);
+    // Bulk transfer support (UDP acceleration)
+    try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
+    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
     // UDP recovery support
-    try auth_pack.addBool("support_udp_recovery", true);
+    try auth_pack.addBool("support_udp_recovery", udp_accel);
 
     // Unique ID (machine identifier) - GenerateMachineUniqueHash in C
     var unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -594,7 +596,7 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
-    try auth_pack.addInt("rudp_bulk_max_version", 2);
+    try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
 
     // Cedar->UniqueId is SEPARATE from unique_id in C
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -650,6 +652,7 @@ pub fn buildPasswordAuthWithHash(
 pub fn buildAnonymousAuth(
     allocator: Allocator,
     hub_name: []const u8,
+    udp_accel: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -687,12 +690,12 @@ pub fn buildAnonymousAuth(
     // QoS flag
     try auth_pack.addBool("qos", true);
 
-    // Bulk transfer support
-    try auth_pack.addBool("support_bulk_on_rudp", true);
-    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", true);
+    // Bulk transfer support (UDP acceleration)
+    try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
+    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
     // UDP recovery support
-    try auth_pack.addBool("support_udp_recovery", true);
+    try auth_pack.addBool("support_udp_recovery", udp_accel);
 
     // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -700,7 +703,7 @@ pub fn buildAnonymousAuth(
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
-    try auth_pack.addInt("rudp_bulk_max_version", 2);
+    try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
 
     // Add pencore dummy value (random padding for anti-fingerprinting)
     var pencore_buf3: [1000]u8 = undefined;
@@ -717,6 +720,7 @@ pub fn buildTicketAuth(
     hub_name: []const u8,
     username: []const u8,
     ticket: *const [Protocol.sha1_size]u8,
+    udp_accel: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -757,12 +761,12 @@ pub fn buildTicketAuth(
     // QoS flag
     try auth_pack.addBool("qos", true);
 
-    // Bulk transfer support
-    try auth_pack.addBool("support_bulk_on_rudp", true);
-    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", true);
+    // Bulk transfer support (UDP acceleration)
+    try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
+    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
     // UDP recovery support
-    try auth_pack.addBool("support_udp_recovery", true);
+    try auth_pack.addBool("support_udp_recovery", udp_accel);
 
     // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -770,7 +774,7 @@ pub fn buildTicketAuth(
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
-    try auth_pack.addInt("rudp_bulk_max_version", 2);
+    try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
 
     // Cedar->UniqueId
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
@@ -1015,6 +1019,7 @@ pub fn performHandshake(
     hub_name: []const u8,
     username: []const u8,
     password: ?[]const u8,
+    udp_accel: bool,
 ) !struct { hello: HelloResponse, auth: AuthResult } {
     // Step 1: Upload signature
     try uploadSignature(allocator, writer, host);
@@ -1025,9 +1030,9 @@ pub fn performHandshake(
 
     // Step 3: Build and upload auth
     const auth_data = if (password) |pwd|
-        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random)
+        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel)
     else
-        try buildAnonymousAuth(allocator, hub_name);
+        try buildAnonymousAuth(allocator, hub_name, udp_accel);
     defer allocator.free(auth_data);
 
     var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
@@ -1080,6 +1085,7 @@ test "buildPasswordAuth creates valid Pack" {
         "testpass",
         "VPN",
         &random,
+        false, // udp_accel
     );
     defer allocator.free(auth_data);
 
@@ -1097,7 +1103,7 @@ test "buildPasswordAuth creates valid Pack" {
 test "buildAnonymousAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC");
+    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false);
     defer allocator.free(auth_data);
 
     var auth_pack = try Pack.fromBytes(allocator, auth_data);
