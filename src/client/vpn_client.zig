@@ -876,10 +876,14 @@ pub const VpnClient = struct {
 
         // Outbound packet buffer (zero-copy: build Ethernet frame in-place)
         var tun_read_buf: [2048]u8 = undefined;
-        var outbound_eth_buf: [2048]u8 = undefined;
 
-        // Send buffer for zero-copy tunnel send (avoid per-packet allocation)
-        var send_buffer: [4 + 4 + 1600]u8 = undefined; // header + size + max eth frame
+        // Batch outbound: multiple packets per TLS write (reduces syscall overhead)
+        const MAX_OUTBOUND_BATCH = 32;
+        var outbound_batch_bufs: [MAX_OUTBOUND_BATCH][1600]u8 = undefined;
+        var outbound_batch_slices: [MAX_OUTBOUND_BATCH][]const u8 = undefined;
+
+        // Large send buffer for batched packets: 4 + (4+1514)*32 = ~48KB
+        var send_buffer: [4 + (4 + 1514) * MAX_OUTBOUND_BATCH]u8 = undefined;
 
         // Packet buffer for ARP/GARP (small, reused)
         var arp_buf: [64]u8 = undefined;
@@ -1030,21 +1034,36 @@ pub const VpnClient = struct {
                 }
             }
 
-            // OUTBOUND: Read from TUN and send to VPN (second priority)
+            // OUTBOUND: Drain TUN and batch send to VPN (reduces syscalls)
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        if (dev.read(&tun_read_buf)) |maybe_len| {
-                            if (maybe_len) |ip_len| {
-                                if (ip_len > 0 and ip_len <= 1500) {
-                                    if (tunnel_mod.wrapIpInEthernet(tun_read_buf[0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_buf)) |eth_frame| {
-                                        const blocks = [_][]const u8{eth_frame};
-                                        tunnel.sendBlocksZeroCopy(&blocks, &send_buffer) catch {};
-                                        self.stats.recordSent(eth_frame.len);
+                        var batch_count: usize = 0;
+
+                        // Drain up to MAX_OUTBOUND_BATCH packets from TUN
+                        while (batch_count < MAX_OUTBOUND_BATCH) {
+                            if (dev.read(&tun_read_buf)) |maybe_len| {
+                                if (maybe_len) |ip_len| {
+                                    if (ip_len > 0 and ip_len <= 1500) {
+                                        // Build Ethernet frame directly into batch buffer
+                                        if (tunnel_mod.wrapIpInEthernet(tun_read_buf[0..ip_len], loop_state.gateway_mac, mac, &outbound_batch_bufs[batch_count])) |eth_frame| {
+                                            outbound_batch_slices[batch_count] = eth_frame;
+                                            self.stats.recordSent(eth_frame.len);
+                                            batch_count += 1;
+                                        }
                                     }
+                                } else {
+                                    break; // No more packets
                                 }
+                            } else |_| {
+                                break; // Read error or would block
                             }
-                        } else |_| {}
+                        }
+
+                        // Send batch in single TLS write
+                        if (batch_count > 0) {
+                            tunnel.sendBlocksZeroCopy(outbound_batch_slices[0..batch_count], &send_buffer) catch {};
+                        }
                     }
                 }
             }
