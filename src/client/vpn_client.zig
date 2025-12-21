@@ -874,12 +874,9 @@ pub const VpnClient = struct {
         var recv_scratch: [512 * 1600]u8 = undefined;
         var recv_slices: [512][]u8 = undefined;
 
-        // Outbound packet buffer (zero-copy: build Ethernet frame in-place)
+        // Outbound packet buffer
         var tun_read_buf: [2048]u8 = undefined;
-        var outbound_eth_buf: [2048]u8 = undefined;
-
-        // Send buffer for zero-copy tunnel send (avoid per-packet allocation)
-        var send_buffer: [4 + 4 + 1600]u8 = undefined; // header + size + max eth frame
+        var outbound_eth_buf: [1600]u8 = undefined;
 
         // Packet buffer for ARP/GARP (small, reused)
         var arp_buf: [64]u8 = undefined;
@@ -1030,16 +1027,18 @@ pub const VpnClient = struct {
                 }
             }
 
-            // OUTBOUND: Read from TUN and send to VPN (second priority)
+            // OUTBOUND: Read from TUN and send to VPN (simple path)
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
+                        // Read one packet from TUN
                         if (dev.read(&tun_read_buf)) |maybe_len| {
                             if (maybe_len) |ip_len| {
                                 if (ip_len > 0 and ip_len <= 1500) {
+                                    // Wrap in Ethernet and send
                                     if (tunnel_mod.wrapIpInEthernet(tun_read_buf[0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_buf)) |eth_frame| {
                                         const blocks = [_][]const u8{eth_frame};
-                                        tunnel.sendBlocksZeroCopy(&blocks, &send_buffer) catch {};
+                                        tunnel.sendBlocks(&blocks) catch {};
                                         self.stats.recordSent(eth_frame.len);
                                     }
                                 }
