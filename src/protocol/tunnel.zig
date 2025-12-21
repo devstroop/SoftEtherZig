@@ -218,7 +218,44 @@ pub const TunnelConnection = struct {
         return block_count;
     }
 
-    /// Send blocks through the tunnel
+    /// Send blocks through the tunnel using pre-allocated buffer (zero-copy path)
+    pub fn sendBlocksZeroCopy(self: *TunnelConnection, blocks: []const []const u8, send_buffer: []u8) !void {
+        if (blocks.len == 0) return;
+
+        // Calculate total size needed
+        var total_size: usize = 4; // num_blocks
+        for (blocks) |block| {
+            total_size += 4 + block.len; // size + data
+        }
+
+        if (total_size > send_buffer.len) return error.BufferTooSmall;
+
+        var offset: usize = 0;
+
+        // Write number of blocks
+        mem.writeInt(u32, send_buffer[0..4], @intCast(blocks.len), .big);
+        offset += 4;
+
+        // Write each block
+        for (blocks) |block| {
+            mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(block.len), .big);
+            offset += 4;
+            @memcpy(send_buffer[offset..][0..block.len], block);
+            offset += block.len;
+        }
+
+        // Send all at once
+        var sent: usize = 0;
+        while (sent < offset) {
+            const n = try self.write_fn(self.context, send_buffer[sent..offset]);
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
+
+        self.total_send += offset;
+    }
+
+    /// Send blocks through the tunnel (allocating version for compatibility)
     pub fn sendBlocks(self: *TunnelConnection, blocks: []const []const u8) !void {
         if (blocks.len == 0) return;
 
