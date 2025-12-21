@@ -33,7 +33,7 @@ jobs:
       - name: Build SoftEtherClient
         run: |
           zig build
-          ls -lh zig-out/lib/
+          ls -lh zig-out/
 
       - name: Run tests
         run: zig build test
@@ -66,7 +66,7 @@ jobs:
       - name: Build SoftEtherClient
         run: |
           zig build
-          ls -lh zig-out/lib/
+          ls -lh zig-out/
 
       - name: Run tests
         run: zig build test
@@ -92,7 +92,7 @@ jobs:
       - name: Build SoftEtherClient
         run: |
           zig build
-          ls zig-out/lib/
+          ls -lh zig-out/
 
       - name: Run tests
         run: zig build test
