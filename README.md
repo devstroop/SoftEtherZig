@@ -220,7 +220,6 @@ zig build --release=fast
 
 - Passwords can be passed via environment variables (preferred over CLI)
 - TLS 1.2+ with certificate verification
-- See [SECURITY.md](SECURITY.md) for security best practices
 
 ## License
 
