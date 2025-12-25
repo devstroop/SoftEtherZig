@@ -2,9 +2,11 @@
 // Network adapter management
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Re-export submodules
 pub const utun = @import("utun.zig");
+pub const tun_linux = @import("tun_linux.zig");
 pub const route = @import("route.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const wrapper = @import("wrapper.zig");
@@ -12,15 +14,22 @@ pub const wrapper = @import("wrapper.zig");
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
 
-// Main types
+// Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;
+pub const TunLinuxDevice = tun_linux.TunLinuxDevice;
 pub const UtunError = utun.UtunError;
+pub const TunLinuxError = tun_linux.TunLinuxError;
+
+// Common types (re-exported from platform-specific modules)
 pub const TunPacket = utun.TunPacket;
-pub const TunStats = utun.TunStats;
+pub const TunStats = if (builtin.os.tag == .linux) tun_linux.TunStats else utun.TunStats;
 pub const DhcpState = utun.DhcpState;
 pub const Ipv4Config = utun.Ipv4Config;
 pub const Ipv6Config = utun.Ipv6Config;
 pub const PacketQueue = utun.PacketQueue;
+
+// Platform-agnostic device type alias
+pub const PlatformDevice = if (builtin.os.tag == .linux) TunLinuxDevice else UtunDevice;
 
 // Route types
 pub const Route = route.Route;
@@ -35,10 +44,10 @@ pub const DhcpMessageType = dhcp.DhcpMessageType;
 pub const DhcpOption = dhcp.DhcpOption;
 pub const DhcpConfig = dhcp.DhcpConfig;
 
-// Constants
-pub const TUN_MTU = utun.TUN_MTU;
-pub const MAX_PACKET_SIZE = utun.MAX_PACKET_SIZE;
-pub const RECV_QUEUE_MAX = utun.RECV_QUEUE_MAX;
+// Constants - use platform-appropriate values
+pub const TUN_MTU = if (builtin.os.tag == .linux) tun_linux.TUN_MTU else utun.TUN_MTU;
+pub const MAX_PACKET_SIZE = if (builtin.os.tag == .linux) tun_linux.MAX_PACKET_SIZE else utun.MAX_PACKET_SIZE;
+pub const RECV_QUEUE_MAX = if (builtin.os.tag == .linux) tun_linux.RECV_QUEUE_MAX else utun.RECV_QUEUE_MAX;
 
 // Packet building functions
 pub const buildGratuitousArp = utun.buildGratuitousArp;
@@ -68,7 +77,7 @@ pub const clearDns = route.clearDns;
 /// Virtual adapter state combining utun device with routing
 pub const VirtualAdapter = struct {
     allocator: std.mem.Allocator,
-    device: ?*UtunDevice,
+    device: ?*PlatformDevice,
     routes: RouteManager,
 
     // DHCP state
@@ -112,14 +121,27 @@ pub const VirtualAdapter = struct {
         self.close();
     }
 
-    /// Open the virtual adapter
+    /// Open the virtual adapter (platform-specific)
     pub fn open(self: *VirtualAdapter) !void {
         if (self.device != null) return;
 
-        self.device = try UtunDevice.open(self.allocator);
-
-        // Configure with temporary IP for initial setup
-        try self.device.?.configureTemporary();
+        if (builtin.os.tag == .linux) {
+            self.device = TunLinuxDevice.open(self.allocator) catch |err| {
+                std.log.err("Failed to open Linux TUN device: {}", .{err});
+                return err;
+            };
+            // Configure with temporary settings for initial setup
+            try self.device.?.configureTemporary();
+        } else if (builtin.os.tag == .macos) {
+            self.device = UtunDevice.open(self.allocator) catch |err| {
+                std.log.err("Failed to open macOS utun device: {}", .{err});
+                return err;
+            };
+            // Configure with temporary IP for initial setup
+            try self.device.?.configureTemporary();
+        } else {
+            return error.UnsupportedPlatform;
+        }
     }
 
     /// Close the virtual adapter and restore routing
@@ -161,7 +183,11 @@ pub const VirtualAdapter = struct {
         if (self.device) |dev| {
             return dev.read(buffer);
         }
-        return UtunError.DeviceNotOpen;
+        if (builtin.os.tag == .linux) {
+            return TunLinuxError.DeviceNotOpen;
+        } else {
+            return UtunError.DeviceNotOpen;
+        }
     }
 
     /// Write a packet to the adapter
@@ -169,12 +195,22 @@ pub const VirtualAdapter = struct {
         if (self.device) |dev| {
             return dev.write(data);
         }
-        return UtunError.DeviceNotOpen;
+        if (builtin.os.tag == .linux) {
+            return TunLinuxError.DeviceNotOpen;
+        } else {
+            return UtunError.DeviceNotOpen;
+        }
     }
 
     /// Configure full-tunnel VPN routing
     pub fn configureFullTunnel(self: *VirtualAdapter, vpn_gateway: u32, vpn_server: u32) !void {
-        const dev = self.device orelse return UtunError.DeviceNotOpen;
+        const dev = self.device orelse {
+            if (builtin.os.tag == .linux) {
+                return TunLinuxError.DeviceNotOpen;
+            } else {
+                return UtunError.DeviceNotOpen;
+            }
+        };
         try self.routes.configureFullTunnel(vpn_gateway, vpn_server, dev.getName());
     }
 

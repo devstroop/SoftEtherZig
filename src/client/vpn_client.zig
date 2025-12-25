@@ -845,10 +845,16 @@ pub const VpnClient = struct {
 
         // Get file descriptors for poll()
         const tls_fd = sock.getFd();
-        const tun_fd = if (adapter.real_adapter) |*real|
-            if (real.device) |dev| dev.getFd() else return ClientError.AdapterConfigurationFailed
-        else
+        const tun_fd = blk: {
+            if (adapter.real_adapter) |*real| {
+                if (real.device) |dev| {
+                    const fd = dev.getFd();
+                    if (fd < 0) return ClientError.AdapterConfigurationFailed;
+                    break :blk fd;
+                }
+            }
             return ClientError.AdapterConfigurationFailed;
+        };
 
         std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd, tun_fd });
 
