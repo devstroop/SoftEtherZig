@@ -9,6 +9,7 @@
 //! The protocol uses HTTP as transport with Pack binary serialization.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const crypto = std.crypto;
@@ -32,6 +33,25 @@ pub const ProtocolError = error{
     OutOfMemory,
     NetworkError,
 };
+
+/// OS information for client identification
+const OsInfo = struct {
+    name: []const u8,
+    version: []const u8,
+    title: []const u8,
+};
+
+fn getOsInfo() OsInfo {
+    return switch (builtin.os.tag) {
+        .linux => .{ .name = "Linux", .version = "5.0", .title = "Linux" },
+        .macos => .{ .name = "macOS", .version = "14.0", .title = "macOS 14" },
+        .windows => .{ .name = "Windows", .version = "10.0", .title = "Windows 10" },
+        .freebsd => .{ .name = "FreeBSD", .version = "14.0", .title = "FreeBSD 14" },
+        .openbsd => .{ .name = "OpenBSD", .version = "7.0", .title = "OpenBSD 7" },
+        .netbsd => .{ .name = "NetBSD", .version = "10.0", .title = "NetBSD 10" },
+        else => .{ .name = "Unix", .version = "1.0", .title = "Unix" },
+    };
+}
 
 /// Protocol constants
 pub const Protocol = struct {
@@ -473,15 +493,15 @@ pub fn buildPasswordAuth(
     std.crypto.random.bytes(&cedar_unique_id);
 
     // Add NodeInfo fields (required by server)
+    const os_info_anon = getOsInfo();
     try auth_pack.addStr("ClientProductName", Protocol.client_str);
     try auth_pack.addStr("ServerProductName", "");
-    try auth_pack.addStr("ClientOsName", "macOS");
-    try auth_pack.addStr("ClientOsVer", "14.0");
+    try auth_pack.addStr("ClientOsName", os_info_anon.name);
+    try auth_pack.addStr("ClientOsVer", os_info_anon.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
     try auth_pack.addStr("ServerHostname", "");
     try auth_pack.addStr("ProxyHostname", "");
-    try auth_pack.addStr("HubName", hub_name);
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
     try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
@@ -507,7 +527,7 @@ pub fn buildPasswordAuth(
     try auth_pack.addInt("V_VerMinor", 0);
     try auth_pack.addInt("V_Build", 0);
     try auth_pack.addInt("V_ServicePack", 0);
-    try auth_pack.addStr("V_Title", "macOS 14");
+    try auth_pack.addStr("V_Title", os_info_anon.title);
 
     // Add pencore dummy value (random padding for anti-fingerprinting)
     var pencore_buf: [1000]u8 = undefined;
@@ -603,15 +623,15 @@ pub fn buildPasswordAuthWithHash(
     std.crypto.random.bytes(&cedar_unique_id);
 
     // Add NodeInfo fields (required by server)
+    const os_info2 = getOsInfo();
     try auth_pack.addStr("ClientProductName", Protocol.client_str);
     try auth_pack.addStr("ServerProductName", "");
-    try auth_pack.addStr("ClientOsName", "macOS");
-    try auth_pack.addStr("ClientOsVer", "14.0");
+    try auth_pack.addStr("ClientOsName", os_info2.name);
+    try auth_pack.addStr("ClientOsVer", os_info2.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
     try auth_pack.addStr("ServerHostname", "");
     try auth_pack.addStr("ProxyHostname", "");
-    try auth_pack.addStr("HubName", hub_name);
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
     try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
@@ -637,7 +657,7 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addInt("V_VerMinor", 0);
     try auth_pack.addInt("V_Build", 0);
     try auth_pack.addInt("V_ServicePack", 0);
-    try auth_pack.addStr("V_Title", "macOS 14");
+    try auth_pack.addStr("V_Title", os_info2.title);
 
     // Add pencore dummy value (random padding for anti-fingerprinting)
     var pencore_buf2: [1000]u8 = undefined;
@@ -781,15 +801,15 @@ pub fn buildTicketAuth(
     std.crypto.random.bytes(&cedar_unique_id);
 
     // Add NodeInfo fields
+    const os_info3 = getOsInfo();
     try auth_pack.addStr("ClientProductName", Protocol.client_str);
     try auth_pack.addStr("ServerProductName", "");
-    try auth_pack.addStr("ClientOsName", "macOS");
-    try auth_pack.addStr("ClientOsVer", "14.0");
+    try auth_pack.addStr("ClientOsName", os_info3.name);
+    try auth_pack.addStr("ClientOsVer", os_info3.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
     try auth_pack.addStr("ServerHostname", "");
     try auth_pack.addStr("ProxyHostname", "");
-    try auth_pack.addStr("HubName", hub_name);
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
     try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
@@ -815,7 +835,7 @@ pub fn buildTicketAuth(
     try auth_pack.addInt("V_VerMinor", 0);
     try auth_pack.addInt("V_Build", 0);
     try auth_pack.addInt("V_ServicePack", 0);
-    try auth_pack.addStr("V_Title", "macOS 14");
+    try auth_pack.addStr("V_Title", os_info3.title);
 
     // Add pencore dummy value
     var pencore_buf: [1000]u8 = undefined;

@@ -266,14 +266,58 @@ pub const NetworkCidr = struct {
 };
 
 // ============================================
-// Route Table Operations (macOS specific)
+// Route Table Operations (platform-specific)
 // ============================================
 
 /// Get the current default gateway
 pub fn getDefaultGateway(allocator: std.mem.Allocator) !u32 {
-    if (builtin.os.tag != .macos) {
+    if (builtin.os.tag == .linux) {
+        return getDefaultGatewayLinux(allocator);
+    } else if (builtin.os.tag == .macos) {
+        return getDefaultGatewayMacOS(allocator);
+    } else {
         return RouteError.NotMacOS;
     }
+}
+
+/// Get default gateway on Linux
+fn getDefaultGatewayLinux(allocator: std.mem.Allocator) !u32 {
+    // Run ip route to get default gateway
+    var child = std.process.Child.init(
+        &[_][]const u8{ "sh", "-c", "ip route show default | awk '/default/ {print $3}' | head -1" },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Close;
+
+    try child.spawn();
+
+    // Read output
+    var output_buf: [128]u8 = undefined;
+    const stdout = child.stdout.?;
+    const bytes_read = try stdout.read(&output_buf);
+
+    _ = try child.wait();
+
+    if (bytes_read == 0) {
+        return RouteError.NoDefaultGateway;
+    }
+
+    // Trim newline and parse
+    var end = bytes_read;
+    while (end > 0 and (output_buf[end - 1] == '\n' or output_buf[end - 1] == '\r')) {
+        end -= 1;
+    }
+
+    if (end == 0) {
+        return RouteError.NoDefaultGateway;
+    }
+
+    return parseIpv4(output_buf[0..end]);
+}
+
+/// Get default gateway on macOS
+fn getDefaultGatewayMacOS(allocator: std.mem.Allocator) !u32 {
 
     // Run netstat to get routing table
     var child = std.process.Child.init(
@@ -323,18 +367,33 @@ pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]cons
         prefix += 1;
     }
 
-    const cmd = if (destination == 0 and netmask == 0)
-        std.fmt.bufPrint(&cmd_buf, "route add default {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
-    else if (interface) |iface|
-        std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} -interface {s}", .{
-            trimNull(&dest_str), prefix, iface,
-        }) catch return RouteError.CommandFailed
-    else
-        std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} {s}", .{
-            trimNull(&dest_str), prefix, trimNull(&gw_str),
-        }) catch return RouteError.CommandFailed;
-
-    _ = runCommand(cmd);
+    if (builtin.os.tag == .linux) {
+        // Linux uses 'ip route' command
+        const cmd = if (destination == 0 and netmask == 0)
+            std.fmt.bufPrint(&cmd_buf, "ip route add default via {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
+        else if (interface) |iface|
+            std.fmt.bufPrint(&cmd_buf, "ip route add {s}/{d} dev {s}", .{
+                trimNull(&dest_str), prefix, iface,
+            }) catch return RouteError.CommandFailed
+        else
+            std.fmt.bufPrint(&cmd_buf, "ip route add {s}/{d} via {s}", .{
+                trimNull(&dest_str), prefix, trimNull(&gw_str),
+            }) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    } else {
+        // macOS uses 'route' command
+        const cmd = if (destination == 0 and netmask == 0)
+            std.fmt.bufPrint(&cmd_buf, "route add default {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
+        else if (interface) |iface|
+            std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} -interface {s}", .{
+                trimNull(&dest_str), prefix, iface,
+            }) catch return RouteError.CommandFailed
+        else
+            std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} {s}", .{
+                trimNull(&dest_str), prefix, trimNull(&gw_str),
+            }) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    }
 }
 
 /// Add a host route (for specific IP)
@@ -344,16 +403,26 @@ pub fn addHostRoute(host: u32, gateway: u32) !void {
     const host_str = formatIpv4(host);
     const gw_str = formatIpv4(gateway);
 
-    const cmd = std.fmt.bufPrint(&cmd_buf, "route add -host {s} {s}", .{
-        trimNull(&host_str), trimNull(&gw_str),
-    }) catch return RouteError.CommandFailed;
-
-    _ = runCommand(cmd);
+    if (builtin.os.tag == .linux) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route add {s}/32 via {s}", .{
+            trimNull(&host_str), trimNull(&gw_str),
+        }) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    } else {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "route add -host {s} {s}", .{
+            trimNull(&host_str), trimNull(&gw_str),
+        }) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    }
 }
 
 /// Delete the default route
 pub fn deleteDefaultRoute() !void {
-    _ = runCommand("route delete default");
+    if (builtin.os.tag == .linux) {
+        _ = runCommand("ip route del default");
+    } else {
+        _ = runCommand("route delete default");
+    }
 }
 
 /// Delete a specific route
@@ -368,11 +437,17 @@ pub fn deleteRoute(destination: u32, netmask: u32) !void {
         prefix += 1;
     }
 
-    const cmd = std.fmt.bufPrint(&cmd_buf, "route delete -net {s}/{d}", .{
-        trimNull(&dest_str), prefix,
-    }) catch return RouteError.CommandFailed;
-
-    _ = runCommand(cmd);
+    if (builtin.os.tag == .linux) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route del {s}/{d}", .{
+            trimNull(&dest_str), prefix,
+        }) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    } else {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "route delete -net {s}/{d}", .{
+            trimNull(&dest_str), prefix,
+        }) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    }
 }
 
 // ============================================
