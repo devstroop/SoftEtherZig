@@ -3,8 +3,16 @@
 //! This module provides Zig networking utilities.
 //! Phase 2 of the C-to-Zig migration.
 
+const builtin = @import("builtin");
+
 pub const socket = @import("socket.zig");
-pub const tls = @import("tls.zig");
+
+// Use native Zig TLS on iOS (no OpenSSL), OpenSSL implementation elsewhere
+pub const tls = if (builtin.os.tag == .ios)
+    @import("tls_native.zig")
+else
+    @import("tls.zig");
+
 pub const http = @import("http.zig");
 
 // Re-export commonly used types

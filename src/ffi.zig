@@ -66,12 +66,12 @@ pub const ZigVpnConfig = extern struct {
 };
 
 // Callback types
-pub const ZigStateCallback = ?*const fn (?*anyopaque, ZigConnectionState) callconv(.C) void;
-pub const ZigConnectedCallback = ?*const fn (?*anyopaque, *const ZigSessionInfo) callconv(.C) void;
-pub const ZigDisconnectedCallback = ?*const fn (?*anyopaque, [*:0]const u8) callconv(.C) void;
-pub const ZigPacketsCallback = ?*const fn (?*anyopaque, [*]const [*]const u8, [*]const usize, usize) callconv(.C) void;
-pub const ZigLogCallback = ?*const fn (?*anyopaque, ZigLogLevel, [*:0]const u8) callconv(.C) void;
-pub const ZigExcludeIpCallback = ?*const fn (?*anyopaque, [*:0]const u8) callconv(.C) bool;
+pub const ZigStateCallback = ?*const fn (?*anyopaque, ZigConnectionState) callconv(.c) void;
+pub const ZigConnectedCallback = ?*const fn (?*anyopaque, *const ZigSessionInfo) callconv(.c) void;
+pub const ZigDisconnectedCallback = ?*const fn (?*anyopaque, [*:0]const u8) callconv(.c) void;
+pub const ZigPacketsCallback = ?*const fn (?*anyopaque, [*]const [*]const u8, [*]const usize, usize) callconv(.c) void;
+pub const ZigLogCallback = ?*const fn (?*anyopaque, ZigLogLevel, [*:0]const u8) callconv(.c) void;
+pub const ZigExcludeIpCallback = ?*const fn (?*anyopaque, [*:0]const u8) callconv(.c) bool;
 
 pub const ZigCallbacks = extern struct {
     user_data: ?*anyopaque,
@@ -121,13 +121,13 @@ const ClientHandle = struct {
     fn stateToZig(state: ClientState) ZigConnectionState {
         return switch (state) {
             .disconnected => .disconnected,
-            .connecting => .connecting,
-            .handshaking => .handshaking,
+            .resolving_dns, .connecting_tcp => .connecting,
+            .ssl_handshake => .handshaking,
             .authenticating => .authenticating,
+            .establishing_session, .configuring_adapter => .establishing,
             .connected => .connected,
-            .disconnecting => .disconnecting,
+            .reconnecting, .disconnecting => .disconnecting,
             .error_state => .@"error",
-            else => .disconnected,
         };
     }
 };
@@ -219,51 +219,62 @@ fn ffiEventCallback(event: client_mod.ClientEvent, user_data: ?*anyopaque) void 
     const h: *ClientHandle = @ptrCast(@alignCast(user_data orelse return));
 
     switch (event) {
-        .state_changed => |state| {
+        .state_changed => |state_info| {
             if (h.callbacks.on_state_changed) |cb| {
-                cb(h.callbacks.user_data, ClientHandle.stateToZig(state));
+                cb(h.callbacks.user_data, ClientHandle.stateToZig(state_info.new_state));
             }
         },
         .connected => |info| {
-            // Fill session info
+            // Fill session info with available data
             h.session_info.assigned_ip = info.assigned_ip;
-            h.session_info.subnet_mask = info.subnet_mask;
             h.session_info.gateway_ip = info.gateway_ip;
-            if (info.mac_address) |mac| {
-                @memcpy(&h.session_info.mac_address, &mac);
+            // Get subnet mask from client if available, otherwise use /24 default
+            if (h.client) |client| {
+                h.session_info.subnet_mask = if (client.subnet_mask != 0) client.subnet_mask else 0xFFFFFF00;
+            } else {
+                h.session_info.subnet_mask = 0xFFFFFF00; // 255.255.255.0
             }
-            if (info.gateway_mac) |gmac| {
-                @memcpy(&h.session_info.gateway_mac, &gmac);
+
+            // Format server IP as string for connected_server_ip
+            // Convert from u32 (host byte order) to dotted decimal string
+            const server_ip = info.server_ip;
+            const formatted = std.fmt.bufPrint(
+                &h.session_info.connected_server_ip,
+                "{d}.{d}.{d}.{d}",
+                .{
+                    (server_ip >> 0) & 0xFF,
+                    (server_ip >> 8) & 0xFF,
+                    (server_ip >> 16) & 0xFF,
+                    (server_ip >> 24) & 0xFF,
+                },
+            ) catch "0.0.0.0";
+            // Null-terminate the string
+            if (formatted.len < h.session_info.connected_server_ip.len) {
+                h.session_info.connected_server_ip[formatted.len] = 0;
             }
 
             if (h.callbacks.on_connected) |cb| {
                 cb(h.callbacks.user_data, &h.session_info);
             }
         },
-        .disconnected => |reason| {
+        .disconnected => |disconnect_info| {
             if (h.callbacks.on_disconnected) |cb| {
-                const msg = switch (reason) {
-                    .user_request => "User requested disconnect",
-                    .server_disconnect => "Server disconnected",
-                    .connection_lost => "Connection lost",
-                    .authentication_failed => "Authentication failed",
+                const msg: [*:0]const u8 = switch (disconnect_info.reason) {
+                    .user_requested => "User requested disconnect",
+                    .server_closed => "Server disconnected",
+                    .network_error => "Connection lost",
+                    .auth_failed => "Authentication failed",
                     .timeout => "Connection timeout",
                     else => "Unknown error",
                 };
                 cb(h.callbacks.user_data, msg);
             }
         },
-        .packet_received => |packet| {
-            if (h.callbacks.on_packets_received) |cb| {
-                const packets = [_][*]const u8{packet.ptr};
-                const lengths = [_]usize{packet.len};
-                cb(h.callbacks.user_data, &packets, &lengths, 1);
-            }
-        },
         .error_occurred => |err| {
-            h.log(.@"error", "[ZIG] Error: {}", .{err});
+            h.log(.@"error", "[ZIG] Error: {s}", .{err.message});
         },
-        else => {},
+        // Handle remaining events
+        .stats_updated, .dhcp_configured => {},
     }
 }
 

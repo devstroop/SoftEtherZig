@@ -18,13 +18,15 @@ pub fn build(b: *std.Build) void {
     // ============================================
     // STATIC LIBRARY (for iOS/Android FFI)
     // ============================================
-    const static_lib = b.addStaticLibrary(.{
+    const ffi_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const static_lib = b.addLibrary(.{
         .name = "softether_zig",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ffi.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = ffi_module,
+        .linkage = .static,
     });
 
     // Link OpenSSL for TLS (iOS uses system Security.framework instead)
@@ -51,13 +53,14 @@ pub fn build(b: *std.Build) void {
     // ============================================
     // VPN CLIENT (executable)
     // ============================================
+    const main_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const vpnclient = b.addExecutable(.{
         .name = "vpnclient",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = main_module,
     });
 
     // Link OpenSSL for TLS
@@ -94,19 +97,28 @@ pub fn build(b: *std.Build) void {
     // iOS BUILD HELPER
     // ============================================
     const ios_step = b.step("ios", "Build static library for iOS (aarch64)");
-    const ios_lib = b.addStaticLibrary(.{
-        .name = "softether_zig",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ffi.zig"),
-            .target = b.resolveTargetQuery(.{
-                .cpu_arch = .aarch64,
-                .os_tag = .ios,
-            }),
-            .optimize = .ReleaseFast,
+    const ios_ffi_module = b.createModule(.{
+        .root_source_file = b.path("src/ffi.zig"),
+        .target = b.resolveTargetQuery(.{
+            .cpu_arch = .aarch64,
+            .os_tag = .ios,
         }),
+        .optimize = .ReleaseFast,
+    });
+    const ios_lib = b.addLibrary(.{
+        .name = "softether_zig",
+        .root_module = ios_ffi_module,
+        .linkage = .static,
     });
     ios_lib.linkLibC();
-    ios_step.dependOn(&ios_lib.step);
+
+    // Install the iOS library to zig-out/lib
+    const ios_install = b.addInstallArtifact(ios_lib, .{});
+    ios_step.dependOn(&ios_install.step);
+
+    // Also install header
+    const ios_header_install = b.addInstallFile(b.path("include/softether_zig.h"), "include/softether_zig.h");
+    ios_step.dependOn(&ios_header_install.step);
 
     // ============================================
     // HELP

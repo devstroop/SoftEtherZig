@@ -173,8 +173,8 @@ pub const VpnClient = struct {
     adapter_ctx: ?AdapterWrapper,
     session: ?SessionWrapper,
 
-    // Network connection
-    tls_socket: ?tls.TlsSocket,
+    // Network connection (heap-allocated for stable pointers)
+    tls_socket: ?*tls.TlsSocket,
 
     mutex: Mutex,
     worker_thread: ?Thread,
@@ -189,6 +189,7 @@ pub const VpnClient = struct {
 
     server_ip: u32,
     assigned_ip: u32,
+    subnet_mask: u32,
     gateway_ip: u32,
     gateway_mac: ?[6]u8,
 
@@ -220,6 +221,7 @@ pub const VpnClient = struct {
             .last_error = null,
             .server_ip = 0,
             .assigned_ip = 0,
+            .subnet_mask = 0,
             .gateway_ip = 0,
             .gateway_mac = null,
             .auth_credentials = null,
@@ -238,8 +240,17 @@ pub const VpnClient = struct {
             sess.deinit();
             self.session = null;
         }
-        if (self.tls_socket) |*sock| {
+        if (self.tls_socket) |sock| {
             sock.close();
+            // Native TLS (iOS) destroys itself in close(), OpenSSL doesn't
+            // Check at comptime which implementation we're using
+            const ConnectReturnType = @typeInfo(@TypeOf(tls.TlsSocket.connect)).@"fn".return_type.?;
+            const PayloadType = @typeInfo(ConnectReturnType).error_union.payload;
+            const is_pointer = @typeInfo(PayloadType) == .pointer;
+            if (!is_pointer) {
+                // OpenSSL returns value, so we heap-allocated it
+                self.allocator.destroy(sock);
+            }
             self.tls_socket = null;
         }
     }
@@ -362,7 +373,13 @@ pub const VpnClient = struct {
             .timeout_ms = self.config.connect_timeout_ms,
         };
 
-        self.tls_socket = tls.TlsSocket.connect(
+        // Connect returns either a pointer (native TLS) or value (OpenSSL).
+        // Handle both cases at comptime.
+        const ConnectReturnType = @typeInfo(@TypeOf(tls.TlsSocket.connect)).@"fn".return_type.?;
+        const PayloadType = @typeInfo(ConnectReturnType).error_union.payload;
+        const is_pointer = @typeInfo(PayloadType) == .pointer;
+
+        const sock_result = tls.TlsSocket.connect(
             self.allocator,
             self.config.server_host,
             self.config.server_port,
@@ -372,8 +389,30 @@ pub const VpnClient = struct {
             return ClientError.ConnectionFailed;
         };
 
+        if (is_pointer) {
+            // Native TLS returns pointer directly
+            self.tls_socket = sock_result;
+        } else {
+            // OpenSSL returns value, need to allocate on heap
+            const sock_ptr = self.allocator.create(tls.TlsSocket) catch {
+                var s = sock_result;
+                s.close();
+                return ClientError.OutOfMemory;
+            };
+            sock_ptr.* = sock_result;
+            self.tls_socket = sock_ptr;
+        }
+
         self.transitionState(.authenticating);
-        self.performAuthentication() catch {
+        self.performAuthentication() catch |err| {
+            std.log.err("[AUTH] performAuthentication failed with: {}", .{err});
+            // Send error event through callback so iOS can see it
+            if (self.event_callback) |cb| {
+                cb(.{ .error_occurred = .{
+                    .code = ClientError.AuthenticationFailed,
+                    .message = "Authentication failed - check server logs for details",
+                } }, self.event_user_data);
+            }
             self.disconnect_reason = .auth_failed;
             return ClientError.AuthenticationFailed;
         };
@@ -408,8 +447,15 @@ pub const VpnClient = struct {
 
         if (self.adapter_ctx) |*ctx| ctx.close();
         if (self.session) |*sess| sess.disconnect();
-        if (self.tls_socket) |*sock| {
+        if (self.tls_socket) |sock| {
             sock.close();
+            // Native TLS (iOS) destroys itself in close(), OpenSSL doesn't
+            const ConnectReturnType = @typeInfo(@TypeOf(tls.TlsSocket.connect)).@"fn".return_type.?;
+            const PayloadType = @typeInfo(ConnectReturnType).error_union.payload;
+            const is_pointer = @typeInfo(PayloadType) == .pointer;
+            if (!is_pointer) {
+                self.allocator.destroy(sock);
+            }
             self.tls_socket = null;
         }
 
@@ -456,7 +502,7 @@ pub const VpnClient = struct {
 
     fn performAuthentication(self: *Self) !void {
         // Get the TLS socket for communication
-        const sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
+        const sock = self.tls_socket orelse return ClientError.ConnectionFailed;
 
         // Create protocol writer and reader wrappers for TLS socket
         const writer = softether_proto.Writer{
@@ -483,24 +529,26 @@ pub const VpnClient = struct {
         var ip_str_buf: [16]u8 = undefined;
         const host_for_http = formatIpv4Buf(self.server_ip, &ip_str_buf);
 
-        std.log.debug("Uploading protocol signature...", .{});
+        std.log.warn("[AUTH] Step 1: Uploading protocol signature to {s}...", .{host_for_http});
 
         // Step 1: Upload signature (WaterMark)
         softether_proto.uploadSignature(self.allocator, writer, host_for_http) catch |err| {
-            std.log.err("Failed to upload signature: {}", .{err});
+            std.log.err("[AUTH] Failed to upload signature: {}", .{err});
             return ClientError.AuthenticationFailed;
         };
+        std.log.warn("[AUTH] Signature uploaded OK", .{});
 
-        std.log.debug("Downloading server hello...", .{});
+        std.log.warn("[AUTH] Step 2: Downloading server hello...", .{});
 
         // Step 2: Download Hello (get server random challenge)
         var hello = softether_proto.downloadHello(self.allocator, reader) catch |err| {
-            std.log.err("Failed to download hello: {}", .{err});
+            std.log.err("[AUTH] Failed to download hello: {}", .{err});
             return ClientError.AuthenticationFailed;
         };
         defer hello.deinit(self.allocator);
+        std.log.warn("[AUTH] Hello received - server v{d} build {d}", .{ hello.server_ver, hello.server_build });
 
-        std.log.debug("Building authentication request...", .{});
+        std.log.warn("[AUTH] Step 3: Building auth request...", .{});
 
         // Step 3: Build and upload auth
         const auth_data = switch (self.config.auth) {
@@ -536,7 +584,7 @@ pub const VpnClient = struct {
         };
         defer self.allocator.free(auth_data);
 
-        std.log.debug("Uploading authentication...", .{});
+        std.log.warn("[AUTH] Step 4: Uploading auth ({d} bytes)...", .{auth_data.len});
 
         // Step 4: Upload auth and get result (use IP address for Host header like C code)
         var auth_result = softether_proto.uploadAuth(
@@ -581,7 +629,7 @@ pub const VpnClient = struct {
             defer self.allocator.free(empty_data);
 
             // Send via HTTP POST
-            const current_sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
+            const current_sock = self.tls_socket orelse return ClientError.ConnectionFailed;
             const ack_writer = softether_proto.Writer{
                 .context = @ptrCast(current_sock),
                 .writeFn = struct {
@@ -605,8 +653,15 @@ pub const VpnClient = struct {
             std.Thread.sleep(100 * std.time.ns_per_ms);
 
             // Close current connection
-            if (self.tls_socket) |*old_sock| {
+            if (self.tls_socket) |old_sock| {
                 old_sock.close();
+                // Native TLS (iOS) destroys itself in close(), OpenSSL doesn't
+                const ConnectReturnType = @typeInfo(@TypeOf(tls.TlsSocket.connect)).@"fn".return_type.?;
+                const PayloadType = @typeInfo(ConnectReturnType).error_union.payload;
+                const is_pointer = @typeInfo(PayloadType) == .pointer;
+                if (!is_pointer) {
+                    self.allocator.destroy(old_sock);
+                }
                 self.tls_socket = null;
             }
 
@@ -632,7 +687,12 @@ pub const VpnClient = struct {
                     .timeout_ms = self.config.connect_timeout_ms,
                 };
 
-                self.tls_socket = tls.TlsSocket.connect(
+                // Handle both pointer and value return types
+                const ConnectReturnType = @typeInfo(@TypeOf(tls.TlsSocket.connect)).@"fn".return_type.?;
+                const PayloadType = @typeInfo(ConnectReturnType).error_union.payload;
+                const is_pointer = @typeInfo(PayloadType) == .pointer;
+
+                const redirect_sock_result = tls.TlsSocket.connect(
                     self.allocator,
                     try_hostname,
                     redirect_port,
@@ -641,6 +701,18 @@ pub const VpnClient = struct {
                     std.log.warn("Failed to connect to {s}:{d}: {}", .{ try_hostname, redirect_port, err });
                     continue;
                 };
+
+                if (is_pointer) {
+                    self.tls_socket = redirect_sock_result;
+                } else {
+                    const redirect_sock_ptr = self.allocator.create(tls.TlsSocket) catch {
+                        var s = redirect_sock_result;
+                        s.close();
+                        continue;
+                    };
+                    redirect_sock_ptr.* = redirect_sock_result;
+                    self.tls_socket = redirect_sock_ptr;
+                }
 
                 connected = true;
                 actual_connect_ip = try_ip;
@@ -663,7 +735,7 @@ pub const VpnClient = struct {
             };
 
             // Redo authentication with ticket
-            const redirect_sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
+            const redirect_sock = self.tls_socket orelse return ClientError.ConnectionFailed;
             const redirect_writer = softether_proto.Writer{
                 .context = @ptrCast(redirect_sock),
                 .writeFn = struct {
@@ -754,13 +826,42 @@ pub const VpnClient = struct {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
 
-        ctx.open() catch |err| {
-            // Provide helpful error message for permission issues
-            std.log.err("Failed to open virtual network adapter: {}", .{err});
-            std.log.err("Note: Creating a TUN/TAP device requires root privileges.", .{});
-            std.log.err("Try running with: sudo ./vpnclient-pure --config config.json", .{});
-            return ClientError.AdapterConfigurationFailed;
-        };
+        // In FFI mode (iOS/Android), we don't open the TUN device ourselves.
+        // The platform provides packet flow via callbacks (NEPacketTunnelProvider on iOS).
+        // We detect FFI mode by checking if an event callback is set.
+        const is_ffi_mode = self.event_callback != null;
+
+        if (is_ffi_mode) {
+            // FFI mode: Skip opening TUN device, iOS provides packetFlow
+            std.log.info("FFI mode: skipping TUN device creation (platform provides packet flow)", .{});
+
+            // Perform DHCP to get IP address before reporting connected
+            std.log.info("FFI mode: performing DHCP to obtain IP address...", .{});
+            const dhcp_config = self.performDhcp() catch |err| {
+                std.log.err("DHCP failed: {}", .{err});
+                return ClientError.AdapterConfigurationFailed;
+            };
+
+            self.assigned_ip = dhcp_config.ip_address;
+            self.subnet_mask = dhcp_config.subnet_mask;
+            self.gateway_ip = dhcp_config.gateway;
+
+            const ip = tunnel_mod.formatIpForLog(self.assigned_ip);
+            const gw = tunnel_mod.formatIpForLog(self.gateway_ip);
+            std.log.info("DHCP complete: IP={d}.{d}.{d}.{d}, Gateway={d}.{d}.{d}.{d}", .{
+                ip.a, ip.b, ip.c, ip.d,
+                gw.a, gw.b, gw.c, gw.d,
+            });
+        } else {
+            // Standalone mode: Open TUN device ourselves
+            ctx.open() catch |err| {
+                // Provide helpful error message for permission issues
+                std.log.err("Failed to open virtual network adapter: {}", .{err});
+                std.log.err("Note: Creating a TUN/TAP device requires root privileges.", .{});
+                std.log.err("Try running with: sudo ./vpnclient-pure --config config.json", .{});
+                return ClientError.AdapterConfigurationFailed;
+            };
+        }
 
         if (self.config.static_ip) |static| {
             if (static.ipv4_address) |ip_str| {
@@ -771,11 +872,240 @@ pub const VpnClient = struct {
             }
         }
 
-        if (self.config.routing.default_route and self.gateway_ip != 0) {
+        if (!is_ffi_mode and self.config.routing.default_route and self.gateway_ip != 0) {
+            // Only configure routing in standalone mode
             // Convert server_ip from little-endian (Pack protocol) to big-endian (network byte order)
             const server_ip_be = @byteSwap(self.server_ip);
             ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
         }
+    }
+
+    /// Perform DHCP over the TLS tunnel to obtain IP configuration
+    /// This is used in FFI mode where we need to get IP before reporting connected
+    fn performDhcp(self: *Self) !dhcp_mod.DhcpConfig {
+        const sock = self.tls_socket orelse return ClientError.ConnectionFailed;
+
+        // Generate a random transaction ID
+        var dhcp_xid: u32 = 0;
+        std.crypto.random.bytes(std.mem.asBytes(&dhcp_xid));
+
+        // Get or generate MAC address
+        const mac: [6]u8 = if (self.adapter_ctx) |*ctx| ctx.getMac() else blk: {
+            var m: [6]u8 = undefined;
+            std.crypto.random.bytes(&m);
+            m[0] = (m[0] | 0x02) & 0xFE; // Locally administered unicast
+            break :blk m;
+        };
+
+        std.log.info("Starting DHCP (xid=0x{x:0>8}, mac={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
+            dhcp_xid, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        });
+
+        // Buffers
+        var dhcp_buf: [512]u8 = undefined;
+        var send_buf: [1024]u8 = undefined;
+        var recv_buf: [8192]u8 = undefined;
+
+        // DHCP state machine
+        var dhcp_state: enum { discover_sent, request_sent, configured } = .discover_sent;
+        var offered_ip: u32 = 0;
+        var server_id: u32 = 0;
+        var final_config: ?dhcp_mod.DhcpConfig = null;
+
+        // Send initial DHCP DISCOVER
+        const discover_size = dhcp_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch {
+            return ClientError.ProtocolError;
+        };
+        try self.sendTunnelFrame(sock, dhcp_buf[0..discover_size], &send_buf);
+        std.log.info("Sent DHCP DISCOVER ({d} bytes)", .{discover_size});
+
+        // DHCP retry/timeout settings
+        const max_retries: u32 = 10;
+        const retry_interval_ms: i64 = 3000; // Retry every 3 seconds
+        const keepalive_interval_ms: i64 = 5000; // Send keep-alive every 5 seconds
+        const read_timeout_ms: i32 = 500; // Poll timeout for reads
+        var retry_count: u32 = 0;
+        var last_send_time = std.time.milliTimestamp();
+        var last_keepalive_time = last_send_time;
+        const deadline = last_send_time + 30000; // 30 second total timeout
+
+        // Keep-alive packet buffer
+        var keepalive_buf: [40]u8 = undefined;
+
+        std.log.info("Starting DHCP loop (deadline in 30s)", .{});
+
+        // Main DHCP loop using readWithTimeout for non-blocking reads
+        while (std.time.milliTimestamp() < deadline) {
+            // Check if we should stop
+            if (self.should_stop) {
+                return ClientError.OperationCancelled;
+            }
+
+            const now = std.time.milliTimestamp();
+
+            // Send keep-alive to prevent server timeout
+            // SoftEther servers timeout connections after ~20 seconds of inactivity
+            if (now - last_keepalive_time >= keepalive_interval_ms) {
+                last_keepalive_time = now;
+                self.sendKeepalive(sock, &keepalive_buf) catch |err| {
+                    std.log.warn("Failed to send keep-alive: {}", .{err});
+                };
+            }
+
+            // Check if we need to retry DHCP
+            if (now - last_send_time >= retry_interval_ms and retry_count < max_retries) {
+                retry_count += 1;
+                last_send_time = now;
+                if (dhcp_state == .discover_sent) {
+                    const size = dhcp_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch continue;
+                    self.sendTunnelFrame(sock, dhcp_buf[0..size], &send_buf) catch {};
+                    std.log.info("DHCP DISCOVER retry #{d}", .{retry_count});
+                } else if (dhcp_state == .request_sent) {
+                    const size = dhcp_mod.buildDhcpRequest(mac, dhcp_xid, offered_ip, server_id, &dhcp_buf) catch continue;
+                    self.sendTunnelFrame(sock, dhcp_buf[0..size], &send_buf) catch {};
+                    std.log.info("DHCP REQUEST retry #{d}", .{retry_count});
+                }
+            }
+
+            // Use readWithTimeout which polls first, then reads - won't block forever
+            const bytes_read = sock.readWithTimeout(&recv_buf, read_timeout_ms) catch |err| {
+                std.log.debug("DHCP read error: {} (continuing)", .{err});
+                continue;
+            };
+
+            if (bytes_read == 0) continue;
+
+            std.log.debug("DHCP: Received {d} bytes from tunnel", .{bytes_read});
+
+            // Parse tunnel frames
+            const frames = self.parseTunnelFrames(recv_buf[0..bytes_read]) catch |err| {
+                std.log.debug("DHCP: Frame parse error: {}", .{err});
+                continue;
+            };
+
+            std.log.debug("DHCP: Parsed {d} frames", .{frames.len});
+
+            for (frames) |frame| {
+                // Skip frames that are too small for Ethernet
+                if (frame.len < 14) continue;
+
+                // Log frame info for debugging
+                const ethertype = (@as(u16, frame[12]) << 8) | frame[13];
+                std.log.debug("DHCP: Frame len={d}, ethertype=0x{x:0>4}", .{ frame.len, ethertype });
+
+                // Check for DHCP response
+                const response = dhcp_mod.parseDhcpResponse(frame, dhcp_xid) catch continue;
+                if (response) |resp| {
+                    if (resp.msg_type == .offer and dhcp_state == .discover_sent) {
+                        // Got OFFER, send REQUEST
+                        offered_ip = resp.config.ip_address;
+                        server_id = resp.config.server_id;
+
+                        const ip = tunnel_mod.formatIpForLog(offered_ip);
+                        std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+
+                        const req_size = dhcp_mod.buildDhcpRequest(mac, dhcp_xid, offered_ip, server_id, &dhcp_buf) catch continue;
+                        self.sendTunnelFrame(sock, dhcp_buf[0..req_size], &send_buf) catch {};
+                        dhcp_state = .request_sent;
+                        retry_count = 0;
+                        last_send_time = std.time.milliTimestamp();
+                        std.log.info("Sent DHCP REQUEST", .{});
+                    } else if (resp.msg_type == .ack and dhcp_state == .request_sent) {
+                        // Got ACK - done!
+                        std.log.info("DHCP ACK received - configuration complete", .{});
+                        final_config = resp.config;
+                        dhcp_state = .configured;
+                        break;
+                    }
+                }
+            }
+
+            if (dhcp_state == .configured) break;
+        }
+
+        if (final_config) |cfg| {
+            return cfg;
+        }
+
+        std.log.err("DHCP timeout - no response received after {d} retries", .{retry_count});
+        return ClientError.OperationCancelled;
+    }
+
+    /// Send a single Ethernet frame over the SoftEther tunnel
+    fn sendTunnelFrame(self: *Self, sock: *tls.TlsSocket, frame: []const u8, buf: []u8) !void {
+        _ = self;
+        // SoftEther tunnel format:
+        // [4 bytes] num_blocks (big-endian) = 1
+        // [4 bytes] block_size (big-endian)
+        // [N bytes] block_data (Ethernet frame)
+        const total_len = 4 + 4 + frame.len;
+        if (total_len > buf.len) return error.BufferTooSmall;
+
+        mem.writeInt(u32, buf[0..4], 1, .big); // num_blocks = 1
+        mem.writeInt(u32, buf[4..8], @intCast(frame.len), .big); // block_size
+        @memcpy(buf[8..][0..frame.len], frame);
+
+        _ = try sock.write(buf[0..total_len]);
+    }
+
+    /// Send a keep-alive packet to keep the connection alive
+    /// SoftEther servers timeout connections after ~20 seconds without activity
+    fn sendKeepalive(self: *Self, sock: *tls.TlsSocket, buf: []u8) !void {
+        _ = self;
+        // SoftEther keep-alive format:
+        // [4 bytes] KEEP_ALIVE_MAGIC (0xFFFFFFFF) big-endian
+        // [4 bytes] size (32) big-endian
+        // [32 bytes] random padding
+        if (buf.len < 40) return error.BufferTooSmall;
+
+        mem.writeInt(u32, buf[0..4], protocol_tunnel_mod.KEEP_ALIVE_MAGIC, .big);
+        mem.writeInt(u32, buf[4..8], 32, .big);
+        std.crypto.random.bytes(buf[8..40]);
+
+        _ = try sock.write(buf[0..40]);
+        std.log.debug("Sent keep-alive packet", .{});
+    }
+
+    /// Parse tunnel frames from raw data
+    /// Returns slices into the input buffer for each frame
+    fn parseTunnelFrames(self: *Self, data: []const u8) ![]const []const u8 {
+        _ = self;
+        if (data.len < 4) return &[_][]const u8{};
+
+        const num_blocks = mem.readInt(u32, data[0..4], .big);
+
+        // Handle keep-alive (magic number 0xFFFFFFFF)
+        if (num_blocks == protocol_tunnel_mod.KEEP_ALIVE_MAGIC) {
+            // Just skip keep-alive packets
+            return &[_][]const u8{};
+        }
+
+        if (num_blocks == 0 or num_blocks > 512) return &[_][]const u8{};
+
+        // Static buffer for frame pointers (max 64 frames per call)
+        const max_frames = 64;
+        const S = struct {
+            var frame_ptrs: [max_frames][]const u8 = undefined;
+        };
+
+        var offset: usize = 4;
+        var frame_count: usize = 0;
+
+        var i: u32 = 0;
+        while (i < num_blocks and frame_count < max_frames) : (i += 1) {
+            if (offset + 4 > data.len) break;
+            const block_size = mem.readInt(u32, data[offset..][0..4], .big);
+            offset += 4;
+
+            if (block_size == 0) continue;
+            if (block_size > 2048 or offset + block_size > data.len) break;
+
+            S.frame_ptrs[frame_count] = data[offset..][0..block_size];
+            frame_count += 1;
+            offset += block_size;
+        }
+
+        return S.frame_ptrs[0..frame_count];
     }
 
     fn scheduleReconnect(self: *Self) void {
@@ -838,7 +1168,7 @@ pub const VpnClient = struct {
     pub fn runDataLoop(self: *Self) !void {
         if (!self.isConnected()) return ClientError.NotConnected;
 
-        const sock = &(self.tls_socket orelse return ClientError.NotConnected);
+        const sock = self.tls_socket orelse return ClientError.NotConnected;
         var adapter = &(self.adapter_ctx orelse return ClientError.NotConnected);
 
         std.log.debug("Starting data channel loop...", .{});

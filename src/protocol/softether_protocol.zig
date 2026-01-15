@@ -314,6 +314,7 @@ pub fn downloadHello(
 
     // Parse HTTP response
     const parsed = try rpc.parseHttpResponse(header_buf[0..header_len]);
+    std.log.warn("[HELLO] HTTP status: {d}, Content-Length: {d}", .{ parsed.status_code, parsed.content_length });
     if (parsed.status_code != 200) {
         std.log.err("Hello response status: {d}", .{parsed.status_code});
         return ProtocolError.ServerError;
@@ -375,7 +376,7 @@ pub fn downloadHello(
     };
     @memcpy(&result.random, random_data);
 
-    std.log.info("Server: {s} v{d}.{d}", .{ result.server_str, result.server_ver, result.server_build });
+    std.log.warn("[HELLO] Server: {s} v{d}.{d}", .{ result.server_str, result.server_ver, result.server_build });
 
     return result;
 }
@@ -538,11 +539,11 @@ pub fn buildPasswordAuth(
     return auth_pack.toBytes(allocator);
 }
 
-/// Build Auth Pack with pre-hashed password (base64 encoded)
+/// Build Auth Pack with pre-hashed password (hex encoded, 40 chars)
 pub fn buildPasswordAuthWithHash(
     allocator: Allocator,
     username: []const u8,
-    password_hash_base64: []const u8,
+    password_hash_hex: []const u8,
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
@@ -556,12 +557,16 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addStr("username", username);
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.password));
 
-    // Decode base64 password hash
-    const base64_decoder = std.base64.standard.Decoder;
+    // Decode hex password hash (40 hex chars = 20 bytes)
+    if (password_hash_hex.len != 40) {
+        std.log.err("Password hash must be 40 hex characters, got {d}", .{password_hash_hex.len});
+        return error.InvalidHexLength;
+    }
+
     var password_hash: [Protocol.sha1_size]u8 = undefined;
-    base64_decoder.decode(&password_hash, password_hash_base64) catch {
-        std.log.err("Failed to decode base64 password hash", .{});
-        return error.InvalidBase64;
+    _ = std.fmt.hexToBytes(&password_hash, password_hash_hex) catch {
+        std.log.err("Failed to decode hex password hash", .{});
+        return error.InvalidHex;
     };
 
     // Debug: Print decoded password hash
@@ -912,6 +917,7 @@ pub fn uploadAuth(
     }
 
     const parsed = try rpc.parseHttpResponse(resp_header_buf[0..resp_header_len]);
+    std.log.warn("[AUTH] Response HTTP status: {d}, Content-Length: {d}", .{ parsed.status_code, parsed.content_length });
     if (parsed.status_code != 200) {
         std.log.err("Auth response status: {d}", .{parsed.status_code});
         return ProtocolError.AuthenticationFailed;
@@ -954,6 +960,7 @@ pub fn uploadAuth(
 
     // Check for error
     const err_code = resp_pack.getInt("error") orelse 0;
+    std.log.warn("[AUTH] Server response error code: {d}", .{err_code});
     if (err_code != 0) {
         const err_msg = resp_pack.getStr("error_str");
         std.log.err("Authentication failed: {d} - {s}", .{ err_code, err_msg orelse "Unknown error" });
