@@ -16,7 +16,40 @@ pub fn build(b: *std.Build) void {
     std.debug.print("\n", .{});
 
     // ============================================
-    // VPN CLIENT
+    // STATIC LIBRARY (for iOS/Android FFI)
+    // ============================================
+    const static_lib = b.addStaticLibrary(.{
+        .name = "softether_zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Link OpenSSL for TLS (iOS uses system Security.framework instead)
+    if (target_os == .macos) {
+        static_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
+        static_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+    } else if (target_os == .ios) {
+        // iOS: Use Security.framework, no OpenSSL linking needed for static lib
+        // The app will link Security.framework
+    } else {
+        static_lib.linkSystemLibrary("ssl");
+        static_lib.linkSystemLibrary("crypto");
+    }
+    static_lib.linkLibC();
+
+    // Install the static library and header
+    b.installArtifact(static_lib);
+    b.installFile("include/softether_zig.h", "include/softether_zig.h");
+
+    // Static library build step
+    const lib_step = b.step("lib", "Build static library for FFI");
+    lib_step.dependOn(&static_lib.step);
+
+    // ============================================
+    // VPN CLIENT (executable)
     // ============================================
     const vpnclient = b.addExecutable(.{
         .name = "vpnclient",
@@ -58,6 +91,24 @@ pub fn build(b: *std.Build) void {
     _ = test_step;
 
     // ============================================
+    // iOS BUILD HELPER
+    // ============================================
+    const ios_step = b.step("ios", "Build static library for iOS (aarch64)");
+    const ios_lib = b.addStaticLibrary(.{
+        .name = "softether_zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .aarch64,
+                .os_tag = .ios,
+            }),
+            .optimize = .ReleaseFast,
+        }),
+    });
+    ios_lib.linkLibC();
+    ios_step.dependOn(&ios_lib.step);
+
+    // ============================================
     // HELP
     // ============================================
     const help_step = b.step("help", "Show build system help");
@@ -68,22 +119,26 @@ pub fn build(b: *std.Build) void {
         \\========================
         \\
         \\Build Targets:
-        \\  zig build          - Build VPN client
+        \\  zig build          - Build VPN client executable
+        \\  zig build lib      - Build static library (libsoftether_zig.a)
+        \\  zig build ios      - Build static library for iOS
         \\  zig build run      - Build and run VPN client
         \\  zig build test     - Run unit tests
         \\
         \\Build Options:
         \\  -Doptimize=<mode>  - Debug, ReleaseSafe, ReleaseFast (default), ReleaseSmall
-        \\  -Dtarget=<triple>  - Target platform (e.g., aarch64-macos, x86_64-linux)
+        \\  -Dtarget=<triple>  - Target platform (e.g., aarch64-macos, aarch64-ios)
         \\
         \\Examples:
-        \\  zig build -Doptimize=ReleaseFast
-        \\  zig build run -- --config config.json
-        \\  zig build -Dtarget=x86_64-linux-gnu
+        \\  zig build lib -Doptimize=ReleaseFast
+        \\  zig build ios
+        \\  zig build -Dtarget=aarch64-ios -Doptimize=ReleaseFast lib
         \\
-        \\Documentation:
-        \\  README.md          - Quick start guide
-        \\  SECURITY.md        - Security best practices
+        \\iOS Integration:
+        \\  1. Run: zig build ios
+        \\  2. Copy zig-out/lib/libsoftether_zig.a to your Xcode project
+        \\  3. Copy include/softether_zig.h to your project
+        \\  4. Add to bridging header: #include "softether_zig.h"
         \\
     });
     help_step.dependOn(&help_run.step);
