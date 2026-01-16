@@ -13,6 +13,44 @@ const ClientState = client_mod.ClientState;
 const AuthMethod = client_mod.AuthMethod;
 
 // ============================================================================
+// Global Logging Override for iOS
+// ============================================================================
+
+/// Global log callback storage (set when connecting)
+var g_log_callback: ZigLogCallback = null;
+var g_log_user_data: ?*anyopaque = null;
+
+/// Custom log function that routes to iOS callback
+pub fn ffiLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = scope;
+
+    // If we have a callback, route logs there
+    if (g_log_callback) |callback| {
+        const zig_level: ZigLogLevel = switch (level) {
+            .err => .@"error",
+            .warn => .warn,
+            .info => .info,
+            .debug => .debug,
+        };
+
+        var buf: [2048]u8 = undefined;
+        const msg = std.fmt.bufPrintZ(&buf, format, args) catch "[log truncated]";
+        callback(g_log_user_data, zig_level, msg);
+    }
+}
+
+/// Override std.log for FFI builds
+pub const std_options: std.Options = .{
+    .logFn = ffiLogFn,
+    .log_level = .debug,
+};
+
+// ============================================================================
 // Types (matching C header)
 // ============================================================================
 
@@ -46,12 +84,29 @@ pub const ZigSessionInfo = extern struct {
     connected_server_ip: [64]u8,
 };
 
+/// Authentication method for VPN connection
+pub const ZigAuthMethod = enum(c_int) {
+    /// Standard password authentication (SHA-0 hashed)
+    standard_password = 0,
+    /// RADIUS or NT Domain authentication (plaintext over TLS)
+    radius_or_nt_domain = 1,
+    /// Certificate-based authentication (not yet implemented)
+    certificate = 2,
+    /// Anonymous authentication (no credentials)
+    anonymous = 3,
+};
+
 pub const ZigVpnConfig = extern struct {
     server: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
     username: [*:0]const u8,
     password_hash: [*:0]const u8,
+    /// Plain password for RADIUS/NT Domain auth (only used when auth_method = radius_or_nt_domain)
+    plain_password: [*:0]const u8,
+
+    /// Authentication method (default: standard_password)
+    auth_method: ZigAuthMethod,
 
     use_encryption: bool,
     use_compression: bool,
@@ -72,6 +127,7 @@ pub const ZigDisconnectedCallback = ?*const fn (?*anyopaque, [*:0]const u8) call
 pub const ZigPacketsCallback = ?*const fn (?*anyopaque, [*]const [*]const u8, [*]const usize, usize) callconv(.c) void;
 pub const ZigLogCallback = ?*const fn (?*anyopaque, ZigLogLevel, [*:0]const u8) callconv(.c) void;
 pub const ZigExcludeIpCallback = ?*const fn (?*anyopaque, [*:0]const u8) callconv(.c) bool;
+pub const ZigProtectSocketCallback = ?*const fn (?*anyopaque, c_int) callconv(.c) bool;
 
 pub const ZigCallbacks = extern struct {
     user_data: ?*anyopaque,
@@ -81,6 +137,7 @@ pub const ZigCallbacks = extern struct {
     on_packets_received: ZigPacketsCallback,
     on_log: ZigLogCallback,
     on_exclude_ip: ZigExcludeIpCallback,
+    protect_socket: ZigProtectSocketCallback,
 };
 
 // ============================================================================
@@ -160,6 +217,9 @@ export fn zig_vpn_set_callbacks(handle: ?*ClientHandle, callbacks: ?*const ZigCa
     if (handle) |h| {
         if (callbacks) |cb| {
             h.callbacks = cb.*;
+            // Update global log callback for std.log routing
+            g_log_callback = cb.on_log;
+            g_log_user_data = cb.user_data;
         }
     }
 }
@@ -171,18 +231,34 @@ export fn zig_vpn_connect(handle: ?*ClientHandle, config: ?*const ZigVpnConfig) 
 
     h.log(.info, "[ZIG] Connecting to {s}:{d}", .{ cfg.server, cfg.port });
 
-    // Convert C config to Zig config
-    const zig_config = ClientConfig{
-        .server_host = std.mem.sliceTo(cfg.server, 0),
-        .server_port = cfg.port,
-        .hub_name = std.mem.sliceTo(cfg.hub, 0),
-        .auth = .{
+    // Build auth method based on config
+    const auth_method: AuthMethod = switch (cfg.auth_method) {
+        .standard_password => .{
             .password = .{
                 .username = std.mem.sliceTo(cfg.username, 0),
                 .password = std.mem.sliceTo(cfg.password_hash, 0),
                 .is_hashed = true,
             },
         },
+        .radius_or_nt_domain => .{
+            .plain_password = .{
+                .username = std.mem.sliceTo(cfg.username, 0),
+                .password = std.mem.sliceTo(cfg.plain_password, 0),
+            },
+        },
+        .anonymous => .{ .anonymous = {} },
+        .certificate => {
+            setLastError(h, "Certificate authentication not yet implemented", .{});
+            return -10;
+        },
+    };
+
+    // Convert C config to Zig config
+    const zig_config = ClientConfig{
+        .server_host = std.mem.sliceTo(cfg.server, 0),
+        .server_port = cfg.port,
+        .hub_name = std.mem.sliceTo(cfg.hub, 0),
+        .auth = auth_method,
         .max_connections = cfg.max_connections,
         .use_compression = cfg.use_compression,
         .use_encryption = cfg.use_encryption,
@@ -384,4 +460,19 @@ export fn zig_vpn_get_packets_received(handle: ?*ClientHandle) u64 {
 /// Get library version
 export fn zig_vpn_version() [*:0]const u8 {
     return "0.2.0-ffi";
+}
+
+/// Get last error message
+export fn zig_vpn_get_last_error(handle: ?*ClientHandle) [*:0]const u8 {
+    if (handle) |h| {
+        // Return pointer to null-terminated error buffer
+        const sentinel_ptr: [*:0]const u8 = @ptrCast(&h.last_error);
+        return sentinel_ptr;
+    }
+    return "No handle";
+}
+
+/// Set last error message (internal helper)
+fn setLastError(handle: *ClientHandle, comptime fmt: []const u8, args: anytype) void {
+    _ = std.fmt.bufPrintZ(&handle.last_error, fmt, args) catch {};
 }

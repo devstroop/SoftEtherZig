@@ -236,6 +236,40 @@ pub const TlsSocket = struct {
         return @intCast(ret);
     }
 
+    /// Read data from the TLS connection with a timeout (in milliseconds)
+    /// Returns 0 if timeout expires with no data available
+    pub fn readWithTimeout(self: *TlsSocket, buffer: []u8, timeout_ms: i32) !usize {
+        if (!self.connected) return error.ConnectionClosed;
+
+        // Use poll to wait for data with timeout
+        var poll_fds = [_]std.posix.pollfd{
+            .{ .fd = self.tcp_fd, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+
+        const poll_result = std.posix.poll(&poll_fds, timeout_ms) catch |err| {
+            std.log.debug("TLS readWithTimeout poll error: {}", .{err});
+            return 0;
+        };
+
+        // Timeout - no data available
+        if (poll_result == 0) return 0;
+
+        // Check for errors on the socket
+        if ((poll_fds[0].revents & std.posix.POLL.ERR) != 0 or
+            (poll_fds[0].revents & std.posix.POLL.HUP) != 0)
+        {
+            self.connected = false;
+            return error.ConnectionClosed;
+        }
+
+        // Data available, do the read
+        if ((poll_fds[0].revents & std.posix.POLL.IN) != 0) {
+            return self.read(buffer);
+        }
+
+        return 0;
+    }
+
     /// Read exactly n bytes
     pub fn readAll(self: *TlsSocket, buffer: []u8) !void {
         var index: usize = 0;

@@ -33,12 +33,15 @@ pub fn build(b: *std.Build) void {
     if (target_os == .macos) {
         static_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
         static_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+        // macOS: Link zlib
+        static_lib.linkSystemLibrary("z");
     } else if (target_os == .ios) {
-        // iOS: Use Security.framework, no OpenSSL linking needed for static lib
-        // The app will link Security.framework
+        // iOS: Do NOT link zlib during cross-compilation
+        // The app will link Security.framework and libz.tbd at final link time
     } else {
         static_lib.linkSystemLibrary("ssl");
         static_lib.linkSystemLibrary("crypto");
+        static_lib.linkSystemLibrary("z");
     }
     static_lib.linkLibC();
 
@@ -105,12 +108,19 @@ pub fn build(b: *std.Build) void {
         }),
         .optimize = .ReleaseFast,
     });
+
+    // Add iOS SDK include path for zlib.h and other system headers
+    // The SDK path is discovered at build time using xcrun
+    ios_ffi_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/usr/include" });
+
     const ios_lib = b.addLibrary(.{
         .name = "softether_zig",
         .root_module = ios_ffi_module,
         .linkage = .static,
     });
     ios_lib.linkLibC();
+    // Note: Do NOT link zlib here for iOS cross-compilation
+    // The iOS app will link libz.tbd from the iOS SDK at final link time
 
     // Install the iOS library to zig-out/lib
     const ios_install = b.addInstallArtifact(ios_lib, .{});

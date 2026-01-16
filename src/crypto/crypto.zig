@@ -6,6 +6,7 @@
 pub const sha0 = @import("sha0.zig");
 pub const hash = @import("hash.zig");
 pub const cipher = @import("cipher.zig");
+pub const rc4 = @import("rc4.zig");
 
 // Re-export commonly used types and functions
 
@@ -37,6 +38,11 @@ pub const Aes256Cbc = cipher.Aes256Cbc;
 pub const Aes128Gcm = cipher.Aes128Gcm;
 pub const Aes256Gcm = cipher.Aes256Gcm;
 pub const ChaCha20Poly1305 = cipher.ChaCha20Poly1305;
+
+// RC4 stream cipher (for SoftEther tunnel encryption)
+pub const Rc4 = rc4.Rc4;
+pub const Rc4KeyPair = rc4.Rc4KeyPair;
+pub const RC4_KEY_SIZE = rc4.RC4_KEY_SIZE;
 
 // Utilities
 pub const randomBytes = cipher.randomBytes;

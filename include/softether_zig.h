@@ -53,13 +53,24 @@ typedef struct {
     char connected_server_ip[64];
 } ZigSessionInfo;
 
+/// Authentication method
+typedef enum {
+    ZIG_AUTH_STANDARD_PASSWORD = 0,   // SHA-0 hashed password
+    ZIG_AUTH_RADIUS_OR_NT_DOMAIN = 1, // Plaintext password over TLS
+    ZIG_AUTH_CERTIFICATE = 2,         // X.509 certificate (not yet implemented)
+    ZIG_AUTH_ANONYMOUS = 3            // No credentials
+} ZigAuthMethod;
+
 /// Configuration for VPN connection
 typedef struct {
     const char* server;
     uint16_t port;
     const char* hub;
     const char* username;
-    const char* password_hash;  // SHA0 hash, base64 encoded
+    const char* password_hash;  // SHA0 hash, base64 encoded (for standard_password)
+    const char* plain_password; // Plaintext password (for radius_or_nt_domain)
+    
+    ZigAuthMethod auth_method;
     
     bool use_encryption;
     bool use_compression;
@@ -95,6 +106,9 @@ typedef void (*ZigLogCallback)(void* user_data, ZigLogLevel level, const char* m
 /// Called when server IP should be excluded from VPN routing
 typedef bool (*ZigExcludeIpCallback)(void* user_data, const char* ip);
 
+/// Called to protect a socket from VPN routing (iOS/Android)
+typedef bool (*ZigProtectSocketCallback)(void* user_data, int fd);
+
 /// Callback structure
 typedef struct {
     void* user_data;
@@ -104,6 +118,7 @@ typedef struct {
     ZigPacketsCallback on_packets_received;
     ZigLogCallback on_log;
     ZigExcludeIpCallback on_exclude_ip;
+    ZigProtectSocketCallback protect_socket;
 } ZigCallbacks;
 
 // ============================================================================
@@ -175,6 +190,9 @@ uint64_t zig_vpn_get_packets_received(ZigVpnClientHandle handle);
 
 /// Get library version string
 const char* zig_vpn_version(void);
+
+/// Get last error message
+const char* zig_vpn_get_last_error(ZigVpnClientHandle handle);
 
 #ifdef __cplusplus
 }

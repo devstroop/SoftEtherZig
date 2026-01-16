@@ -16,6 +16,8 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const flate = std.compress.flate;
+const Io = std.Io;
 
 /// Magic number indicating keep-alive packet (same as SoftEther's KEEP_ALIVE_MAGIC)
 pub const KEEP_ALIVE_MAGIC: u32 = 0xFFFFFFFF;
@@ -47,6 +49,9 @@ pub const TunnelConnection = struct {
     read_fn: *const fn (ctx: *anyopaque, buf: []u8) anyerror!usize,
     write_fn: *const fn (ctx: *anyopaque, data: []const u8) anyerror!usize,
     context: *anyopaque,
+
+    // Compression flag - when true, compress outgoing blocks
+    use_compression: bool = false,
 
     // Receive state machine
     recv_state: RecvState = .read_num_blocks,
@@ -83,6 +88,23 @@ pub const TunnelConnection = struct {
             .context = context,
             .read_fn = read_fn,
             .write_fn = write_fn,
+        };
+    }
+
+    /// Initialize with compression enabled/disabled
+    pub fn initWithCompression(
+        allocator: Allocator,
+        context: *anyopaque,
+        read_fn: *const fn (*anyopaque, []u8) anyerror!usize,
+        write_fn: *const fn (*anyopaque, []const u8) anyerror!usize,
+        use_compression: bool,
+    ) TunnelConnection {
+        return .{
+            .allocator = allocator,
+            .context = context,
+            .read_fn = read_fn,
+            .write_fn = write_fn,
+            .use_compression = use_compression,
         };
     }
 
@@ -219,10 +241,14 @@ pub const TunnelConnection = struct {
     }
 
     /// Send blocks through the tunnel using pre-allocated buffer (zero-copy path)
+    /// Compresses each block if use_compression is enabled
     pub fn sendBlocksZeroCopy(self: *TunnelConnection, blocks: []const []const u8, send_buffer: []u8) !void {
         if (blocks.len == 0) return;
 
-        // Calculate total size needed
+        // Compression buffer (per block)
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+
+        // Calculate total size needed (uncompressed, as upper bound)
         var total_size: usize = 4; // num_blocks
         for (blocks) |block| {
             total_size += 4 + block.len; // size + data
@@ -236,8 +262,22 @@ pub const TunnelConnection = struct {
         mem.writeInt(u32, send_buffer[0..4], @intCast(blocks.len), .big);
         offset += 4;
 
-        // Write each block
+        // Write each block (compressed if enabled)
         for (blocks) |block| {
+            if (self.use_compression and block.len > 14) {
+                // Compress this block
+                if (compressZlib(block, &compress_buf)) |compressed_len| {
+                    // Only use compression if it actually saves space
+                    if (compressed_len < block.len) {
+                        mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(compressed_len), .big);
+                        offset += 4;
+                        @memcpy(send_buffer[offset..][0..compressed_len], compress_buf[0..compressed_len]);
+                        offset += compressed_len;
+                        continue;
+                    }
+                }
+            }
+            // Either compression disabled, failed, or didn't help - send uncompressed
             mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(block.len), .big);
             offset += 4;
             @memcpy(send_buffer[offset..][0..block.len], block);
@@ -262,6 +302,7 @@ pub const TunnelConnection = struct {
 
     /// Send a single IP packet wrapped in Ethernet, directly into send buffer (minimal copy)
     /// Returns number of bytes written to send_buffer, or 0 on error
+    /// Compresses the Ethernet frame if use_compression is enabled
     pub fn sendSinglePacketDirect(
         self: *TunnelConnection,
         ip_packet: []const u8,
@@ -272,34 +313,46 @@ pub const TunnelConnection = struct {
         if (ip_packet.len == 0 or ip_packet.len > 1500) return 0;
 
         const eth_len = 14 + ip_packet.len;
-        const total_len = 4 + 4 + eth_len; // num_blocks + size + eth_frame
 
-        if (total_len > send_buffer.len) return 0;
-
-        // Build packet directly in send buffer
-        // num_blocks = 1
-        mem.writeInt(u32, send_buffer[0..4], 1, .big);
-        // block size
-        mem.writeInt(u32, send_buffer[4..8], @intCast(eth_len), .big);
-
-        // Ethernet header (14 bytes)
-        @memcpy(send_buffer[8..14], &dst_mac); // dst MAC
-        @memcpy(send_buffer[14..20], &src_mac); // src MAC
+        // First build the Ethernet frame in a temp buffer
+        var eth_frame: [1600]u8 = undefined;
+        @memcpy(eth_frame[0..6], &dst_mac); // dst MAC
+        @memcpy(eth_frame[6..12], &src_mac); // src MAC
 
         // EtherType
         const ip_version = (ip_packet[0] >> 4) & 0x0F;
         if (ip_version == 4) {
-            send_buffer[20] = 0x08;
-            send_buffer[21] = 0x00;
+            eth_frame[12] = 0x08;
+            eth_frame[13] = 0x00;
         } else if (ip_version == 6) {
-            send_buffer[20] = 0x86;
-            send_buffer[21] = 0xDD;
+            eth_frame[12] = 0x86;
+            eth_frame[13] = 0xDD;
         } else {
             return 0;
         }
 
-        // IP packet (single copy from TUN buffer)
-        @memcpy(send_buffer[22..][0..ip_packet.len], ip_packet);
+        // Copy IP packet
+        @memcpy(eth_frame[14..][0..ip_packet.len], ip_packet);
+
+        // Now handle compression
+        var final_data: []const u8 = eth_frame[0..eth_len];
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+
+        if (self.use_compression and eth_len > 14) {
+            if (compressZlib(eth_frame[0..eth_len], &compress_buf)) |compressed_len| {
+                if (compressed_len < eth_len) {
+                    final_data = compress_buf[0..compressed_len];
+                }
+            }
+        }
+
+        const total_len = 4 + 4 + final_data.len; // num_blocks + size + data
+        if (total_len > send_buffer.len) return 0;
+
+        // Build packet in send buffer
+        mem.writeInt(u32, send_buffer[0..4], 1, .big); // num_blocks = 1
+        mem.writeInt(u32, send_buffer[4..8], @intCast(final_data.len), .big); // block size
+        @memcpy(send_buffer[8..][0..final_data.len], final_data);
 
         // Send
         const n = try self.write_fn(self.context, send_buffer[0..total_len]);
@@ -314,17 +367,38 @@ pub const TunnelConnection = struct {
         }
 
         self.total_send += total_len;
-        return eth_len;
+        return eth_len; // Return original eth_len for stats
+    }
+
+    /// Compress data using zlib (fast compression for VPN traffic)
+    /// Returns compressed length, or null on error
+    fn compressZlib(input: []const u8, output: []u8) ?usize {
+        var input_reader: Io.Reader = .fixed(input);
+        var output_writer: Io.Writer = .fixed(output);
+        var window_buf: [flate.max_window_len]u8 = undefined;
+        var compress: flate.Compress = .init(&input_reader, .zlib, .fast, &window_buf);
+
+        const compressed_len = compress.writer.streamRemaining(&output_writer) catch |err| {
+            std.log.debug("Zlib compression error: {}", .{err});
+            return null;
+        };
+
+        return compressed_len;
     }
 
     /// Send blocks through the tunnel (allocating version for compatibility)
+    /// Compresses each block if use_compression is enabled
     pub fn sendBlocks(self: *TunnelConnection, blocks: []const []const u8) !void {
         if (blocks.len == 0) return;
 
-        // Calculate total size needed
+        // Compression buffer (per block, max ~2x size for worst case)
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+
+        // Calculate total size needed (with potential compression)
+        // We allocate conservatively for uncompressed; compression may reduce this
         var total_size: usize = 4; // num_blocks
         for (blocks) |block| {
-            total_size += 4 + block.len; // size + data
+            total_size += 4 + block.len; // size + data (max size)
         }
 
         // Build the packet
@@ -337,23 +411,37 @@ pub const TunnelConnection = struct {
         mem.writeInt(u32, packet[0..4], @intCast(blocks.len), .big);
         offset += 4;
 
-        // Write each block
+        // Write each block (compressed if enabled)
         for (blocks) |block| {
+            if (self.use_compression and block.len > 14) {
+                // Compress this block
+                if (compressZlib(block, &compress_buf)) |compressed_len| {
+                    // Only use compression if it actually saves space
+                    if (compressed_len < block.len) {
+                        mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed_len), .big);
+                        offset += 4;
+                        @memcpy(packet[offset..][0..compressed_len], compress_buf[0..compressed_len]);
+                        offset += compressed_len;
+                        continue;
+                    }
+                }
+            }
+            // Either compression disabled, failed, or didn't help - send uncompressed
             mem.writeInt(u32, packet[offset..][0..4], @intCast(block.len), .big);
             offset += 4;
             @memcpy(packet[offset..][0..block.len], block);
             offset += block.len;
         }
 
-        // Send all at once
+        // Send actual data (may be smaller than allocated due to compression)
         var sent: usize = 0;
-        while (sent < packet.len) {
-            const n = try self.write_fn(self.context, packet[sent..]);
+        while (sent < offset) {
+            const n = try self.write_fn(self.context, packet[sent..offset]);
             if (n == 0) return error.ConnectionClosed;
             sent += n;
         }
 
-        self.total_send += packet.len;
+        self.total_send += offset;
     }
 
     /// Send a keep-alive packet

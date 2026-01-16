@@ -130,6 +130,16 @@ pub const TlsSocket = struct {
         }
         errdefer tcp_stream.close();
 
+        // Set TCP_NODELAY to disable Nagle's algorithm for low-latency VPN
+        // This is critical for DHCP/keepalive packets to be sent immediately
+        // Use raw values since std.posix.TCP may not be available on all platforms
+        const IPPROTO_TCP = 6;
+        const TCP_NODELAY = 1;
+        const nodelay: c_int = 1;
+        _ = std.posix.setsockopt(tcp_stream.handle, IPPROTO_TCP, TCP_NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
+            std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
+        };
+
         // Apply timeout
         if (config.timeout_ms > 0) {
             TcpSocket.setReadTimeout(tcp_stream.handle, config.timeout_ms) catch {};
@@ -243,7 +253,12 @@ pub const TlsSocket = struct {
 
         // Use readSliceShort which returns actual bytes read (can be less than buffer.len)
         const n = client.reader.readSliceShort(buffer) catch |err| {
-            std.log.err("TLS read error: {} (close_notify: {})", .{ err, client.received_close_notify });
+            // Only log as error if it's a real close, otherwise debug level (timeouts are expected)
+            if (client.received_close_notify) {
+                std.log.err("TLS read error: {} (close_notify: true)", .{err});
+            } else {
+                std.log.debug("TLS read: {} (close_notify: false, likely timeout)", .{err});
+            }
             switch (err) {
                 error.ReadFailed => {
                     // Check if connection was closed
@@ -337,40 +352,124 @@ pub const TlsSocket = struct {
         return self.hostname_buf;
     }
 
+    /// Check if there's data already buffered in the TLS layer
+    /// This allows checking for data without blocking on the socket
+    pub fn hasBufferedData(self: *Self) bool {
+        if (self.tls_client) |*client| {
+            // Check if there's decrypted data in the TLS buffer
+            return client.reader.bufferedLen() > 0;
+        }
+        return false;
+    }
+
     /// Read with timeout - uses poll() to check for data before reading
     /// Returns 0 if timeout expires with no data, otherwise returns bytes read
     /// This is safe to use in a loop without blocking forever
+    ///
+    /// CRITICAL FIX: TLS buffers data internally. We must check the TLS buffer FIRST
+    /// before falling back to poll() on the TCP socket. Otherwise we may miss data
+    /// that was already decrypted from a previous TLS record.
+    ///
+    /// IMPORTANT: TLS buffering issue - poll() only sees TCP data, not TLS internal buffers.
+    /// The TLS layer may need multiple TCP segments to complete a TLS record, causing blocking.
+    /// Solution: Set a temporary socket read timeout during the TLS read.
     pub fn readWithTimeout(self: *Self, buffer: []u8, timeout_ms: i32) !usize {
         if (!self.connected) {
             return 0;
         }
 
-        // First check if there's data available at TCP level using poll()
+        const client = &(self.tls_client orelse return 0);
+
+        // CRITICAL: First check if there's already decrypted data in the TLS buffer!
+        // The TLS layer buffers data from previous records, and poll() won't see this.
+        // This was causing DHCP to fail - server responses were buffered but we never read them.
+        const buffered = client.reader.bufferedLen();
+        if (buffered > 0) {
+            std.log.debug("TLS readWithTimeout: {d} bytes already buffered in TLS layer", .{buffered});
+
+            // Read buffered data without touching the socket
+            // readSliceShort will return immediately with buffered data
+            const result = self.read(buffer) catch |err| {
+                switch (err) {
+                    TlsError.ConnectionClosed => {
+                        self.connected = false;
+                        return error.ConnectionClosed;
+                    },
+                    else => return err,
+                }
+            };
+            return result;
+        }
+
+        // No buffered TLS data, check TCP socket with poll()
+        // Use a slightly longer poll timeout to allow TCP data to accumulate
+        const poll_timeout = @max(timeout_ms, 500); // At least 500ms for TLS records
+        std.log.warn("TLS readWithTimeout: poll(timeout={d}ms)", .{poll_timeout});
         var poll_fds = [_]std.posix.pollfd{
             .{ .fd = self.tcp_stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
         };
 
-        const poll_result = std.posix.poll(&poll_fds, timeout_ms) catch |err| {
-            std.log.debug("TLS readWithTimeout: poll error: {}", .{err});
+        const poll_result = std.posix.poll(&poll_fds, poll_timeout) catch |err| {
+            std.log.warn("TLS readWithTimeout: poll error: {}", .{err});
             return 0;
         };
+        std.log.warn("TLS readWithTimeout: poll returned {d}, revents=0x{x:0>4}", .{
+            poll_result,
+            poll_fds[0].revents,
+        });
 
         // Check for errors or hangup
         if ((poll_fds[0].revents & std.posix.POLL.ERR) != 0 or
             (poll_fds[0].revents & std.posix.POLL.HUP) != 0)
         {
+            std.log.debug("TLS readWithTimeout: poll ERR/HUP detected", .{});
             self.connected = false;
             return error.ConnectionClosed;
         }
 
-        // No data available within timeout
+        // No data available within timeout at TCP level
         if (poll_result == 0 or (poll_fds[0].revents & std.posix.POLL.IN) == 0) {
-            return 0; // Timeout - no data
+            std.log.debug("TLS readWithTimeout: poll timeout (no data)", .{});
+            return 0; // Timeout - no data at TCP or TLS level
         }
 
+        std.log.debug("TLS readWithTimeout: data available, calling TLS read", .{});
         // Data is available at TCP level, now read through TLS
-        // This should not block since poll said data is ready
-        return self.read(buffer);
+        // CRITICAL: TLS read can still block if it needs more TCP data to complete a record!
+        // Set a longer socket timeout to allow TLS record completion (TLS records can be up to 16KB)
+        const tls_read_timeout_ms: u32 = @max(2000, @as(u32, @intCast(timeout_ms)) * 4);
+        socket_mod.TcpSocket.setReadTimeout(self.tcp_stream.handle, tls_read_timeout_ms) catch {};
+
+        // Try to read through TLS - may get partial data or timeout
+        // If the socket timeout triggers, it returns an error which we should treat as "no data yet"
+        const result = self.read(buffer) catch |err| {
+            // Restore timeout before returning
+            socket_mod.TcpSocket.setReadTimeout(self.tcp_stream.handle, self.config.timeout_ms) catch {};
+
+            // Check if this is a real error or just a timeout
+            switch (err) {
+                TlsError.ReadError => {
+                    // Socket timeout caused TLS read to fail - this is expected, not an error
+                    // Just return 0 to indicate no data available yet
+                    std.log.debug("TLS readWithTimeout: socket timeout (expected, no data yet)", .{});
+                    return 0;
+                },
+                TlsError.ConnectionClosed => {
+                    // Real connection close
+                    self.connected = false;
+                    return error.ConnectionClosed;
+                },
+                else => {
+                    // Other errors - propagate them
+                    return err;
+                },
+            }
+        };
+
+        // Restore original timeout (30 seconds default)
+        socket_mod.TcpSocket.setReadTimeout(self.tcp_stream.handle, self.config.timeout_ms) catch {};
+
+        return result;
     }
 };
 

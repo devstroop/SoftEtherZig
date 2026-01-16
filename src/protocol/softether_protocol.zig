@@ -111,6 +111,12 @@ pub const RedirectInfo = struct {
 };
 
 /// Authentication result
+/// RC4 key pair for tunnel encryption (16 bytes each)
+pub const Rc4Keys = struct {
+    client_to_server: [16]u8,
+    server_to_client: [16]u8,
+};
+
 pub const AuthResult = struct {
     success: bool,
     error_code: u32,
@@ -118,6 +124,7 @@ pub const AuthResult = struct {
     session_key: ?[Protocol.sha1_size]u8,
     policy: ?[]const u8,
     redirect: ?RedirectInfo, // If set, need to reconnect to this server
+    rc4_keys: ?Rc4Keys, // If set, tunnel data must be RC4 encrypted
 
     pub fn deinit(self: *AuthResult, allocator: Allocator) void {
         if (self.error_message) |msg| allocator.free(msg);
@@ -421,6 +428,7 @@ pub fn buildPasswordAuth(
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
+    use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -464,7 +472,7 @@ pub fn buildPasswordAuth(
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
     try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
+    try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
@@ -547,6 +555,7 @@ pub fn buildPasswordAuthWithHash(
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
+    use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -598,7 +607,7 @@ pub fn buildPasswordAuthWithHash(
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
     try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
+    try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
@@ -678,6 +687,7 @@ pub fn buildAnonymousAuth(
     allocator: Allocator,
     hub_name: []const u8,
     udp_accel: bool,
+    use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -705,7 +715,7 @@ pub fn buildAnonymousAuth(
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
     try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
+    try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
@@ -739,6 +749,78 @@ pub fn buildAnonymousAuth(
     return auth_pack.toBytes(allocator);
 }
 
+/// Build Auth Pack with plain password authentication (for RADIUS / NT Domain)
+/// This sends the plaintext password over TLS for server-side authentication
+/// via RADIUS or NT Domain controller.
+pub fn buildPlainPasswordAuth(
+    allocator: Allocator,
+    hub_name: []const u8,
+    username: []const u8,
+    password: []const u8,
+    udp_accel: bool,
+    use_compress: bool,
+) ![]u8 {
+    var auth_pack = Pack.init(allocator);
+    defer auth_pack.deinit();
+
+    // Add authentication fields
+    try auth_pack.addStr("method", "login");
+    try auth_pack.addStr("hubname", hub_name);
+    try auth_pack.addStr("username", username);
+    try auth_pack.addInt("authtype", @intFromEnum(AuthType.plain_password));
+    try auth_pack.addStr("plain_password", password);
+
+    // PackAddClientVersion fields
+    try auth_pack.addStr("client_str", Protocol.client_str);
+    try auth_pack.addInt("client_ver", Protocol.client_ver);
+    try auth_pack.addInt("client_build", Protocol.client_build);
+
+    // Protocol (0 = TCP)
+    try auth_pack.addInt("protocol", 0);
+
+    // Version fields
+    try auth_pack.addStr("hello", Protocol.client_str);
+    try auth_pack.addInt("version", Protocol.client_ver);
+    try auth_pack.addInt("build", Protocol.client_build);
+    try auth_pack.addInt("client_id", 0);
+
+    // Protocol options
+    try auth_pack.addInt("max_connection", 1);
+    try auth_pack.addBool("use_encrypt", true);
+    try auth_pack.addBool("use_compress", use_compress);
+    try auth_pack.addBool("half_connection", false);
+
+    // Bridge/monitor mode flags
+    try auth_pack.addBool("require_bridge_routing_mode", false);
+    try auth_pack.addBool("require_monitor_mode", false);
+
+    // QoS flag
+    try auth_pack.addBool("qos", true);
+
+    // Bulk transfer support (UDP acceleration)
+    try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
+    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
+
+    // UDP recovery support
+    try auth_pack.addBool("support_udp_recovery", udp_accel);
+
+    // Unique ID
+    var unique_id: [Protocol.sha1_size]u8 = undefined;
+    std.crypto.random.bytes(&unique_id);
+    try auth_pack.addData("unique_id", &unique_id);
+
+    // RUDP bulk max version
+    try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
+
+    // Add pencore dummy value (random padding for anti-fingerprinting)
+    var pencore_buf: [1000]u8 = undefined;
+    const pencore_size = crypto.random.intRangeAtMost(usize, 0, 1000);
+    crypto.random.bytes(pencore_buf[0..pencore_size]);
+    try auth_pack.addData("pencore", pencore_buf[0..pencore_size]);
+
+    return auth_pack.toBytes(allocator);
+}
+
 /// Build Auth Pack with ticket authentication (for cluster redirect)
 pub fn buildTicketAuth(
     allocator: Allocator,
@@ -746,6 +828,7 @@ pub fn buildTicketAuth(
     username: []const u8,
     ticket: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
+    use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -776,7 +859,7 @@ pub fn buildTicketAuth(
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
     try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
+    try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
@@ -972,6 +1055,7 @@ pub fn uploadAuth(
             .session_key = null,
             .policy = null,
             .redirect = null,
+            .rc4_keys = null,
         };
     }
 
@@ -1013,6 +1097,7 @@ pub fn uploadAuth(
                 .port = redirect_port,
                 .ticket = ticket,
             },
+            .rc4_keys = null, // Will get RC4 keys from redirect server
         };
     }
 
@@ -1025,6 +1110,33 @@ pub fn uploadAuth(
         }
     }
 
+    // Parse RC4 keys (UseFastRC4 mode) - CRITICAL for tunnel encryption
+    // If server sends these, all tunnel data must be RC4 encrypted/decrypted
+    const rc4_c2s = resp_pack.getData("rc4_key_client_to_server");
+    const rc4_s2c = resp_pack.getData("rc4_key_server_to_client");
+    var rc4_keys: ?Rc4Keys = null;
+
+    if (rc4_c2s != null and rc4_s2c != null) {
+        const c2s = rc4_c2s.?;
+        const s2c = rc4_s2c.?;
+        if (c2s.len == 16 and s2c.len == 16) {
+            std.log.warn("RC4 defense-in-depth enabled by server (TLS + RC4)", .{});
+            var keys: Rc4Keys = undefined;
+            @memcpy(&keys.client_to_server, c2s[0..16]);
+            @memcpy(&keys.server_to_client, s2c[0..16]);
+            rc4_keys = keys;
+        } else {
+            std.log.warn("RC4 keys present but wrong size (c2s={d}, s2c={d}), ignoring", .{ c2s.len, s2c.len });
+        }
+    } else if (rc4_c2s != null or rc4_s2c != null) {
+        std.log.warn("Only partial RC4 keys received (c2s={d}, s2c={d}), ignoring", .{
+            if (rc4_c2s) |k| k.len else 0,
+            if (rc4_s2c) |k| k.len else 0,
+        });
+    } else {
+        std.log.info("No RC4 keys in auth response - using TLS-only encryption", .{});
+    }
+
     std.log.info("Authentication successful", .{});
 
     return AuthResult{
@@ -1034,6 +1146,7 @@ pub fn uploadAuth(
         .session_key = session_key,
         .policy = null,
         .redirect = null,
+        .rc4_keys = rc4_keys,
     };
 }
 
@@ -1057,9 +1170,9 @@ pub fn performHandshake(
 
     // Step 3: Build and upload auth
     const auth_data = if (password) |pwd|
-        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel)
+        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, false)
     else
-        try buildAnonymousAuth(allocator, hub_name, udp_accel);
+        try buildAnonymousAuth(allocator, hub_name, udp_accel, false);
     defer allocator.free(auth_data);
 
     var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
@@ -1113,6 +1226,7 @@ test "buildPasswordAuth creates valid Pack" {
         "VPN",
         &random,
         false, // udp_accel
+        false, // use_compress
     );
     defer allocator.free(auth_data);
 
@@ -1130,7 +1244,7 @@ test "buildPasswordAuth creates valid Pack" {
 test "buildAnonymousAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false);
+    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, false);
     defer allocator.free(auth_data);
 
     var auth_pack = try Pack.fromBytes(allocator, auth_data);
