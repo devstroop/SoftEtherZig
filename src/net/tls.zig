@@ -50,7 +50,7 @@ pub const TlsConfig = struct {
     min_version: TlsVersion = .tls_1_2,
 
     /// Connection timeout in milliseconds
-    timeout_ms: u32 = 30000,
+    timeout_ms: u32 = 10000, // iOS-safe: keep under 15s to avoid watchdog
 
     /// SoftEther-specific: Accept self-signed certificates
     /// WARNING: Only use for testing or when server cert is pinned

@@ -372,18 +372,13 @@ pub const TunnelConnection = struct {
 
     /// Compress data using zlib (fast compression for VPN traffic)
     /// Returns compressed length, or null on error
+    /// NOTE: Compression temporarily disabled due to Zig 0.15 API changes
     fn compressZlib(input: []const u8, output: []u8) ?usize {
-        var input_reader: Io.Reader = .fixed(input);
-        var output_writer: Io.Writer = .fixed(output);
-        var window_buf: [flate.max_window_len]u8 = undefined;
-        var compress: flate.Compress = .init(&input_reader, .zlib, .fast, &window_buf);
-
-        const compressed_len = compress.writer.streamRemaining(&output_writer) catch |err| {
-            std.log.debug("Zlib compression error: {}", .{err});
-            return null;
-        };
-
-        return compressed_len;
+        _ = input;
+        _ = output;
+        // TODO: Re-implement with Zig 0.15 flate API
+        // Compression disabled for now - VPN still works without it
+        return null;
     }
 
     /// Send blocks through the tunnel (allocating version for compatibility)

@@ -193,6 +193,12 @@ pub const VpnClient = struct {
     // Network connection (heap-allocated for stable pointers)
     tls_socket: ?*tls.TlsSocket,
 
+    // Raw TCP stream for raw mode (when RC4 keys are provided)
+    // In raw mode, tunnel data is sent over raw TCP with RC4 encryption,
+    // not wrapped in TLS. This matches SoftEther's "UseFastRC4" mode.
+    raw_stream: ?std.net.Stream,
+    use_raw_mode: bool,
+
     mutex: Mutex,
     worker_thread: ?Thread,
     should_stop: bool,
@@ -232,6 +238,8 @@ pub const VpnClient = struct {
             .adapter_ctx = null,
             .session = null,
             .tls_socket = null,
+            .raw_stream = null,
+            .use_raw_mode = false,
             .mutex = .{},
             .worker_thread = null,
             .should_stop = false,
@@ -585,6 +593,7 @@ pub const VpnClient = struct {
                         self.config.hub_name,
                         &hello.random,
                         self.config.udp_acceleration,
+                        self.config.use_encryption,
                         self.config.use_compression,
                     ) catch return ClientError.OutOfMemory;
                 } else {
@@ -596,6 +605,7 @@ pub const VpnClient = struct {
                         self.config.hub_name,
                         &hello.random,
                         self.config.udp_acceleration,
+                        self.config.use_encryption,
                         self.config.use_compression,
                     ) catch return ClientError.OutOfMemory;
                 }
@@ -606,12 +616,14 @@ pub const VpnClient = struct {
                 p.username,
                 p.password,
                 self.config.udp_acceleration,
+                self.config.use_encryption,
                 self.config.use_compression,
             ) catch return ClientError.OutOfMemory,
             .anonymous => softether_proto.buildAnonymousAuth(
                 self.allocator,
                 self.config.hub_name,
                 self.config.udp_acceleration,
+                self.config.use_encryption,
                 self.config.use_compression,
             ) catch return ClientError.OutOfMemory,
             .certificate => return ClientError.AuthenticationFailed, // Not implemented yet
@@ -814,6 +826,7 @@ pub const VpnClient = struct {
                 username,
                 &ticket,
                 self.config.udp_acceleration,
+                self.config.use_encryption,
                 self.config.use_compression,
             ) catch return ClientError.OutOfMemory;
             defer self.allocator.free(ticket_auth_data);
@@ -842,10 +855,17 @@ pub const VpnClient = struct {
             }
 
             // Initialize RC4 ciphers if server requires RC4 encryption
+            // When RC4 keys are provided, tunnel data uses raw TCP + RC4 (not TLS)
             if (ticket_auth_result.rc4_keys) |keys| {
-                std.log.info("Initializing RC4 ciphers from ticket auth", .{});
+                std.log.info("Initializing RC4 ciphers from ticket auth - switching to raw mode", .{});
                 self.rc4_send = Rc4.init(&keys.client_to_server);
                 self.rc4_recv = Rc4.init(&keys.server_to_client);
+
+                // Switch to raw TCP mode for tunnel data
+                // This matches Rust's into_plain() - tunnel data is raw TCP + RC4, not TLS
+                self.raw_stream = redirect_sock.getRawStream();
+                self.use_raw_mode = true;
+                std.log.warn("Switched to raw TCP mode (RC4 encryption layer active)", .{});
             }
 
             std.log.debug("Ticket authentication successful!", .{});
@@ -859,10 +879,18 @@ pub const VpnClient = struct {
         }
 
         // Initialize RC4 ciphers if server requires RC4 encryption (non-redirect case)
+        // When RC4 keys are provided, tunnel data uses raw TCP + RC4 (not TLS)
         if (auth_result.rc4_keys) |keys| {
-            std.log.info("Initializing RC4 ciphers from auth result", .{});
+            std.log.info("Initializing RC4 ciphers from auth result - switching to raw mode", .{});
             self.rc4_send = Rc4.init(&keys.client_to_server);
             self.rc4_recv = Rc4.init(&keys.server_to_client);
+
+            // Switch to raw TCP mode for tunnel data
+            if (self.tls_socket) |tls_sock| {
+                self.raw_stream = tls_sock.getRawStream();
+                self.use_raw_mode = true;
+                std.log.warn("Switched to raw TCP mode (RC4 encryption layer active)", .{});
+            }
         }
 
         std.log.info("Authentication successful!", .{});
@@ -963,6 +991,12 @@ pub const VpnClient = struct {
         var recv_buf: [8192]u8 = undefined;
         var decompress_buf: [4096]u8 = undefined; // For zlib decompression
 
+        // SKIP DRAIN PHASE - it was causing 15+ second delays that triggered server timeout
+        // TLS 1.3 NewSessionTicket messages will be processed during normal read loop
+        // The server has a 15-second keep-alive timeout, and the drain was taking too long
+        // because partial TLS records require waiting for all fragments to arrive
+        std.log.info("Skipping TLS drain (server has 15s keep-alive, drain can take 20s+)", .{});
+
         // DHCP state machine
         var dhcp_state: enum { discover_sent, request_sent, configured } = .discover_sent;
         var offered_ip: u32 = 0;
@@ -1030,9 +1064,10 @@ pub const VpnClient = struct {
 
             // Non-blocking read with 3-second timeout (matching Rust behavior)
             // This mirrors Rust's tokio::time::timeout(Duration::from_secs(3), conn.read())
-            std.log.warn("DHCP: readWithTimeout({d}ms)...", .{read_timeout_ms});
-            const bytes_read = sock.readWithTimeout(&recv_buf, read_timeout_ms) catch |err| {
-                std.log.warn("DHCP: readWithTimeout error: {}", .{err});
+            // Uses tunnelRead which handles raw mode vs TLS mode transparently
+            std.log.warn("DHCP: tunnelRead({d}ms), use_raw_mode={}", .{ read_timeout_ms, self.use_raw_mode });
+            const bytes_read = self.tunnelRead(&recv_buf, read_timeout_ms) catch |err| {
+                std.log.warn("DHCP: tunnelRead error: {}", .{err});
                 // Connection errors are fatal
                 if (err == error.ConnectionClosed) {
                     std.log.err("DHCP: Server closed connection", .{});
@@ -1041,84 +1076,125 @@ pub const VpnClient = struct {
                 // Other errors (timeout, would block) are expected - continue loop
                 continue;
             };
-            std.log.warn("DHCP: readWithTimeout returned {d} bytes", .{bytes_read});
+            std.log.warn("DHCP: tunnelRead returned {d} bytes", .{bytes_read});
 
             // No data within timeout - this is normal, just loop back to check keepalive/retry
             if (bytes_read == 0) continue;
 
             std.log.info("DHCP: Received {d} bytes from tunnel", .{bytes_read});
 
+            // DEBUG: Log first 16 bytes of received data to trace crash
+            if (bytes_read >= 16) {
+                std.log.err("DHCP: First 16 bytes: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
+                    recv_buf[0],  recv_buf[1],  recv_buf[2],  recv_buf[3],
+                    recv_buf[4],  recv_buf[5],  recv_buf[6],  recv_buf[7],
+                    recv_buf[8],  recv_buf[9],  recv_buf[10], recv_buf[11],
+                    recv_buf[12], recv_buf[13], recv_buf[14], recv_buf[15],
+                });
+            }
+
+            std.log.err("DHCP: About to parse tunnel frames inline...", .{});
+
             // NOTE: Do NOT apply RC4 decryption during DHCP - server sends raw tunnel data
             // RC4 is only used after DHCP completes (matching Rust behavior)
 
-            // Parse tunnel frames - may contain multiple concatenated packets
-            // (keep-alives + data frames mixed together in one TLS read)
-            const frames = self.parseTunnelFramesMulti(recv_buf[0..bytes_read]) catch |err| {
-                std.log.warn("DHCP: Frame parse error: {}", .{err});
-                continue;
-            };
+            // Parse tunnel frames inline to avoid iOS static storage issues
+            // Process each frame directly as we parse
+            var parse_pos: usize = 0;
+            const tunnel_data = recv_buf[0..bytes_read];
 
-            std.log.info("DHCP: Parsed {d} frames from {d} bytes", .{ frames.len, bytes_read });
+            while (parse_pos + 4 <= tunnel_data.len) {
+                const header = mem.readInt(u32, tunnel_data[parse_pos..][0..4], .big);
 
-            for (frames) |frame| {
-                // Skip frames that are too small
-                if (frame.len < 2) {
-                    std.log.debug("DHCP: Skipping tiny frame len={d}", .{frame.len});
+                if (header == protocol_tunnel_mod.KEEP_ALIVE_MAGIC) {
+                    // Keep-alive packet: skip past it
+                    if (parse_pos + 8 > tunnel_data.len) break;
+                    const keepalive_size = mem.readInt(u32, tunnel_data[parse_pos + 4 ..][0..4], .big);
+                    const total_keepalive_len = 8 + keepalive_size;
+                    std.log.warn("RX Keep-alive: size={d}", .{keepalive_size});
+                    if (parse_pos + total_keepalive_len > tunnel_data.len) break;
+                    parse_pos += total_keepalive_len;
                     continue;
                 }
 
-                // Check for zlib compressed data and decompress if needed
-                const frame_data: []const u8 = if (isZlibCompressed(frame)) blk: {
-                    const decompressed_len = decompressZlib(frame, &decompress_buf) orelse {
-                        std.log.warn("DHCP: Decompression failed for frame len={d}", .{frame.len});
-                        continue;
-                    };
-                    std.log.info("DHCP: Decompressed {d} -> {d} bytes", .{ frame.len, decompressed_len });
-                    break :blk decompress_buf[0..decompressed_len];
-                } else frame;
-
-                // Skip frames that are too small for Ethernet after decompression
-                if (frame_data.len < 14) {
-                    std.log.debug("DHCP: Skipping small frame len={d}", .{frame_data.len});
-                    continue;
+                // Data block packet: num_blocks followed by [size][data] pairs
+                const num_blocks = header;
+                if (num_blocks == 0 or num_blocks > 512) {
+                    std.log.warn("RX: Invalid num_blocks={d} at offset {d}", .{ num_blocks, parse_pos });
+                    break;
                 }
 
-                // Log frame info for debugging
-                const ethertype = (@as(u16, frame_data[12]) << 8) | frame_data[13];
-                std.log.info("DHCP: Frame len={d}, ethertype=0x{x:0>4}", .{ frame_data.len, ethertype });
+                std.log.info("DHCP: Parsing data block with {d} frames", .{num_blocks});
+                parse_pos += 4; // Skip num_blocks header
 
-                // Check for DHCP response (IPv4 UDP port 68)
-                const response = dhcp_mod.parseDhcpResponse(frame_data, dhcp_xid) catch |err| {
-                    std.log.debug("DHCP: Parse error: {}", .{err});
-                    continue;
-                };
-                if (response) |resp| {
-                    std.log.info("DHCP: Got response type={}", .{resp.msg_type});
-                    if (resp.msg_type == .offer and dhcp_state == .discover_sent) {
-                        // Got OFFER, send REQUEST
-                        offered_ip = resp.config.ip_address;
-                        server_id = resp.config.server_id;
+                var frame_idx: u32 = 0;
+                while (frame_idx < num_blocks) : (frame_idx += 1) {
+                    if (parse_pos + 4 > tunnel_data.len) break;
+                    const block_size = mem.readInt(u32, tunnel_data[parse_pos..][0..4], .big);
+                    parse_pos += 4;
 
-                        const ip = tunnel_mod.formatIpForLog(offered_ip);
-                        std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
-
-                        const req_size = dhcp_mod.buildDhcpRequest(mac, dhcp_xid, offered_ip, server_id, &dhcp_buf) catch continue;
-                        self.sendTunnelFrameRaw(sock, dhcp_buf[0..req_size], &send_buf) catch {};
-                        dhcp_state = .request_sent;
-                        retry_count = 0;
-                        last_send_time = std.time.milliTimestamp();
-                        std.log.info("Sent DHCP REQUEST", .{});
-                    } else if (resp.msg_type == .ack and dhcp_state == .request_sent) {
-                        // Got ACK - done!
-                        std.log.info("DHCP ACK received - configuration complete", .{});
-                        final_config = resp.config;
-                        dhcp_state = .configured;
+                    if (block_size == 0) continue;
+                    if (block_size > 2048 or parse_pos + block_size > tunnel_data.len) {
+                        std.log.warn("RX: Invalid block_size={d} at offset {d}", .{ block_size, parse_pos });
                         break;
                     }
-                }
-            }
 
-            if (dhcp_state == .configured) break;
+                    const frame = tunnel_data[parse_pos..][0..block_size];
+                    parse_pos += block_size;
+
+                    // Skip frames that are too small
+                    if (frame.len < 14) {
+                        std.log.debug("DHCP: Skipping small frame len={d}", .{frame.len});
+                        continue;
+                    }
+
+                    // Check for zlib compressed data and decompress if needed
+                    const frame_data: []const u8 = if (isZlibCompressed(frame)) blk: {
+                        const decompressed_len = decompressZlib(frame, &decompress_buf) orelse {
+                            std.log.warn("DHCP: Decompression failed for frame len={d}", .{frame.len});
+                            continue;
+                        };
+                        std.log.info("DHCP: Decompressed {d} -> {d} bytes", .{ frame.len, decompressed_len });
+                        break :blk decompress_buf[0..decompressed_len];
+                    } else frame;
+
+                    // Log frame info for debugging
+                    const ethertype = (@as(u16, frame_data[12]) << 8) | frame_data[13];
+                    std.log.info("DHCP: Frame len={d}, ethertype=0x{x:0>4}", .{ frame_data.len, ethertype });
+
+                    // Check for DHCP response (IPv4 UDP port 68)
+                    const response = dhcp_mod.parseDhcpResponse(frame_data, dhcp_xid) catch |err| {
+                        std.log.debug("DHCP: Parse error: {}", .{err});
+                        continue;
+                    };
+                    if (response) |resp| {
+                        std.log.info("DHCP: Got response type={}", .{resp.msg_type});
+                        if (resp.msg_type == .offer and dhcp_state == .discover_sent) {
+                            // Got OFFER, send REQUEST
+                            offered_ip = resp.config.ip_address;
+                            server_id = resp.config.server_id;
+
+                            const ip = tunnel_mod.formatIpForLog(offered_ip);
+                            std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+
+                            const req_size = dhcp_mod.buildDhcpRequest(mac, dhcp_xid, offered_ip, server_id, &dhcp_buf) catch continue;
+                            self.sendTunnelFrameRaw(sock, dhcp_buf[0..req_size], &send_buf) catch {};
+                            dhcp_state = .request_sent;
+                            retry_count = 0;
+                            last_send_time = std.time.milliTimestamp();
+                            std.log.info("Sent DHCP REQUEST", .{});
+                        } else if (resp.msg_type == .ack and dhcp_state == .request_sent) {
+                            // Got ACK - done!
+                            std.log.info("DHCP ACK received - configuration complete", .{});
+                            final_config = resp.config;
+                            dhcp_state = .configured;
+                            break;
+                        }
+                    }
+                }
+
+                if (dhcp_state == .configured) break;
+            }
         }
 
         if (final_config) |cfg| {
@@ -1184,12 +1260,74 @@ pub const VpnClient = struct {
         return @intCast(dest_len);
     }
 
+    /// Read from the tunnel (raw TCP in raw mode, TLS otherwise)
+    /// This handles the mode switch transparently for DHCP and tunnel data.
+    fn tunnelRead(self: *Self, buffer: []u8, timeout_ms: i32) !usize {
+        if (self.use_raw_mode) {
+            // Raw TCP mode - read directly from TCP stream
+            const stream = self.raw_stream orelse return error.NotConnected;
+
+            // Poll for data with timeout
+            var poll_fds = [_]std.posix.pollfd{
+                .{ .fd = stream.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            };
+
+            const poll_timeout = @min(timeout_ms, 500);
+            const poll_result = std.posix.poll(&poll_fds, @intCast(poll_timeout)) catch |err| {
+                std.log.warn("Raw tunnelRead: poll error: {}", .{err});
+                return 0;
+            };
+
+            if (poll_result == 0) {
+                return 0; // Timeout, no data
+            }
+
+            // Check for connection close
+            if ((poll_fds[0].revents & std.posix.POLL.HUP) != 0 and
+                (poll_fds[0].revents & std.posix.POLL.IN) == 0)
+            {
+                return error.ConnectionClosed;
+            }
+
+            // Read data
+            const n = stream.read(buffer) catch |err| {
+                std.log.warn("Raw tunnelRead: read error: {}", .{err});
+                return error.ReadError;
+            };
+
+            std.log.warn("Raw tunnelRead: {d} bytes", .{n});
+            return n;
+        } else {
+            // TLS mode - use TLS socket with timeout
+            const sock = self.tls_socket orelse return error.NotConnected;
+            return sock.readWithTimeout(buffer, timeout_ms);
+        }
+    }
+
+    /// Write to the tunnel (raw TCP in raw mode, TLS otherwise)
+    fn tunnelWrite(self: *Self, data: []const u8) !usize {
+        if (self.use_raw_mode) {
+            // Raw TCP mode - write directly to TCP stream
+            const stream = self.raw_stream orelse return error.NotConnected;
+            const n = stream.write(data) catch |err| {
+                std.log.warn("Raw tunnelWrite: write error: {}", .{err});
+                return error.WriteError;
+            };
+            std.log.warn("Raw tunnelWrite: {d} bytes", .{n});
+            return n;
+        } else {
+            // TLS mode - use TLS socket
+            const sock = self.tls_socket orelse return error.NotConnected;
+            return sock.write(data);
+        }
+    }
+
     /// Send a single Ethernet frame over the SoftEther tunnel
     /// NO compression or RC4 encryption (for DHCP phase)
     /// DHCP happens before the tunnel is fully established, matching Swift's approach
     /// which sends use_compress=false during auth.
     fn sendTunnelFrameRaw(self: *Self, sock: *tls.TlsSocket, frame: []const u8, buf: []u8) !void {
-        _ = self; // DHCP doesn't use compression or RC4
+        _ = sock; // Using self.tunnelWrite instead
         // SoftEther tunnel format:
         // [4 bytes] num_blocks (big-endian) = 1
         // [4 bytes] block_size (big-endian)
@@ -1230,7 +1368,8 @@ pub const VpnClient = struct {
         // NOTE: No RC4 encryption or compression for DHCP phase
         std.log.warn("TX Tunnel (raw DHCP, no compress/RC4): {d} bytes", .{total_len});
 
-        _ = try sock.write(buf[0..total_len]);
+        // Use tunnelWrite to handle raw mode vs TLS mode transparently
+        _ = try self.tunnelWrite(buf[0..total_len]);
     }
 
     fn sendTunnelFrame(self: *Self, sock: *tls.TlsSocket, frame: []const u8, buf: []u8) !void {
@@ -1335,12 +1474,15 @@ pub const VpnClient = struct {
             data_to_send.len,
         });
 
-        _ = try sock.write(buf[0..total_len]);
+        // Use tunnelWrite to handle raw mode vs TLS mode transparently
+        _ = sock; // Unused - using tunnelWrite instead
+        _ = try self.tunnelWrite(buf[0..total_len]);
     }
 
     /// Send a keep-alive packet to keep the connection alive
     /// SoftEther servers timeout connections after ~20 seconds without activity
     fn sendKeepalive(self: *Self, sock: *tls.TlsSocket, buf: []u8) !void {
+        _ = sock; // Unused - using tunnelWrite instead
         // SoftEther keep-alive format:
         // [4 bytes] KEEP_ALIVE_MAGIC (0xFFFFFFFF) big-endian
         // [4 bytes] size (32) big-endian
@@ -1356,7 +1498,7 @@ pub const VpnClient = struct {
             cipher.process(buf[0..40]);
         }
 
-        _ = try sock.write(buf[0..40]);
+        _ = try self.tunnelWrite(buf[0..40]);
         std.log.debug("Sent keep-alive packet", .{});
     }
 
@@ -1384,15 +1526,25 @@ pub const VpnClient = struct {
         }
 
         const max_frames = 64;
+        // Use simple static storage - iOS doesn't support threadlocal in Network Extensions
         const S = struct {
-            var frame_ptrs: [max_frames][]const u8 = undefined;
+            var frame_ptrs: [max_frames][]const u8 = .{&[_]u8{}} ** max_frames;
         };
         var frame_count: usize = 0;
         var pos: usize = 0;
 
+        // Reset frame_ptrs to empty slices before use
+        for (&S.frame_ptrs) |*ptr| {
+            ptr.* = &[_]u8{};
+        }
+
+        std.log.warn("parseTunnelFramesMulti: entering loop, data.len={d}", .{data.len});
+
         while (pos + 8 <= data.len and frame_count < max_frames) {
+            std.log.warn("parseTunnelFramesMulti: loop pos={d}, remaining={d}", .{ pos, data.len - pos });
             const header = mem.readInt(u32, data[pos..][0..4], .big);
             const second = mem.readInt(u32, data[pos + 4 ..][0..4], .big);
+            std.log.warn("parseTunnelFramesMulti: header=0x{x:0>8}, second=0x{x:0>8}", .{ header, second });
 
             if (header == protocol_tunnel_mod.KEEP_ALIVE_MAGIC) {
                 // Keep-alive packet: skip past it
@@ -1501,10 +1653,16 @@ pub const VpnClient = struct {
         if (num_blocks == 0 or num_blocks > 512) return &[_][]const u8{};
 
         // Static buffer for frame pointers (max 64 frames per call)
+        // Note: iOS doesn't support threadlocal in Network Extensions
         const max_frames = 64;
         const S = struct {
-            var frame_ptrs: [max_frames][]const u8 = undefined;
+            var frame_ptrs: [max_frames][]const u8 = .{&[_]u8{}} ** max_frames;
         };
+
+        // Reset frame_ptrs before use
+        for (&S.frame_ptrs) |*ptr| {
+            ptr.* = &[_]u8{};
+        }
 
         var offset: usize = 4;
         var frame_count: usize = 0;

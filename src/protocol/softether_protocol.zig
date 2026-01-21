@@ -271,8 +271,8 @@ pub fn uploadSignature(
     writer: Writer,
     host: []const u8,
 ) !void {
-    // Try using VPNCONNECT instead of watermark (some servers accept this)
-    const body = "VPNCONNECT";
+    // Use the full WaterMark signature (68KB GIF image)
+    const body = WaterMark;
     const body_len = body.len;
 
     // Build HTTP header
@@ -282,10 +282,10 @@ pub fn uploadSignature(
     // Send header
     try writer.writeAll(header);
 
-    // Send VPNCONNECT
+    // Send WaterMark
     try writer.writeAll(body);
 
-    std.log.debug("Uploaded protocol signature ({d} bytes) - using VPNCONNECT", .{body_len});
+    std.log.debug("Uploaded protocol signature ({d} bytes) - WaterMark", .{body_len});
 }
 
 /// Download Hello from server
@@ -428,6 +428,7 @@ pub fn buildPasswordAuth(
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
+    use_encrypt: bool,
     use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
@@ -471,7 +472,7 @@ pub fn buildPasswordAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
+    try auth_pack.addBool("use_encrypt", use_encrypt);
     try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
@@ -555,6 +556,7 @@ pub fn buildPasswordAuthWithHash(
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
+    use_encrypt: bool,
     use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
@@ -606,7 +608,7 @@ pub fn buildPasswordAuthWithHash(
 
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
+    try auth_pack.addBool("use_encrypt", use_encrypt);
     try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
@@ -687,6 +689,7 @@ pub fn buildAnonymousAuth(
     allocator: Allocator,
     hub_name: []const u8,
     udp_accel: bool,
+    use_encrypt: bool,
     use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
@@ -714,7 +717,7 @@ pub fn buildAnonymousAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
+    try auth_pack.addBool("use_encrypt", use_encrypt);
     try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
@@ -758,6 +761,7 @@ pub fn buildPlainPasswordAuth(
     username: []const u8,
     password: []const u8,
     udp_accel: bool,
+    use_encrypt: bool,
     use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
@@ -786,7 +790,7 @@ pub fn buildPlainPasswordAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
+    try auth_pack.addBool("use_encrypt", use_encrypt);
     try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
@@ -828,6 +832,7 @@ pub fn buildTicketAuth(
     username: []const u8,
     ticket: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
+    use_encrypt: bool,
     use_compress: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
@@ -858,7 +863,7 @@ pub fn buildTicketAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
+    try auth_pack.addBool("use_encrypt", use_encrypt);
     try auth_pack.addBool("use_compress", use_compress);
     try auth_pack.addBool("half_connection", false);
 
@@ -1170,9 +1175,9 @@ pub fn performHandshake(
 
     // Step 3: Build and upload auth
     const auth_data = if (password) |pwd|
-        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, false)
+        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, false, false)
     else
-        try buildAnonymousAuth(allocator, hub_name, udp_accel, false);
+        try buildAnonymousAuth(allocator, hub_name, udp_accel, false, false);
     defer allocator.free(auth_data);
 
     var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
@@ -1226,6 +1231,7 @@ test "buildPasswordAuth creates valid Pack" {
         "VPN",
         &random,
         false, // udp_accel
+        false, // use_encrypt
         false, // use_compress
     );
     defer allocator.free(auth_data);
@@ -1244,7 +1250,7 @@ test "buildPasswordAuth creates valid Pack" {
 test "buildAnonymousAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, false);
+    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, false, false);
     defer allocator.free(auth_data);
 
     var auth_pack = try Pack.fromBytes(allocator, auth_data);

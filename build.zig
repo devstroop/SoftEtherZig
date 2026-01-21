@@ -8,13 +8,6 @@ pub fn build(b: *std.Build) void {
 
     const target_os = target.result.os.tag;
 
-    // Print build configuration
-    std.debug.print("Build Configuration:\n", .{});
-    std.debug.print("  Target: {s}\n", .{@tagName(target_os)});
-    std.debug.print("  Optimize: {s}\n", .{@tagName(optimize)});
-    std.debug.print("  SSL: system OpenSSL\n", .{});
-    std.debug.print("\n", .{});
-
     // ============================================
     // STATIC LIBRARY (for iOS/Android FFI)
     // ============================================
