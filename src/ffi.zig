@@ -417,6 +417,34 @@ export fn zig_vpn_send_packet(
     return 1;
 }
 
+/// Poll for received packets from VPN tunnel
+/// Returns number of frames received (0 if none ready, negative on error)
+/// Frames are Ethernet frames that should be unwrapped to IP packets
+export fn zig_vpn_poll_receive(
+    handle: ?*ClientHandle,
+    frame_ptrs_out: [*][*]u8,
+    frame_lens_out: [*]usize,
+    frame_buf: [*]u8,
+    buf_size: usize,
+    max_frames: usize,
+) i32 {
+    const h = handle orelse return -1;
+    const client = &(h.client orelse return -2);
+
+    // Call client's pollReceive with slices
+    const count = client.pollReceive(
+        frame_ptrs_out[0..max_frames],
+        frame_lens_out[0..max_frames],
+        frame_buf[0..buf_size],
+    ) catch |err| {
+        if (err == client_mod.ClientError.NotConnected) return -3;
+        if (err == client_mod.ClientError.ConnectionLost) return -4;
+        return 0; // Temporary error, try again
+    };
+
+    return @intCast(count);
+}
+
 /// Get bytes sent
 export fn zig_vpn_get_bytes_sent(handle: ?*ClientHandle) u64 {
     if (handle) |h| {

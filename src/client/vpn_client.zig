@@ -854,18 +854,30 @@ pub const VpnClient = struct {
                 _ = key; // Will be used for session encryption
             }
 
+            // Determine whether to use raw TCP mode for tunnel data
+            // SoftEther protocol: use_ssl_data_encryption = (use_encrypt && !use_fast_rc4)
+            // - When use_ssl_data_encryption=true: Keep TLS for data (use_raw_mode=false)
+            // - When use_ssl_data_encryption=false: Switch to raw TCP (use_raw_mode=true)
+            const use_raw_mode = !ticket_auth_result.use_ssl_data_encryption;
+
             // Initialize RC4 ciphers if server requires RC4 encryption
-            // When RC4 keys are provided, tunnel data uses raw TCP + RC4 (not TLS)
             if (ticket_auth_result.rc4_keys) |keys| {
-                std.log.info("Initializing RC4 ciphers from ticket auth - switching to raw mode", .{});
+                std.log.info("Initializing RC4 ciphers from ticket auth", .{});
                 self.rc4_send = Rc4.init(&keys.client_to_server);
                 self.rc4_recv = Rc4.init(&keys.server_to_client);
+            }
 
-                // Switch to raw TCP mode for tunnel data
-                // This matches Rust's into_plain() - tunnel data is raw TCP + RC4, not TLS
+            // Switch to raw TCP mode if needed
+            if (use_raw_mode) {
                 self.raw_stream = redirect_sock.getRawStream();
                 self.use_raw_mode = true;
-                std.log.warn("Switched to raw TCP mode (RC4 encryption layer active)", .{});
+                if (ticket_auth_result.rc4_keys != null) {
+                    std.log.warn("Switched to raw TCP mode (RC4 encryption layer active)", .{});
+                } else {
+                    std.log.warn("Switched to raw TCP mode (no encryption)", .{});
+                }
+            } else {
+                std.log.info("Keeping TLS for tunnel data (use_ssl_data_encryption=true)", .{});
             }
 
             std.log.debug("Ticket authentication successful!", .{});
@@ -878,19 +890,32 @@ pub const VpnClient = struct {
             _ = key;
         }
 
-        // Initialize RC4 ciphers if server requires RC4 encryption (non-redirect case)
-        // When RC4 keys are provided, tunnel data uses raw TCP + RC4 (not TLS)
+        // Determine whether to use raw TCP mode for tunnel data (non-redirect case)
+        // SoftEther protocol: use_ssl_data_encryption = (use_encrypt && !use_fast_rc4)
+        // - When use_ssl_data_encryption=true: Keep TLS for data (use_raw_mode=false)
+        // - When use_ssl_data_encryption=false: Switch to raw TCP (use_raw_mode=true)
+        const use_raw_mode_auth = !auth_result.use_ssl_data_encryption;
+
+        // Initialize RC4 ciphers if server requires RC4 encryption
         if (auth_result.rc4_keys) |keys| {
-            std.log.info("Initializing RC4 ciphers from auth result - switching to raw mode", .{});
+            std.log.info("Initializing RC4 ciphers from auth result", .{});
             self.rc4_send = Rc4.init(&keys.client_to_server);
             self.rc4_recv = Rc4.init(&keys.server_to_client);
+        }
 
-            // Switch to raw TCP mode for tunnel data
+        // Switch to raw TCP mode if needed
+        if (use_raw_mode_auth) {
             if (self.tls_socket) |tls_sock| {
                 self.raw_stream = tls_sock.getRawStream();
                 self.use_raw_mode = true;
-                std.log.warn("Switched to raw TCP mode (RC4 encryption layer active)", .{});
+                if (auth_result.rc4_keys != null) {
+                    std.log.warn("Switched to raw TCP mode (RC4 encryption layer active)", .{});
+                } else {
+                    std.log.warn("Switched to raw TCP mode (no encryption)", .{});
+                }
             }
+        } else {
+            std.log.info("Keeping TLS for tunnel data (use_ssl_data_encryption=true)", .{});
         }
 
         std.log.info("Authentication successful!", .{});
@@ -1195,6 +1220,9 @@ pub const VpnClient = struct {
 
                 if (dhcp_state == .configured) break;
             }
+
+            // Check if DHCP completed - break from main loop
+            if (dhcp_state == .configured) break;
         }
 
         if (final_config) |cfg| {
@@ -1702,17 +1730,119 @@ pub const VpnClient = struct {
         self.transitionState(.reconnecting);
     }
 
+    /// Send a packet to the VPN tunnel
+    /// In FFI mode (iOS/Android), the packet is an Ethernet frame from the platform
+    /// The frame is wrapped in SoftEther tunnel format and sent over the connection
     pub fn sendPacket(self: *Self, data: []const u8) ClientError!void {
         if (!self.isConnected()) return ClientError.NotConnected;
 
-        var sess = &(self.session orelse return ClientError.NotConnected);
+        // Validate packet has at least Ethernet header
+        if (data.len < 14) return ClientError.InvalidParameter;
 
-        if (self.config.use_encryption) {
-            const encrypted = sess.encrypt(self.allocator, data) catch return ClientError.OperationCancelled;
-            defer self.allocator.free(encrypted);
-        }
+        // Use stack buffer for tunnel framing
+        var buf: [2048]u8 = undefined;
+        const sock = self.tls_socket orelse return ClientError.NotConnected;
+
+        // Send as raw tunnel frame (DHCP mode) or compressed depending on config
+        // Currently matching DHCP behavior (no compression) for simplicity
+        self.sendTunnelFrameRaw(sock, data, &buf) catch |err| {
+            std.log.warn("sendPacket failed: {}", .{err});
+            return ClientError.OperationCancelled;
+        };
 
         self.stats.recordSent(data.len);
+    }
+
+    /// Poll for incoming packets from the VPN tunnel
+    /// Returns the number of Ethernet frames received (0 if none ready)
+    /// Frames are written to frame_ptrs slice with lengths in frame_lens
+    /// This is non-blocking with a short poll timeout
+    pub fn pollReceive(
+        self: *Self,
+        frame_ptrs: [][*]u8,
+        frame_lens: []usize,
+        frame_buf: []u8,
+    ) ClientError!usize {
+        if (!self.isConnected()) return ClientError.NotConnected;
+
+        // Read from tunnel with short timeout
+        var recv_buf: [8192]u8 = undefined;
+        const bytes_read = self.tunnelRead(&recv_buf, 10) catch |err| {
+            if (err == error.ConnectionClosed) {
+                return ClientError.ConnectionLost;
+            }
+            return 0; // Timeout or temporary error
+        };
+
+        if (bytes_read == 0) {
+            return 0;
+        }
+
+        // Debug: log received data
+        std.log.debug("pollReceive: got {d} bytes from tunnel", .{bytes_read});
+
+        // Parse tunnel frames
+        var pos: usize = 0;
+        var frame_count: usize = 0;
+        var buf_offset: usize = 0;
+        const max_frames = @min(frame_ptrs.len, frame_lens.len);
+
+        while (pos + 8 <= bytes_read and frame_count < max_frames) {
+            const header = mem.readInt(u32, recv_buf[pos..][0..4], .big);
+            const second = mem.readInt(u32, recv_buf[pos + 4 ..][0..4], .big);
+
+            if (header == protocol_tunnel_mod.KEEP_ALIVE_MAGIC) {
+                // Keep-alive packet - skip
+                const keepalive_size = second;
+                pos += 8 + keepalive_size;
+                std.log.debug("pollReceive: skip keep-alive ({d} bytes)", .{keepalive_size});
+                continue;
+            }
+
+            // Data block: header = num_blocks
+            const num_blocks = header;
+            pos += 4; // Skip num_blocks
+
+            var block_idx: u32 = 0;
+            while (block_idx < num_blocks and pos + 4 <= bytes_read and frame_count < max_frames) : (block_idx += 1) {
+                const block_size = mem.readInt(u32, recv_buf[pos..][0..4], .big);
+                pos += 4;
+
+                if (pos + block_size > bytes_read) {
+                    break; // Incomplete frame
+                }
+
+                const frame = recv_buf[pos..][0..block_size];
+                pos += block_size;
+
+                // Skip non-Ethernet or too-small frames
+                if (block_size < 14) {
+                    continue;
+                }
+
+                // Copy frame to output buffer
+                if (buf_offset + block_size > frame_buf.len) {
+                    break; // Buffer full
+                }
+
+                @memcpy(frame_buf[buf_offset..][0..block_size], frame);
+                frame_ptrs[frame_count] = @ptrCast(&frame_buf[buf_offset]);
+                frame_lens[frame_count] = block_size;
+                frame_count += 1;
+                buf_offset += block_size;
+
+                // Log the received frame
+                const ethertype = (@as(u16, frame[12]) << 8) | frame[13];
+                std.log.debug("pollReceive: frame {d}: {d} bytes, ethertype=0x{x:0>4}", .{
+                    frame_count,
+                    block_size,
+                    ethertype,
+                });
+            }
+        }
+
+        self.stats.recordReceived(bytes_read);
+        return frame_count;
     }
 
     pub fn receivePacket(self: *Self, data: []const u8) ClientError![]u8 {

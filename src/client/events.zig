@@ -16,6 +16,7 @@ pub const ClientError = error{
     AlreadyConnected,
     NotConnected,
     ConnectionFailed,
+    ConnectionLost,
     AuthenticationFailed,
     DnsResolutionFailed,
     SslHandshakeFailed,
@@ -26,6 +27,7 @@ pub const ClientError = error{
     ProtocolError,
     InvalidConfiguration,
     InvalidState,
+    InvalidParameter,
     OutOfMemory,
     OperationCancelled,
 };

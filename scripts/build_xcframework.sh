@@ -122,8 +122,8 @@ install_to_project() {
 build_release() {
     log_info "Building optimized release for iOS..."
     
-    # Use explicit target and optimization flags for maximum control
-    zig build -Dtarget=aarch64-ios -Doptimize=ReleaseFast
+    # Use the ios build step with release mode (Zig 0.15 syntax)
+    zig build ios --release=fast
     
     if [ ! -f "zig-out/lib/libsoftether_zig.a" ]; then
         log_error "Build failed - library not found"

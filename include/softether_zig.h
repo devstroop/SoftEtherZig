@@ -168,6 +168,21 @@ int32_t zig_vpn_send_packet(ZigVpnClientHandle handle,
                              const uint8_t* packet,
                              size_t length);
 
+/// Poll for received packets from VPN tunnel
+/// Returns number of frames received (0 if none ready, negative on error)
+/// frame_ptrs_out: array to receive pointers to frame data
+/// frame_lens_out: array to receive frame lengths
+/// frame_buf: buffer for frame data storage
+/// buf_size: size of frame_buf
+/// max_frames: maximum number of frames to return
+/// Returns: number of frames, or negative error code
+int32_t zig_vpn_poll_receive(ZigVpnClientHandle handle,
+                              uint8_t** frame_ptrs_out,
+                              size_t* frame_lens_out,
+                              uint8_t* frame_buf,
+                              size_t buf_size,
+                              size_t max_frames);
+
 // ============================================================================
 // Statistics
 // ============================================================================

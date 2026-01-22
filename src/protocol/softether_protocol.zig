@@ -125,6 +125,8 @@ pub const AuthResult = struct {
     policy: ?[]const u8,
     redirect: ?RedirectInfo, // If set, need to reconnect to this server
     rc4_keys: ?Rc4Keys, // If set, tunnel data must be RC4 encrypted
+    use_encrypt: bool, // Server's use_encrypt decision
+    use_ssl_data_encryption: bool, // True = keep TLS for data, False = switch to raw TCP
 
     pub fn deinit(self: *AuthResult, allocator: Allocator) void {
         if (self.error_message) |msg| allocator.free(msg);
@@ -1061,6 +1063,8 @@ pub fn uploadAuth(
             .policy = null,
             .redirect = null,
             .rc4_keys = null,
+            .use_encrypt = false,
+            .use_ssl_data_encryption = false,
         };
     }
 
@@ -1103,6 +1107,8 @@ pub fn uploadAuth(
                 .ticket = ticket,
             },
             .rc4_keys = null, // Will get RC4 keys from redirect server
+            .use_encrypt = false, // Will be determined by redirect server
+            .use_ssl_data_encryption = false, // Will be determined by redirect server
         };
     }
 
@@ -1139,8 +1145,25 @@ pub fn uploadAuth(
             if (rc4_s2c) |k| k.len else 0,
         });
     } else {
-        std.log.info("No RC4 keys in auth response - using TLS-only encryption", .{});
+        std.log.info("No RC4 keys in auth response", .{});
     }
+
+    // Parse the server's use_encrypt decision
+    // This is what the server decided to use, may differ from what we requested
+    const use_encrypt = (resp_pack.getInt("use_encrypt") orelse 1) != 0;
+    std.log.info("Server use_encrypt={}", .{use_encrypt});
+
+    // use_ssl_data_encryption = (UseEncrypt && !UseFastRC4)
+    // This follows SoftEther's Protocol.c logic:
+    // - true: TLS only (no RC4 layer) - use_encrypt=true but no RC4 keys
+    // - false: Raw TCP mode - either use_encrypt=false, or RC4 keys provided
+    // Note: TLS is always the baseline transport; this flag indicates whether to keep TLS for data.
+    const use_ssl_data_encryption = use_encrypt and rc4_keys == null;
+    std.log.info("use_ssl_data_encryption={} (use_encrypt={}, has_rc4_keys={})", .{
+        use_ssl_data_encryption,
+        use_encrypt,
+        rc4_keys != null,
+    });
 
     std.log.info("Authentication successful", .{});
 
@@ -1152,6 +1175,8 @@ pub fn uploadAuth(
         .policy = null,
         .redirect = null,
         .rc4_keys = rc4_keys,
+        .use_encrypt = use_encrypt,
+        .use_ssl_data_encryption = use_ssl_data_encryption,
     };
 }
 
