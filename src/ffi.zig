@@ -311,6 +311,15 @@ fn ffiEventCallback(event: client_mod.ClientEvent, user_data: ?*anyopaque) void 
                 h.session_info.subnet_mask = 0xFFFFFF00; // 255.255.255.0
             }
 
+            // Copy DNS servers from connected event
+            h.session_info.dns_servers = info.dns_servers;
+            // Count non-zero DNS servers
+            var dns_count: u8 = 0;
+            for (info.dns_servers) |dns| {
+                if (dns != 0) dns_count += 1;
+            }
+            h.session_info.dns_count = dns_count;
+
             // Format server IP as string for connected_server_ip
             // Convert from u32 (host byte order) to dotted decimal string
             const server_ip = info.server_ip;

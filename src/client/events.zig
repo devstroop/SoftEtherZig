@@ -45,6 +45,7 @@ pub const ClientEvent = union(enum) {
         server_ip: u32,
         assigned_ip: u32,
         gateway_ip: u32,
+        dns_servers: [4]u32,
     },
 
     /// Disconnected from VPN

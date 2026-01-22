@@ -215,6 +215,7 @@ pub const VpnClient = struct {
     subnet_mask: u32,
     gateway_ip: u32,
     gateway_mac: ?[6]u8,
+    dns_servers: [4]u32,
 
     // Authentication state
     auth_credentials: ?auth_mod.ClientAuth,
@@ -253,6 +254,7 @@ pub const VpnClient = struct {
             .subnet_mask = 0,
             .gateway_ip = 0,
             .gateway_mac = null,
+            .dns_servers = .{ 0, 0, 0, 0 },
             .auth_credentials = null,
             .last_keepalive_sent = 0,
             .last_keepalive_recv = 0,
@@ -468,6 +470,7 @@ pub const VpnClient = struct {
                 .server_ip = self.server_ip,
                 .assigned_ip = self.assigned_ip,
                 .gateway_ip = self.gateway_ip,
+                .dns_servers = self.dns_servers,
             } }, self.event_user_data);
         }
     }
@@ -948,6 +951,11 @@ pub const VpnClient = struct {
             self.assigned_ip = dhcp_config.ip_address;
             self.subnet_mask = dhcp_config.subnet_mask;
             self.gateway_ip = dhcp_config.gateway;
+            // Copy DNS servers from DHCP config
+            self.dns_servers[0] = dhcp_config.dns1;
+            self.dns_servers[1] = dhcp_config.dns2;
+            self.dns_servers[2] = 0;
+            self.dns_servers[3] = 0;
 
             const ip = tunnel_mod.formatIpForLog(self.assigned_ip);
             const gw = tunnel_mod.formatIpForLog(self.gateway_ip);
