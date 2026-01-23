@@ -46,6 +46,8 @@ pub const ClientEvent = union(enum) {
         assigned_ip: u32,
         gateway_ip: u32,
         dns_servers: [4]u32,
+        mac_address: [6]u8,
+        gateway_mac: [6]u8,
     },
 
     /// Disconnected from VPN
@@ -112,11 +114,14 @@ pub const EventDispatcher = struct {
     }
 
     /// Convenience: dispatch connected event
-    pub fn connected(self: *const EventDispatcher, server_ip: u32, assigned_ip: u32, gateway_ip: u32) void {
+    pub fn connected(self: *const EventDispatcher, server_ip: u32, assigned_ip: u32, gateway_ip: u32, dns_servers: [4]u32, mac_address: [6]u8, gateway_mac: [6]u8) void {
         self.dispatch(.{ .connected = .{
             .server_ip = server_ip,
             .assigned_ip = assigned_ip,
             .gateway_ip = gateway_ip,
+            .dns_servers = dns_servers,
+            .mac_address = mac_address,
+            .gateway_mac = gateway_mac,
         } });
     }
 
@@ -148,7 +153,14 @@ pub const EventDispatcher = struct {
 // ============================================================================
 
 test "ClientEvent name" {
-    const event = ClientEvent{ .connected = .{ .server_ip = 0, .assigned_ip = 0, .gateway_ip = 0 } };
+    const event = ClientEvent{ .connected = .{
+        .server_ip = 0,
+        .assigned_ip = 0,
+        .gateway_ip = 0,
+        .dns_servers = .{ 0, 0, 0, 0 },
+        .mac_address = .{ 0, 0, 0, 0, 0, 0 },
+        .gateway_mac = .{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
+    } };
     try std.testing.expectEqualStrings("connected", event.name());
 }
 

@@ -34,7 +34,7 @@ pub const CliArgs = struct {
     use_compress: bool = true,
     udp_accel: bool = false,
     max_connections: u8 = 1,
-    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
+    mtu: u16 = 1420, // Standardized across all backends
 
     // Reconnection
     reconnect: bool = true,

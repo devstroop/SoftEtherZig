@@ -649,7 +649,7 @@ pub const Session = struct {
     use_compression: bool,
     half_connection: bool,
     qos_enabled: bool,
-    bridge_mode: bool,
+    nat_traversal: bool,
     monitor_mode: bool,
 
     /// Error information
@@ -690,7 +690,7 @@ pub const Session = struct {
             .use_compression = options.use_compression,
             .half_connection = options.half_connection,
             .qos_enabled = options.qos_enabled,
-            .bridge_mode = false,
+            .nat_traversal = false,
             .monitor_mode = false,
             .last_error = null,
             .error_code = 0,

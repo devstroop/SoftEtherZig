@@ -155,7 +155,13 @@ pub const ClientConfig = struct {
     use_compression: bool = false,
     use_encryption: bool = true,
     udp_acceleration: bool = false,
-    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
+    mtu: u16 = 1420, // Standardized across all backends
+
+    // Session mode
+    /// NAT traversal mode for L3 access (default: false)
+    /// When true: uses virtual NAT/SecureNAT, L3 access
+    /// When false: RequireBridgeRoutingMode=true, L2 bridging (DHCP works directly)
+    nat_traversal: bool = false,
 
     // TLS settings
     verify_certificate: bool = true,
@@ -214,7 +220,8 @@ pub const VpnClient = struct {
     assigned_ip: u32,
     subnet_mask: u32,
     gateway_ip: u32,
-    gateway_mac: ?[6]u8,
+    mac_address: [6]u8,
+    gateway_mac: [6]u8,
     dns_servers: [4]u32,
 
     // Authentication state
@@ -253,7 +260,8 @@ pub const VpnClient = struct {
             .assigned_ip = 0,
             .subnet_mask = 0,
             .gateway_ip = 0,
-            .gateway_mac = null,
+            .mac_address = .{ 0, 0, 0, 0, 0, 0 },
+            .gateway_mac = .{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
             .dns_servers = .{ 0, 0, 0, 0 },
             .auth_credentials = null,
             .last_keepalive_sent = 0,
@@ -471,6 +479,8 @@ pub const VpnClient = struct {
                 .assigned_ip = self.assigned_ip,
                 .gateway_ip = self.gateway_ip,
                 .dns_servers = self.dns_servers,
+                .mac_address = self.mac_address,
+                .gateway_mac = self.gateway_mac,
             } }, self.event_user_data);
         }
     }
@@ -598,6 +608,7 @@ pub const VpnClient = struct {
                         self.config.udp_acceleration,
                         self.config.use_encryption,
                         self.config.use_compression,
+                        self.config.nat_traversal,
                     ) catch return ClientError.OutOfMemory;
                 } else {
                     // Password is plain text, hash it first
@@ -610,6 +621,7 @@ pub const VpnClient = struct {
                         self.config.udp_acceleration,
                         self.config.use_encryption,
                         self.config.use_compression,
+                        self.config.nat_traversal,
                     ) catch return ClientError.OutOfMemory;
                 }
             },
@@ -621,6 +633,7 @@ pub const VpnClient = struct {
                 self.config.udp_acceleration,
                 self.config.use_encryption,
                 self.config.use_compression,
+                self.config.nat_traversal,
             ) catch return ClientError.OutOfMemory,
             .anonymous => softether_proto.buildAnonymousAuth(
                 self.allocator,
@@ -628,6 +641,7 @@ pub const VpnClient = struct {
                 self.config.udp_acceleration,
                 self.config.use_encryption,
                 self.config.use_compression,
+                self.config.nat_traversal,
             ) catch return ClientError.OutOfMemory,
             .certificate => return ClientError.AuthenticationFailed, // Not implemented yet
         };
@@ -831,6 +845,7 @@ pub const VpnClient = struct {
                 self.config.udp_acceleration,
                 self.config.use_encryption,
                 self.config.use_compression,
+                self.config.nat_traversal,
             ) catch return ClientError.OutOfMemory;
             defer self.allocator.free(ticket_auth_data);
 
@@ -1006,13 +1021,14 @@ pub const VpnClient = struct {
         var dhcp_xid: u32 = 0;
         std.crypto.random.bytes(std.mem.asBytes(&dhcp_xid));
 
-        // Get or generate MAC address
+        // Get or generate MAC address and store it for session info
         const mac: [6]u8 = if (self.adapter_ctx) |*ctx| ctx.getMac() else blk: {
             var m: [6]u8 = undefined;
             std.crypto.random.bytes(&m);
             m[0] = (m[0] | 0x02) & 0xFE; // Locally administered unicast
             break :blk m;
         };
+        self.mac_address = mac;
 
         std.log.info("Starting DHCP (xid=0x{x:0>8}, mac={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2})", .{
             dhcp_xid, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -1327,11 +1343,10 @@ pub const VpnClient = struct {
 
             // Read data
             const n = stream.read(buffer) catch |err| {
-                std.log.warn("Raw tunnelRead: read error: {}", .{err});
+                std.log.debug("Raw tunnelRead: read error: {}", .{err});
                 return error.ReadError;
             };
 
-            std.log.warn("Raw tunnelRead: {d} bytes", .{n});
             return n;
         } else {
             // TLS mode - use TLS socket with timeout
@@ -1346,10 +1361,9 @@ pub const VpnClient = struct {
             // Raw TCP mode - write directly to TCP stream
             const stream = self.raw_stream orelse return error.NotConnected;
             const n = stream.write(data) catch |err| {
-                std.log.warn("Raw tunnelWrite: write error: {}", .{err});
+                std.log.debug("Raw tunnelWrite: write error: {}", .{err});
                 return error.WriteError;
             };
-            std.log.warn("Raw tunnelWrite: {d} bytes", .{n});
             return n;
         } else {
             // TLS mode - use TLS socket
@@ -1369,29 +1383,6 @@ pub const VpnClient = struct {
         // [4 bytes] block_size (big-endian)
         // [N bytes] block_data (raw Ethernet frame, no compression during DHCP)
 
-        // Debug: Log outgoing frame details
-        if (frame.len >= 14) {
-            const dst_mac = frame[0..6];
-            const src_mac = frame[6..12];
-            const ethertype = (@as(u16, frame[12]) << 8) | frame[13];
-            std.log.warn("TX Frame (raw DHCP): {d} bytes, dst={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, src={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, ethertype=0x{x:0>4}", .{
-                frame.len,
-                dst_mac[0],
-                dst_mac[1],
-                dst_mac[2],
-                dst_mac[3],
-                dst_mac[4],
-                dst_mac[5],
-                src_mac[0],
-                src_mac[1],
-                src_mac[2],
-                src_mac[3],
-                src_mac[4],
-                src_mac[5],
-                ethertype,
-            });
-        }
-
         // NO compression for DHCP phase - send raw frame like Swift does
         // (Swift hardcodes use_compress=false in auth, we match that behavior for DHCP)
         const total_len = 4 + 4 + frame.len;
@@ -1400,9 +1391,6 @@ pub const VpnClient = struct {
         mem.writeInt(u32, buf[0..4], 1, .big); // num_blocks = 1
         mem.writeInt(u32, buf[4..8], @intCast(frame.len), .big); // block_size
         @memcpy(buf[8..][0..frame.len], frame);
-
-        // NOTE: No RC4 encryption or compression for DHCP phase
-        std.log.warn("TX Tunnel (raw DHCP, no compress/RC4): {d} bytes", .{total_len});
 
         // Use tunnelWrite to handle raw mode vs TLS mode transparently
         _ = try self.tunnelWrite(buf[0..total_len]);
@@ -1413,52 +1401,6 @@ pub const VpnClient = struct {
         // [4 bytes] num_blocks (big-endian) = 1
         // [4 bytes] block_size (big-endian)
         // [N bytes] block_data (Ethernet frame, possibly zlib compressed)
-
-        // Debug: Log outgoing frame details
-        if (frame.len >= 14) {
-            const dst_mac = frame[0..6];
-            const src_mac = frame[6..12];
-            const ethertype = (@as(u16, frame[12]) << 8) | frame[13];
-            std.log.warn("TX Frame: {d} bytes, dst={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, src={x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}, ethertype=0x{x:0>4}", .{
-                frame.len,
-                dst_mac[0],
-                dst_mac[1],
-                dst_mac[2],
-                dst_mac[3],
-                dst_mac[4],
-                dst_mac[5],
-                src_mac[0],
-                src_mac[1],
-                src_mac[2],
-                src_mac[3],
-                src_mac[4],
-                src_mac[5],
-                ethertype,
-            });
-            // If IPv4, show more details
-            if (ethertype == 0x0800 and frame.len >= 34) {
-                const ip_proto = frame[23];
-                const src_ip = frame[26..30];
-                const dst_ip = frame[30..34];
-                std.log.warn("  IPv4: proto={d}, src={d}.{d}.{d}.{d}, dst={d}.{d}.{d}.{d}", .{
-                    ip_proto,
-                    src_ip[0],
-                    src_ip[1],
-                    src_ip[2],
-                    src_ip[3],
-                    dst_ip[0],
-                    dst_ip[1],
-                    dst_ip[2],
-                    dst_ip[3],
-                });
-                // If UDP, show ports
-                if (ip_proto == 17 and frame.len >= 42) {
-                    const src_port = (@as(u16, frame[34]) << 8) | frame[35];
-                    const dst_port = (@as(u16, frame[36]) << 8) | frame[37];
-                    std.log.warn("  UDP: src_port={d}, dst_port={d}", .{ src_port, dst_port });
-                }
-            }
-        }
 
         // Compress the frame if compression is enabled
         // CRITICAL: When we send use_compress=1 in auth, server expects ALL data to be compressed

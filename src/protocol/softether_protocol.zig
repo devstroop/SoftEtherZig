@@ -432,6 +432,7 @@ pub fn buildPasswordAuth(
     udp_accel: bool,
     use_encrypt: bool,
     use_compress: bool,
+    nat_traversal: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -479,7 +480,8 @@ pub fn buildPasswordAuth(
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
-    try auth_pack.addBool("require_bridge_routing_mode", false);
+    // nat_traversal=true -> L3 mode (SecureNAT), nat_traversal=false -> L2 bridging
+    try auth_pack.addBool("require_bridge_routing_mode", !nat_traversal);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
@@ -560,6 +562,7 @@ pub fn buildPasswordAuthWithHash(
     udp_accel: bool,
     use_encrypt: bool,
     use_compress: bool,
+    nat_traversal: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -615,7 +618,8 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
-    try auth_pack.addBool("require_bridge_routing_mode", false);
+    // nat_traversal=true -> L3 mode (SecureNAT), nat_traversal=false -> L2 bridging
+    try auth_pack.addBool("require_bridge_routing_mode", !nat_traversal);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
@@ -693,6 +697,7 @@ pub fn buildAnonymousAuth(
     udp_accel: bool,
     use_encrypt: bool,
     use_compress: bool,
+    nat_traversal: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -724,7 +729,8 @@ pub fn buildAnonymousAuth(
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
-    try auth_pack.addBool("require_bridge_routing_mode", false);
+    // nat_traversal=true -> L3 mode (SecureNAT), nat_traversal=false -> L2 bridging
+    try auth_pack.addBool("require_bridge_routing_mode", !nat_traversal);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
@@ -765,6 +771,7 @@ pub fn buildPlainPasswordAuth(
     udp_accel: bool,
     use_encrypt: bool,
     use_compress: bool,
+    nat_traversal: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -797,7 +804,8 @@ pub fn buildPlainPasswordAuth(
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
-    try auth_pack.addBool("require_bridge_routing_mode", false);
+    // nat_traversal=true -> L3 mode (SecureNAT), nat_traversal=false -> L2 bridging
+    try auth_pack.addBool("require_bridge_routing_mode", !nat_traversal);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
@@ -836,6 +844,7 @@ pub fn buildTicketAuth(
     udp_accel: bool,
     use_encrypt: bool,
     use_compress: bool,
+    nat_traversal: bool,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -870,7 +879,8 @@ pub fn buildTicketAuth(
     try auth_pack.addBool("half_connection", false);
 
     // Bridge/monitor mode flags
-    try auth_pack.addBool("require_bridge_routing_mode", false);
+    // nat_traversal=true -> L3 mode (SecureNAT), nat_traversal=false -> L2 bridging
+    try auth_pack.addBool("require_bridge_routing_mode", !nat_traversal);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
@@ -1200,9 +1210,9 @@ pub fn performHandshake(
 
     // Step 3: Build and upload auth
     const auth_data = if (password) |pwd|
-        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, false, false)
+        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, false, false, true)
     else
-        try buildAnonymousAuth(allocator, hub_name, udp_accel, false, false);
+        try buildAnonymousAuth(allocator, hub_name, udp_accel, false, false, true);
     defer allocator.free(auth_data);
 
     var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
@@ -1258,6 +1268,7 @@ test "buildPasswordAuth creates valid Pack" {
         false, // udp_accel
         false, // use_encrypt
         false, // use_compress
+        false, // nat_traversal (false = L2 bridging)
     );
     defer allocator.free(auth_data);
 
@@ -1275,7 +1286,7 @@ test "buildPasswordAuth creates valid Pack" {
 test "buildAnonymousAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, false, false);
+    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, false, false, true);
     defer allocator.free(auth_data);
 
     var auth_pack = try Pack.fromBytes(allocator, auth_data);

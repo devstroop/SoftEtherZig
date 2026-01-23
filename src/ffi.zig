@@ -311,6 +311,10 @@ fn ffiEventCallback(event: client_mod.ClientEvent, user_data: ?*anyopaque) void 
                 h.session_info.subnet_mask = 0xFFFFFF00; // 255.255.255.0
             }
 
+            // Copy MAC addresses from connected event
+            h.session_info.mac_address = info.mac_address;
+            h.session_info.gateway_mac = info.gateway_mac;
+
             // Copy DNS servers from connected event
             h.session_info.dns_servers = info.dns_servers;
             // Count non-zero DNS servers
