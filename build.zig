@@ -33,6 +33,13 @@ pub fn build(b: *std.Build) void {
         vpnclient.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
         vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+    } else if (target_os == .windows) {
+        vpnclient.linkSystemLibrary("ssl");
+        vpnclient.linkSystemLibrary("crypto");
+        vpnclient.linkSystemLibrary("ws2_32");
+        vpnclient.linkSystemLibrary("kernel32");
+        vpnclient.linkSystemLibrary("advapi32");
+        vpnclient.linkSystemLibrary("iphlpapi");
     } else {
         vpnclient.linkSystemLibrary("ssl");
         vpnclient.linkSystemLibrary("crypto");
@@ -70,6 +77,13 @@ pub fn build(b: *std.Build) void {
         shared_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
         shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+    } else if (target_os == .windows) {
+        shared_lib.linkSystemLibrary("ssl");
+        shared_lib.linkSystemLibrary("crypto");
+        shared_lib.linkSystemLibrary("ws2_32");
+        shared_lib.linkSystemLibrary("kernel32");
+        shared_lib.linkSystemLibrary("advapi32");
+        shared_lib.linkSystemLibrary("iphlpapi");
     } else {
         shared_lib.linkSystemLibrary("ssl");
         shared_lib.linkSystemLibrary("crypto");
@@ -80,6 +94,36 @@ pub fn build(b: *std.Build) void {
 
     const shared_lib_step = b.step("shared-lib", "Build shared library (libsoftether.dylib/.so/.dll)");
     shared_lib_step.dependOn(&shared_lib.step);
+
+    // ============================================
+    // STATIC LIBRARY (for mobile: iOS/Android embedding)
+    // ============================================
+    const static_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "softether",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Static library links OpenSSL statically for mobile
+    if (target_os == .macos) {
+        static_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
+        static_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+    } else {
+        static_lib.linkSystemLibrary("ssl");
+        static_lib.linkSystemLibrary("crypto");
+    }
+    static_lib.linkLibC();
+
+    b.installArtifact(static_lib);
+
+    const static_lib_step = b.step("static-lib", "Build static library (for iOS/Android embedding)");
+    static_lib_step.dependOn(&static_lib.step);
 
     // ============================================
     // TESTS
@@ -101,6 +145,7 @@ pub fn build(b: *std.Build) void {
         \\  zig build              - Build VPN client
         \\  zig build run          - Build and run VPN client
         \\  zig build shared-lib   - Build shared library for FFI
+        \\  zig build static-lib   - Build static library (iOS/Android)
         \\  zig build test         - Run unit tests
         \\
         \\Build Options:

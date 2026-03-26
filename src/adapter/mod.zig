@@ -7,6 +7,8 @@ const builtin = @import("builtin");
 // Re-export submodules
 pub const utun = @import("utun.zig");
 pub const tun_linux = @import("tun_linux.zig");
+pub const tap_windows = @import("tap_windows.zig");
+pub const fd_adapter = @import("fd_adapter.zig");
 pub const route = @import("route.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const wrapper = @import("wrapper.zig");
@@ -17,19 +19,31 @@ pub const AdapterWrapper = wrapper.AdapterWrapper;
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;
 pub const TunLinuxDevice = tun_linux.TunLinuxDevice;
+pub const TapWindowsDevice = tap_windows.TapWindowsDevice;
+pub const FdAdapter = fd_adapter.FdAdapter;
 pub const UtunError = utun.UtunError;
 pub const TunLinuxError = tun_linux.TunLinuxError;
+pub const TapWindowsError = tap_windows.TapWindowsError;
+pub const FdAdapterError = fd_adapter.FdAdapterError;
 
 // Common types (re-exported from platform-specific modules)
 pub const TunPacket = utun.TunPacket;
-pub const TunStats = if (builtin.os.tag == .linux) tun_linux.TunStats else utun.TunStats;
+pub const TunStats = if (builtin.os.tag == .linux) tun_linux.TunStats else if (builtin.os.tag == .windows) tap_windows.TunStats else utun.TunStats;
 pub const DhcpState = utun.DhcpState;
 pub const Ipv4Config = utun.Ipv4Config;
 pub const Ipv6Config = utun.Ipv6Config;
 pub const PacketQueue = utun.PacketQueue;
 
 // Platform-agnostic device type alias
-pub const PlatformDevice = if (builtin.os.tag == .linux) TunLinuxDevice else UtunDevice;
+// iOS and Android use FdAdapter (OS-provided tunnel fd)
+pub const PlatformDevice = if (builtin.os.tag == .linux)
+    TunLinuxDevice
+else if (builtin.os.tag == .windows)
+    TapWindowsDevice
+else if (builtin.os.tag == .ios)
+    FdAdapter
+else
+    UtunDevice; // macOS
 
 // Route types
 pub const Route = route.Route;
@@ -45,9 +59,9 @@ pub const DhcpOption = dhcp.DhcpOption;
 pub const DhcpConfig = dhcp.DhcpConfig;
 
 // Constants - use platform-appropriate values
-pub const TUN_MTU = if (builtin.os.tag == .linux) tun_linux.TUN_MTU else utun.TUN_MTU;
-pub const MAX_PACKET_SIZE = if (builtin.os.tag == .linux) tun_linux.MAX_PACKET_SIZE else utun.MAX_PACKET_SIZE;
-pub const RECV_QUEUE_MAX = if (builtin.os.tag == .linux) tun_linux.RECV_QUEUE_MAX else utun.RECV_QUEUE_MAX;
+pub const TUN_MTU = if (builtin.os.tag == .linux) tun_linux.TUN_MTU else if (builtin.os.tag == .windows) tap_windows.TUN_MTU else utun.TUN_MTU;
+pub const MAX_PACKET_SIZE = if (builtin.os.tag == .linux) tun_linux.MAX_PACKET_SIZE else if (builtin.os.tag == .windows) tap_windows.MAX_PACKET_SIZE else utun.MAX_PACKET_SIZE;
+pub const RECV_QUEUE_MAX = if (builtin.os.tag == .linux) tun_linux.RECV_QUEUE_MAX else if (builtin.os.tag == .windows) tap_windows.RECV_QUEUE_MAX else utun.RECV_QUEUE_MAX;
 
 // Packet building functions
 pub const buildGratuitousArp = utun.buildGratuitousArp;
@@ -130,18 +144,39 @@ pub const VirtualAdapter = struct {
                 std.log.err("Failed to open Linux TUN device: {}", .{err});
                 return err;
             };
-            // Configure with temporary settings for initial setup
             try self.device.?.configureTemporary();
         } else if (builtin.os.tag == .macos) {
             self.device = UtunDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open macOS utun device: {}", .{err});
                 return err;
             };
-            // Configure with temporary IP for initial setup
             try self.device.?.configureTemporary();
+        } else if (builtin.os.tag == .windows) {
+            self.device = TapWindowsDevice.open(self.allocator) catch |err| {
+                std.log.err("Failed to open Windows TUN adapter (Wintun): {}", .{err});
+                return err;
+            };
+            try self.device.?.configureTemporary();
+        } else if (builtin.os.tag == .ios) {
+            return error.UnsupportedPlatform; // iOS must use openWithFd()
         } else {
             return error.UnsupportedPlatform;
         }
+    }
+
+    /// Open the virtual adapter with an externally-provided file descriptor.
+    /// Used on mobile (iOS/Android) where the OS creates the TUN device.
+    /// Only available when PlatformDevice is FdAdapter.
+    pub fn openWithFd(self: *VirtualAdapter, fd: i32, name: []const u8) !void {
+        if (PlatformDevice != FdAdapter) {
+            return error.UnsupportedPlatform;
+        }
+        if (self.device != null) return;
+
+        self.device = FdAdapter.initWithFd(self.allocator, fd, name) catch |err| {
+            std.log.err("Failed to wrap external fd={d}: {}", .{ fd, err });
+            return err;
+        };
     }
 
     /// Close the virtual adapter and restore routing
@@ -185,6 +220,8 @@ pub const VirtualAdapter = struct {
         }
         if (builtin.os.tag == .linux) {
             return TunLinuxError.DeviceNotOpen;
+        } else if (builtin.os.tag == .windows) {
+            return TapWindowsError.DeviceNotOpen;
         } else {
             return UtunError.DeviceNotOpen;
         }
@@ -197,6 +234,8 @@ pub const VirtualAdapter = struct {
         }
         if (builtin.os.tag == .linux) {
             return TunLinuxError.DeviceNotOpen;
+        } else if (builtin.os.tag == .windows) {
+            return TapWindowsError.DeviceNotOpen;
         } else {
             return UtunError.DeviceNotOpen;
         }
@@ -207,6 +246,8 @@ pub const VirtualAdapter = struct {
         const dev = self.device orelse {
             if (builtin.os.tag == .linux) {
                 return TunLinuxError.DeviceNotOpen;
+            } else if (builtin.os.tag == .windows) {
+                return TapWindowsError.DeviceNotOpen;
             } else {
                 return UtunError.DeviceNotOpen;
             }

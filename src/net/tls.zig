@@ -55,6 +55,12 @@ pub const TlsConfig = struct {
     /// SoftEther-specific: Accept self-signed certificates
     /// WARNING: Only use for testing or when server cert is pinned
     allow_self_signed: bool = false,
+
+    /// Client certificate PEM data (for certificate authentication)
+    client_cert_pem: ?[]const u8 = null,
+
+    /// Client private key PEM data (for certificate authentication)
+    client_key_pem: ?[]const u8 = null,
 };
 
 /// TLS-wrapped socket using OpenSSL
@@ -133,6 +139,52 @@ pub const TlsSocket = struct {
         // For SoftEther with self-signed certs, disable verification
         if (config.allow_self_signed or !config.verify_certificate) {
             c.SSL_CTX_set_verify(ssl_ctx, c.SSL_VERIFY_NONE, null);
+        }
+
+        // Load client certificate for certificate authentication
+        if (config.client_cert_pem) |cert_pem| {
+            const cert_bio = c.BIO_new_mem_buf(cert_pem.ptr, @intCast(cert_pem.len)) orelse {
+                std.log.err("TLS: Failed to create BIO for client certificate", .{});
+                return TlsError.TlsInitializationFailed;
+            };
+            defer _ = c.BIO_free(cert_bio);
+            const cert = c.PEM_read_bio_X509(cert_bio, null, null, null) orelse {
+                std.log.err("TLS: Failed to parse client certificate PEM", .{});
+                return TlsError.BadCertificate;
+            };
+            defer c.X509_free(cert);
+            if (c.SSL_CTX_use_certificate(ssl_ctx, cert) != 1) {
+                std.log.err("TLS: Failed to set client certificate", .{});
+                logOpenSslErrors();
+                return TlsError.BadCertificate;
+            }
+            std.log.info("TLS: Client certificate loaded", .{});
+        }
+
+        // Load client private key for certificate authentication
+        if (config.client_key_pem) |key_pem| {
+            const key_bio = c.BIO_new_mem_buf(key_pem.ptr, @intCast(key_pem.len)) orelse {
+                std.log.err("TLS: Failed to create BIO for client key", .{});
+                return TlsError.TlsInitializationFailed;
+            };
+            defer _ = c.BIO_free(key_bio);
+            const pkey = c.PEM_read_bio_PrivateKey(key_bio, null, null, null) orelse {
+                std.log.err("TLS: Failed to parse client private key PEM", .{});
+                return TlsError.BadCertificate;
+            };
+            defer c.EVP_PKEY_free(pkey);
+            if (c.SSL_CTX_use_PrivateKey(ssl_ctx, pkey) != 1) {
+                std.log.err("TLS: Failed to set client private key", .{});
+                logOpenSslErrors();
+                return TlsError.BadCertificate;
+            }
+            // Verify cert/key match
+            if (c.SSL_CTX_check_private_key(ssl_ctx) != 1) {
+                std.log.err("TLS: Client certificate and private key do not match", .{});
+                logOpenSslErrors();
+                return TlsError.BadCertificate;
+            }
+            std.log.info("TLS: Client private key loaded and verified", .{});
         }
 
         // Create SSL connection

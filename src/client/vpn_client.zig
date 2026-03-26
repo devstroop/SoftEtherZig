@@ -58,6 +58,9 @@ const softether_proto = @import("../protocol/softether_protocol.zig");
 const pack_mod = @import("../protocol/pack.zig");
 const protocol_tunnel_mod = @import("../protocol/tunnel.zig");
 
+// Import UDP acceleration
+const udp_accel_mod = @import("../net/udp_accel.zig");
+
 // Import tunnel module (data loop helpers)
 const tunnel_mod = @import("../tunnel/mod.zig");
 
@@ -156,6 +159,10 @@ pub const ClientConfig = struct {
     connect_timeout_ms: u32 = 30000,
     read_timeout_ms: u32 = 60000,
     keepalive_interval_ms: u32 = 10000,
+
+    // Mobile: external tunnel fd provided by platform (iOS/Android)
+    // When set, the VPN client uses this fd instead of opening its own adapter.
+    tunnel_fd: ?i32 = null,
 };
 
 // ============================================================================
@@ -175,6 +182,10 @@ pub const VpnClient = struct {
 
     // Network connection
     tls_socket: ?tls.TlsSocket,
+
+    // UDP acceleration
+    udp_accel: ?udp_accel_mod.UdpAccelEngine,
+    bulk_keys: ?softether_proto.UdpBulkKeys,
 
     mutex: Mutex,
     worker_thread: ?Thread,
@@ -212,6 +223,8 @@ pub const VpnClient = struct {
             .adapter_ctx = null,
             .session = null,
             .tls_socket = null,
+            .udp_accel = null,
+            .bulk_keys = null,
             .mutex = .{},
             .worker_thread = null,
             .should_stop = false,
@@ -364,6 +377,14 @@ pub const VpnClient = struct {
             .verify_certificate = self.config.verify_certificate,
             .allow_self_signed = !self.config.verify_certificate,
             .timeout_ms = self.config.connect_timeout_ms,
+            .client_cert_pem = switch (self.config.auth) {
+                .certificate => |cert| cert.cert_data,
+                else => null,
+            },
+            .client_key_pem = switch (self.config.auth) {
+                .certificate => |cert| cert.key_data,
+                else => null,
+            },
         };
 
         self.tls_socket = tls.TlsSocket.connect(
@@ -409,6 +430,12 @@ pub const VpnClient = struct {
     fn performDisconnect(self: *Self) void {
         const old_state = self.state;
         self.transitionState(.disconnecting);
+
+        // Stop UDP acceleration
+        if (self.udp_accel) |*ua| {
+            ua.stop();
+        }
+        self.udp_accel = null;
 
         if (self.adapter_ctx) |*ctx| ctx.close();
         if (self.session) |*sess| sess.disconnect();
@@ -506,6 +533,19 @@ pub const VpnClient = struct {
 
         std.log.debug("Building authentication request...", .{});
 
+        // Generate bulk encryption keys for UDP acceleration
+        var bulk_keys_storage: softether_proto.UdpBulkKeys = if (self.config.udp_acceleration)
+            softether_proto.UdpBulkKeys.generate()
+        else
+            undefined;
+        const bulk_keys_ptr: ?*const softether_proto.UdpBulkKeys = if (self.config.udp_acceleration)
+            &bulk_keys_storage
+        else
+            null;
+        if (self.config.udp_acceleration) {
+            self.bulk_keys = bulk_keys_storage;
+        }
+
         // Step 3: Build and upload auth
         const auth_data = switch (self.config.auth) {
             .password => |p| blk: {
@@ -518,6 +558,7 @@ pub const VpnClient = struct {
                         self.config.hub_name,
                         &hello.random,
                         self.config.udp_acceleration,
+                        bulk_keys_ptr,
                     ) catch return ClientError.OutOfMemory;
                 } else {
                     // Password is plain text, hash it first
@@ -528,6 +569,7 @@ pub const VpnClient = struct {
                         self.config.hub_name,
                         &hello.random,
                         self.config.udp_acceleration,
+                        bulk_keys_ptr,
                     ) catch return ClientError.OutOfMemory;
                 }
             },
@@ -535,8 +577,17 @@ pub const VpnClient = struct {
                 self.allocator,
                 self.config.hub_name,
                 self.config.udp_acceleration,
+                bulk_keys_ptr,
             ) catch return ClientError.OutOfMemory,
-            .certificate => return ClientError.AuthenticationFailed, // Not implemented yet
+            .certificate => |cert| softether_proto.buildCertificateAuth(
+                self.allocator,
+                cert.cert_data,
+                cert.key_data,
+                self.config.hub_name,
+                &hello.random,
+                self.config.udp_acceleration,
+                bulk_keys_ptr,
+            ) catch return ClientError.AuthenticationFailed,
         };
         defer self.allocator.free(auth_data);
 
@@ -634,6 +685,14 @@ pub const VpnClient = struct {
                     .verify_certificate = self.config.verify_certificate,
                     .allow_self_signed = !self.config.verify_certificate,
                     .timeout_ms = self.config.connect_timeout_ms,
+                    .client_cert_pem = switch (self.config.auth) {
+                        .certificate => |cert| cert.cert_data,
+                        else => null,
+                    },
+                    .client_key_pem = switch (self.config.auth) {
+                        .certificate => |cert| cert.key_data,
+                        else => null,
+                    },
                 };
 
                 self.tls_socket = tls.TlsSocket.connect(
@@ -711,6 +770,7 @@ pub const VpnClient = struct {
                 username,
                 &ticket,
                 self.config.udp_acceleration,
+                bulk_keys_ptr,
             ) catch return ClientError.OutOfMemory;
             defer self.allocator.free(ticket_auth_data);
 
@@ -746,6 +806,41 @@ pub const VpnClient = struct {
         if (auth_result.session_key) |key| {
             self.auth_session_key = key;
             self.auth_hello_random = hello.random;
+        }
+
+        // Initialize UDP acceleration if server supports it
+        if (auth_result.udp_accel_enabled and self.config.udp_acceleration) {
+            if (self.bulk_keys) |bk| {
+                // Server's send key is our recv key and vice versa
+                const recv_key = auth_result.server_bulk_send_key orelse bk.recv_key;
+                const send_key = auth_result.server_bulk_recv_key orelse bk.send_key;
+
+                // Derive HMAC keys from bulk keys (SHA-1 of the key)
+                var send_hmac: [20]u8 = undefined;
+                var recv_hmac: [20]u8 = undefined;
+                std.crypto.hash.Sha1.hash(&send_key, &send_hmac, .{});
+                std.crypto.hash.Sha1.hash(&recv_key, &recv_hmac, .{});
+
+                // Use server IP for UDP if no specific UDP IP provided
+                var server_ip_buf: [16]u8 = undefined;
+                const server_ip_str = formatIpv4Buf(self.server_ip, &server_ip_buf);
+
+                const udp_config = udp_accel_mod.UdpAccelConfig{
+                    .server_ip = server_ip_str,
+                    .server_port = auth_result.udp_accel_port,
+                    .use_encryption = auth_result.udp_accel_use_encryption,
+                    .send_key = send_key,
+                    .recv_key = recv_key,
+                    .send_hmac_key = send_hmac,
+                    .recv_hmac_key = recv_hmac,
+                };
+
+                self.udp_accel = udp_accel_mod.UdpAccelEngine.init(self.allocator, udp_config);
+                self.udp_accel.?.start() catch |err| {
+                    std.log.warn("Failed to start UDP acceleration: {}", .{err});
+                    self.udp_accel = null;
+                };
+            }
         }
 
         std.log.info("Authentication successful!", .{});
@@ -785,13 +880,21 @@ pub const VpnClient = struct {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
 
-        ctx.open() catch |err| {
-            // Provide helpful error message for permission issues
-            std.log.err("Failed to open virtual network adapter: {}", .{err});
-            std.log.err("Note: Creating a TUN/TAP device requires root privileges.", .{});
-            std.log.err("Try running with: sudo ./vpnclient-pure --config config.json", .{});
-            return ClientError.AdapterConfigurationFailed;
-        };
+        if (self.config.tunnel_fd) |fd| {
+            // Mobile: use the OS-provided tunnel fd
+            ctx.openWithFd(fd, "tun-mobile") catch |err| {
+                std.log.err("Failed to open tunnel with external fd={d}: {}", .{ fd, err });
+                return ClientError.AdapterConfigurationFailed;
+            };
+        } else {
+            // Desktop: open native TUN/TAP device
+            ctx.open() catch |err| {
+                std.log.err("Failed to open virtual network adapter: {}", .{err});
+                std.log.err("Note: Creating a TUN/TAP device requires root privileges.", .{});
+                std.log.err("Try running with: sudo ./vpnclient-pure --config config.json", .{});
+                return ClientError.AdapterConfigurationFailed;
+            };
+        }
 
         if (self.config.static_ip) |static| {
             if (static.ipv4_address) |ip_str| {
@@ -961,12 +1064,15 @@ pub const VpnClient = struct {
         }
 
         // Set up poll structures
-        var poll_fds: [2]std.posix.pollfd = .{
+        const udp_fd: std.posix.fd_t = if (self.udp_accel) |*ua| ua.getFd() orelse -1 else -1;
+        var poll_fds: [3]std.posix.pollfd = .{
             .{ .fd = tls_fd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = tun_fd, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = udp_fd, .events = if (udp_fd >= 0) std.posix.POLL.IN else 0, .revents = 0 },
         };
         const POLL_TLS = 0;
         const POLL_TUN = 1;
+        const POLL_UDP = 2;
         _ = POLL_TLS; // Used implicitly via index 0
 
         // Cache the configured state check
@@ -974,12 +1080,18 @@ pub const VpnClient = struct {
 
         // Main packet loop
         while (!self.should_stop and self.isConnected()) {
-            // Poll both TLS and TUN with 1ms timeout for low latency
+            // Poll TLS, TUN, and optionally UDP with 1ms timeout for low latency
             poll_fds[0].revents = 0;
             poll_fds[1].revents = 0;
-            _ = std.posix.poll(&poll_fds, 1) catch 0;
+            poll_fds[2].revents = 0;
+            const poll_count: std.posix.nfds_t = if (udp_fd >= 0) 3 else 2;
+            _ = std.posix.poll(poll_fds[0..poll_count], 1) catch 0;
             const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
             const tun_readable = (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
+            const udp_readable = udp_fd >= 0 and (poll_fds[POLL_UDP].revents & std.posix.POLL.IN) != 0;
+
+            // Drive UDP acceleration timers (probing, keepalive, timeout)
+            if (self.udp_accel) |*ua| ua.tick();
 
             // ============================================================
             // FAST PATH: Data plane (process packets first for low latency)
@@ -1078,7 +1190,28 @@ pub const VpnClient = struct {
                 }
             }
 
-            // OUTBOUND: Read from TUN and send to VPN (simple path)
+            // INBOUND: Receive packets via UDP acceleration (if established)
+            if (udp_readable) {
+                if (self.udp_accel) |*ua| {
+                    if (ua.processIncoming() catch null) |udp_data| {
+                        // UDP data is an Ethernet frame — same dispatch as TCP
+                        if (udp_data.len > 14 and is_configured) {
+                            const ethertype_udp = (@as(u16, udp_data[12]) << 8) | udp_data[13];
+                            if (ethertype_udp == 0x0800 or ethertype_udp == 0x86DD) {
+                                if (adapter.real_adapter) |*real| {
+                                    if (real.device) |dev| {
+                                        _ = dev.write(udp_data[14..]) catch {};
+                                    }
+                                }
+                            }
+                            self.stats.recordReceived(udp_data.len);
+                        }
+                    }
+                }
+            }
+
+            // OUTBOUND: Read from TUN and send to VPN
+            // Prefer UDP if established, fall back to TCP
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
@@ -1088,8 +1221,16 @@ pub const VpnClient = struct {
                                 if (ip_len > 0 and ip_len <= 1500) {
                                     // Wrap in Ethernet and send
                                     if (tunnel_mod.wrapIpInEthernet(tun_read_buf[0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_buf)) |eth_frame| {
-                                        const blocks = [_][]const u8{eth_frame};
-                                        tunnel.sendBlocks(&blocks) catch {};
+                                        // Try UDP first
+                                        var sent_udp = false;
+                                        if (self.udp_accel) |*ua| {
+                                            sent_udp = ua.sendData(eth_frame) catch false;
+                                        }
+                                        if (!sent_udp) {
+                                            // Fall back to TCP
+                                            const blocks = [_][]const u8{eth_frame};
+                                            tunnel.sendBlocks(&blocks) catch {};
+                                        }
                                         self.stats.recordSent(eth_frame.len);
                                     }
                                 }

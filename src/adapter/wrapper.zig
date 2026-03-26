@@ -78,6 +78,24 @@ pub const AdapterWrapper = struct {
         }
     }
 
+    /// Open using an externally-provided file descriptor (for mobile platforms)
+    pub fn openWithFd(self: *Self, fd: i32, name: []const u8) !void {
+        if (self.real_adapter) |*adapter| {
+            try adapter.openWithFd(fd, name);
+            self.is_open = adapter.isOpen();
+
+            if (adapter.getName()) |n| {
+                const len = @min(n.len, self.device_name.len);
+                @memcpy(self.device_name[0..len], n[0..len]);
+                self.device_name_len = len;
+            }
+
+            if (adapter.getMac()) |m| {
+                self.mac = m;
+            }
+        }
+    }
+
     /// Close the adapter
     pub fn close(self: *Self) void {
         if (self.real_adapter) |*adapter| {

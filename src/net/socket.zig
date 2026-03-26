@@ -198,6 +198,85 @@ pub const TcpListener = struct {
 };
 
 // ============================================================================
+// UDP Socket
+// ============================================================================
+
+/// UDP Socket wrapper for datagram I/O
+pub const UdpSocket = struct {
+    fd: posix.fd_t,
+    bound_port: u16 = 0,
+
+    /// Create and bind a UDP socket to a local port (0 = system-assigned).
+    pub fn bind(port: u16, family: AddressFamily) !UdpSocket {
+        _ = family; // Use IPv4 for now; address family determined by bind address
+
+        // Create IPv4 UDP socket using net.Address to get correct AF
+        const bind_addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        const fd = try posix.socket(bind_addr.any.family, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+        errdefer posix.close(fd);
+
+        // Allow address reuse
+        const one: u32 = 1;
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
+
+        // Bind
+        try posix.bind(fd, &bind_addr.any, bind_addr.getOsSockLen());
+
+        // Retrieve actual bound port
+        var actual = bind_addr;
+        var actual_len = bind_addr.getOsSockLen();
+        try posix.getsockname(fd, &actual.any, &actual_len);
+        const real_port = actual.getPort();
+
+        return .{ .fd = fd, .bound_port = real_port };
+    }
+
+    /// Close the socket.
+    pub fn close(self: *UdpSocket) void {
+        posix.close(self.fd);
+        self.fd = -1;
+    }
+
+    /// Send a datagram to a specific address.
+    pub fn sendTo(self: *const UdpSocket, data: []const u8, dest: Address) !usize {
+        const sa = dest.inner.any;
+        const sa_len = dest.inner.getOsSockLen();
+        const rc = posix.sendto(self.fd, data, 0, &sa, sa_len) catch |err| switch (err) {
+            error.WouldBlock => return 0,
+            else => return err,
+        };
+        return rc;
+    }
+
+    /// Receive a datagram. Returns bytes read and sender address.
+    pub fn recvFrom(self: *const UdpSocket, buf: []u8) !struct { len: usize, from: Address } {
+        var src_addr: posix.sockaddr.storage = undefined;
+        var src_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+        const n = posix.recvfrom(self.fd, buf, 0, @ptrCast(&src_addr), &src_len) catch |err| switch (err) {
+            error.WouldBlock => return .{ .len = 0, .from = undefined },
+            else => return err,
+        };
+        const addr = net.Address.initPosix(@ptrCast(&src_addr));
+        return .{ .len = n, .from = .{ .inner = addr } };
+    }
+
+    /// Get the file descriptor for use with poll().
+    pub fn getFd(self: *const UdpSocket) posix.fd_t {
+        return self.fd;
+    }
+
+    /// Set receive buffer size.
+    pub fn setRecvBufSize(self: *const UdpSocket, size: u32) !void {
+        try posix.setsockopt(self.fd, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&size));
+    }
+
+    /// Set send buffer size.
+    pub fn setSendBufSize(self: *const UdpSocket, size: u32) !void {
+        try posix.setsockopt(self.fd, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&size));
+    }
+};
+
+// ============================================================================
 // DNS resolution utilities
 // ============================================================================
 

@@ -138,6 +138,7 @@ pub const CEventCallback = ?*const fn (event_type: CEventType, new_state: CState
 
 /// Create a new VPN client with password authentication.
 /// Returns null on failure. Caller must call softether_destroy() when done.
+/// IMPORTANT: The caller MUST keep the string pointers alive until softether_destroy().
 export fn softether_create(
     server: [*:0]const u8,
     port: u16,
@@ -170,6 +171,7 @@ export fn softether_create(
 }
 
 /// Create a new VPN client with anonymous authentication.
+/// IMPORTANT: The caller MUST keep the string pointers alive until softether_destroy().
 export fn softether_create_anonymous(
     server: [*:0]const u8,
     port: u16,
@@ -187,6 +189,43 @@ export fn softether_create_anonymous(
         .server_port = port,
         .hub_name = hub_slice,
         .auth = .{ .anonymous = {} },
+    };
+
+    const ptr = ffi_allocator.create(VpnClient) catch return null;
+    ptr.* = VpnClient.init(ffi_allocator, config);
+    return ptr;
+}
+
+/// Create a new VPN client with X.509 certificate authentication.
+/// PEM data is passed as pointer+length since PEM may contain embedded nulls.
+/// IMPORTANT: The caller MUST keep the PEM data alive until softether_destroy().
+export fn softether_create_certificate(
+    server: [*:0]const u8,
+    port: u16,
+    hub: [*:0]const u8,
+    cert_pem: [*]const u8,
+    cert_pem_len: u32,
+    key_pem: [*]const u8,
+    key_pem_len: u32,
+) ?*VpnClient {
+    const server_slice = std.mem.span(server);
+    const hub_slice = std.mem.span(hub);
+
+    if (server_slice.len == 0 or hub_slice.len == 0 or cert_pem_len == 0 or key_pem_len == 0) {
+        return null;
+    }
+
+    const cert_slice = cert_pem[0..cert_pem_len];
+    const key_slice = key_pem[0..key_pem_len];
+
+    const config = ClientConfig{
+        .server_host = server_slice,
+        .server_port = port,
+        .hub_name = hub_slice,
+        .auth = .{ .certificate = .{
+            .cert_data = cert_slice,
+            .key_data = key_slice,
+        } },
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
@@ -323,6 +362,14 @@ export fn softether_set_reconnect(client: ?*VpnClient, enabled: bool, max_attemp
     const c = client orelse return;
     c.config.reconnect.enabled = enabled;
     c.config.reconnect.max_attempts = max_attempts;
+}
+
+/// Set an external tunnel file descriptor (for iOS/Android).
+/// On mobile, the OS creates the TUN device and provides an fd.
+/// Must be called before connect().
+export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: c_int) void {
+    const c = client orelse return;
+    c.config.tunnel_fd = fd;
 }
 
 // ============================================================================

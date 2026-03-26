@@ -12,6 +12,14 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;
 
+const ssl = @cImport({
+    @cInclude("openssl/pem.h");
+    @cInclude("openssl/evp.h");
+    @cInclude("openssl/x509.h");
+    @cInclude("openssl/bio.h");
+    @cInclude("openssl/err.h");
+});
+
 /// SHA-0 digest length
 pub const sha0_digest_length = 20;
 
@@ -401,6 +409,113 @@ pub const SessionKey = struct {
         return key;
     }
 };
+
+// ============================================================================
+// Certificate Authentication Helpers (OpenSSL)
+// ============================================================================
+
+pub const CertError = error{
+    InvalidCertificate,
+    InvalidPrivateKey,
+    SigningFailed,
+    EncodingFailed,
+    OutOfMemory,
+};
+
+/// Convert a PEM-encoded X.509 certificate to DER format.
+pub fn certPemToDer(allocator: Allocator, cert_pem: []const u8) CertError![]u8 {
+    const bio = ssl.BIO_new_mem_buf(cert_pem.ptr, @intCast(cert_pem.len)) orelse
+        return CertError.InvalidCertificate;
+    defer _ = ssl.BIO_free(bio);
+
+    const x509 = ssl.PEM_read_bio_X509(bio, null, null, null) orelse
+        return CertError.InvalidCertificate;
+    defer ssl.X509_free(x509);
+
+    // Get DER-encoded length
+    const der_len = ssl.i2d_X509(x509, null);
+    if (der_len <= 0) return CertError.EncodingFailed;
+
+    const buf = allocator.alloc(u8, @intCast(der_len)) catch
+        return CertError.OutOfMemory;
+    errdefer allocator.free(buf);
+
+    var out_ptr: [*c]u8 = buf.ptr;
+    const written = ssl.i2d_X509(x509, &out_ptr);
+    if (written <= 0) {
+        allocator.free(buf);
+        return CertError.EncodingFailed;
+    }
+
+    return buf[0..@intCast(written)];
+}
+
+/// Sign data with a PEM-encoded private key using SHA-256.
+/// Returns the signature bytes.
+pub fn signWithPrivateKey(allocator: Allocator, key_pem: []const u8, data: []const u8) CertError![]u8 {
+    const bio = ssl.BIO_new_mem_buf(key_pem.ptr, @intCast(key_pem.len)) orelse
+        return CertError.InvalidPrivateKey;
+    defer _ = ssl.BIO_free(bio);
+
+    const pkey = ssl.PEM_read_bio_PrivateKey(bio, null, null, null) orelse
+        return CertError.InvalidPrivateKey;
+    defer ssl.EVP_PKEY_free(pkey);
+
+    const md_ctx = ssl.EVP_MD_CTX_new() orelse
+        return CertError.SigningFailed;
+    defer ssl.EVP_MD_CTX_free(md_ctx);
+
+    if (ssl.EVP_DigestSignInit(md_ctx, null, ssl.EVP_sha256(), null, pkey) != 1)
+        return CertError.SigningFailed;
+
+    if (ssl.EVP_DigestSignUpdate(md_ctx, data.ptr, data.len) != 1)
+        return CertError.SigningFailed;
+
+    // Get signature length
+    var sig_len: usize = 0;
+    if (ssl.EVP_DigestSignFinal(md_ctx, null, &sig_len) != 1)
+        return CertError.SigningFailed;
+
+    const sig = allocator.alloc(u8, sig_len) catch
+        return CertError.OutOfMemory;
+    errdefer allocator.free(sig);
+
+    if (ssl.EVP_DigestSignFinal(md_ctx, sig.ptr, &sig_len) != 1) {
+        allocator.free(sig);
+        return CertError.SigningFailed;
+    }
+
+    // sig_len may be smaller than allocated
+    if (sig_len < sig.len) {
+        const trimmed = allocator.realloc(sig, sig_len) catch return sig[0..sig_len];
+        return trimmed;
+    }
+    return sig;
+}
+
+/// Extract the Common Name (CN) from a PEM-encoded X.509 certificate.
+/// Falls back to "certificate_user" if CN cannot be extracted.
+pub fn extractCertCommonName(allocator: Allocator, cert_pem: []const u8) CertError![]u8 {
+    const bio = ssl.BIO_new_mem_buf(cert_pem.ptr, @intCast(cert_pem.len)) orelse
+        return CertError.InvalidCertificate;
+    defer _ = ssl.BIO_free(bio);
+
+    const x509 = ssl.PEM_read_bio_X509(bio, null, null, null) orelse
+        return CertError.InvalidCertificate;
+    defer ssl.X509_free(x509);
+
+    const subject = ssl.X509_get_subject_name(x509) orelse {
+        return allocator.dupe(u8, "certificate_user") catch return CertError.OutOfMemory;
+    };
+
+    var cn_buf: [256]u8 = undefined;
+    const cn_len = ssl.X509_NAME_get_text_by_NID(subject, ssl.NID_commonName, &cn_buf, cn_buf.len);
+    if (cn_len <= 0) {
+        return allocator.dupe(u8, "certificate_user") catch return CertError.OutOfMemory;
+    }
+
+    return allocator.dupe(u8, cn_buf[0..@intCast(cn_len)]) catch return CertError.OutOfMemory;
+}
 
 // ============================================================================
 // Tests
