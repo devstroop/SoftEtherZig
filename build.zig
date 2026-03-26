@@ -52,6 +52,36 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // ============================================
+    // SHARED LIBRARY (for FFI: Flutter, Python, etc.)
+    // ============================================
+    const shared_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "softether",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    // Link OpenSSL for shared library too
+    if (target_os == .macos) {
+        shared_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
+        shared_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+        shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+        shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+    } else {
+        shared_lib.linkSystemLibrary("ssl");
+        shared_lib.linkSystemLibrary("crypto");
+    }
+    shared_lib.linkLibC();
+
+    b.installArtifact(shared_lib);
+
+    const shared_lib_step = b.step("shared-lib", "Build shared library (libsoftether.dylib/.so/.dll)");
+    shared_lib_step.dependOn(&shared_lib.step);
+
+    // ============================================
     // TESTS
     // ============================================
     const test_step = b.step("test", "Run unit tests");
@@ -68,9 +98,10 @@ pub fn build(b: *std.Build) void {
         \\========================
         \\
         \\Build Targets:
-        \\  zig build          - Build VPN client
-        \\  zig build run      - Build and run VPN client
-        \\  zig build test     - Run unit tests
+        \\  zig build              - Build VPN client
+        \\  zig build run          - Build and run VPN client
+        \\  zig build shared-lib   - Build shared library for FFI
+        \\  zig build test         - Run unit tests
         \\
         \\Build Options:
         \\  -Doptimize=<mode>  - Debug, ReleaseSafe, ReleaseFast (default), ReleaseSmall
@@ -78,6 +109,7 @@ pub fn build(b: *std.Build) void {
         \\
         \\Examples:
         \\  zig build -Doptimize=ReleaseFast
+        \\  zig build shared-lib -Doptimize=ReleaseFast
         \\  zig build run -- --config config.json
         \\  zig build -Dtarget=x86_64-linux-gnu
         \\

@@ -194,6 +194,8 @@ pub const VpnClient = struct {
 
     // Authentication state
     auth_credentials: ?auth_mod.ClientAuth,
+    auth_session_key: ?[20]u8,
+    auth_hello_random: ?[20]u8,
 
     last_keepalive_sent: i64,
     last_keepalive_recv: i64,
@@ -223,6 +225,8 @@ pub const VpnClient = struct {
             .gateway_ip = 0,
             .gateway_mac = null,
             .auth_credentials = null,
+            .auth_session_key = null,
+            .auth_hello_random = null,
             .last_keepalive_sent = 0,
             .last_keepalive_recv = 0,
         };
@@ -728,26 +732,53 @@ pub const VpnClient = struct {
                 return ClientError.AuthenticationFailed;
             }
 
-            // Store session key from ticket auth if provided
+            // Store session key from ticket auth for session encryption
             if (ticket_auth_result.session_key) |key| {
-                _ = key; // Will be used for session encryption
+                self.auth_session_key = key;
+                self.auth_hello_random = redirect_hello.random;
             }
 
             std.log.debug("Ticket authentication successful!", .{});
             return;
         }
 
-        // Store session key if provided
+        // Store session key and server challenge for session encryption
         if (auth_result.session_key) |key| {
-            // Will be used for session encryption
-            _ = key;
+            self.auth_session_key = key;
+            self.auth_hello_random = hello.random;
         }
 
         std.log.info("Authentication successful!", .{});
     }
 
     fn establishSession(self: *Self) !void {
-        self.session = SessionWrapper.init(self.allocator, self.config.use_encryption);
+        if (self.config.use_encryption and self.auth_session_key != null and self.auth_hello_random != null) {
+            // Create a full session with encryption using auth-derived keys
+            const username = switch (self.config.auth) {
+                .password => |p| p.username,
+                .anonymous => "anonymous",
+                .certificate => "certificate",
+            };
+            const options = SessionOptions{
+                .host = self.config.server_host,
+                .port = self.config.server_port,
+                .hub = self.config.hub_name,
+                .username = username,
+                .use_encryption = true,
+                .use_compression = self.config.use_compression,
+            };
+            self.session = SessionWrapper.initWithOptions(self.allocator, options);
+
+            // Derive encryption keys from session key + server challenge
+            if (self.session) |*sess| {
+                sess.initEncryption(&self.auth_session_key.?, &self.auth_hello_random.?);
+            }
+            std.log.info("Session established with AES-256-CBC encryption", .{});
+        } else {
+            // No encryption (server didn't provide session key or encryption disabled)
+            self.session = SessionWrapper.init(self.allocator, false);
+            std.log.info("Session established without encryption", .{});
+        }
     }
 
     fn configureAdapter(self: *Self) !void {
