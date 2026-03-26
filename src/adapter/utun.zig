@@ -369,6 +369,39 @@ pub const UtunDevice = struct {
         return self;
     }
 
+    /// Create a UtunDevice from an existing file descriptor.
+    /// Used when the utun was created by a privileged helper process.
+    pub fn fromFd(allocator: std.mem.Allocator, fd: posix.fd_t, device_name: [64]u8, name_len: usize) UtunError!*UtunDevice {
+        const self = allocator.create(UtunDevice) catch {
+            return UtunError.OutOfMemory;
+        };
+
+        self.* = UtunDevice{
+            .allocator = allocator,
+            .fd = fd,
+            .device_name = device_name,
+            .device_name_len = name_len,
+            .mac_address = generateMac(),
+            .ipv4_config = .{},
+            .ipv6_config = .{},
+            .dhcp_state = .init,
+            .dhcp_xid = generateXid(),
+            .dhcp_server_ip = 0,
+            .dhcp_retry_count = 0,
+            .last_dhcp_time = 0,
+            .recv_queue = PacketQueue.init(allocator, RECV_QUEUE_MAX),
+            .send_queue = PacketQueue.init(allocator, RECV_QUEUE_MAX),
+            .stats = .{},
+            .is_open = true,
+            .halt = false,
+            .connection_start_time = std.time.milliTimestamp(),
+        };
+
+        self.ipv6_config = Ipv6Config.generateLinkLocal(self.mac_address);
+
+        return self;
+    }
+
     /// Close the utun device
     pub fn close(self: *UtunDevice) void {
         if (self.is_open) {

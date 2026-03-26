@@ -9,6 +9,7 @@ pub const utun = @import("utun.zig");
 pub const tun_linux = @import("tun_linux.zig");
 pub const tap_windows = @import("tap_windows.zig");
 pub const fd_adapter = @import("fd_adapter.zig");
+pub const utun_escalate = @import("utun_escalate.zig");
 pub const route = @import("route.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const wrapper = @import("wrapper.zig");
@@ -146,9 +147,19 @@ pub const VirtualAdapter = struct {
             };
             try self.device.?.configureTemporary();
         } else if (builtin.os.tag == .macos) {
-            self.device = UtunDevice.open(self.allocator) catch |err| {
-                std.log.err("Failed to open macOS utun device: {}", .{err});
-                return err;
+            self.device = UtunDevice.open(self.allocator) catch |direct_err| {
+                // Direct utun creation failed (likely EPERM) — try privilege escalation
+                std.log.warn("Direct utun open failed ({}) — attempting privilege escalation...", .{direct_err});
+                const escalated = utun_escalate.escalatedUtunOpen(self.allocator) catch |esc_err| {
+                    std.log.err("Privilege escalation also failed: {}", .{esc_err});
+                    return direct_err;
+                };
+                self.device = UtunDevice.fromFd(self.allocator, escalated.fd, escalated.device_name, escalated.device_name_len) catch |fd_err| {
+                    std.log.err("Failed to wrap escalated utun fd: {}", .{fd_err});
+                    return fd_err;
+                };
+                // Already configured by helper — skip configureTemporary
+                return;
             };
             try self.device.?.configureTemporary();
         } else if (builtin.os.tag == .windows) {

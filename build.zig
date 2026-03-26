@@ -126,6 +126,26 @@ pub fn build(b: *std.Build) void {
     static_lib_step.dependOn(&install_static_lib.step);
 
     // ============================================
+    // UTUN HELPER (macOS privilege escalation)
+    // ============================================
+    if (target_os == .macos) {
+        const utun_helper = b.addExecutable(.{
+            .name = "softether-utun-helper",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/adapter/utun_helper_main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        utun_helper.linkLibC();
+
+        b.installArtifact(utun_helper);
+
+        // Make shared-lib step also build the helper
+        shared_lib_step.dependOn(&b.addInstallArtifact(utun_helper, .{}).step);
+    }
+
+    // ============================================
     // TESTS
     // ============================================
     const test_step = b.step("test", "Run unit tests");
