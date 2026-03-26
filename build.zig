@@ -7,12 +7,14 @@ pub fn build(b: *std.Build) void {
     });
 
     const target_os = target.result.os.tag;
+    const target_abi = target.result.abi;
+    const is_android = target_os == .linux and (target_abi == .android or target_abi == .androideabi);
 
     // Print build configuration
     std.debug.print("Build Configuration:\n", .{});
-    std.debug.print("  Target: {s}\n", .{@tagName(target_os)});
+    std.debug.print("  Target: {s}{s}\n", .{ @tagName(target_os), if (is_android) " (android)" else "" });
     std.debug.print("  Optimize: {s}\n", .{@tagName(optimize)});
-    std.debug.print("  SSL: system OpenSSL\n", .{});
+    std.debug.print("  SSL: {s}\n", .{if (is_android) "static (deps/openssl-android)" else "system OpenSSL"});
     std.debug.print("\n", .{});
 
     // ============================================
@@ -72,7 +74,13 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link OpenSSL for shared library too
-    if (target_os == .macos) {
+    if (is_android) {
+        // Android: statically link OpenSSL into the .so (no system OpenSSL)
+        shared_lib.addLibraryPath(.{ .cwd_relative = "deps/openssl-android/lib" });
+        shared_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-android/include" });
+        shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+    } else if (target_os == .macos) {
         shared_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
         shared_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
         shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
@@ -114,6 +122,11 @@ pub fn build(b: *std.Build) void {
         static_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-ios/include" });
         // iOS SDK sysroot for system headers (sys/types.h etc.)
         static_lib.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/usr/include" });
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+    } else if (is_android) {
+        static_lib.addLibraryPath(.{ .cwd_relative = "deps/openssl-android/lib" });
+        static_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-android/include" });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (target_os == .macos) {
