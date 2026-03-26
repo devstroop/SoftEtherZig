@@ -90,10 +90,10 @@ pub fn build(b: *std.Build) void {
     }
     shared_lib.linkLibC();
 
-    b.installArtifact(shared_lib);
+    const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
 
     const shared_lib_step = b.step("shared-lib", "Build shared library (libsoftether.dylib/.so/.dll)");
-    shared_lib_step.dependOn(&shared_lib.step);
+    shared_lib_step.dependOn(&install_shared_lib.step);
 
     // ============================================
     // STATIC LIBRARY (for mobile: iOS/Android embedding)
@@ -120,10 +120,10 @@ pub fn build(b: *std.Build) void {
     }
     static_lib.linkLibC();
 
-    b.installArtifact(static_lib);
+    const install_static_lib = b.addInstallArtifact(static_lib, .{});
 
     const static_lib_step = b.step("static-lib", "Build static library (for iOS/Android embedding)");
-    static_lib_step.dependOn(&static_lib.step);
+    static_lib_step.dependOn(&install_static_lib.step);
 
     // ============================================
     // TESTS

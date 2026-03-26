@@ -367,7 +367,7 @@ export fn softether_set_reconnect(client: ?*VpnClient, enabled: bool, max_attemp
 /// Set an external tunnel file descriptor (for iOS/Android).
 /// On mobile, the OS creates the TUN device and provides an fd.
 /// Must be called before connect().
-export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: c_int) void {
+export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: i32) void {
     const c = client orelse return;
     c.config.tunnel_fd = fd;
 }
