@@ -177,6 +177,9 @@ void softether_set_full_tunnel(softether_client_t client, bool enabled);
 void softether_set_mtu(softether_client_t client, uint16_t mtu);
 void softether_set_reconnect(softether_client_t client, bool enabled, uint32_t max_attempts);
 
+/** Set tunnel file descriptor (utun fd) for packet I/O. Call after connect(). */
+void softether_set_tunnel_fd(softether_client_t client, int32_t fd);
+
 /* ========================================================================== */
 /* Event Callback                                                             */
 /* ========================================================================== */

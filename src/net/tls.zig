@@ -114,7 +114,9 @@ pub const TlsSocket = struct {
         // CRITICAL: Disable Nagle's algorithm for low latency
         // Nagle buffers small packets for up to 200ms, causing latency spikes
         const nodelay: u32 = 1;
-        std.posix.setsockopt(tcp_fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
+        const IPPROTO_TCP = 6;
+        const TCP_NODELAY = 1;
+        std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
             std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
         };
 

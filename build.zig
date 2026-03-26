@@ -109,7 +109,14 @@ pub fn build(b: *std.Build) void {
     });
 
     // Static library links OpenSSL statically for mobile
-    if (target_os == .macos) {
+    if (target_os == .ios) {
+        static_lib.addLibraryPath(.{ .cwd_relative = "deps/openssl-ios/lib" });
+        static_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-ios/include" });
+        // iOS SDK sysroot for system headers (sys/types.h etc.)
+        static_lib.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/usr/include" });
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+    } else if (target_os == .macos) {
         static_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
         static_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });

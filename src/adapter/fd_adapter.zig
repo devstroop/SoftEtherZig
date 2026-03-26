@@ -87,13 +87,15 @@ pub const FdAdapter = struct {
             .connection_start_time = std.time.milliTimestamp(),
         };
 
-        // Set non-blocking
-        const flags = posix.fcntl(fd, .F_GETFL) catch {
+        // Set non-blocking using C fcntl (cross-platform: works on macOS + iOS)
+        const F_GETFL = 3;
+        const F_SETFL = 4;
+        const O_NONBLOCK = 0x0004; // Darwin value
+        const flags = std.c.fcntl(fd, F_GETFL, @as(c_int, 0));
+        if (flags < 0) return FdAdapterError.OpenFailed;
+        if (std.c.fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
             return FdAdapterError.OpenFailed;
-        };
-        _ = posix.fcntl(fd, .F_SETFL, .{ .raw = @as(u32, @bitCast(flags)) | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })) }) catch {
-            return FdAdapterError.OpenFailed;
-        };
+        }
 
         std.log.info("FdAdapter wrapping fd={d} name={s}", .{ fd, name });
         return device;
