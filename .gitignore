@@ -43,7 +43,7 @@ main
 *.dSYM/
 
 config.json
-config*.jsondeps/
-zig-out/
-zig-cache/
-.zig-cache/
+config*.json
+
+# Cross-compiled dependencies
+deps/
