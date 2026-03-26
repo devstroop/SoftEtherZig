@@ -484,8 +484,17 @@ pub fn clearDns() !void {
     _ = runCommand("networksetup -setdnsservers Wi-Fi Empty");
 }
 
-/// Run a shell command (helper function)
+/// Run a shell command (helper function).
+/// On macOS, tries the privileged command channel first (for root operations
+/// like route/ifconfig), then falls back to direct execution.
 fn runCommand(cmd: []const u8) bool {
+    // Try privileged channel first (macOS escalation helper)
+    if (builtin.os.tag == .macos) {
+        const escalate = @import("utun_escalate.zig");
+        if (escalate.runPrivilegedCommand(cmd)) return true;
+    }
+
+    // Fallback: run directly
     var child = std.process.Child.init(
         &[_][]const u8{ "/bin/sh", "-c", cmd },
         std.heap.page_allocator,

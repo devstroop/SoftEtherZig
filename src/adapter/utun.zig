@@ -543,9 +543,9 @@ pub const UtunDevice = struct {
         self.ipv4_config.netmask = netmask;
         self.ipv4_config.gateway = gateway;
 
-        // Build ifconfig command
+        // Build ifconfig command (use full path for reliability)
         var cmd_buf: [512]u8 = undefined;
-        const cmd = try std.fmt.bufPrint(&cmd_buf, "ifconfig {s} {d}.{d}.{d}.{d} {d}.{d}.{d}.{d} netmask {d}.{d}.{d}.{d} up", .{
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "/sbin/ifconfig {s} {d}.{d}.{d}.{d} {d}.{d}.{d}.{d} netmask {d}.{d}.{d}.{d} up", .{
             self.getName(),
             (ip >> 24) & 0xFF,
             (ip >> 16) & 0xFF,
@@ -561,9 +561,18 @@ pub const UtunDevice = struct {
             netmask & 0xFF,
         });
 
-        // Execute command
+        // Try privileged channel first (macOS escalation)
+        if (builtin.os.tag == .macos) {
+            const escalate = @import("utun_escalate.zig");
+            if (escalate.runPrivilegedCommand(cmd)) {
+                std.log.info("Interface configured via privileged channel", .{});
+                return;
+            }
+        }
+
+        // Fallback: run directly (works if already root)
         var child = std.process.Child.init(
-            &[_][]const u8{ "sh", "-c", cmd },
+            &[_][]const u8{ "/bin/sh", "-c", cmd },
             self.allocator,
         );
         _ = child.spawnAndWait() catch {

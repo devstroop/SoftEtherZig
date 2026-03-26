@@ -37,6 +37,10 @@ pub const EscalatedUtun = struct {
     device_name_len: usize,
 };
 
+/// Module-level fd for the persistent privileged command channel.
+/// Set after successful escalation; used by runPrivilegedCommand().
+pub var privileged_cmd_fd: posix.fd_t = -1;
+
 /// Attempt to create a utun device via privilege escalation.
 /// Shows the macOS admin password dialog, then creates the utun as root.
 pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!EscalatedUtun {
@@ -115,7 +119,7 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
         _ = child.wait() catch {};
         return EscalationError.AcceptFailed;
     };
-    defer posix.close(client_fd);
+    // NOTE: Do NOT close client_fd here — it becomes the persistent privileged command channel.
 
     // Receive the utun fd via SCM_RIGHTS
     const CMSG_SPACE = @sizeOf(Cmsghdr) + @sizeOf(c_int);
@@ -141,12 +145,12 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
     const received = std.c.recvmsg(client_fd, &msg, 0);
     if (received < 0) {
+        posix.close(client_fd);
         _ = child.wait() catch {};
         return EscalationError.RecvFailed;
     }
 
-    // Wait for helper to exit
-    _ = child.wait() catch {};
+    // Do NOT wait for helper — it stays alive as our privileged command server.
 
     // Extract fd from control message
     const cmsg: *const Cmsghdr = @ptrCast(@alignCast(&cmsg_buf));
@@ -164,11 +168,68 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
     std.log.info("utun_escalate: received {s} (fd={d}) from helper", .{ device_name[0..name_len], received_fd.* });
 
+    // Store the socket as our persistent privileged command channel
+    privileged_cmd_fd = client_fd;
+    std.log.info("utun_escalate: privileged command channel established (fd={d})", .{client_fd});
+
     return EscalatedUtun{
         .fd = received_fd.*,
         .device_name = device_name,
         .device_name_len = name_len,
     };
+}
+
+/// Send a shell command to the privileged helper for execution as root.
+/// Returns true if the command succeeded (exit code 0).
+pub fn runPrivilegedCommand(cmd: []const u8) bool {
+    if (privileged_cmd_fd < 0) return false;
+    if (cmd.len == 0 or cmd.len > 2048) return false;
+
+    // Send length prefix (2 bytes, little-endian)
+    const len: u16 = @intCast(cmd.len);
+    const len_bytes = [2]u8{ @intCast(len & 0xFF), @intCast((len >> 8) & 0xFF) };
+    _ = posix.write(privileged_cmd_fd, &len_bytes) catch {
+        std.log.err("utun_escalate: privileged channel write failed (length)", .{});
+        privileged_cmd_fd = -1;
+        return false;
+    };
+
+    // Send command bytes
+    _ = posix.write(privileged_cmd_fd, cmd) catch {
+        std.log.err("utun_escalate: privileged channel write failed (command)", .{});
+        privileged_cmd_fd = -1;
+        return false;
+    };
+
+    // Read 1-byte response (exit code)
+    var resp: [1]u8 = undefined;
+    const n = posix.read(privileged_cmd_fd, &resp) catch {
+        std.log.err("utun_escalate: privileged channel read failed", .{});
+        privileged_cmd_fd = -1;
+        return false;
+    };
+    if (n == 0) {
+        std.log.err("utun_escalate: privileged channel closed by helper", .{});
+        privileged_cmd_fd = -1;
+        return false;
+    }
+
+    if (resp[0] != 0) {
+        std.log.warn("utun_escalate: privileged command returned exit code {d}", .{resp[0]});
+    }
+    return resp[0] == 0;
+}
+
+/// Close the privileged command channel and signal the helper to exit.
+pub fn closePrivilegedChannel() void {
+    if (privileged_cmd_fd >= 0) {
+        // Send EXIT signal (length = 0)
+        const exit_signal = [2]u8{ 0, 0 };
+        _ = posix.write(privileged_cmd_fd, &exit_signal) catch {};
+        posix.close(privileged_cmd_fd);
+        privileged_cmd_fd = -1;
+        std.log.info("utun_escalate: privileged command channel closed", .{});
+    }
 }
 
 /// Search for the helper binary in likely locations.

@@ -195,6 +195,11 @@ pub const VirtualAdapter = struct {
         // Restore original routes
         self.routes.restore() catch {};
 
+        // Close the privileged command channel (helper process exits)
+        if (builtin.os.tag == .macos) {
+            utun_escalate.closePrivilegedChannel();
+        }
+
         if (self.device) |dev| {
             dev.close();
             self.device = null;

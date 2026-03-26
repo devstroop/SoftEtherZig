@@ -122,16 +122,17 @@ pub fn main() !void {
         std.process.exit(6);
     };
 
-    // Step 2: Configure with temporary IP via ifconfig
-    var cmd_buf: [256]u8 = undefined;
     const dev_name_slice = device_name[0..name_len];
-    const cmd = std.fmt.bufPrint(&cmd_buf, "ifconfig {s} 169.254.1.1 169.254.0.1 netmask 255.255.0.0 up", .{dev_name_slice}) catch {
+
+    // Step 2: Configure with temporary IP via ifconfig (must use full path, running as root)
+    var cmd_buf: [256]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "/sbin/ifconfig {s} 169.254.1.1 169.254.0.1 netmask 255.255.0.0 up", .{dev_name_slice}) catch {
         posix.close(utun_fd);
         std.process.exit(7);
     };
 
     var child = std.process.Child.init(
-        &[_][]const u8{ "sh", "-c", cmd },
+        &[_][]const u8{ "/bin/sh", "-c", cmd },
         std.heap.page_allocator,
     );
     const term = child.spawnAndWait() catch {
@@ -207,4 +208,56 @@ pub fn main() !void {
     }
 
     std.debug.print("OK: Created {s} (fd={d}), sent to parent\n", .{ dev_name_slice, utun_fd });
+
+    // Step 4: Enter privileged command loop.
+    // Parent sends commands for ifconfig/route that need root.
+    // Protocol: [u16 LE length][command bytes] -> [u8 exit_code]
+    // Length 0 = EXIT.
+    std.debug.print("OK: Entering privileged command loop\n", .{});
+    while (true) {
+        // Read 2-byte length prefix (little-endian)
+        var len_buf: [2]u8 = undefined;
+        if (!readExact(sock_fd, &len_buf)) break;
+
+        const cmd_len: u16 = @as(u16, len_buf[0]) | (@as(u16, len_buf[1]) << 8);
+        if (cmd_len == 0) break; // EXIT signal
+        if (cmd_len > 2048) break; // Safety limit
+
+        // Read command bytes
+        var cmd_data: [2048]u8 = undefined;
+        if (!readExact(sock_fd, cmd_data[0..cmd_len])) break;
+
+        const cmd_str = cmd_data[0..cmd_len];
+        std.debug.print("CMD: {s}\n", .{cmd_str});
+
+        // Execute as root via /bin/sh
+        var proc = std.process.Child.init(
+            &[_][]const u8{ "/bin/sh", "-c", cmd_str },
+            std.heap.page_allocator,
+        );
+        proc.stderr_behavior = .Ignore;
+        proc.stdout_behavior = .Ignore;
+        const proc_term = proc.spawnAndWait() catch {
+            const err_resp = [_]u8{1};
+            _ = posix.write(sock_fd, &err_resp) catch break;
+            continue;
+        };
+
+        const exit_code: u8 = if (proc_term.Exited <= 255) @intCast(proc_term.Exited) else 1;
+        const resp = [_]u8{exit_code};
+        _ = posix.write(sock_fd, &resp) catch break;
+    }
+
+    std.debug.print("OK: Command loop ended, helper exiting\n", .{});
+}
+
+/// Read exactly buf.len bytes from fd. Returns false on EOF or error.
+fn readExact(fd: posix.fd_t, buf: []u8) bool {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = posix.read(fd, buf[total..]) catch return false;
+        if (n == 0) return false;
+        total += n;
+    }
+    return true;
 }
