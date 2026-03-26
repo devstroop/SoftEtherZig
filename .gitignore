@@ -33,9 +33,6 @@ log-*.log
 # Compiled binaries
 *.exe
 *.dll
-*.so
-*.dylib
-*.a
 *.o
 main
 
@@ -44,6 +41,3 @@ main
 
 config.json
 config*.json
-
-# Cross-compiled dependencies
-deps/
