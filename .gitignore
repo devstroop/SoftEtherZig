@@ -43,4 +43,7 @@ main
 *.dSYM/
 
 config.json
-config*.json
+config*.jsondeps/
+zig-out/
+zig-cache/
+.zig-cache/
