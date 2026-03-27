@@ -369,6 +369,11 @@ pub const VpnClient = struct {
             return ClientError.DnsResolutionFailed;
         };
 
+        if (@atomicLoad(bool, &self.should_stop, .acquire)) {
+            self.disconnect_reason = .user_requested;
+            return ClientError.OperationCancelled;
+        }
+
         self.transitionState(.connecting_tcp);
         self.transitionState(.ssl_handshake);
 
@@ -397,17 +402,32 @@ pub const VpnClient = struct {
             return ClientError.ConnectionFailed;
         };
 
+        if (@atomicLoad(bool, &self.should_stop, .acquire)) {
+            self.disconnect_reason = .user_requested;
+            return ClientError.OperationCancelled;
+        }
+
         self.transitionState(.authenticating);
         self.performAuthentication() catch {
             self.disconnect_reason = .auth_failed;
             return ClientError.AuthenticationFailed;
         };
 
+        if (@atomicLoad(bool, &self.should_stop, .acquire)) {
+            self.disconnect_reason = .user_requested;
+            return ClientError.OperationCancelled;
+        }
+
         self.transitionState(.establishing_session);
         self.establishSession() catch {
             self.disconnect_reason = .protocol_error;
             return ClientError.SessionEstablishmentFailed;
         };
+
+        if (@atomicLoad(bool, &self.should_stop, .acquire)) {
+            self.disconnect_reason = .user_requested;
+            return ClientError.OperationCancelled;
+        }
 
         self.transitionState(.configuring_adapter);
         self.configureAdapter() catch {
@@ -519,7 +539,7 @@ pub const VpnClient = struct {
         // Step 1: Upload signature (WaterMark)
         softether_proto.uploadSignature(self.allocator, writer, host_for_http) catch |err| {
             std.log.err("Failed to upload signature: {}", .{err});
-            return ClientError.AuthenticationFailed;
+            return ClientError.ProtocolError;
         };
 
         std.log.debug("Downloading server hello...", .{});
@@ -527,7 +547,7 @@ pub const VpnClient = struct {
         // Step 2: Download Hello (get server random challenge)
         var hello = softether_proto.downloadHello(self.allocator, reader) catch |err| {
             std.log.err("Failed to download hello: {}", .{err});
-            return ClientError.AuthenticationFailed;
+            return ClientError.ProtocolError;
         };
         defer hello.deinit(self.allocator);
 
@@ -1079,7 +1099,7 @@ pub const VpnClient = struct {
         var is_configured = false;
 
         // Main packet loop
-        while (!self.should_stop and self.isConnected()) {
+        while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             // Poll TLS, TUN, and optionally UDP with 1ms timeout for low latency
             poll_fds[0].revents = 0;
             poll_fds[1].revents = 0;

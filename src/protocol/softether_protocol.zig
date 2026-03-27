@@ -154,9 +154,17 @@ pub const Writer = struct {
 
     pub fn writeAll(self: Writer, data: []const u8) !void {
         var remaining = data;
+        var retry_count: u32 = 0;
         while (remaining.len > 0) {
             const written = try self.write(remaining);
-            if (written == 0) return error.ConnectionClosed;
+            if (written == 0) {
+                // TLS returns 0 for WANT_WRITE/WANT_READ — retry with backoff
+                retry_count += 1;
+                if (retry_count > 100) return error.ConnectionClosed;
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
+            retry_count = 0;
             remaining = remaining[written..];
         }
     }
@@ -272,8 +280,10 @@ pub fn uploadSignature(
     writer: Writer,
     host: []const u8,
 ) !void {
-    // Try using VPNCONNECT instead of watermark (some servers accept this)
-    const body = "VPNCONNECT";
+    // Send the full WaterMark GIF signature — servers validate this to confirm
+    // the client speaks the SoftEther VPN protocol. "VPNCONNECT" is only accepted
+    // by a subset of servers and most production servers reject it.
+    const body = WaterMark;
     const body_len = body.len;
 
     // Build HTTP header
@@ -283,10 +293,10 @@ pub fn uploadSignature(
     // Send header
     try writer.writeAll(header);
 
-    // Send VPNCONNECT
+    // Send WaterMark signature
     try writer.writeAll(body);
 
-    std.log.debug("Uploaded protocol signature ({d} bytes) - using VPNCONNECT", .{body_len});
+    std.log.debug("Uploaded protocol signature ({d} bytes)", .{body_len});
 }
 
 /// Download Hello from server

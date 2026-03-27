@@ -254,8 +254,11 @@ export fn softether_connect(client: ?*VpnClient) c_int {
 }
 
 /// Disconnect from the VPN server.
+/// First signals cancellation (non-blocking), then waits for clean disconnect.
 export fn softether_disconnect(client: ?*VpnClient) c_int {
     const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
+    // Signal stop first so performConnection() can exit early
+    c.requestStop();
     c.disconnect() catch |err| {
         return @intFromEnum(mapClientError(err));
     };

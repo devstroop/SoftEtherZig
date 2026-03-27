@@ -63,6 +63,50 @@ pub const TlsConfig = struct {
     client_key_pem: ?[]const u8 = null,
 };
 
+/// TCP connect with configurable timeout using non-blocking socket + poll.
+/// Avoids the OS default 75s SYN timeout that causes apparent freezes.
+fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.fd_t {
+    const fd = try std.posix.socket(address.any.family, std.posix.SOCK.STREAM, 0);
+    errdefer std.posix.close(fd);
+
+    // Set non-blocking for connect (O_NONBLOCK on macOS is 0x0004)
+    const O_NONBLOCK: usize = 0x0004;
+    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+
+    // Initiate connect — returns immediately with WouldBlock (EINPROGRESS)
+    std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock => {},
+        else => return err,
+    };
+
+    // Poll for write-readiness (connection completion)
+    var poll_fds = [1]std.posix.pollfd{
+        .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
+    };
+    const effective_timeout: i32 = if (timeout_ms > 0) @intCast(timeout_ms) else 30000;
+    const poll_result = try std.posix.poll(&poll_fds, effective_timeout);
+    if (poll_result == 0) {
+        return error.ConnectionTimedOut;
+    }
+
+    // Check for connect error via SO_ERROR
+    var so_error: c_int = 0;
+    var optlen: std.posix.socklen_t = @sizeOf(c_int);
+    const rc = std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, @ptrCast(&so_error), &optlen);
+    if (rc != 0) {
+        return error.ConnectionRefused;
+    }
+    if (so_error != 0) {
+        return error.ConnectionRefused;
+    }
+
+    // Restore blocking mode
+    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags);
+
+    return fd;
+}
+
 /// TLS-wrapped socket using OpenSSL
 pub const TlsSocket = struct {
     allocator: Allocator,
@@ -84,11 +128,10 @@ pub const TlsSocket = struct {
         // First try to parse as IP address
         if (net.Address.resolveIp(hostname, port)) |address| {
             std.log.debug("TLS: Resolved IP address directly: {s}:{d}", .{ hostname, port });
-            const stream = net.tcpConnectToAddress(address) catch |err| {
+            tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms) catch |err| {
                 std.log.err("TLS: TCP connect failed: {}", .{err});
                 return TlsError.ConnectionFailed;
             };
-            tcp_fd = stream.handle;
         } else |resolve_err| {
             std.log.debug("TLS: Not an IP, trying DNS for: {s} (err: {})", .{ hostname, resolve_err });
             // DNS resolution
@@ -103,11 +146,10 @@ pub const TlsSocket = struct {
                 return TlsError.ConnectionFailed;
             }
 
-            const stream = net.tcpConnectToAddress(addr_list.addrs[0]) catch |err| {
+            tcp_fd = tcpConnectWithTimeout(addr_list.addrs[0], config.timeout_ms) catch |err| {
                 std.log.err("TLS: TCP connect to DNS result failed: {}", .{err});
                 return TlsError.ConnectionFailed;
             };
-            tcp_fd = stream.handle;
         }
         errdefer std.posix.close(tcp_fd);
 
