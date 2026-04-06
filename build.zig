@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
 
     const target_os = target.result.os.tag;
     const target_abi = target.result.abi;
+    const target_arch = target.result.cpu.arch;
     const is_android = target_os == .linux and (target_abi == .android or target_abi == .androideabi);
 
     // Detect Homebrew OpenSSL path (ARM vs Intel Mac)
@@ -32,6 +33,20 @@ pub fn build(b: *std.Build) void {
             break :blk p;
         }
         break :blk "/opt/homebrew/opt/openssl@3/include"; // fallback
+    } else "";
+
+    // Android: per-arch OpenSSL deps
+    const android_ssl_lib: []const u8 = if (is_android) switch (target_arch) {
+        .aarch64 => "deps/openssl-android/arm64-v8a/lib",
+        .arm => "deps/openssl-android/armeabi-v7a/lib",
+        .x86_64 => "deps/openssl-android/x86_64/lib",
+        else => "deps/openssl-android/arm64-v8a/lib",
+    } else "";
+    const android_ssl_include: []const u8 = if (is_android) switch (target_arch) {
+        .aarch64 => "deps/openssl-android/arm64-v8a/include",
+        .arm => "deps/openssl-android/armeabi-v7a/include",
+        .x86_64 => "deps/openssl-android/x86_64/include",
+        else => "deps/openssl-android/arm64-v8a/include",
     } else "";
 
     // Print build configuration
@@ -100,8 +115,8 @@ pub fn build(b: *std.Build) void {
     // Link OpenSSL for shared library too
     if (is_android) {
         // Android: statically link OpenSSL into the .so (no system OpenSSL)
-        shared_lib.addLibraryPath(.{ .cwd_relative = "deps/openssl-android/lib" });
-        shared_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-android/include" });
+        shared_lib.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
+        shared_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
         shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (target_os == .macos) {
@@ -149,8 +164,8 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (is_android) {
-        static_lib.addLibraryPath(.{ .cwd_relative = "deps/openssl-android/lib" });
-        static_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-android/include" });
+        static_lib.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
+        static_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (target_os == .macos) {
