@@ -174,9 +174,26 @@ pub fn build(b: *std.Build) void {
     const test_sources = [_][]const u8{
         "src/crypto/sha0.zig",
         "src/crypto/cipher.zig",
+        "src/crypto/hash.zig",
         "src/protocol/pack.zig",
+        "src/protocol/auth.zig",
+        "src/protocol/rpc.zig",
         "src/client/state.zig",
+        "src/client/stats.zig",
+        "src/client/events.zig",
         "src/core/ip.zig",
+        "src/core/errors.zig",
+        "src/core/types.zig",
+        "src/config.zig",
+        "src/types.zig",
+        "src/app/config.zig",
+        "src/app/events.zig",
+        "src/app/password_hash.zig",
+        "src/app/state.zig",
+        "src/tunnel/arp.zig",
+        "src/tunnel/dhcp.zig",
+        "src/cli/args.zig",
+        "src/cli/config_manager.zig",
     };
 
     for (test_sources) |test_src| {

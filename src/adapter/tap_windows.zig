@@ -113,6 +113,8 @@ const WintunApi = struct {
         const kernel32 = @cImport(@cInclude("windows.h"));
         const dll = kernel32.LoadLibraryA("wintun.dll");
         if (dll == null) {
+            std.log.err("Failed to load wintun.dll — Wintun driver not installed.", .{});
+            std.log.err("Download from: https://www.wintun.net/ and place wintun.dll in the application directory or System32.", .{});
             return TapWindowsError.WintunNotFound;
         }
 
@@ -213,6 +215,8 @@ pub const TapWindowsDevice = struct {
 
         // Load Wintun DLL
         var api = WintunApi.load() catch {
+            std.log.err("Wintun initialization failed. VPN tunnel cannot be created.", .{});
+            std.log.err("Ensure Wintun is installed: https://www.wintun.net/", .{});
             return TapWindowsError.WintunNotFound;
         };
         errdefer api.unload();
