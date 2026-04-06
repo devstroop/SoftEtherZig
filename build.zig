@@ -10,6 +10,30 @@ pub fn build(b: *std.Build) void {
     const target_abi = target.result.abi;
     const is_android = target_os == .linux and (target_abi == .android or target_abi == .androideabi);
 
+    // Detect Homebrew OpenSSL path (ARM vs Intel Mac)
+    const openssl_lib: []const u8 = if (target_os == .macos) blk: {
+        const candidates = [_][]const u8{
+            "/opt/homebrew/opt/openssl@3/lib",
+            "/usr/local/opt/openssl@3/lib",
+        };
+        for (candidates) |p| {
+            std.fs.accessAbsolute(p, .{}) catch continue;
+            break :blk p;
+        }
+        break :blk "/opt/homebrew/opt/openssl@3/lib"; // fallback
+    } else "";
+    const openssl_include: []const u8 = if (target_os == .macos) blk: {
+        const candidates = [_][]const u8{
+            "/opt/homebrew/opt/openssl@3/include",
+            "/usr/local/opt/openssl@3/include",
+        };
+        for (candidates) |p| {
+            std.fs.accessAbsolute(p, .{}) catch continue;
+            break :blk p;
+        }
+        break :blk "/opt/homebrew/opt/openssl@3/include"; // fallback
+    } else "";
+
     // Print build configuration
     std.debug.print("Build Configuration:\n", .{});
     std.debug.print("  Target: {s}{s}\n", .{ @tagName(target_os), if (is_android) " (android)" else "" });
@@ -31,8 +55,8 @@ pub fn build(b: *std.Build) void {
 
     // Link OpenSSL for TLS
     if (target_os == .macos) {
-        vpnclient.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
-        vpnclient.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+        vpnclient.addLibraryPath(.{ .cwd_relative = openssl_lib });
+        vpnclient.addIncludePath(.{ .cwd_relative = openssl_include });
         vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
     } else if (target_os == .windows) {
@@ -81,8 +105,8 @@ pub fn build(b: *std.Build) void {
         shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (target_os == .macos) {
-        shared_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
-        shared_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+        shared_lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
+        shared_lib.addIncludePath(.{ .cwd_relative = openssl_include });
         shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
     } else if (target_os == .windows) {
@@ -130,8 +154,8 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (target_os == .macos) {
-        static_lib.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
-        static_lib.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+        static_lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
+        static_lib.addIncludePath(.{ .cwd_relative = openssl_include });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else {
@@ -209,8 +233,8 @@ pub fn build(b: *std.Build) void {
 
         // Tests may need OpenSSL (cipher.zig uses it)
         if (target_os == .macos) {
-            t.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
-            t.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+            t.addLibraryPath(.{ .cwd_relative = openssl_lib });
+            t.addIncludePath(.{ .cwd_relative = openssl_include });
             t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else {
