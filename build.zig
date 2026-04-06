@@ -169,7 +169,40 @@ pub fn build(b: *std.Build) void {
     // TESTS
     // ============================================
     const test_step = b.step("test", "Run unit tests");
-    _ = test_step;
+
+    // Test modules — each source file with `test` blocks
+    const test_sources = [_][]const u8{
+        "src/crypto/sha0.zig",
+        "src/crypto/cipher.zig",
+        "src/protocol/pack.zig",
+        "src/client/state.zig",
+        "src/core/ip.zig",
+    };
+
+    for (test_sources) |test_src| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_src),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+
+        // Tests may need OpenSSL (cipher.zig uses it)
+        if (target_os == .macos) {
+            t.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/lib" });
+            t.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" });
+            t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+        } else {
+            t.linkSystemLibrary("ssl");
+            t.linkSystemLibrary("crypto");
+        }
+        t.linkLibC();
+
+        const run_t = b.addRunArtifact(t);
+        test_step.dependOn(&run_t.step);
+    }
 
     // ============================================
     // HELP
