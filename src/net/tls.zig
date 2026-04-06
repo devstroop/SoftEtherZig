@@ -16,6 +16,22 @@ const testing = std.testing;
 
 const socket_mod = @import("socket.zig");
 const TcpSocket = socket_mod.TcpSocket;
+const dns_cache_mod = @import("dns_cache.zig");
+
+/// Global DNS cache instance for TLS connections
+var global_dns_cache: ?dns_cache_mod.DnsCache = null;
+var dns_cache_init_mutex: std.Thread.Mutex = .{};
+
+/// Get or initialize the global DNS cache
+fn getDnsCache(allocator: Allocator) *dns_cache_mod.DnsCache {
+    dns_cache_init_mutex.lock();
+    defer dns_cache_init_mutex.unlock();
+
+    if (global_dns_cache == null) {
+        global_dns_cache = dns_cache_mod.DnsCache.init(allocator, null);
+    }
+    return &global_dns_cache.?;
+}
 
 /// TLS errors
 pub const TlsError = error{
@@ -134,19 +150,22 @@ pub const TlsSocket = struct {
             };
         } else |resolve_err| {
             std.log.debug("TLS: Not an IP, trying DNS for: {s} (err: {})", .{ hostname, resolve_err });
-            // DNS resolution
-            const addr_list = net.getAddressList(allocator, hostname, port) catch |err| {
+
+            // Try DNS cache first, fall back to OS resolution
+            const cache = getDnsCache(allocator);
+            const cached_addrs = cache.resolveWithCache(hostname, port) catch |err| {
                 std.log.err("TLS: DNS resolution failed: {}", .{err});
                 return TlsError.ConnectionFailed;
             };
-            defer addr_list.deinit();
 
-            if (addr_list.addrs.len == 0) {
+            if (cached_addrs.len == 0) {
                 std.log.err("TLS: No addresses found for {s}", .{hostname});
                 return TlsError.ConnectionFailed;
             }
 
-            tcp_fd = tcpConnectWithTimeout(addr_list.addrs[0], config.timeout_ms) catch |err| {
+            tcp_fd = tcpConnectWithTimeout(cached_addrs[0], config.timeout_ms) catch |err| {
+                // Invalidate cache on connection failure — address may have changed
+                cache.invalidate(hostname);
                 std.log.err("TLS: TCP connect to DNS result failed: {}", .{err});
                 return TlsError.ConnectionFailed;
             };

@@ -194,6 +194,8 @@ pub fn build(b: *std.Build) void {
         "src/tunnel/dhcp.zig",
         "src/cli/args.zig",
         "src/cli/config_manager.zig",
+        "src/net/dns_cache.zig",
+        "src/net/udp_accel.zig",
     };
 
     for (test_sources) |test_src| {

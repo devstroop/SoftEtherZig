@@ -492,3 +492,155 @@ test "UdpAccelEngine init" {
 
     try std.testing.expectEqual(UdpAccelState.idle, engine.state);
 }
+
+test "UdpAccelEngine state starts idle" {
+    const config = UdpAccelConfig{
+        .server_ip = "10.0.0.1",
+        .server_port = 8000,
+        .send_key = [_]u8{0x11} ** 16,
+        .recv_key = [_]u8{0x22} ** 16,
+        .send_hmac_key = [_]u8{0x33} ** 20,
+        .recv_hmac_key = [_]u8{0x44} ** 20,
+    };
+    var engine = UdpAccelEngine.init(std.testing.allocator, config);
+    defer engine.stop();
+
+    try std.testing.expectEqual(UdpAccelState.idle, engine.state);
+    try std.testing.expectEqual(@as(u32, 0), engine.send_seq);
+    try std.testing.expectEqual(@as(u32, 0), engine.recv_seq);
+}
+
+test "UdpAccelConfig defaults" {
+    const config = UdpAccelConfig{
+        .server_ip = "1.2.3.4",
+        .server_port = 443,
+        .send_key = [_]u8{0} ** 16,
+        .recv_key = [_]u8{0} ** 16,
+        .send_hmac_key = [_]u8{0} ** 20,
+        .recv_hmac_key = [_]u8{0} ** 20,
+    };
+
+    try std.testing.expect(config.use_encryption);
+}
+
+test "Sequence number check - first packet" {
+    const config = UdpAccelConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 4500,
+        .send_key = [_]u8{0xAA} ** 16,
+        .recv_key = [_]u8{0xBB} ** 16,
+        .send_hmac_key = [_]u8{0xCC} ** 20,
+        .recv_hmac_key = [_]u8{0xDD} ** 20,
+    };
+    var engine = UdpAccelEngine.init(std.testing.allocator, config);
+    defer engine.stop();
+
+    // First packet with seq 0 should be accepted
+    try std.testing.expect(engine.checkSeq(0));
+    try std.testing.expectEqual(@as(u32, 0), engine.recv_seq);
+}
+
+test "Sequence number check - sequential" {
+    const config = UdpAccelConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 4500,
+        .send_key = [_]u8{0xAA} ** 16,
+        .recv_key = [_]u8{0xBB} ** 16,
+        .send_hmac_key = [_]u8{0xCC} ** 20,
+        .recv_hmac_key = [_]u8{0xDD} ** 20,
+    };
+    var engine = UdpAccelEngine.init(std.testing.allocator, config);
+    defer engine.stop();
+
+    _ = engine.checkSeq(0);
+    try std.testing.expect(engine.checkSeq(1));
+    try std.testing.expect(engine.checkSeq(2));
+    try std.testing.expect(engine.checkSeq(3));
+    try std.testing.expectEqual(@as(u32, 3), engine.recv_seq);
+}
+
+test "Sequence number check - small gap allowed" {
+    const config = UdpAccelConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 4500,
+        .send_key = [_]u8{0xAA} ** 16,
+        .recv_key = [_]u8{0xBB} ** 16,
+        .send_hmac_key = [_]u8{0xCC} ** 20,
+        .recv_hmac_key = [_]u8{0xDD} ** 20,
+    };
+    var engine = UdpAccelEngine.init(std.testing.allocator, config);
+    defer engine.stop();
+
+    _ = engine.checkSeq(0);
+    // Small gap (10 packets) should be allowed
+    try std.testing.expect(engine.checkSeq(10));
+    try std.testing.expectEqual(@as(u32, 10), engine.recv_seq);
+}
+
+test "Sequence number check - large gap rejected" {
+    const config = UdpAccelConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 4500,
+        .send_key = [_]u8{0xAA} ** 16,
+        .recv_key = [_]u8{0xBB} ** 16,
+        .send_hmac_key = [_]u8{0xCC} ** 20,
+        .recv_hmac_key = [_]u8{0xDD} ** 20,
+    };
+    var engine = UdpAccelEngine.init(std.testing.allocator, config);
+    defer engine.stop();
+
+    _ = engine.checkSeq(0);
+    // Gap larger than MAX_SEQ_GAP should be rejected
+    try std.testing.expect(!engine.checkSeq(MAX_SEQ_GAP + 1));
+}
+
+test "HMAC-SHA1 consistency" {
+    const key = [_]u8{0x0b} ** 20;
+    const data = "Hi There";
+
+    const mac1 = computeHmacSha1(&key, data);
+    const mac2 = computeHmacSha1(&key, data);
+
+    // Same input produces same HMAC
+    try std.testing.expectEqualSlices(u8, &mac1, &mac2);
+}
+
+test "HMAC-SHA1 different keys produce different MACs" {
+    const key1 = [_]u8{0x0a} ** 20;
+    const key2 = [_]u8{0x0b} ** 20;
+    const data = "test data";
+
+    const mac1 = computeHmacSha1(&key1, data);
+    const mac2 = computeHmacSha1(&key2, data);
+
+    try std.testing.expect(!mem.eql(u8, &mac1, &mac2));
+}
+
+test "Packet constants are consistent" {
+    // MIN_PACKET_SIZE should equal flags + IV + aes_block + hmac
+    try std.testing.expectEqual(
+        FLAGS_SIZE + IV_SIZE + block_size + HMAC_SIZE,
+        MIN_PACKET_SIZE,
+    );
+    // NAT-T timeout should be longer than probe interval
+    try std.testing.expect(NATT_TIMEOUT_MS > NATT_PROBE_INTERVAL_MS);
+    // Path dead timeout should be longer than keepalive
+    try std.testing.expect(PATH_DEAD_TIMEOUT_MS > KEEPALIVE_INTERVAL_MS);
+}
+
+test "UdpAccelConfig key sizes" {
+    const config = UdpAccelConfig{
+        .server_ip = "127.0.0.1",
+        .server_port = 4500,
+        .send_key = [_]u8{0} ** 16,
+        .recv_key = [_]u8{0} ** 16,
+        .send_hmac_key = [_]u8{0} ** 20,
+        .recv_hmac_key = [_]u8{0} ** 20,
+    };
+    // AES-128 keys should be 16 bytes
+    try std.testing.expectEqual(@as(usize, 16), config.send_key.len);
+    try std.testing.expectEqual(@as(usize, 16), config.recv_key.len);
+    // HMAC-SHA1 keys should be 20 bytes
+    try std.testing.expectEqual(@as(usize, 20), config.send_hmac_key.len);
+    try std.testing.expectEqual(@as(usize, 20), config.recv_hmac_key.len);
+}
