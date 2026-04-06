@@ -479,12 +479,18 @@ pub const NodeInfo = struct {
         const name = "SoftEther VPN Client (Zig)";
         @memcpy(info.client_product_name[0..name.len], name);
 
-        // Version 4.19
-        info.client_version = 419;
-        info.client_build = 9799;
+        // Version 4.44 build 9807 (SoftEther 4.x compat — see PRD.md)
+        info.client_version = 444;
+        info.client_build = 9807;
 
-        // OS info (placeholder)
-        const os = "macOS";
+        // OS info — detect at compile time
+        const os = switch (@import("builtin").os.tag) {
+            .macos => "macOS",
+            .linux => "Linux",
+            .windows => "Windows",
+            .ios => "iOS",
+            else => "Unknown",
+        };
         @memcpy(info.os_name[0..os.len], os);
 
         // Generate unique ID
@@ -1111,7 +1117,7 @@ test "NodeInfo creation" {
 
     // Should have product name set
     try testing.expect(info.client_product_name[0] != 0);
-    try testing.expectEqual(@as(u32, 419), info.client_version);
+    try testing.expectEqual(@as(u32, 444), info.client_version);
 
     // Unique ID should not be all zeros
     var all_zero = true;

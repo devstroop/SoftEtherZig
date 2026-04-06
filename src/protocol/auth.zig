@@ -375,11 +375,31 @@ pub const MsChapV2 = struct {
     }
 
     fn desEncrypt(key: *const [8]u8, data: *const [8]u8, out: *[8]u8) void {
-        // Simple placeholder - in production, use proper DES
-        // For now, XOR-based placeholder
-        for (out, 0..) |*o, i| {
-            o.* = data[i] ^ key[i];
+        // Use OpenSSL EVP for single-block DES-ECB encryption (required for NTLM auth)
+        const ctx = ssl.EVP_CIPHER_CTX_new() orelse {
+            // Fallback: zero output on allocation failure
+            @memset(out, 0);
+            return;
+        };
+        defer ssl.EVP_CIPHER_CTX_free(ctx);
+
+        if (ssl.EVP_EncryptInit_ex(ctx, ssl.EVP_des_ecb(), null, key, null) != 1) {
+            @memset(out, 0);
+            return;
         }
+
+        // Disable padding — we encrypt exactly one 8-byte block
+        _ = ssl.EVP_CIPHER_CTX_set_padding(ctx, 0);
+
+        var out_len: c_int = 0;
+        if (ssl.EVP_EncryptUpdate(ctx, out, &out_len, data, 8) != 1) {
+            @memset(out, 0);
+            return;
+        }
+
+        var final_len: c_int = 0;
+        var out_buf: [8]u8 = undefined;
+        _ = ssl.EVP_EncryptFinal_ex(ctx, &out_buf, &final_len);
     }
 };
 
