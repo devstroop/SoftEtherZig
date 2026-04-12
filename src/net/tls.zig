@@ -227,6 +227,24 @@ pub const TlsSocket = struct {
             std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
         };
 
+        // On Windows, disable delayed ACKs — default 200ms ACK delay adds latency
+        if (builtin.os.tag == .windows) {
+            const SIO_TCP_SET_ACK_FREQUENCY = @as(u32, 0x98000017);
+            var ack_freq: u32 = 1; // ACK every packet immediately
+            var bytes_returned: u32 = 0;
+            _ = std.os.windows.ws2_32.WSAIoctl(
+                tcp_fd,
+                SIO_TCP_SET_ACK_FREQUENCY,
+                @ptrCast(&ack_freq),
+                @sizeOf(u32),
+                null,
+                0,
+                &bytes_returned,
+                null,
+                null,
+            );
+        }
+
         // Apply timeout
         if (config.timeout_ms > 0) {
             TcpSocket.setReadTimeout(tcp_fd, config.timeout_ms) catch {};

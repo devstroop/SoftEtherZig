@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
                 step.linkSystemLibrary("kernel32");
                 step.linkSystemLibrary("advapi32");
                 step.linkSystemLibrary("iphlpapi");
+                step.linkSystemLibrary("winmm");
             } else {
                 step.linkSystemLibrary("ssl");
                 step.linkSystemLibrary("crypto");

@@ -67,6 +67,12 @@ const tunnel_mod = @import("../tunnel/mod.zig");
 // Import DHCP parsing
 const dhcp_mod = @import("../adapter/dhcp.zig");
 
+// Windows multimedia timer API (for high-resolution poll timeouts)
+const winmm = if (builtin.os.tag == .windows) struct {
+    extern "winmm" fn timeBeginPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
+    extern "winmm" fn timeEndPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
+} else struct {};
+
 // ============================================================================
 // Client Configuration
 // ============================================================================
@@ -1131,6 +1137,15 @@ pub const VpnClient = struct {
         var is_configured = false;
 
         // Main packet loop
+        // On Windows, set timer resolution to 1ms for accurate poll() timeouts.
+        // Default Windows timer resolution is 15.6ms, making 1ms poll wait up to 15.6ms.
+        if (builtin.os.tag == .windows) {
+            _ = winmm.timeBeginPeriod(1);
+        }
+        defer if (builtin.os.tag == .windows) {
+            _ = winmm.timeEndPeriod(1);
+        };
+
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             // Poll TLS, TUN, and optionally UDP
             poll_fds[0].revents = 0;
@@ -1290,17 +1305,17 @@ pub const VpnClient = struct {
                         }
 
                         if (outbound_count > 0) {
-                            // Try UDP first for each packet
-                            var sent_udp = false;
+                            // Try UDP first, track how many succeeded
+                            var udp_sent_count: usize = 0;
                             if (self.udp_accel) |*ua| {
                                 for (outbound_blocks[0..outbound_count]) |frame| {
-                                    sent_udp = ua.sendData(frame) catch false;
-                                    if (!sent_udp) break;
+                                    if (!(ua.sendData(frame) catch false)) break;
+                                    udp_sent_count += 1;
                                 }
                             }
-                            if (!sent_udp) {
-                                // Batch send all packets over TCP in one protocol frame (zero-copy)
-                                tunnel.sendBlocksZeroCopy(outbound_blocks[0..outbound_count], &send_buffer) catch {};
+                            // Send remaining packets (not sent via UDP) over TCP
+                            if (udp_sent_count < outbound_count) {
+                                tunnel.sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], &send_buffer) catch {};
                             }
                             self.stats.recordSent(outbound_bytes);
                         }
