@@ -1052,8 +1052,10 @@ pub const VpnClient = struct {
         const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
         const garp_interval: i64 = 10000; // 10 seconds - periodic GARP for bridge mode
 
-        // Receive buffers (zero-copy: reused each iteration)
-        var recv_scratch: [512 * 1600]u8 = undefined;
+        // Receive buffers — heap-allocated to avoid stack overflow
+        // (Dart Isolate.run() threads have ~1MB stack; these buffers are 800KB+)
+        const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
+        defer self.allocator.free(recv_scratch);
         var recv_slices: [512][]u8 = undefined;
 
         // Outbound packet buffer
@@ -1114,15 +1116,17 @@ pub const VpnClient = struct {
 
         // Main packet loop
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
-            // Poll TLS, TUN, and optionally UDP with 1ms timeout for low latency
+            // Poll TLS, TUN, and optionally UDP
             poll_fds[0].revents = 0;
             poll_fds[1].revents = 0;
             poll_fds[2].revents = 0;
             const poll_count: std.posix.nfds_t = if (has_udp) 3 else if (builtin.os.tag == .windows) 1 else 2;
-            _ = std.posix.poll(poll_fds[0..poll_count], 1) catch 0;
+            // On Windows, poll only TLS socket; TUN uses non-blocking receivePacket
+            _ = std.posix.poll(poll_fds[0..poll_count], 10) catch 0;
             const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
-            // On Windows, TUN (Wintun) is always "readable" — receivePacket is non-blocking
-            const tun_readable = if (builtin.os.tag == .windows) true else (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
+            // On Windows, Wintun receivePacket is non-blocking (returns null if no data).
+            // We always attempt TUN read but the 10ms poll timeout prevents busy-spinning.
+            const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[POLL_UDP].revents & std.posix.POLL.IN) != 0;
 
             // Drive UDP acceleration timers (probing, keepalive, timeout)
@@ -1134,7 +1138,7 @@ pub const VpnClient = struct {
 
             // INBOUND: Receive packets from VPN server (highest priority)
             if (tls_readable) {
-                const recv_count = tunnel.receiveBlocksBatch(&recv_slices, &recv_scratch) catch |err| {
+                const recv_count = tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
                     if (self.should_stop) break;
                     if (err == error.ConnectionClosed) {
                         std.log.info("Server closed connection", .{});

@@ -114,6 +114,12 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
             return error.ConnectionTimedOut;
         }
 
+        // Check for connect error via revents
+        if (poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
+            std.log.err("TLS: TCP connect failed (poll revents={x})", .{poll_fds[0].revents});
+            return error.ConnectionRefused;
+        }
+
         // Restore blocking mode
         nonblocking = 0;
         _ = ws2.ioctlsocket(fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking); // FIONBIO

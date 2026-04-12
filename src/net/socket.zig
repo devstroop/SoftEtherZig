@@ -130,20 +130,30 @@ pub const TcpSocket = struct {
 
     /// Set read timeout in milliseconds
     pub fn setReadTimeout(fd: posix.socket_t, ms: u32) !void {
-        const timeout = posix.timeval{
-            .sec = @intCast(ms / 1000),
-            .usec = @intCast((ms % 1000) * 1000),
-        };
-        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        if (builtin.os.tag == .windows) {
+            // Windows: SO_RCVTIMEO takes a DWORD in milliseconds
+            try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&ms));
+        } else {
+            const timeout = posix.timeval{
+                .sec = @intCast(ms / 1000),
+                .usec = @intCast((ms % 1000) * 1000),
+            };
+            try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        }
     }
 
     /// Set write timeout in milliseconds
     pub fn setWriteTimeout(fd: posix.socket_t, ms: u32) !void {
-        const timeout = posix.timeval{
-            .sec = @intCast(ms / 1000),
-            .usec = @intCast((ms % 1000) * 1000),
-        };
-        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+        if (builtin.os.tag == .windows) {
+            // Windows: SO_SNDTIMEO takes a DWORD in milliseconds
+            try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&ms));
+        } else {
+            const timeout = posix.timeval{
+                .sec = @intCast(ms / 1000),
+                .usec = @intCast((ms % 1000) * 1000),
+            };
+            try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+        }
     }
 
     /// Enable TCP keepalive
