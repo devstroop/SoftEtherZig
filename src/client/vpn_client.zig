@@ -190,6 +190,7 @@ pub const VpnClient = struct {
     mutex: Mutex,
     worker_thread: ?Thread,
     should_stop: bool,
+    data_loop_running: bool,
 
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
@@ -228,6 +229,7 @@ pub const VpnClient = struct {
             .mutex = .{},
             .worker_thread = null,
             .should_stop = false,
+            .data_loop_running = false,
             .event_callback = null,
             .event_user_data = null,
             .reconnect_attempt = 0,
@@ -450,6 +452,13 @@ pub const VpnClient = struct {
     fn performDisconnect(self: *Self) void {
         const old_state = self.state;
         self.transitionState(.disconnecting);
+
+        // Signal data loop to stop and wait for it to exit
+        @atomicStore(bool, &self.should_stop, true, .release);
+        var wait_count: u32 = 0;
+        while (@atomicLoad(bool, &self.data_loop_running, .acquire) and wait_count < 200) : (wait_count += 1) {
+            std.Thread.sleep(10 * std.time.ns_per_ms); // 10ms per check, max 2s
+        }
 
         // Stop UDP acceleration
         if (self.udp_accel) |*ua| {
@@ -992,6 +1001,9 @@ pub const VpnClient = struct {
     pub fn runDataLoop(self: *Self) !void {
         if (!self.isConnected()) return ClientError.NotConnected;
 
+        @atomicStore(bool, &self.data_loop_running, true, .release);
+        defer @atomicStore(bool, &self.data_loop_running, false, .release);
+
         const sock = &(self.tls_socket orelse return ClientError.NotConnected);
         var adapter = &(self.adapter_ctx orelse return ClientError.NotConnected);
 
@@ -1122,7 +1134,7 @@ pub const VpnClient = struct {
             poll_fds[2].revents = 0;
             const poll_count: std.posix.nfds_t = if (has_udp) 3 else if (builtin.os.tag == .windows) 1 else 2;
             // On Windows, poll only TLS socket; TUN uses non-blocking receivePacket
-            _ = std.posix.poll(poll_fds[0..poll_count], 10) catch 0;
+            _ = std.posix.poll(poll_fds[0..poll_count], 1) catch 0;
             const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
             // On Windows, Wintun receivePacket is non-blocking (returns null if no data).
             // We always attempt TUN read but the 10ms poll timeout prevents busy-spinning.
