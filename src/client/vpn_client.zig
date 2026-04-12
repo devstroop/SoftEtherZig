@@ -1070,12 +1070,16 @@ pub const VpnClient = struct {
         defer self.allocator.free(recv_scratch);
         var recv_slices: [512][]u8 = undefined;
 
-        // Outbound packet buffer
-        var tun_read_buf: [2048]u8 = undefined;
-        var outbound_eth_buf: [1600]u8 = undefined;
+        // Outbound packet buffers — multiple buffers for batching TUN reads
+        var tun_read_bufs: [16][2048]u8 = undefined;
+        var outbound_eth_bufs: [16][1600]u8 = undefined;
 
         // Packet buffer for ARP/GARP (small, reused)
         var arp_buf: [64]u8 = undefined;
+
+        // Pre-allocated send buffer for zero-copy outbound path (avoids per-send heap alloc)
+        // 16 packets * (4 + 1514) + 4 header ≈ 25KB
+        var send_buffer: [25000]u8 = undefined;
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -1137,7 +1141,7 @@ pub const VpnClient = struct {
             _ = std.posix.poll(poll_fds[0..poll_count], 1) catch 0;
             const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
             // On Windows, Wintun receivePacket is non-blocking (returns null if no data).
-            // We always attempt TUN read but the 10ms poll timeout prevents busy-spinning.
+            // We always attempt TUN read but the 1ms poll timeout prevents busy-spinning.
             const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[POLL_UDP].revents & std.posix.POLL.IN) != 0;
 
@@ -1261,32 +1265,45 @@ pub const VpnClient = struct {
                 }
             }
 
-            // OUTBOUND: Read from TUN and send to VPN
+            // OUTBOUND: Read from TUN and send to VPN (batched for throughput)
             // Prefer UDP if established, fall back to TCP
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        // Read one packet from TUN
-                        if (dev.read(&tun_read_buf)) |maybe_len| {
-                            if (maybe_len) |ip_len| {
-                                if (ip_len > 0 and ip_len <= 1500) {
-                                    // Wrap in Ethernet and send
-                                    if (tunnel_mod.wrapIpInEthernet(tun_read_buf[0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_buf)) |eth_frame| {
-                                        // Try UDP first
-                                        var sent_udp = false;
-                                        if (self.udp_accel) |*ua| {
-                                            sent_udp = ua.sendData(eth_frame) catch false;
+                        // Read up to 32 packets from TUN in one batch
+                        var outbound_blocks: [16][]const u8 = undefined;
+                        var outbound_count: usize = 0;
+                        var outbound_bytes: usize = 0;
+
+                        while (outbound_count < 16) {
+                            if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
+                                if (maybe_len) |ip_len| {
+                                    if (ip_len > 0 and ip_len <= 1500) {
+                                        if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
+                                            outbound_blocks[outbound_count] = eth_frame;
+                                            outbound_bytes += eth_frame.len;
+                                            outbound_count += 1;
                                         }
-                                        if (!sent_udp) {
-                                            // Fall back to TCP
-                                            const blocks = [_][]const u8{eth_frame};
-                                            tunnel.sendBlocks(&blocks) catch {};
-                                        }
-                                        self.stats.recordSent(eth_frame.len);
                                     }
+                                } else break; // No more packets available
+                            } else |_| break;
+                        }
+
+                        if (outbound_count > 0) {
+                            // Try UDP first for each packet
+                            var sent_udp = false;
+                            if (self.udp_accel) |*ua| {
+                                for (outbound_blocks[0..outbound_count]) |frame| {
+                                    sent_udp = ua.sendData(frame) catch false;
+                                    if (!sent_udp) break;
                                 }
                             }
-                        } else |_| {}
+                            if (!sent_udp) {
+                                // Batch send all packets over TCP in one protocol frame (zero-copy)
+                                tunnel.sendBlocksZeroCopy(outbound_blocks[0..outbound_count], &send_buffer) catch {};
+                            }
+                            self.stats.recordSent(outbound_bytes);
+                        }
                     }
                 }
             }
