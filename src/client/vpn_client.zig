@@ -997,9 +997,13 @@ pub const VpnClient = struct {
 
         std.log.debug("Starting data channel loop...", .{});
 
-        // Get file descriptors for poll()
+        // Get file descriptors / handles for polling
         const tls_fd = sock.getFd();
-        const tun_fd = blk: {
+        const tun_fd = if (builtin.os.tag == .windows) win_blk: {
+            // Windows: Wintun uses event handles, not file descriptors.
+            // We'll poll TUN separately with WaitForSingleObject.
+            break :win_blk @as(std.posix.fd_t, std.os.windows.INVALID_HANDLE_VALUE);
+        } else blk: {
             if (adapter.real_adapter) |*real| {
                 if (real.device) |dev| {
                     const fd = dev.getFd();
@@ -1010,7 +1014,11 @@ pub const VpnClient = struct {
             return ClientError.AdapterConfigurationFailed;
         };
 
-        std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd, tun_fd });
+        if (builtin.os.tag != .windows) {
+            std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd, tun_fd });
+        } else {
+            std.log.debug("Using Windows event-based I/O for data loop", .{});
+        }
 
         // Create tunnel connection (from protocol module)
         var tunnel = protocol_tunnel_mod.TunnelConnection.init(
@@ -1083,12 +1091,18 @@ pub const VpnClient = struct {
             }
         }
 
-        // Set up poll structures
-        const udp_fd: std.posix.fd_t = if (self.udp_accel) |*ua| ua.getFd() orelse -1 else -1;
+        // Set up poll structures — all socket fds use socket_t for Windows compatibility
+        const invalid_sock: std.posix.socket_t = if (builtin.os.tag == .windows) @ptrFromInt(std.math.maxInt(usize)) else -1;
+        const udp_fd: std.posix.socket_t = if (self.udp_accel) |*ua| ua.getFd() orelse invalid_sock else invalid_sock;
+        const has_udp = if (builtin.os.tag == .windows) (udp_fd != invalid_sock) else (udp_fd >= 0);
+
+        // tls_fd is already socket_t; tun_fd is fd_t (not a socket on Windows)
+        const poll_tun_sock: std.posix.socket_t = if (builtin.os.tag == .windows) @ptrCast(tun_fd) else tun_fd;
+
         var poll_fds: [3]std.posix.pollfd = .{
             .{ .fd = tls_fd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = tun_fd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = udp_fd, .events = if (udp_fd >= 0) std.posix.POLL.IN else 0, .revents = 0 },
+            .{ .fd = poll_tun_sock, .events = if (builtin.os.tag == .windows) 0 else std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = udp_fd, .events = if (has_udp) std.posix.POLL.IN else 0, .revents = 0 },
         };
         const POLL_TLS = 0;
         const POLL_TUN = 1;
@@ -1104,11 +1118,12 @@ pub const VpnClient = struct {
             poll_fds[0].revents = 0;
             poll_fds[1].revents = 0;
             poll_fds[2].revents = 0;
-            const poll_count: std.posix.nfds_t = if (udp_fd >= 0) 3 else 2;
+            const poll_count: std.posix.nfds_t = if (has_udp) 3 else if (builtin.os.tag == .windows) 1 else 2;
             _ = std.posix.poll(poll_fds[0..poll_count], 1) catch 0;
             const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
-            const tun_readable = (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
-            const udp_readable = udp_fd >= 0 and (poll_fds[POLL_UDP].revents & std.posix.POLL.IN) != 0;
+            // On Windows, TUN (Wintun) is always "readable" — receivePacket is non-blocking
+            const tun_readable = if (builtin.os.tag == .windows) true else (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
+            const udp_readable = has_udp and (poll_fds[POLL_UDP].revents & std.posix.POLL.IN) != 0;
 
             // Drive UDP acceleration timers (probing, keepalive, timeout)
             if (self.udp_accel) |*ua| ua.tick();

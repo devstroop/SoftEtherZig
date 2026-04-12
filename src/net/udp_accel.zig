@@ -194,7 +194,7 @@ pub const UdpAccelEngine = struct {
 
     /// Get the UDP socket fd for inclusion in poll().
     /// Returns null if not active.
-    pub fn getFd(self: *const UdpAccelEngine) ?posix.fd_t {
+    pub fn getFd(self: *const UdpAccelEngine) ?posix.socket_t {
         if (self.sock) |*s| return s.getFd();
         return null;
     }

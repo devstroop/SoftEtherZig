@@ -9,6 +9,8 @@ const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
+const builtin = @import("builtin");
+
 /// Socket error types
 pub const SocketError = error{
     ConnectionRefused,
@@ -116,13 +118,18 @@ pub const TcpSocket = struct {
         try self.stream.writeAll(data);
     }
 
-    /// Get file descriptor for use with TLS
-    pub fn getFd(self: *const TcpSocket) posix.fd_t {
-        return self.stream.handle;
+    /// Get socket for use with TLS and socket operations
+    pub fn getFd(self: *const TcpSocket) posix.socket_t {
+        return if (builtin.os.tag == .windows) @ptrCast(self.stream.handle) else self.stream.handle;
+    }
+
+    /// Get socket_t handle for socket operations
+    fn sock(self: *const TcpSocket) posix.socket_t {
+        return if (builtin.os.tag == .windows) @ptrCast(self.stream.handle) else self.stream.handle;
     }
 
     /// Set read timeout in milliseconds
-    pub fn setReadTimeout(fd: posix.fd_t, ms: u32) !void {
+    pub fn setReadTimeout(fd: posix.socket_t, ms: u32) !void {
         const timeout = posix.timeval{
             .sec = @intCast(ms / 1000),
             .usec = @intCast((ms % 1000) * 1000),
@@ -131,7 +138,7 @@ pub const TcpSocket = struct {
     }
 
     /// Set write timeout in milliseconds
-    pub fn setWriteTimeout(fd: posix.fd_t, ms: u32) !void {
+    pub fn setWriteTimeout(fd: posix.socket_t, ms: u32) !void {
         const timeout = posix.timeval{
             .sec = @intCast(ms / 1000),
             .usec = @intCast((ms % 1000) * 1000),
@@ -142,20 +149,20 @@ pub const TcpSocket = struct {
     /// Enable TCP keepalive
     pub fn setKeepalive(self: *TcpSocket, enable: bool) !void {
         const val: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.stream.handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&val));
+        try posix.setsockopt(self.sock(), posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&val));
     }
 
     /// Set TCP nodelay (disable Nagle's algorithm)
     pub fn setNoDelay(self: *TcpSocket, enable: bool) !void {
         const val: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.stream.handle, posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&val));
+        try posix.setsockopt(self.sock(), posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&val));
     }
 
     /// Check if socket has data available (non-blocking)
     pub fn poll(self: *TcpSocket, timeout_ms: i32) !bool {
         var pfd = [_]posix.pollfd{
             .{
-                .fd = self.stream.handle,
+                .fd = self.sock(),
                 .events = posix.POLL.IN,
                 .revents = 0,
             },
@@ -203,7 +210,7 @@ pub const TcpListener = struct {
 
 /// UDP Socket wrapper for datagram I/O
 pub const UdpSocket = struct {
-    fd: posix.fd_t,
+    fd: posix.socket_t,
     bound_port: u16 = 0,
 
     /// Create and bind a UDP socket to a local port (0 = system-assigned).
@@ -233,8 +240,13 @@ pub const UdpSocket = struct {
 
     /// Close the socket.
     pub fn close(self: *UdpSocket) void {
-        posix.close(self.fd);
-        self.fd = -1;
+        if (builtin.os.tag == .windows) {
+            _ = std.os.windows.ws2_32.closesocket(self.fd);
+            self.fd = @ptrFromInt(std.math.maxInt(usize));
+        } else {
+            posix.close(self.fd);
+            self.fd = -1;
+        }
     }
 
     /// Send a datagram to a specific address.
@@ -260,8 +272,8 @@ pub const UdpSocket = struct {
         return .{ .len = n, .from = .{ .inner = addr } };
     }
 
-    /// Get the file descriptor for use with poll().
-    pub fn getFd(self: *const UdpSocket) posix.fd_t {
+    /// Get the socket for use with poll().
+    pub fn getFd(self: *const UdpSocket) posix.socket_t {
         return self.fd;
     }
 

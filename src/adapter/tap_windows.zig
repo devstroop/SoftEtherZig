@@ -136,7 +136,7 @@ const WintunApi = struct {
     fn unload(self: *WintunApi) void {
         const kernel32 = @cImport(@cInclude("windows.h"));
         if (self.dll) |dll| {
-            _ = kernel32.FreeLibrary(dll);
+            _ = kernel32.FreeLibrary(@ptrCast(@alignCast(dll)));
             self.dll = null;
         }
     }

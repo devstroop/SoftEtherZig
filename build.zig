@@ -35,6 +35,25 @@ pub fn build(b: *std.Build) void {
         break :blk "/opt/homebrew/opt/openssl@3/include"; // fallback
     } else "";
 
+    // Windows: detect OpenSSL installation path
+    const win_openssl_lib: []const u8 = if (target_os == .windows) blk: {
+        const candidates = [_][]const u8{
+            "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD",
+            "C:/Program Files/OpenSSL-Win64/lib",
+        };
+        for (candidates) |p| {
+            std.fs.accessAbsolute(p, .{}) catch continue;
+            break :blk p;
+        }
+        break :blk "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD";
+    } else "";
+    const win_openssl_include: []const u8 = if (target_os == .windows) blk: {
+        std.fs.accessAbsolute("C:/Program Files/OpenSSL-Win64/include", .{}) catch {
+            break :blk "";
+        };
+        break :blk "C:/Program Files/OpenSSL-Win64/include";
+    } else "";
+
     // Android: per-arch OpenSSL deps
     const android_ssl_lib: []const u8 = if (is_android) switch (target_arch) {
         .aarch64 => "deps/openssl-android/arm64-v8a/lib",
@@ -56,6 +75,36 @@ pub fn build(b: *std.Build) void {
     std.debug.print("  SSL: {s}\n", .{if (is_android) "static (deps/openssl-android)" else "system OpenSSL"});
     std.debug.print("\n", .{});
 
+    // Helper to link OpenSSL for a given compile step
+    const linkOpenSsl = struct {
+        fn link(step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
+            if (android) {
+                step.addLibraryPath(.{ .cwd_relative = and_lib });
+                step.addIncludePath(.{ .cwd_relative = and_inc });
+                step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+                step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+            } else if (os == .macos) {
+                step.addLibraryPath(.{ .cwd_relative = mac_lib });
+                step.addIncludePath(.{ .cwd_relative = mac_inc });
+                step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            } else if (os == .windows) {
+                step.addLibraryPath(.{ .cwd_relative = win_lib });
+                step.addIncludePath(.{ .cwd_relative = win_inc });
+                step.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary("ws2_32");
+                step.linkSystemLibrary("kernel32");
+                step.linkSystemLibrary("advapi32");
+                step.linkSystemLibrary("iphlpapi");
+            } else {
+                step.linkSystemLibrary("ssl");
+                step.linkSystemLibrary("crypto");
+            }
+            step.linkLibC();
+        }
+    }.link;
+
     // ============================================
     // VPN CLIENT
     // ============================================
@@ -75,8 +124,10 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
     } else if (target_os == .windows) {
-        vpnclient.linkSystemLibrary("ssl");
-        vpnclient.linkSystemLibrary("crypto");
+        vpnclient.addLibraryPath(.{ .cwd_relative = win_openssl_lib });
+        vpnclient.addIncludePath(.{ .cwd_relative = win_openssl_include });
+        vpnclient.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+        vpnclient.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary("ws2_32");
         vpnclient.linkSystemLibrary("kernel32");
         vpnclient.linkSystemLibrary("advapi32");
@@ -113,29 +164,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link OpenSSL for shared library too
-    if (is_android) {
-        // Android: statically link OpenSSL into the .so (no system OpenSSL)
-        shared_lib.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
-        shared_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
-        shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-        shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-    } else if (target_os == .macos) {
-        shared_lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
-        shared_lib.addIncludePath(.{ .cwd_relative = openssl_include });
-        shared_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-        shared_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-    } else if (target_os == .windows) {
-        shared_lib.linkSystemLibrary("ssl");
-        shared_lib.linkSystemLibrary("crypto");
-        shared_lib.linkSystemLibrary("ws2_32");
-        shared_lib.linkSystemLibrary("kernel32");
-        shared_lib.linkSystemLibrary("advapi32");
-        shared_lib.linkSystemLibrary("iphlpapi");
-    } else {
-        shared_lib.linkSystemLibrary("ssl");
-        shared_lib.linkSystemLibrary("crypto");
-    }
-    shared_lib.linkLibC();
+    linkOpenSsl(shared_lib, target_os, is_android, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
 
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
 
@@ -252,6 +281,11 @@ pub fn build(b: *std.Build) void {
             t.addIncludePath(.{ .cwd_relative = openssl_include });
             t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+        } else if (target_os == .windows) {
+            t.addLibraryPath(.{ .cwd_relative = win_openssl_lib });
+            t.addIncludePath(.{ .cwd_relative = win_openssl_include });
+            t.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            t.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else {
             t.linkSystemLibrary("ssl");
             t.linkSystemLibrary("crypto");

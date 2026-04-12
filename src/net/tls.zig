@@ -5,6 +5,7 @@
 //! certificates, and we need fine-grained control over certificate verification.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const net = std.net;
 const c = @cImport({
     @cInclude("openssl/ssl.h");
@@ -81,44 +82,77 @@ pub const TlsConfig = struct {
 
 /// TCP connect with configurable timeout using non-blocking socket + poll.
 /// Avoids the OS default 75s SYN timeout that causes apparent freezes.
-fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.fd_t {
+fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socket_t {
     const fd = try std.posix.socket(address.any.family, std.posix.SOCK.STREAM, 0);
-    errdefer std.posix.close(fd);
-
-    // Set non-blocking for connect (O_NONBLOCK on macOS is 0x0004)
-    const O_NONBLOCK: usize = 0x0004;
-    const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
-
-    // Initiate connect — returns immediately with WouldBlock (EINPROGRESS)
-    std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
-        else => return err,
-    };
-
-    // Poll for write-readiness (connection completion)
-    var poll_fds = [1]std.posix.pollfd{
-        .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
-    };
-    const effective_timeout: i32 = if (timeout_ms > 0) @intCast(timeout_ms) else 30000;
-    const poll_result = try std.posix.poll(&poll_fds, effective_timeout);
-    if (poll_result == 0) {
-        return error.ConnectionTimedOut;
+    errdefer {
+        if (builtin.os.tag == .windows) {
+            _ = std.os.windows.ws2_32.closesocket(fd);
+        } else {
+            std.posix.close(fd);
+        }
     }
 
-    // Check for connect error via SO_ERROR
-    var so_error: c_int = 0;
-    var optlen: std.posix.socklen_t = @sizeOf(c_int);
-    const rc = std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, @ptrCast(&so_error), &optlen);
-    if (rc != 0) {
-        return error.ConnectionRefused;
-    }
-    if (so_error != 0) {
-        return error.ConnectionRefused;
-    }
+    if (builtin.os.tag == .windows) {
+        // Windows: use ioctlsocket for non-blocking mode
+        const ws2 = std.os.windows.ws2_32;
+        var nonblocking: c_ulong = 1;
+        _ = ws2.ioctlsocket(fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking); // FIONBIO
 
-    // Restore blocking mode
-    _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags);
+        // Initiate connect
+        std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+            error.WouldBlock => {},
+            else => return err,
+        };
+
+        // Poll for write-readiness
+        var poll_fds = [1]std.posix.pollfd{
+            .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
+        };
+        const effective_timeout: i32 = if (timeout_ms > 0) @intCast(timeout_ms) else 30000;
+        const poll_result = try std.posix.poll(&poll_fds, effective_timeout);
+        if (poll_result == 0) {
+            return error.ConnectionTimedOut;
+        }
+
+        // Restore blocking mode
+        nonblocking = 0;
+        _ = ws2.ioctlsocket(fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking); // FIONBIO
+    } else {
+        // POSIX: use fcntl for non-blocking mode
+        const O_NONBLOCK: usize = 0x0004;
+        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+
+        // Initiate connect — returns immediately with WouldBlock (EINPROGRESS)
+        std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+            error.WouldBlock => {},
+            else => return err,
+        };
+
+        // Poll for write-readiness (connection completion)
+        var poll_fds = [1]std.posix.pollfd{
+            .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
+        };
+        const effective_timeout: i32 = if (timeout_ms > 0) @intCast(timeout_ms) else 30000;
+        const poll_result = try std.posix.poll(&poll_fds, effective_timeout);
+        if (poll_result == 0) {
+            return error.ConnectionTimedOut;
+        }
+
+        // Check for connect error via SO_ERROR
+        var so_error: c_int = 0;
+        var optlen: std.posix.socklen_t = @sizeOf(c_int);
+        const rc = std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, @ptrCast(&so_error), &optlen);
+        if (rc != 0) {
+            return error.ConnectionRefused;
+        }
+        if (so_error != 0) {
+            return error.ConnectionRefused;
+        }
+
+        // Restore blocking mode
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags);
+    }
 
     return fd;
 }
@@ -126,7 +160,7 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.fd_t 
 /// TLS-wrapped socket using OpenSSL
 pub const TlsSocket = struct {
     allocator: Allocator,
-    tcp_fd: std.posix.fd_t,
+    tcp_fd: std.posix.socket_t,
     ssl_ctx: ?*c.SSL_CTX,
     ssl: ?*c.SSL,
     config: TlsConfig,
@@ -139,7 +173,7 @@ pub const TlsSocket = struct {
         _ = c.OPENSSL_init_ssl(0, null);
 
         // Resolve and connect TCP
-        var tcp_fd: std.posix.fd_t = undefined;
+        var tcp_fd: std.posix.socket_t = undefined;
 
         // First try to parse as IP address
         if (net.Address.resolveIp(hostname, port)) |address| {
@@ -170,7 +204,13 @@ pub const TlsSocket = struct {
                 return TlsError.ConnectionFailed;
             };
         }
-        errdefer std.posix.close(tcp_fd);
+        errdefer {
+            if (builtin.os.tag == .windows) {
+                _ = std.os.windows.ws2_32.closesocket(tcp_fd);
+            } else {
+                std.posix.close(tcp_fd);
+            }
+        }
 
         // CRITICAL: Disable Nagle's algorithm for low latency
         // Nagle buffers small packets for up to 200ms, causing latency spikes
@@ -263,7 +303,8 @@ pub const TlsSocket = struct {
         _ = c.SSL_set_tlsext_host_name(ssl, hostname_z.ptr);
 
         // Attach to socket
-        if (c.SSL_set_fd(ssl, @intCast(tcp_fd)) != 1) {
+        const fd_int: c_int = if (builtin.os.tag == .windows) @intCast(@intFromPtr(tcp_fd)) else @intCast(tcp_fd);
+        if (c.SSL_set_fd(ssl, fd_int) != 1) {
             std.log.err("Failed to set SSL fd", .{});
             return TlsError.TlsInitializationFailed;
         }
@@ -314,7 +355,11 @@ pub const TlsSocket = struct {
             if (self.ssl_ctx) |ctx| {
                 c.SSL_CTX_free(ctx);
             }
-            std.posix.close(self.tcp_fd);
+            if (builtin.os.tag == .windows) {
+                _ = std.os.windows.ws2_32.closesocket(self.tcp_fd);
+            } else {
+                std.posix.close(self.tcp_fd);
+            }
             self.connected = false;
             self.ssl = null;
             self.ssl_ctx = null;
@@ -432,8 +477,8 @@ pub const TlsSocket = struct {
         return self.connected;
     }
 
-    /// Get the underlying file descriptor
-    pub fn getFd(self: *const TlsSocket) std.posix.fd_t {
+    /// Get the underlying socket
+    pub fn getFd(self: *const TlsSocket) std.posix.socket_t {
         return self.tcp_fd;
     }
 
