@@ -147,7 +147,7 @@ pub const ClientConfig = struct {
     use_compression: bool = false,
     use_encryption: bool = true,
     udp_acceleration: bool = false,
-    mtu: u16 = 1486, // 1500 - 14 byte Ethernet header
+    mtu: u16 = 1450,
 
     // TLS settings
     verify_certificate: bool = true,
