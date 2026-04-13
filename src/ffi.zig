@@ -367,6 +367,26 @@ export fn softether_set_reconnect(client: ?*VpnClient, enabled: bool, max_attemp
     c.config.reconnect.max_attempts = max_attempts;
 }
 
+/// Set max TCP connections (1-32). Must be called before connect().
+export fn softether_set_max_connections(client: ?*VpnClient, count: u8) void {
+    const c = client orelse return;
+    if (count >= 1 and count <= 32) {
+        c.config.max_connections = count;
+    }
+}
+
+/// Set half-connection mode. Must be called before connect().
+export fn softether_set_half_connection(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.half_connection = enabled;
+}
+
+/// Set QoS (VoIP/QoS prioritization). Must be called before connect().
+export fn softether_set_qos(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.qos = enabled;
+}
+
 /// Set an external tunnel file descriptor (for iOS/Android).
 /// On mobile, the OS creates the TUN device and provides an fd.
 /// Must be called before connect().

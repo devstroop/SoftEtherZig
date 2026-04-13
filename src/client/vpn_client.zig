@@ -147,6 +147,8 @@ pub const ClientConfig = struct {
     use_compression: bool = false,
     use_encryption: bool = true,
     udp_acceleration: bool = false,
+    half_connection: bool = false,
+    qos: bool = true,
     mtu: u16 = 1450,
 
     // TLS settings
@@ -582,6 +584,14 @@ pub const VpnClient = struct {
         }
 
         // Step 3: Build and upload auth
+        // DEBUG: hardcode existing fields, read only NEW fields from config
+        const session_opts = softether_proto.SessionOptions{
+            .max_connection = 1,
+            .half_connection = self.config.half_connection,
+            .qos = self.config.qos,
+            .use_encryption = true,
+            .use_compression = false,
+        };
         const auth_data = switch (self.config.auth) {
             .password => |p| blk: {
                 if (p.is_hashed) {
@@ -594,6 +604,7 @@ pub const VpnClient = struct {
                         &hello.random,
                         self.config.udp_acceleration,
                         bulk_keys_ptr,
+                        session_opts,
                     ) catch return ClientError.OutOfMemory;
                 } else {
                     // Password is plain text, hash it first
@@ -605,6 +616,7 @@ pub const VpnClient = struct {
                         &hello.random,
                         self.config.udp_acceleration,
                         bulk_keys_ptr,
+                        session_opts,
                     ) catch return ClientError.OutOfMemory;
                 }
             },
@@ -613,6 +625,7 @@ pub const VpnClient = struct {
                 self.config.hub_name,
                 self.config.udp_acceleration,
                 bulk_keys_ptr,
+                session_opts,
             ) catch return ClientError.OutOfMemory,
             .certificate => |cert| softether_proto.buildCertificateAuth(
                 self.allocator,
@@ -622,6 +635,7 @@ pub const VpnClient = struct {
                 &hello.random,
                 self.config.udp_acceleration,
                 bulk_keys_ptr,
+                session_opts,
             ) catch return ClientError.AuthenticationFailed,
         };
         defer self.allocator.free(auth_data);
@@ -806,6 +820,7 @@ pub const VpnClient = struct {
                 &ticket,
                 self.config.udp_acceleration,
                 bulk_keys_ptr,
+                session_opts,
             ) catch return ClientError.OutOfMemory;
             defer self.allocator.free(ticket_auth_data);
 

@@ -133,6 +133,15 @@ pub const AuthResult = struct {
     }
 };
 
+/// Session-level options passed through to the auth pack.
+pub const SessionOptions = struct {
+    max_connection: u32 = 1,
+    half_connection: bool = false,
+    qos: bool = true,
+    use_encryption: bool = true,
+    use_compression: bool = false,
+};
+
 /// Authentication type enum
 pub const AuthType = enum(u32) {
     anonymous = 0,
@@ -467,6 +476,7 @@ pub fn buildPasswordAuth(
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
+    opts: SessionOptions,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -508,17 +518,17 @@ pub fn buildPasswordAuth(
     try auth_pack.addInt("client_id", 0); // Cedar client ID
 
     // Protocol options
-    try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
-    try auth_pack.addBool("half_connection", false);
+    try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
+    try auth_pack.addBool("use_encrypt", opts.use_encryption);
+    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
-    try auth_pack.addBool("qos", true);
+    try auth_pack.addBool("qos", opts.qos);
 
     // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
@@ -595,6 +605,7 @@ pub fn buildPasswordAuthWithHash(
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
+    opts: SessionOptions,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -640,17 +651,17 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addInt("client_id", 0); // Cedar client ID
 
     // Protocol options
-    try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
-    try auth_pack.addBool("half_connection", false);
+    try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
+    try auth_pack.addBool("use_encrypt", opts.use_encryption);
+    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
-    try auth_pack.addBool("qos", true);
+    try auth_pack.addBool("qos", opts.qos);
 
     // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
@@ -724,6 +735,7 @@ pub fn buildAnonymousAuth(
     hub_name: []const u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
+    opts: SessionOptions,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -749,17 +761,17 @@ pub fn buildAnonymousAuth(
     try auth_pack.addInt("client_id", 0);
 
     // Protocol options
-    try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
-    try auth_pack.addBool("half_connection", false);
+    try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
+    try auth_pack.addBool("use_encrypt", opts.use_encryption);
+    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
-    try auth_pack.addBool("qos", true);
+    try auth_pack.addBool("qos", opts.qos);
 
     // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
@@ -796,6 +808,7 @@ pub fn buildCertificateAuth(
     server_random: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
+    opts: SessionOptions,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -837,17 +850,17 @@ pub fn buildCertificateAuth(
     try auth_pack.addInt("protocol", 0);
 
     // Protocol options
-    try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
-    try auth_pack.addBool("half_connection", false);
+    try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
+    try auth_pack.addBool("use_encrypt", opts.use_encryption);
+    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS
-    try auth_pack.addBool("qos", true);
+    try auth_pack.addBool("qos", opts.qos);
 
     // UDP acceleration
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
@@ -915,6 +928,7 @@ pub fn buildTicketAuth(
     ticket: *const [Protocol.sha1_size]u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
+    opts: SessionOptions,
 ) ![]u8 {
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
@@ -943,17 +957,17 @@ pub fn buildTicketAuth(
     try auth_pack.addInt("client_id", 0);
 
     // Protocol options
-    try auth_pack.addInt("max_connection", 1);
-    try auth_pack.addBool("use_encrypt", true);
-    try auth_pack.addBool("use_compress", false);
-    try auth_pack.addBool("half_connection", false);
+    try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
+    try auth_pack.addBool("use_encrypt", opts.use_encryption);
+    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
     // QoS flag
-    try auth_pack.addBool("qos", true);
+    try auth_pack.addBool("qos", opts.qos);
 
     // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
@@ -1255,10 +1269,11 @@ pub fn performHandshake(
     errdefer hello.deinit(allocator);
 
     // Step 3: Build and upload auth
+    const default_opts = SessionOptions{};
     const auth_data = if (password) |pwd|
-        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel)
+        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, null, default_opts)
     else
-        try buildAnonymousAuth(allocator, hub_name, udp_accel);
+        try buildAnonymousAuth(allocator, hub_name, udp_accel, null, default_opts);
     defer allocator.free(auth_data);
 
     var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
@@ -1312,6 +1327,8 @@ test "buildPasswordAuth creates valid Pack" {
         "VPN",
         &random,
         false, // udp_accel
+        null,
+        .{},
     );
     defer allocator.free(auth_data);
 
@@ -1329,7 +1346,7 @@ test "buildPasswordAuth creates valid Pack" {
 test "buildAnonymousAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false);
+    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, null, .{});
     defer allocator.free(auth_data);
 
     var auth_pack = try Pack.fromBytes(allocator, auth_data);
