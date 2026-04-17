@@ -584,22 +584,6 @@ pub const VpnClient = struct {
         }
 
         // Step 3: Build and upload auth
-        // DEBUG: write config values to file for diagnosis
-        {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "max_conn={d} encrypt={} compress={} half={} qos={}\n", .{
-                self.config.max_connections,
-                self.config.use_encryption,
-                self.config.use_compression,
-                self.config.half_connection,
-                self.config.qos,
-            }) catch "fmt error";
-            const debug_file = std.fs.cwd().createFile("C:\\Users\\Akash\\vpn_debug.txt", .{}) catch null;
-            if (debug_file) |f| {
-                defer f.close();
-                _ = f.write(msg) catch {};
-            }
-        }
         const session_opts = softether_proto.SessionOptions{
             .max_connection = self.config.max_connections,
             .half_connection = self.config.half_connection,
@@ -1085,6 +1069,7 @@ pub const VpnClient = struct {
                 }
             }.write,
         );
+        tunnel.use_compression = self.config.use_compression;
 
         // Get MAC address
         const mac = adapter.getMac();

@@ -75,6 +75,31 @@ pub fn build(b: *std.Build) void {
     std.debug.print("  SSL: {s}\n", .{if (is_android) "static (deps/openssl-android)" else "system OpenSSL"});
     std.debug.print("\n", .{});
 
+    // Bundled zlib C source files (for block compression)
+    const zlib_sources = [_][]const u8{
+        "deps/zlib/adler32.c",
+        "deps/zlib/compress.c",
+        "deps/zlib/crc32.c",
+        "deps/zlib/deflate.c",
+        "deps/zlib/inffast.c",
+        "deps/zlib/inflate.c",
+        "deps/zlib/inftrees.c",
+        "deps/zlib/trees.c",
+        "deps/zlib/uncompr.c",
+        "deps/zlib/zutil.c",
+    };
+    const zlib_c_flags = [_][]const u8{"-std=c99"};
+
+    // Helper to add bundled zlib to a compile step
+    const addZlib = struct {
+        fn add(step: *std.Build.Step.Compile, builder: *std.Build) void {
+            step.addIncludePath(builder.path("deps/zlib"));
+            for (zlib_sources) |src| {
+                step.addCSourceFile(.{ .file = builder.path(src), .flags = &zlib_c_flags });
+            }
+        }
+    }.add;
+
     // Helper to link OpenSSL for a given compile step
     const linkOpenSsl = struct {
         fn link(step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
@@ -138,6 +163,7 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary("crypto");
     }
     vpnclient.linkLibC();
+    addZlib(vpnclient, b);
 
     b.installArtifact(vpnclient);
 
@@ -166,6 +192,7 @@ pub fn build(b: *std.Build) void {
 
     // Link OpenSSL for shared library too
     linkOpenSsl(shared_lib, target_os, is_android, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
+    addZlib(shared_lib, b);
 
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
 
@@ -208,6 +235,7 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary("crypto");
     }
     static_lib.linkLibC();
+    addZlib(static_lib, b);
 
     const install_static_lib = b.addInstallArtifact(static_lib, .{});
 

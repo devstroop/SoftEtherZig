@@ -358,18 +358,13 @@ pub const TapWindowsDevice = struct {
     }
 
     /// Configure with temporary settings for DHCP phase
+    /// On Windows with Wintun (L3), we skip this — the VPN tunnel performs its own
+    /// DHCP negotiation and then configure() sets a static IP from the DHCP ACK.
+    /// Running `netsh ... dhcp` here would trigger Windows' built-in DHCP client
+    /// which races the tunnel DHCP and falls back to APIPA (169.254.x.x).
     pub fn configureTemporary(self: *TapWindowsDevice) !void {
-        // On Windows, Wintun adapters start in an unconfigured state.
-        // Set DHCP mode via netsh so the adapter is usable.
-        var child = std.process.Child.init(
-            &[_][]const u8{ "cmd.exe", "/C", "netsh interface ip set address name=\"SoftEther VPN\" dhcp" },
-            self.allocator,
-        );
-        child.stdout_behavior = .Close;
-        child.stderr_behavior = .Close;
-        _ = child.spawnAndWait() catch {
-            std.log.warn("Failed to set temporary DHCP mode", .{});
-        };
+        _ = self;
+        // No-op on Windows — tunnel DHCP + configure() handles IP assignment
     }
 
     /// Read a packet from the Wintun session ring.

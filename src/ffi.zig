@@ -163,6 +163,15 @@ export fn softether_create(
             .username = username_slice,
             .password = password_slice,
         } },
+        // Explicit defaults — don't rely on struct defaults (ReleaseFast may not apply them)
+        .max_connections = 1,
+        .use_compression = false,
+        .use_encryption = true,
+        .udp_acceleration = false,
+        .half_connection = false,
+        .qos = true,
+        .mtu = 1450,
+        .verify_certificate = true,
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
@@ -189,6 +198,14 @@ export fn softether_create_anonymous(
         .server_port = port,
         .hub_name = hub_slice,
         .auth = .{ .anonymous = {} },
+        .max_connections = 1,
+        .use_compression = false,
+        .use_encryption = true,
+        .udp_acceleration = false,
+        .half_connection = false,
+        .qos = true,
+        .mtu = 1450,
+        .verify_certificate = true,
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
@@ -226,6 +243,14 @@ export fn softether_create_certificate(
             .cert_data = cert_slice,
             .key_data = key_slice,
         } },
+        .max_connections = 1,
+        .use_compression = false,
+        .use_encryption = true,
+        .udp_acceleration = false,
+        .half_connection = false,
+        .qos = true,
+        .mtu = 1450,
+        .verify_certificate = true,
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;

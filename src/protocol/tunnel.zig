@@ -16,6 +16,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const c = @cImport(@cInclude("zlib.h"));
 
 /// Magic number indicating keep-alive packet (same as SoftEther's KEEP_ALIVE_MAGIC)
 pub const KEEP_ALIVE_MAGIC: u32 = 0xFFFFFFFF;
@@ -47,6 +48,9 @@ pub const TunnelConnection = struct {
     read_fn: *const fn (ctx: *anyopaque, buf: []u8) anyerror!usize,
     write_fn: *const fn (ctx: *anyopaque, data: []const u8) anyerror!usize,
     context: *anyopaque,
+
+    // Compression
+    use_compression: bool = false,
 
     // Receive state machine
     recv_state: RecvState = .read_num_blocks,
@@ -150,14 +154,26 @@ pub const TunnelConnection = struct {
                 return error.PacketTooLarge;
             }
 
-            // Allocate and read block data
-            const data = try self.allocator.alloc(u8, block_size);
-            errdefer self.allocator.free(data);
+            if (self.use_compression) {
+                // Read compressed data
+                const compressed = try self.allocator.alloc(u8, block_size);
+                defer self.allocator.free(compressed);
+                try self.readExact(compressed);
 
-            try self.readExact(data);
+                // Decompress
+                var decompress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+                const decompressed = self.decompressBlock(compressed, &decompress_buf) catch continue;
 
-            // Call the callback with the block
-            callback(data, ctx);
+                const data = try self.allocator.alloc(u8, decompressed.len);
+                @memcpy(data, decompressed);
+                callback(data, ctx);
+            } else {
+                // Allocate and read block data
+                const data = try self.allocator.alloc(u8, block_size);
+                errdefer self.allocator.free(data);
+                try self.readExact(data);
+                callback(data, ctx);
+            }
         }
     }
 
@@ -194,19 +210,44 @@ pub const TunnelConnection = struct {
         var i: u32 = 0;
         while (i < num_blocks) : (i += 1) {
             const block_size = try self.readU32();
+
             if (block_size == 0) continue;
             if (block_size > MAX_PACKET_SIZE * 2) {
                 std.log.warn("PacketTooLarge: block_size={d}", .{block_size});
                 return error.PacketTooLarge;
             }
-            if (scratch_offset + block_size > scratch_buffer.len) {
-                std.log.warn("BufferTooSmall: need {d}, have {d}", .{ scratch_offset + block_size, scratch_buffer.len });
-                return error.BufferTooSmall;
-            }
 
-            try self.readExact(scratch_buffer[scratch_offset..][0..block_size]);
-            out_data[block_count] = scratch_buffer[scratch_offset..][0..block_size];
-            scratch_offset += block_size;
+            if (self.use_compression) {
+                // Read compressed data into temp area at end of scratch buffer
+                const compressed_start = scratch_buffer.len - block_size;
+                if (compressed_start <= scratch_offset) {
+                    std.log.warn("BufferTooSmall for compressed block", .{});
+                    return error.BufferTooSmall;
+                }
+                try self.readExact(scratch_buffer[compressed_start..][0..block_size]);
+
+                // Decompress into scratch buffer at current offset
+                const remaining = scratch_buffer[scratch_offset..compressed_start];
+                const decompressed = self.decompressBlock(
+                    scratch_buffer[compressed_start..][0..block_size],
+                    remaining,
+                ) catch {
+                    continue;
+                };
+
+                out_data[block_count] = decompressed;
+                scratch_offset += decompressed.len;
+            } else {
+                // Uncompressed block — read directly
+                if (scratch_offset + block_size > scratch_buffer.len) {
+                    std.log.warn("BufferTooSmall: need {d}, have {d}", .{ scratch_offset + block_size, scratch_buffer.len });
+                    return error.BufferTooSmall;
+                }
+
+                try self.readExact(scratch_buffer[scratch_offset..][0..block_size]);
+                out_data[block_count] = scratch_buffer[scratch_offset..][0..block_size];
+                scratch_offset += block_size;
+            }
             block_count += 1;
         }
 
@@ -222,26 +263,29 @@ pub const TunnelConnection = struct {
     pub fn sendBlocksZeroCopy(self: *TunnelConnection, blocks: []const []const u8, send_buffer: []u8) !void {
         if (blocks.len == 0) return;
 
-        // Calculate total size needed
-        var total_size: usize = 4; // num_blocks
-        for (blocks) |block| {
-            total_size += 4 + block.len; // size + data
-        }
-
-        if (total_size > send_buffer.len) return error.BufferTooSmall;
-
         var offset: usize = 0;
 
         // Write number of blocks
         mem.writeInt(u32, send_buffer[0..4], @intCast(blocks.len), .big);
         offset += 4;
 
+        // Temp buffer for compression
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+
         // Write each block
         for (blocks) |block| {
-            mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(block.len), .big);
-            offset += 4;
-            @memcpy(send_buffer[offset..][0..block.len], block);
-            offset += block.len;
+            if (self.use_compression) {
+                const compressed = compressBlock(&compress_buf, block) catch block;
+                mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(compressed.len), .big);
+                offset += 4;
+                @memcpy(send_buffer[offset..][0..compressed.len], compressed);
+                offset += compressed.len;
+            } else {
+                mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(block.len), .big);
+                offset += 4;
+                @memcpy(send_buffer[offset..][0..block.len], block);
+                offset += block.len;
+            }
         }
 
         // Single write - TLS/TCP should handle it atomically with TCP_NODELAY
@@ -276,44 +320,60 @@ pub const TunnelConnection = struct {
 
         if (total_len > send_buffer.len) return 0;
 
-        // Build packet directly in send buffer
-        // num_blocks = 1
-        mem.writeInt(u32, send_buffer[0..4], 1, .big);
-        // block size
-        mem.writeInt(u32, send_buffer[4..8], @intCast(eth_len), .big);
+        // Build Ethernet frame in a temp area first (for potential compression)
+        var eth_frame_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
 
         // Ethernet header (14 bytes)
-        @memcpy(send_buffer[8..14], &dst_mac); // dst MAC
-        @memcpy(send_buffer[14..20], &src_mac); // src MAC
+        @memcpy(eth_frame_buf[0..6], &dst_mac); // dst MAC
+        @memcpy(eth_frame_buf[6..12], &src_mac); // src MAC
 
         // EtherType
         const ip_version = (ip_packet[0] >> 4) & 0x0F;
         if (ip_version == 4) {
-            send_buffer[20] = 0x08;
-            send_buffer[21] = 0x00;
+            eth_frame_buf[12] = 0x08;
+            eth_frame_buf[13] = 0x00;
         } else if (ip_version == 6) {
-            send_buffer[20] = 0x86;
-            send_buffer[21] = 0xDD;
+            eth_frame_buf[12] = 0x86;
+            eth_frame_buf[13] = 0xDD;
         } else {
             return 0;
         }
 
-        // IP packet (single copy from TUN buffer)
-        @memcpy(send_buffer[22..][0..ip_packet.len], ip_packet);
+        // IP packet
+        @memcpy(eth_frame_buf[14..][0..ip_packet.len], ip_packet);
+
+        const eth_frame = eth_frame_buf[0..eth_len];
+
+        // Try compression
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+        var actual_len: usize = undefined;
+
+        if (self.use_compression) {
+            const compressed = compressBlock(&compress_buf, eth_frame) catch eth_frame;
+            mem.writeInt(u32, send_buffer[0..4], 1, .big);
+            mem.writeInt(u32, send_buffer[4..8], @intCast(compressed.len), .big);
+            @memcpy(send_buffer[8..][0..compressed.len], compressed);
+            actual_len = 8 + compressed.len;
+        } else {
+            mem.writeInt(u32, send_buffer[0..4], 1, .big);
+            mem.writeInt(u32, send_buffer[4..8], @intCast(eth_len), .big);
+            @memcpy(send_buffer[8..][0..eth_len], eth_frame);
+            actual_len = 8 + eth_len;
+        }
 
         // Send
-        const n = try self.write_fn(self.context, send_buffer[0..total_len]);
+        const n = try self.write_fn(self.context, send_buffer[0..actual_len]);
         if (n == 0) return error.ConnectionClosed;
-        if (n < total_len) {
+        if (n < actual_len) {
             var sent = n;
-            while (sent < total_len) {
-                const m = try self.write_fn(self.context, send_buffer[sent..total_len]);
+            while (sent < actual_len) {
+                const m = try self.write_fn(self.context, send_buffer[sent..actual_len]);
                 if (m == 0) return error.ConnectionClosed;
                 sent += m;
             }
         }
 
-        self.total_send += total_len;
+        self.total_send += actual_len;
         return eth_len;
     }
 
@@ -321,7 +381,7 @@ pub const TunnelConnection = struct {
     pub fn sendBlocks(self: *TunnelConnection, blocks: []const []const u8) !void {
         if (blocks.len == 0) return;
 
-        // Calculate total size needed
+        // Calculate max total size needed (uncompressed worst case)
         var total_size: usize = 4; // num_blocks
         for (blocks) |block| {
             total_size += 4 + block.len; // size + data
@@ -337,23 +397,35 @@ pub const TunnelConnection = struct {
         mem.writeInt(u32, packet[0..4], @intCast(blocks.len), .big);
         offset += 4;
 
+        // Temp buffer for compression
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+
         // Write each block
         for (blocks) |block| {
+            if (self.use_compression) {
+                if (compressBlock(&compress_buf, block) catch null) |compressed| {
+                    mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed.len), .big);
+                    offset += 4;
+                    @memcpy(packet[offset..][0..compressed.len], compressed);
+                    offset += compressed.len;
+                    continue;
+                }
+            }
             mem.writeInt(u32, packet[offset..][0..4], @intCast(block.len), .big);
             offset += 4;
             @memcpy(packet[offset..][0..block.len], block);
             offset += block.len;
         }
 
-        // Send all at once
+        // Send all at once (may be smaller than allocated due to compression)
         var sent: usize = 0;
-        while (sent < packet.len) {
-            const n = try self.write_fn(self.context, packet[sent..]);
+        while (sent < offset) {
+            const n = try self.write_fn(self.context, packet[sent..offset]);
             if (n == 0) return error.ConnectionClosed;
             sent += n;
         }
 
-        self.total_send += packet.len;
+        self.total_send += offset;
     }
 
     /// Send a keep-alive packet
@@ -376,6 +448,22 @@ pub const TunnelConnection = struct {
 
         self.keepalives_sent += 1;
         self.total_send += packet.len;
+    }
+
+    /// Decompress a zlib-compressed block using C zlib uncompress()
+    fn decompressBlock(_: *TunnelConnection, compressed: []const u8, out_buf: []u8) ![]u8 {
+        var dest_len: c.uLong = @intCast(out_buf.len);
+        const ret = c.uncompress(out_buf.ptr, &dest_len, compressed.ptr, @intCast(compressed.len));
+        if (ret != c.Z_OK) return error.DecompressionFailed;
+        return out_buf[0..@intCast(dest_len)];
+    }
+
+    /// Compress a block using C zlib compress2() with Z_DEFAULT_COMPRESSION
+    fn compressBlock(compressed_buf: []u8, data: []const u8) ![]const u8 {
+        var dest_len: c.uLong = @intCast(compressed_buf.len);
+        const ret = c.compress2(compressed_buf.ptr, &dest_len, data.ptr, @intCast(data.len), c.Z_DEFAULT_COMPRESSION);
+        if (ret != c.Z_OK) return error.CompressionFailed;
+        return compressed_buf[0..@intCast(dest_len)];
     }
 };
 
