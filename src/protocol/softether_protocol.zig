@@ -1283,6 +1283,100 @@ pub fn performHandshake(
 }
 
 // ============================================================================
+// Additional Connection Protocol
+// ============================================================================
+
+/// Result of an additional connection handshake
+pub const AdditionalConnectResult = struct {
+    success: bool,
+    direction: u32, // 0=both, 1=server_to_client, 2=client_to_server
+    error_code: u32,
+};
+
+/// Build the Pack for an additional TCP connection handshake.
+/// Reference: C `PackAdditionalConnect()` in Protocol.c:6891-6906
+pub fn buildAdditionalConnectPack(
+    allocator: Allocator,
+    session_key: *const [Protocol.sha1_size]u8,
+) ![]u8 {
+    var p = Pack.init(allocator);
+    defer p.deinit();
+
+    try p.addStr("method", "additional_connect");
+    try p.addData("session_key", session_key);
+
+    return p.toBytes(allocator);
+}
+
+/// Send additional connect pack and parse the server response.
+/// Reference: C `ClientUploadAuth2()` in Protocol.c:5407-5418
+pub fn uploadAdditionalConnect(
+    allocator: Allocator,
+    writer: Writer,
+    reader: Reader,
+    host: []const u8,
+    session_key: *const [Protocol.sha1_size]u8,
+) !AdditionalConnectResult {
+    // Build and send the pack
+    const pack_data = try buildAdditionalConnectPack(allocator, session_key);
+    defer allocator.free(pack_data);
+
+    try sendHttpPost(allocator, writer, host, pack_data);
+
+    // Read HTTP response header
+    var resp_header_buf: [4096]u8 = undefined;
+    var resp_header_len: usize = 0;
+
+    while (resp_header_len < resp_header_buf.len - 1) {
+        const bytes_read = try reader.read(resp_header_buf[resp_header_len .. resp_header_len + 1]);
+        if (bytes_read == 0) return ProtocolError.ConnectionFailed;
+        resp_header_len += 1;
+
+        if (resp_header_len >= 4) {
+            if (mem.eql(u8, resp_header_buf[resp_header_len - 4 .. resp_header_len], "\r\n\r\n")) {
+                break;
+            }
+        }
+    }
+
+    const parsed = try rpc.parseHttpResponse(resp_header_buf[0..resp_header_len]);
+    if (parsed.status_code != 200) {
+        std.log.err("Additional connect response status: {d}", .{parsed.status_code});
+        return AdditionalConnectResult{ .success = false, .direction = 0, .error_code = 0 };
+    }
+
+    // Read body
+    const body = try allocator.alloc(u8, parsed.content_length);
+    defer allocator.free(body);
+
+    const body_read = try reader.readAll(body);
+    if (body_read != parsed.content_length) {
+        return ProtocolError.InvalidResponse;
+    }
+
+    // Parse response Pack
+    var resp_pack = try Pack.fromBytes(allocator, body);
+    defer resp_pack.deinit();
+
+    // Check for error
+    const err_code = resp_pack.getInt("error") orelse 0;
+    if (err_code != 0) {
+        std.log.err("Additional connect failed: error={d}", .{err_code});
+        return AdditionalConnectResult{ .success = false, .direction = 0, .error_code = err_code };
+    }
+
+    // Extract direction (0=both, 1=S2C, 2=C2S)
+    const direction = resp_pack.getInt("direction") orelse 0;
+    std.log.info("Additional connect accepted: direction={d}", .{direction});
+
+    return AdditionalConnectResult{
+        .success = true,
+        .direction = direction,
+        .error_code = 0,
+    };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

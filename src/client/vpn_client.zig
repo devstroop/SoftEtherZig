@@ -67,6 +67,11 @@ const tunnel_mod = @import("../tunnel/mod.zig");
 // Import DHCP parsing
 const dhcp_mod = @import("../adapter/dhcp.zig");
 
+// Import connection manager for multi-TCP
+const connection_manager = @import("connection_manager.zig");
+const ConnectionManager = connection_manager.ConnectionManager;
+const TcpDirection = connection_manager.TcpDirection;
+
 // Windows multimedia timer API (for high-resolution poll timeouts)
 const winmm = if (builtin.os.tag == .windows) struct {
     extern "winmm" fn timeBeginPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
@@ -191,6 +196,9 @@ pub const VpnClient = struct {
     // Network connection
     tls_socket: ?tls.TlsSocket,
 
+    // Multi-TCP connection manager (null when max_connections=1)
+    conn_manager: ?ConnectionManager,
+
     // UDP acceleration
     udp_accel: ?udp_accel_mod.UdpAccelEngine,
     bulk_keys: ?softether_proto.UdpBulkKeys,
@@ -222,6 +230,32 @@ pub const VpnClient = struct {
 
     const Self = @This();
 
+    /// Create a protocol Writer wrapping a TLS socket pointer.
+    fn makeProtoWriter(sock: *tls.TlsSocket) softether_proto.Writer {
+        return .{
+            .context = @ptrCast(sock),
+            .writeFn = struct {
+                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
+                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                    return s.write(data);
+                }
+            }.write,
+        };
+    }
+
+    /// Create a protocol Reader wrapping a TLS socket pointer.
+    fn makeProtoReader(sock: *tls.TlsSocket) softether_proto.Reader {
+        return .{
+            .context = @ptrCast(sock),
+            .readFn = struct {
+                fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                    return s.read(buffer);
+                }
+            }.read,
+        };
+    }
+
     pub fn init(allocator: Allocator, config: ClientConfig) Self {
         return .{
             .allocator = allocator,
@@ -232,6 +266,7 @@ pub const VpnClient = struct {
             .adapter_ctx = null,
             .session = null,
             .tls_socket = null,
+            .conn_manager = null,
             .udp_accel = null,
             .bulk_keys = null,
             .mutex = .{},
@@ -264,6 +299,10 @@ pub const VpnClient = struct {
         if (self.session) |*sess| {
             sess.deinit();
             self.session = null;
+        }
+        if (self.conn_manager) |*cm| {
+            cm.deinit();
+            self.conn_manager = null;
         }
         if (self.tls_socket) |*sock| {
             sock.close();
@@ -439,6 +478,10 @@ pub const VpnClient = struct {
             return ClientError.OperationCancelled;
         }
 
+        // Establish additional TCP connections (multi-connection mode)
+        // Non-fatal: if some fail, we continue with what we have
+        self.establishAdditionalConnections();
+
         self.transitionState(.configuring_adapter);
         self.configureAdapter() catch {
             self.disconnect_reason = .configuration_error;
@@ -476,6 +519,12 @@ pub const VpnClient = struct {
 
         if (self.adapter_ctx) |*ctx| ctx.close();
         if (self.session) |*sess| sess.disconnect();
+
+        // Close all connections (multi-connection manager or single socket)
+        if (self.conn_manager) |*cm| {
+            cm.deinit();
+            self.conn_manager = null;
+        }
         if (self.tls_socket) |*sock| {
             sock.close();
             self.tls_socket = null;
@@ -527,25 +576,8 @@ pub const VpnClient = struct {
         const sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
 
         // Create protocol writer and reader wrappers for TLS socket
-        const writer = softether_proto.Writer{
-            .context = @ptrCast(sock),
-            .writeFn = struct {
-                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.write(data);
-                }
-            }.write,
-        };
-
-        const reader = softether_proto.Reader{
-            .context = @ptrCast(sock),
-            .readFn = struct {
-                fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.read(buffer);
-                }
-            }.read,
-        };
+        const writer = makeProtoWriter(sock);
+        const reader = makeProtoReader(sock);
 
         // Format server IP as string for HTTP Host header (like C code does)
         var ip_str_buf: [16]u8 = undefined;
@@ -685,15 +717,7 @@ pub const VpnClient = struct {
 
             // Send via HTTP POST
             const current_sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
-            const ack_writer = softether_proto.Writer{
-                .context = @ptrCast(current_sock),
-                .writeFn = struct {
-                    fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                        const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                        return s.write(data);
-                    }
-                }.write,
-            };
+            const ack_writer = makeProtoWriter(current_sock);
 
             // Get current host for HTTP header
             var current_ip_buf: [16]u8 = undefined;
@@ -775,24 +799,8 @@ pub const VpnClient = struct {
 
             // Redo authentication with ticket
             const redirect_sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
-            const redirect_writer = softether_proto.Writer{
-                .context = @ptrCast(redirect_sock),
-                .writeFn = struct {
-                    fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                        const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                        return s.write(data);
-                    }
-                }.write,
-            };
-            const redirect_reader = softether_proto.Reader{
-                .context = @ptrCast(redirect_sock),
-                .readFn = struct {
-                    fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
-                        const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                        return s.read(buffer);
-                    }
-                }.read,
-            };
+            const redirect_writer = makeProtoWriter(redirect_sock);
+            const redirect_reader = makeProtoReader(redirect_sock);
 
             // Format actual connected IP for HTTP Host header
             var redirect_ip_buf: [16]u8 = undefined;
@@ -925,6 +933,161 @@ pub const VpnClient = struct {
         }
     }
 
+    /// Establish additional TCP connections for multi-connection mode.
+    /// When max_connections > 1, opens N-1 additional TCP connections,
+    /// each performing the additional_connect handshake.
+    /// Non-fatal: continues with fewer connections if some fail.
+    fn establishAdditionalConnections(self: *Self) void {
+        if (self.config.max_connections <= 1) return;
+
+        const session_key = self.auth_session_key orelse {
+            std.log.warn("No session key available, skipping additional connections", .{});
+            return;
+        };
+
+        // Create ConnectionManager and add the primary connection
+        var cm = ConnectionManager.init(
+            self.allocator,
+            self.config.max_connections,
+            self.config.half_connection,
+            self.config.use_compression,
+        );
+
+        // Transfer primary socket to the manager
+        const primary_sock = self.tls_socket orelse {
+            std.log.warn("No primary socket, skipping additional connections", .{});
+            return;
+        };
+
+        // Primary direction: C2S in half-connection mode, bidirectional otherwise
+        const primary_direction: TcpDirection = if (self.config.half_connection)
+            .client_to_server
+        else
+            .bidirectional;
+
+        _ = cm.addConnection(primary_sock, primary_direction, true) catch |err| {
+            std.log.err("Failed to add primary connection to manager: {}", .{err});
+            return;
+        };
+
+        // Primary is now owned by the manager; clear self.tls_socket
+        self.tls_socket = null;
+
+        // Build TLS config (reuse from primary)
+        const tls_config = tls.TlsConfig{
+            .verify_certificate = self.config.verify_certificate,
+            .allow_self_signed = !self.config.verify_certificate,
+            .timeout_ms = self.config.connect_timeout_ms,
+            .client_cert_pem = switch (self.config.auth) {
+                .certificate => |cert| cert.cert_data,
+                else => null,
+            },
+            .client_key_pem = switch (self.config.auth) {
+                .certificate => |cert| cert.key_data,
+                else => null,
+            },
+        };
+
+        // Format server IP for HTTP Host header
+        var ip_str_buf: [16]u8 = undefined;
+        const host_for_http = formatIpv4Buf(self.server_ip, &ip_str_buf);
+
+        // Establish N-1 additional connections
+        var established: u8 = 1; // counting primary
+        var i: u8 = 1;
+        while (i < self.config.max_connections) : (i += 1) {
+            if (@atomicLoad(bool, &self.should_stop, .acquire)) break;
+
+            self.establishOneAdditionalConnection(
+                &cm,
+                &session_key,
+                tls_config,
+                host_for_http,
+                i,
+            );
+            established = cm.count;
+        }
+
+        self.conn_manager = cm;
+        std.log.info("Established {d}/{d} TCP connections (half_connection={})", .{
+            established,
+            self.config.max_connections,
+            self.config.half_connection,
+        });
+    }
+
+    /// Establish a single additional TCP connection to the server.
+    fn establishOneAdditionalConnection(
+        self: *Self,
+        cm: *ConnectionManager,
+        session_key: *const [20]u8,
+        tls_config: tls.TlsConfig,
+        host_for_http: []const u8,
+        conn_index: u8,
+    ) void {
+        // Open new TLS connection to same server
+        var new_sock = tls.TlsSocket.connect(
+            self.allocator,
+            self.config.server_host,
+            self.config.server_port,
+            tls_config,
+        ) catch |err| {
+            std.log.warn("Additional connection {d} TLS failed: {}", .{ conn_index, err });
+            return;
+        };
+
+        // Create writer/reader for the new socket
+        const writer = makeProtoWriter(&new_sock);
+        const reader = makeProtoReader(&new_sock);
+
+        // Upload signature
+        softether_proto.uploadSignature(self.allocator, writer, host_for_http) catch |err| {
+            std.log.warn("Additional connection {d} signature failed: {}", .{ conn_index, err });
+            new_sock.close();
+            return;
+        };
+
+        // Download hello
+        var hello = softether_proto.downloadHello(self.allocator, reader) catch |err| {
+            std.log.warn("Additional connection {d} hello failed: {}", .{ conn_index, err });
+            new_sock.close();
+            return;
+        };
+        hello.deinit(self.allocator);
+
+        // Send additional_connect with session key
+        const result = softether_proto.uploadAdditionalConnect(
+            self.allocator,
+            writer,
+            reader,
+            host_for_http,
+            session_key,
+        ) catch |err| {
+            std.log.warn("Additional connection {d} handshake failed: {}", .{ conn_index, err });
+            new_sock.close();
+            return;
+        };
+
+        if (!result.success) {
+            std.log.warn("Additional connection {d} rejected: error_code={d}", .{ conn_index, result.error_code });
+            new_sock.close();
+            return;
+        }
+
+        // Map server direction value to TcpDirection
+        const direction: TcpDirection = switch (result.direction) {
+            1 => .server_to_client,
+            2 => .client_to_server,
+            else => .bidirectional,
+        };
+
+        _ = cm.addConnection(new_sock, direction, false) catch |err| {
+            std.log.warn("Additional connection {d} add failed: {}", .{ conn_index, err });
+            new_sock.close();
+            return;
+        };
+    }
+
     fn configureAdapter(self: *Self) !void {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
@@ -1015,6 +1178,114 @@ pub const VpnClient = struct {
         return decrypted;
     }
 
+    /// Process a single inbound Ethernet block from the VPN server.
+    /// Handles IP dispatch, ARP, and DHCP state machine.
+    fn processInboundBlock(
+        self: *Self,
+        block_data: []u8,
+        adapter: *AdapterWrapper,
+        loop_state: *tunnel_mod.DataLoopState,
+        send_helper: *SendTunnelHelper,
+        dhcp_xid: *u32,
+        mac: [6]u8,
+        is_configured: *bool,
+    ) void {
+        if (block_data.len <= 14) return;
+
+        const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+
+        if (is_configured.*) {
+            // Configured: fast path for IP packets
+            if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                if (adapter.real_adapter) |*real| {
+                    if (real.device) |dev| {
+                        _ = dev.write(block_data[14..]) catch {};
+                    }
+                }
+            } else if (ethertype == 0x0806) {
+                if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
+                    if (arp_op == 2) {
+                        loop_state.processArpReply(block_data);
+                        self.gateway_mac = loop_state.gateway_mac;
+                    } else if (arp_op == 1) {
+                        loop_state.processArpRequest(block_data);
+                    }
+                }
+            }
+        } else {
+            // Not configured: check for DHCP
+            const maybe_response = adapter_mod.parseDhcpResponse(block_data, dhcp_xid.*) catch null;
+            if (maybe_response) |response| {
+                if (response.msg_type == .offer and loop_state.dhcp.state == .discover_sent) {
+                    const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
+                    std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+
+                    var req_buf: [512]u8 = undefined;
+                    const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid.*, response.config.ip_address, response.config.server_id, &req_buf) catch 0;
+                    if (req_size > 0) {
+                        const blocks = [_][]const u8{req_buf[0..req_size]};
+                        send_helper.get().sendBlocks(&blocks) catch {};
+                        loop_state.dhcp.state = .request_sent;
+                        std.log.info("Sent DHCP REQUEST", .{});
+                    }
+                } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
+                    std.log.info("DHCP ACK received!", .{});
+                    loop_state.configure(response.config.ip_address, response.config.gateway);
+                    loop_state.dhcp.state = .configured;
+                    is_configured.* = true;
+                    self.assigned_ip = loop_state.our_ip;
+                    self.gateway_ip = loop_state.our_gateway;
+
+                    if (adapter.real_adapter) |*real| {
+                        if (real.device) |dev| {
+                            dev.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
+                                std.log.err("Failed to configure interface: {}", .{err});
+                            };
+                        }
+                    }
+
+                    const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
+                    std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+
+                    if (self.config.routing.default_route and loop_state.our_gateway != 0) {
+                        const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
+                        std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
+                        const server_ip_be = @byteSwap(self.server_ip);
+                        adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
+                    }
+
+                    // Restore half-connection directions after DHCP completes
+                    if (self.conn_manager) |*cm| {
+                        cm.restoreDhcpDirections();
+                    }
+
+                    if (self.event_callback) |cb| {
+                        cb(.{ .dhcp_configured = .{
+                            .ip = response.config.ip_address,
+                            .mask = response.config.subnet_mask,
+                            .gateway = response.config.gateway,
+                        } }, self.event_user_data);
+                    }
+                }
+            }
+        }
+        self.stats.recordReceived(block_data.len);
+    }
+
+    // Forward declare SendTunnelHelper type for use in processInboundBlock signature
+    const SendTunnelHelper = struct {
+        cm_ptr: ?*ConnectionManager,
+        single_ptr: *protocol_tunnel_mod.TunnelConnection,
+
+        fn get(ctx: @This()) *protocol_tunnel_mod.TunnelConnection {
+            if (ctx.cm_ptr) |m| {
+                if (m.selectSendConnection()) |conn| return &conn.tunnel;
+                if (m.getPrimary()) |primary| return &primary.tunnel;
+            }
+            return ctx.single_ptr;
+        }
+    };
+
     /// Run the data channel packet loop
     /// This is the main loop that processes packets between TLS and TUN
     /// Returns when should_stop is set or connection is lost
@@ -1024,13 +1295,21 @@ pub const VpnClient = struct {
         @atomicStore(bool, &self.data_loop_running, true, .release);
         defer @atomicStore(bool, &self.data_loop_running, false, .release);
 
-        const sock = &(self.tls_socket orelse return ClientError.NotConnected);
+        // Multi-connection mode: enable bidirectional on primary for DHCP phase
+        const multi_conn = self.conn_manager != null;
+        if (self.conn_manager) |*cm| {
+            cm.enableDhcpBidirectional();
+        }
+
+        // Get single-socket pointer (null if multi-connection mode owns it)
+        const single_sock: ?*tls.TlsSocket = if (!multi_conn) blk: {
+            break :blk &(self.tls_socket orelse return ClientError.NotConnected);
+        } else null;
         var adapter = &(self.adapter_ctx orelse return ClientError.NotConnected);
 
         std.log.debug("Starting data channel loop...", .{});
 
         // Get file descriptors / handles for polling
-        const tls_fd = sock.getFd();
         const tun_fd = if (builtin.os.tag == .windows) win_blk: {
             // Windows: Wintun uses event handles, not file descriptors.
             // We'll poll TUN separately with WaitForSingleObject.
@@ -1047,29 +1326,36 @@ pub const VpnClient = struct {
         };
 
         if (builtin.os.tag != .windows) {
-            std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd, tun_fd });
+            if (multi_conn) {
+                std.log.debug("Using poll() for multi-connection I/O: {d} TCP connections, TUN fd={d}", .{ self.conn_manager.?.count, tun_fd });
+            } else {
+                std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ single_sock.?.getFd(), tun_fd });
+            }
         } else {
             std.log.debug("Using Windows event-based I/O for data loop", .{});
         }
 
-        // Create tunnel connection (from protocol module)
-        var tunnel = protocol_tunnel_mod.TunnelConnection.init(
-            self.allocator,
-            @ptrCast(sock),
-            struct {
-                fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.read(buf);
-                }
-            }.read,
-            struct {
-                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.write(data);
-                }
-            }.write,
-        );
-        tunnel.use_compression = self.config.use_compression;
+        // Create single tunnel connection (only used in single-connection mode)
+        var single_tunnel: protocol_tunnel_mod.TunnelConnection = if (single_sock) |ss| blk: {
+            var t = protocol_tunnel_mod.TunnelConnection.init(
+                self.allocator,
+                @ptrCast(ss),
+                struct {
+                    fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+                        const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                        return s.read(buf);
+                    }
+                }.read,
+                struct {
+                    fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
+                        const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                        return s.write(data);
+                    }
+                }.write,
+            );
+            t.use_compression = self.config.use_compression;
+            break :blk t;
+        } else undefined;
 
         // Get MAC address
         const mac = adapter.getMac();
@@ -1102,12 +1388,17 @@ pub const VpnClient = struct {
         // 16 packets * (4 + 1514) + 4 header ≈ 25KB
         var send_buffer: [25000]u8 = undefined;
 
+        var send_helper = SendTunnelHelper{
+            .cm_ptr = if (self.conn_manager != null) &self.conn_manager.? else null,
+            .single_ptr = &single_tunnel,
+        };
+
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
             const garp_size = adapter_mod.buildGratuitousArp(mac, 0, &arp_buf) catch 0;
             if (garp_size > 0) {
                 const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                tunnel.sendBlocks(&blocks) catch {};
+                send_helper.get().sendBlocks(&blocks) catch {};
                 std.log.debug("Sent initial Gratuitous ARP (announcing MAC)", .{});
             }
         }
@@ -1121,7 +1412,7 @@ pub const VpnClient = struct {
             const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
             if (dhcp_size > 0) {
                 const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                tunnel.sendBlocks(&blocks) catch |err| {
+                send_helper.get().sendBlocks(&blocks) catch |err| {
                     std.log.err("Failed to send DHCP discover: {}", .{err});
                 };
                 loop_state.dhcp.state = .discover_sent;
@@ -1135,18 +1426,12 @@ pub const VpnClient = struct {
         const udp_fd: std.posix.socket_t = if (self.udp_accel) |*ua| ua.getFd() orelse invalid_sock else invalid_sock;
         const has_udp = if (builtin.os.tag == .windows) (udp_fd != invalid_sock) else (udp_fd >= 0);
 
-        // tls_fd is already socket_t; tun_fd is fd_t (not a socket on Windows)
+        // tun_fd is fd_t (not a socket on Windows)
         const poll_tun_sock: std.posix.socket_t = if (builtin.os.tag == .windows) @ptrCast(tun_fd) else tun_fd;
 
-        var poll_fds: [3]std.posix.pollfd = .{
-            .{ .fd = tls_fd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = poll_tun_sock, .events = if (builtin.os.tag == .windows) 0 else std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = udp_fd, .events = if (has_udp) std.posix.POLL.IN else 0, .revents = 0 },
-        };
-        const POLL_TLS = 0;
-        const POLL_TUN = 1;
-        const POLL_UDP = 2;
-        _ = POLL_TLS; // Used implicitly via index 0
+        // Dynamic poll_fds: up to 32 TLS connections + TUN + UDP = 34
+        var poll_fds: [34]std.posix.pollfd = undefined;
+        var tls_fd_count: usize = 0;
 
         // Cache the configured state check
         var is_configured = false;
@@ -1162,18 +1447,41 @@ pub const VpnClient = struct {
         };
 
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
-            // Poll TLS, TUN, and optionally UDP
-            poll_fds[0].revents = 0;
-            poll_fds[1].revents = 0;
-            poll_fds[2].revents = 0;
-            const poll_count: std.posix.nfds_t = if (has_udp) 3 else if (builtin.os.tag == .windows) 1 else 2;
-            // On Windows, poll only TLS socket; TUN uses non-blocking receivePacket
-            _ = std.posix.poll(poll_fds[0..poll_count], 1) catch 0;
-            const tls_readable = (poll_fds[0].revents & std.posix.POLL.IN) != 0;
-            // On Windows, Wintun receivePacket is non-blocking (returns null if no data).
-            // We always attempt TUN read but the 1ms poll timeout prevents busy-spinning.
-            const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[POLL_TUN].revents & std.posix.POLL.IN) != 0;
-            const udp_readable = has_udp and (poll_fds[POLL_UDP].revents & std.posix.POLL.IN) != 0;
+            // Build poll fd array
+            tls_fd_count = 0;
+            if (self.conn_manager) |*cm| {
+                // Multi-connection: build poll fds from all recv-capable connections
+                tls_fd_count = cm.buildPollFds(&poll_fds);
+            } else if (single_sock) |ss| {
+                // Single-connection: just the one TLS socket
+                poll_fds[0] = .{ .fd = ss.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+                tls_fd_count = 1;
+            }
+
+            // TUN fd at index tls_fd_count
+            const poll_tun_idx = tls_fd_count;
+            poll_fds[poll_tun_idx] = .{
+                .fd = poll_tun_sock,
+                .events = if (builtin.os.tag == .windows) 0 else std.posix.POLL.IN,
+                .revents = 0,
+            };
+
+            // UDP fd at index tls_fd_count + 1
+            const poll_udp_idx = tls_fd_count + 1;
+            poll_fds[poll_udp_idx] = .{
+                .fd = udp_fd,
+                .events = if (has_udp) std.posix.POLL.IN else 0,
+                .revents = 0,
+            };
+
+            const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + (if (has_udp) @as(usize, 2) else if (builtin.os.tag == .windows) @as(usize, 0) else @as(usize, 1)));
+            _ = std.posix.poll(poll_fds[0..total_poll_count], 1) catch 0;
+
+            const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[poll_tun_idx].revents & std.posix.POLL.IN) != 0;
+            const udp_readable = has_udp and (poll_fds[poll_udp_idx].revents & std.posix.POLL.IN) != 0;
+
+            // Decay pending bytes for load balancing (multi-connection)
+            if (self.conn_manager) |*cm| cm.decayPendingBytes();
 
             // Drive UDP acceleration timers (probing, keepalive, timeout)
             if (self.udp_accel) |*ua| ua.tick();
@@ -1183,95 +1491,47 @@ pub const VpnClient = struct {
             // ============================================================
 
             // INBOUND: Receive packets from VPN server (highest priority)
-            if (tls_readable) {
-                const recv_count = tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
-                    if (self.should_stop) break;
-                    if (err == error.ConnectionClosed) {
-                        std.log.info("Server closed connection", .{});
-                        break;
-                    }
-                    continue;
-                };
-
-                for (recv_slices[0..recv_count]) |block_data| {
-                    if (block_data.len <= 14) continue;
-
-                    // Fast EtherType dispatch
-                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
-
-                    if (is_configured) {
-                        // Configured: fast path for IP packets
-                        if (ethertype == 0x0800 or ethertype == 0x86DD) {
-                            // IPv4/IPv6 - direct to TUN (zero-copy slice)
-                            if (adapter.real_adapter) |*real| {
-                                if (real.device) |dev| {
-                                    _ = dev.write(block_data[14..]) catch {};
-                                }
-                            }
-                        } else if (ethertype == 0x0806) {
-                            // ARP
-                            if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
-                                if (arp_op == 2) {
-                                    loop_state.processArpReply(block_data);
-                                    self.gateway_mac = loop_state.gateway_mac;
-                                } else if (arp_op == 1) {
-                                    loop_state.processArpRequest(block_data);
-                                }
-                            }
+            if (self.conn_manager) |*cm| {
+                // Multi-connection: iterate all readable connections
+                var iter = cm.forEachReadable(poll_fds[0..tls_fd_count]);
+                while (iter.next()) |conn| {
+                    const recv_count = conn.tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
+                        if (self.should_stop) break;
+                        if (err == error.ConnectionClosed) {
+                            conn.established = false;
+                            std.log.warn("Connection lost (multi-conn)", .{});
+                            continue;
                         }
-                    } else {
-                        // Not configured: check for DHCP
-                        const maybe_response = adapter_mod.parseDhcpResponse(block_data, dhcp_xid) catch null;
-                        if (maybe_response) |response| {
-                            if (response.msg_type == .offer and loop_state.dhcp.state == .discover_sent) {
-                                const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
-                                std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                        continue;
+                    };
 
-                                var req_buf: [512]u8 = undefined;
-                                const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid, response.config.ip_address, response.config.server_id, &req_buf) catch 0;
-                                if (req_size > 0) {
-                                    const blocks = [_][]const u8{req_buf[0..req_size]};
-                                    tunnel.sendBlocks(&blocks) catch {};
-                                    loop_state.dhcp.state = .request_sent;
-                                    std.log.info("Sent DHCP REQUEST", .{});
-                                }
-                            } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
-                                std.log.info("DHCP ACK received!", .{});
-                                loop_state.configure(response.config.ip_address, response.config.gateway);
-                                loop_state.dhcp.state = .configured;
-                                is_configured = true;
-                                self.assigned_ip = loop_state.our_ip;
-                                self.gateway_ip = loop_state.our_gateway;
-
-                                if (adapter.real_adapter) |*real| {
-                                    if (real.device) |dev| {
-                                        dev.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
-                                            std.log.err("Failed to configure interface: {}", .{err});
-                                        };
-                                    }
-                                }
-
-                                const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
-                                std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
-
-                                if (self.config.routing.default_route and loop_state.our_gateway != 0) {
-                                    const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
-                                    std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
-                                    const server_ip_be = @byteSwap(self.server_ip);
-                                    adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
-                                }
-
-                                if (self.event_callback) |cb| {
-                                    cb(.{ .dhcp_configured = .{
-                                        .ip = response.config.ip_address,
-                                        .mask = response.config.subnet_mask,
-                                        .gateway = response.config.gateway,
-                                    } }, self.event_user_data);
-                                }
-                            }
-                        }
+                    for (recv_slices[0..recv_count]) |block_data| {
+                        self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
                     }
-                    self.stats.recordReceived(block_data.len);
+                }
+
+                // Cleanup dead connections
+                if (cm.cleanupDead()) {
+                    // Primary died — break data loop to trigger reconnect
+                    std.log.err("Primary connection died, exiting data loop", .{});
+                    break;
+                }
+            } else {
+                // Single-connection mode
+                const tls_readable = tls_fd_count > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0;
+                if (tls_readable) {
+                    const recv_count = single_tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
+                        if (self.should_stop) break;
+                        if (err == error.ConnectionClosed) {
+                            std.log.info("Server closed connection", .{});
+                            break;
+                        }
+                        continue;
+                    };
+
+                    for (recv_slices[0..recv_count]) |block_data| {
+                        self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                    }
                 }
             }
 
@@ -1330,7 +1590,7 @@ pub const VpnClient = struct {
                             }
                             // Send remaining packets (not sent via UDP) over TCP
                             if (udp_sent_count < outbound_count) {
-                                tunnel.sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], &send_buffer) catch {};
+                                send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], &send_buffer) catch {};
                             }
                             self.stats.recordSent(outbound_bytes);
                         }
@@ -1349,7 +1609,7 @@ pub const VpnClient = struct {
                 const reply_size = adapter_mod.buildArpReply(mac, loop_state.our_ip, loop_state.arp_reply_target_mac, loop_state.arp_reply_target_ip, &arp_buf) catch 0;
                 if (reply_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..reply_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch {};
                     const ip = tunnel_mod.formatIpForLog(loop_state.arp_reply_target_ip);
                     std.log.debug("Sent ARP Reply to {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
                 }
@@ -1361,7 +1621,7 @@ pub const VpnClient = struct {
                 const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
                 if (garp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch {};
                     loop_state.timing.last_garp_time = now;
                     const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
                     std.log.debug("Sent Gratuitous ARP (IP={d}.{d}.{d}.{d})", .{ ip.a, ip.b, ip.c, ip.d });
@@ -1374,7 +1634,7 @@ pub const VpnClient = struct {
                 const arp_size = adapter_mod.buildArpRequest(mac, loop_state.our_ip, loop_state.our_gateway, &arp_buf) catch 0;
                 if (arp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..arp_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch {};
                     const ip = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                     std.log.debug("Sent ARP Request for gateway {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
                 }
@@ -1385,16 +1645,20 @@ pub const VpnClient = struct {
                 const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
                 if (garp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                    tunnel.sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch {};
                     loop_state.timing.last_garp_time = now;
                 }
             }
 
             // SoftEther keepalive (every 5s)
             if (loop_state.timing.shouldSendKeepalive(now, keepalive_interval)) {
-                tunnel.sendKeepalive() catch |err| {
-                    std.log.warn("Failed to send keepalive: {}", .{err});
-                };
+                if (self.conn_manager) |*cm| {
+                    cm.sendKeepaliveAll();
+                } else {
+                    single_tunnel.sendKeepalive() catch |err| {
+                        std.log.warn("Failed to send keepalive: {}", .{err});
+                    };
+                }
                 std.log.debug("Sent keepalive", .{});
                 loop_state.timing.last_keepalive = now;
             }
@@ -1406,7 +1670,7 @@ pub const VpnClient = struct {
                     const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
                     if (dhcp_size > 0) {
                         const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                        tunnel.sendBlocks(&blocks) catch {};
+                        send_helper.get().sendBlocks(&blocks) catch {};
                         loop_state.timing.last_dhcp_time = now;
                         loop_state.dhcp_retry_count += 1;
                         std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});

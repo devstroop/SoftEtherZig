@@ -50,6 +50,7 @@ pub const packet_processor = @import("packet_processor.zig");
 pub const state = @import("state.zig");
 pub const stats = @import("stats.zig");
 pub const events = @import("events.zig");
+pub const connection_manager = @import("connection_manager.zig");
 
 // Main client types
 pub const VpnClient = vpn_client.VpnClient;
@@ -89,6 +90,11 @@ pub const ProxyConfig = connection.ProxyConfig;
 pub const KeepAliveManager = connection.KeepAliveManager;
 pub const ReconnectManager = connection.ReconnectManager;
 pub const ReconnectStrategy = connection.ReconnectStrategy;
+
+// Multi-connection types
+pub const ConnectionManager = connection_manager.ConnectionManager;
+pub const ManagedConnection = connection_manager.ManagedConnection;
+pub const TcpDirection = connection_manager.TcpDirection;
 
 // Packet processing types
 pub const PacketProcessor = packet_processor.PacketProcessor;
