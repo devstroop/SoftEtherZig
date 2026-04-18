@@ -119,6 +119,15 @@ pub const AuthResult = struct {
     policy: ?[]const u8,
     redirect: ?RedirectInfo, // If set, need to reconnect to this server
 
+    // Server-overridden session parameters (C: Protocol.c:4720-4741)
+    // The server may override client-requested values; these are authoritative.
+    server_max_connection: u32 = 1,
+    server_half_connection: bool = false,
+    server_use_compress: bool = false,
+    server_use_encrypt: bool = true,
+    server_qos: bool = false,
+    server_timeout: u32 = 0,
+
     // UDP acceleration fields (from server response)
     udp_accel_enabled: bool = false,
     udp_accel_port: u16 = 0,
@@ -1207,6 +1216,20 @@ pub fn uploadAuth(
         }
     }
 
+    // Extract server-overridden session parameters (C: Protocol.c:4720-4741)
+    // Defaults match C behavior: if server doesn't send the field, use safe defaults.
+    // vpn_client.zig will apply min/max logic with client-requested values.
+    const srv_max_conn = resp_pack.getInt("max_connection") orelse 1;
+    const srv_half_conn = (resp_pack.getInt("half_connection") orelse 0) != 0;
+    const srv_use_compress = (resp_pack.getInt("use_compress") orelse 0) != 0;
+    const srv_use_encrypt = (resp_pack.getInt("use_encrypt") orelse 1) != 0;
+    const srv_qos = (resp_pack.getInt("qos") orelse 0) != 0;
+    const srv_timeout = resp_pack.getInt("timeout") orelse 0;
+
+    std.log.info("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, qos={}, timeout={d}", .{
+        srv_max_conn, srv_half_conn, srv_use_compress, srv_use_encrypt, srv_qos, srv_timeout,
+    });
+
     // Extract UDP acceleration fields
     const udp_enabled = (resp_pack.getInt("use_udp_acceleration") orelse 0) != 0;
     const udp_port: u16 = @intCast(resp_pack.getInt("udp_acceleration_client_port") orelse 0);
@@ -1241,6 +1264,12 @@ pub fn uploadAuth(
         .session_key = session_key,
         .policy = null,
         .redirect = null,
+        .server_max_connection = srv_max_conn,
+        .server_half_connection = srv_half_conn,
+        .server_use_compress = srv_use_compress,
+        .server_use_encrypt = srv_use_encrypt,
+        .server_qos = srv_qos,
+        .server_timeout = srv_timeout,
         .udp_accel_enabled = udp_enabled,
         .udp_accel_port = udp_port,
         .udp_accel_use_encryption = udp_enc,

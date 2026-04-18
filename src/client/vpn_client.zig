@@ -855,6 +855,9 @@ pub const VpnClient = struct {
                 self.auth_hello_random = redirect_hello.random;
             }
 
+            // Apply server overrides from redirect server too
+            self.applyServerOverrides(ticket_auth_result);
+
             std.log.debug("Ticket authentication successful!", .{});
             return;
         }
@@ -864,6 +867,9 @@ pub const VpnClient = struct {
             self.auth_session_key = key;
             self.auth_hello_random = hello.random;
         }
+
+        // Apply server-overridden session parameters (C: Protocol.c:4720-4741)
+        self.applyServerOverrides(auth_result);
 
         // Initialize UDP acceleration if server supports it
         if (auth_result.udp_accel_enabled and self.config.udp_acceleration) {
@@ -901,6 +907,35 @@ pub const VpnClient = struct {
         }
 
         std.log.info("Authentication successful!", .{});
+    }
+
+    /// Apply server-overridden session parameters (C: Protocol.c:4720-4741).
+    /// The server is authoritative and may cap or change what the client requested.
+    fn applyServerOverrides(self: *Self, result: softether_proto.AuthResult) void {
+        var effective_max = result.server_max_connection;
+        effective_max = @min(effective_max, self.config.max_connections);
+        effective_max = @min(effective_max, 32); // MAX_TCP_CONNECTION
+        effective_max = @max(effective_max, 1);
+
+        const effective_half = result.server_half_connection;
+
+        // QoS requires minimum connections (C: Protocol.c:4737-4740)
+        if (result.server_qos) {
+            const qos_min: u32 = if (effective_half) 4 else 2;
+            effective_max = @max(effective_max, qos_min);
+        }
+
+        if (effective_max != self.config.max_connections) {
+            std.log.info("Server overrode max_connections: {d} -> {d}", .{ self.config.max_connections, effective_max });
+        }
+        if (effective_half != self.config.half_connection) {
+            std.log.info("Server overrode half_connection: {} -> {}", .{ self.config.half_connection, effective_half });
+        }
+
+        self.config.max_connections = @intCast(effective_max);
+        self.config.half_connection = effective_half;
+        self.config.use_compression = result.server_use_compress;
+        self.config.use_encryption = result.server_use_encrypt;
     }
 
     fn establishSession(self: *Self) !void {
@@ -1302,12 +1337,15 @@ pub const VpnClient = struct {
         // Multi-connection mode: enable bidirectional on primary for DHCP phase
         const multi_conn = self.conn_manager != null;
         if (self.conn_manager) |*cm| {
+            cm.prepareForDataLoop();
             cm.enableDhcpBidirectional();
         }
 
         // Get single-socket pointer (null if multi-connection mode owns it)
         const single_sock: ?*tls.TlsSocket = if (!multi_conn) blk: {
-            break :blk &(self.tls_socket orelse return ClientError.NotConnected);
+            var ss = &(self.tls_socket orelse return ClientError.NotConnected);
+            ss.clearTimeouts(); // Remove connect-phase timeouts for data loop
+            break :blk ss;
         } else null;
         var adapter = &(self.adapter_ctx orelse return ClientError.NotConnected);
 

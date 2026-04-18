@@ -248,11 +248,12 @@ pub const ConnectionManager = struct {
         }
     };
 
-    /// Send keepalive on ALL established connections
+    /// Send keepalive on all send-capable connections (C: Connection.c:1037-1044).
+    /// In half-connection mode, S2C connections are recv-only — don't write to them.
     pub fn sendKeepaliveAll(self: *ConnectionManager) void {
         for (&self.connections) |*slot| {
             if (slot.*) |*conn| {
-                if (conn.established) {
+                if (conn.established and conn.direction.canSend()) {
                     conn.tunnel.sendKeepalive() catch {};
                 }
             }
@@ -313,6 +314,21 @@ pub const ConnectionManager = struct {
     /// Check if we need more connections
     pub fn needsMoreConnections(self: *const ConnectionManager) bool {
         return self.count < self.max_connections;
+    }
+
+    /// Prepare all sockets for the poll-based data loop.
+    /// Removes blocking read/write timeouts that were set during the
+    /// connect/handshake phase — these would cause SSL_read to fail
+    /// on recv-only (S2C) sockets in half-connection mode if no data
+    /// arrives within the timeout period.
+    /// Matches C behavior: SetTimeout(sock, INFINITE) after additional_connect.
+    pub fn prepareForDataLoop(self: *ConnectionManager) void {
+        for (&self.connections) |*slot| {
+            if (slot.*) |*conn| {
+                conn.tls_socket.clearTimeouts();
+            }
+        }
+        std.log.debug("Cleared socket timeouts for data loop ({d} connections)", .{self.count});
     }
 };
 

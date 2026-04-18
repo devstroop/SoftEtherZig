@@ -506,6 +506,23 @@ pub const TlsSocket = struct {
         return self.tcp_fd;
     }
 
+    /// Remove read/write timeouts set during connect phase and configure
+    /// socket for the poll-based data loop. Sets large buffers and enables
+    /// TCP keepalive. Matches C's SetTimeout(sock, INFINITE) after connect.
+    pub fn clearTimeouts(self: *TlsSocket) void {
+        TcpSocket.setReadTimeout(self.tcp_fd, 0) catch {};
+        TcpSocket.setWriteTimeout(self.tcp_fd, 0) catch {};
+
+        // Set 2MB socket buffers (match Rust reference)
+        const buf_size: u32 = 2 * 1024 * 1024;
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buf_size)) catch {};
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&buf_size)) catch {};
+
+        // Enable TCP keepalive
+        const keepalive: u32 = 1;
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&keepalive)) catch {};
+    }
+
     /// Get the hostname this socket connected to
     pub fn getHostname(self: *const TlsSocket) []const u8 {
         return self.hostname_buf;
