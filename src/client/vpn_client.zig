@@ -945,8 +945,11 @@ pub const VpnClient = struct {
             return;
         };
 
-        // Create ConnectionManager and add the primary connection
-        var cm = ConnectionManager.init(
+        // Initialize conn_manager directly on self (NOT a local variable) so that
+        // TunnelConnection context pointers inside ManagedConnections reference the
+        // stable heap location. Using a local var + value-copy would leave dangling
+        // pointers after the stack frame is reclaimed.
+        self.conn_manager = ConnectionManager.init(
             self.allocator,
             self.config.max_connections,
             self.config.half_connection,
@@ -956,6 +959,7 @@ pub const VpnClient = struct {
         // Transfer primary socket to the manager
         const primary_sock = self.tls_socket orelse {
             std.log.warn("No primary socket, skipping additional connections", .{});
+            self.conn_manager = null;
             return;
         };
 
@@ -965,8 +969,9 @@ pub const VpnClient = struct {
         else
             .bidirectional;
 
-        _ = cm.addConnection(primary_sock, primary_direction, true) catch |err| {
+        _ = self.conn_manager.?.addConnection(primary_sock, primary_direction, true) catch |err| {
             std.log.err("Failed to add primary connection to manager: {}", .{err});
+            self.conn_manager = null;
             return;
         };
 
@@ -999,16 +1004,15 @@ pub const VpnClient = struct {
             if (@atomicLoad(bool, &self.should_stop, .acquire)) break;
 
             self.establishOneAdditionalConnection(
-                &cm,
+                &self.conn_manager.?,
                 &session_key,
                 tls_config,
                 host_for_http,
                 i,
             );
-            established = cm.count;
+            established = self.conn_manager.?.count;
         }
 
-        self.conn_manager = cm;
         std.log.info("Established {d}/{d} TCP connections (half_connection={})", .{
             established,
             self.config.max_connections,
