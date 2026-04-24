@@ -1207,12 +1207,39 @@ pub fn uploadAuth(
         };
     }
 
-    // Extract session key
+    // Extract session key.
+    // LIBSE-95: SoftEther server uses field name "SessionKey" (PascalCase) in
+    // the auth response, NOT "session_key". Older Zig client looked only for
+    // lowercase, causing self.auth_session_key to remain null after redirect-
+    // ticket auth → "Session established without encryption" + multi-conn
+    // additional sockets aborted with "No session key available". Try both,
+    // and dump field names if neither is present so we catch future drift.
     var session_key: ?[Protocol.sha1_size]u8 = null;
-    if (resp_pack.getData("session_key")) |key_data| {
+    const sk_pascal = resp_pack.getData("SessionKey");
+    const sk_snake = resp_pack.getData("session_key");
+    std.log.info("LIBSE-95 session_key probe: SessionKey={?d}B session_key={?d}B", .{
+        if (sk_pascal) |d| d.len else null,
+        if (sk_snake) |d| d.len else null,
+    });
+    const session_key_data = sk_pascal orelse sk_snake;
+    if (session_key_data) |key_data| {
         if (key_data.len == Protocol.sha1_size) {
-            session_key = undefined;
-            @memcpy(&session_key.?, key_data);
+            // FIX: previously did `session_key = undefined; @memcpy(&session_key.?, key_data);`
+            // which left the optional tag undefined → consumer saw null even though
+            // payload bytes were written. Build the array first, then assign whole optional.
+            var buf: [Protocol.sha1_size]u8 = undefined;
+            @memcpy(&buf, key_data);
+            session_key = buf;
+            std.log.info("LIBSE-95 session_key OK ({d} bytes), opt_set={}", .{ key_data.len, session_key != null });
+        } else {
+            std.log.err("LIBSE-95 session_key wrong size: {d} (expected {d})", .{ key_data.len, Protocol.sha1_size });
+        }
+    } else {
+        // One-shot diagnostic: dump all field names so we can see what the
+        // server actually sent if we still failed to find it.
+        std.log.err("LIBSE-95 NO session key field found. {d} fields in response:", .{resp_pack.elements.items.len});
+        for (resp_pack.elements.items) |elem| {
+            std.log.err("  field: '{s}'", .{elem.name});
         }
     }
 
@@ -1239,15 +1266,17 @@ pub fn uploadAuth(
     var server_send_key: ?[16]u8 = null;
     if (resp_pack.getData("bulk_on_rudp_send_key")) |key| {
         if (key.len >= 16) {
-            server_send_key = undefined;
-            @memcpy(&server_send_key.?, key[0..16]);
+            var buf: [16]u8 = undefined;
+            @memcpy(&buf, key[0..16]);
+            server_send_key = buf;
         }
     }
     var server_recv_key: ?[16]u8 = null;
     if (resp_pack.getData("bulk_on_rudp_recv_key")) |key| {
         if (key.len >= 16) {
-            server_recv_key = undefined;
-            @memcpy(&server_recv_key.?, key[0..16]);
+            var buf: [16]u8 = undefined;
+            @memcpy(&buf, key[0..16]);
+            server_recv_key = buf;
         }
     }
 

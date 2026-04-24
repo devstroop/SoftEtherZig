@@ -430,6 +430,56 @@ pub const TlsSocket = struct {
         }
     }
 
+    /// Check if OpenSSL has buffered decrypted application data invisible to poll().
+    /// SSL records may contain multiple application messages; SSL_read can leave
+    /// some buffered in the SSL object even when the kernel TCP buffer is empty
+    /// (poll() will report POLL.IN unset). Without this check the data loop
+    /// sleeps in poll while the next batch of bytes is already decrypted and
+    /// waiting — a major source of stalls under bursty inbound traffic.
+    pub fn hasPending(self: *TlsSocket) bool {
+        const ssl = self.ssl orelse return false;
+        return c.SSL_pending(ssl) > 0;
+    }
+
+    /// DIAGNOSTIC: Returns count of decrypted bytes buffered inside OpenSSL.
+    pub fn pendingBytes(self: *const TlsSocket) u32 {
+        const ssl = self.ssl orelse return 0;
+        const p = c.SSL_pending(ssl);
+        return if (p > 0) @intCast(p) else 0;
+    }
+
+    /// DIAGNOSTIC (macOS): Returns bytes currently sitting in the kernel TCP
+    /// recv queue (i.e. arrived from network but not yet read by us). High
+    /// values mean we're not draining fast enough → server's advertised
+    /// window is shrinking → TCP backpressure.
+    pub fn kernelRecvQueue(self: *const TlsSocket) u32 {
+        if (builtin.os.tag != .macos) return 0;
+        var n: c_int = 0;
+        var len: u32 = @sizeOf(c_int);
+        // SO_NREAD = 0x1020 on macOS/Darwin
+        const SO_NREAD: u32 = 0x1020;
+        const fd_int: c_int = @intCast(self.tcp_fd);
+        const rc = std.c.getsockopt(fd_int, std.posix.SOL.SOCKET, SO_NREAD, &n, &len);
+        if (rc != 0 or n < 0) return 0;
+        return @intCast(n);
+    }
+
+    /// DIAGNOSTIC (macOS): Returns bytes currently sitting in the kernel TCP
+    /// send queue (queued but not yet ACK'd / sent). High values mean we
+    /// can't push outbound fast enough → our send window is full → upload
+    /// backpressure / risk of SSL_write deadlock.
+    pub fn kernelSendQueue(self: *const TlsSocket) u32 {
+        if (builtin.os.tag != .macos) return 0;
+        var n: c_int = 0;
+        var len: u32 = @sizeOf(c_int);
+        // SO_NWRITE = 0x1024 on macOS/Darwin
+        const SO_NWRITE: u32 = 0x1024;
+        const fd_int: c_int = @intCast(self.tcp_fd);
+        const rc = std.c.getsockopt(fd_int, std.posix.SOL.SOCKET, SO_NWRITE, &n, &len);
+        if (rc != 0 or n < 0) return 0;
+        return @intCast(n);
+    }
+
     /// Write data to the TLS connection
     pub fn write(self: *TlsSocket, data: []const u8) !usize {
         if (!self.connected) return error.BrokenPipe;
@@ -513,10 +563,29 @@ pub const TlsSocket = struct {
         TcpSocket.setReadTimeout(self.tcp_fd, 0) catch {};
         TcpSocket.setWriteTimeout(self.tcp_fd, 0) catch {};
 
-        // Set 2MB socket buffers (match Rust reference)
-        const buf_size: u32 = 2 * 1024 * 1024;
-        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buf_size)) catch {};
+        // Set TCP buffers to BDP-sized values for high-RTT/high-throughput paths.
+        //
+        // History:
+        //  - Originally hardcoded 2MB → caused 5-10 Mbps stalls because at 200ms
+        //    RTT the BDP for 100+ Mbps is >2.5MB (we got cwnd-capped).
+        //  - Removed entirely → on macOS, default SO_SNDBUF/RCVBUF is ~128KB and
+        //    DOES NOT auto-tune (unlike Linux). BDP at 200ms RTT capped throughput
+        //    at ~5 Mbps (128KB / 0.2s = 5.12 Mbps theoretical max).
+        //
+        // Solution: set buffers to 4MB. macOS kern.ipc.maxsockbuf default is 8MB,
+        // and the kernel reserves overhead so requesting exactly 8MB may fail.
+        // 4MB covers the BDP for 160 Mbps at 200ms RTT (~4.0 MB) with safety margin.
+        // C SoftEther sets 256MB which means "give me as much as the system allows".
+        //
+        // CYCLE 7 attempted asymmetric (1MB SND / 6MB RCV) hoping smaller SNDBUF would
+        // prevent UL from choking DL. Result: T1 DL recovered to 68 Mbps but T2/T3 DL
+        // still collapsed to 9-10 Mbps and UL capped at 21 Mbps. Root cause is NOT
+        // buffer size — it's server-side cwnd starvation when our single-thread loop
+        // delays ACKs during heavy UL bursts. Revert to symmetric 4MB; the long-term
+        // fix needs separate read/write threads or POLLIN priority over POLLOUT.
+        const buf_size: u32 = 4 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&buf_size)) catch {};
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buf_size)) catch {};
 
         // Enable TCP keepalive
         const keepalive: u32 = 1;

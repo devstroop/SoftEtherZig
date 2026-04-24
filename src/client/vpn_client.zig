@@ -148,11 +148,16 @@ pub const ClientConfig = struct {
     auth: AuthMethod,
 
     // Connection options
-    max_connections: u8 = 1,
+    // LIBSE-93: enable multi-connection by default to fix UL→DL choke.
+    // Single TCP socket carrying both directions causes server-side cwnd starvation
+    // (delayed ACKs during heavy UL bursts). 8 connections + half-connection mode
+    // splits TX and RX onto separate sockets, eliminating the choke completely.
+    // Server can override via applyServerOverrides() if it caps lower.
+    max_connections: u8 = 8,
     use_compression: bool = false,
     use_encryption: bool = true,
     udp_acceleration: bool = false,
-    half_connection: bool = false,
+    half_connection: bool = true,
     qos: bool = true,
     mtu: u16 = 1450,
 
@@ -220,6 +225,10 @@ pub const VpnClient = struct {
     gateway_ip: u32,
     gateway_mac: ?[6]u8,
 
+    // Effective server address for additional connections (updated after redirect)
+    effective_server_ip: u32,
+    effective_server_port: u16,
+
     // Authentication state
     auth_credentials: ?auth_mod.ClientAuth,
     auth_session_key: ?[20]u8,
@@ -282,6 +291,8 @@ pub const VpnClient = struct {
             .assigned_ip = 0,
             .gateway_ip = 0,
             .gateway_mac = null,
+            .effective_server_ip = 0,
+            .effective_server_port = config.server_port,
             .auth_credentials = null,
             .auth_session_key = null,
             .auth_hello_random = null,
@@ -417,6 +428,8 @@ pub const VpnClient = struct {
             self.disconnect_reason = .network_error;
             return ClientError.DnsResolutionFailed;
         };
+        self.effective_server_ip = self.server_ip;
+        self.effective_server_port = self.config.server_port;
 
         if (@atomicLoad(bool, &self.should_stop, .acquire)) {
             self.disconnect_reason = .user_requested;
@@ -789,6 +802,8 @@ pub const VpnClient = struct {
 
             // Update server IP to what we actually connected to
             self.server_ip = actual_connect_ip;
+            self.effective_server_ip = actual_connect_ip;
+            self.effective_server_port = redirect_port;
 
             // Get username for ticket auth
             const username = switch (self.config.auth) {
@@ -849,10 +864,16 @@ pub const VpnClient = struct {
                 return ClientError.AuthenticationFailed;
             }
 
+            // LIBSE-95 probe: verify session_key arrived at consumer site
+            std.log.info("LIBSE-95 consumer probe: ticket_auth_result.session_key is_some={}", .{ticket_auth_result.session_key != null});
+
             // Store session key from ticket auth for session encryption
             if (ticket_auth_result.session_key) |key| {
                 self.auth_session_key = key;
                 self.auth_hello_random = redirect_hello.random;
+                std.log.info("LIBSE-95 consumer: stored auth_session_key (20B) and auth_hello_random", .{});
+            } else {
+                std.log.warn("LIBSE-95 consumer: ticket_auth_result.session_key was null — skipping store", .{});
             }
 
             // Apply server overrides from redirect server too
@@ -939,6 +960,11 @@ pub const VpnClient = struct {
     }
 
     fn establishSession(self: *Self) !void {
+        std.log.info("LIBSE-95 establishSession entry: use_encryption={} auth_session_key_some={} auth_hello_random_some={}", .{
+            self.config.use_encryption,
+            self.auth_session_key != null,
+            self.auth_hello_random != null,
+        });
         if (self.config.use_encryption and self.auth_session_key != null and self.auth_hello_random != null) {
             // Create a full session with encryption using auth-derived keys
             const username = switch (self.config.auth) {
@@ -1028,9 +1054,9 @@ pub const VpnClient = struct {
             },
         };
 
-        // Format server IP for HTTP Host header
+        // Format effective server IP for HTTP Host header and TLS connect
         var ip_str_buf: [16]u8 = undefined;
-        const host_for_http = formatIpv4Buf(self.server_ip, &ip_str_buf);
+        const host_for_http = formatIpv4Buf(self.effective_server_ip, &ip_str_buf);
 
         // Establish N-1 additional connections
         var established: u8 = 1; // counting primary
@@ -1064,11 +1090,12 @@ pub const VpnClient = struct {
         host_for_http: []const u8,
         conn_index: u8,
     ) void {
-        // Open new TLS connection to same server
+        // Open new TLS connection to the effective server (may differ from
+        // config.server_host after a cluster redirect).
         var new_sock = tls.TlsSocket.connect(
             self.allocator,
-            self.config.server_host,
-            self.config.server_port,
+            host_for_http, // IP string of effective server
+            self.effective_server_port,
             tls_config,
         ) catch |err| {
             std.log.warn("Additional connection {d} TLS failed: {}", .{ conn_index, err });
@@ -1419,21 +1446,63 @@ pub const VpnClient = struct {
         defer self.allocator.free(recv_scratch);
         var recv_slices: [512][]u8 = undefined;
 
-        // Outbound packet buffers — multiple buffers for batching TUN reads
-        var tun_read_bufs: [16][2048]u8 = undefined;
-        var outbound_eth_bufs: [16][1600]u8 = undefined;
+        // Outbound packet buffers — heap-allocated to allow larger batch (32)
+        // without blowing the Dart isolate's ~512KB stack. 16x2048 + 16x1600 =
+        // 57KB, kept on heap for safety in ReleaseFast mode.
+        //
+        // Cycle 5 attempted batch=32 + drain=32 — regressed throughput
+        // (T1 67→40 Mbps, avg 31→22 Mbps). Reverted to 16/8. Larger drain
+        // starves outbound; larger batch holds TUN packets too long.
+        const OUTBOUND_BATCH: usize = 16;
+        const tun_read_bufs = try self.allocator.alloc([2048]u8, OUTBOUND_BATCH);
+        defer self.allocator.free(tun_read_bufs);
+        const outbound_eth_bufs = try self.allocator.alloc([1600]u8, OUTBOUND_BATCH);
+        defer self.allocator.free(outbound_eth_bufs);
 
         // Packet buffer for ARP/GARP (small, reused)
         var arp_buf: [64]u8 = undefined;
 
-        // Pre-allocated send buffer for zero-copy outbound path (avoids per-send heap alloc)
-        // 16 packets * (4 + 1514) + 4 header ≈ 25KB
-        var send_buffer: [25000]u8 = undefined;
+        // Heap-allocated send buffer for zero-copy outbound path.
+        // Heap (not stack) because this loop may run on a Dart isolate thread
+        // with a small (~512KB) stack — a 25KB stack array plus other locals
+        // (tun_read_bufs 32KB, outbound_eth_bufs 25KB, recv_scratch, poll_fds)
+        // crosses safety margins in ReleaseFast mode. Sized at 100KB to leave
+        // headroom for future batch-size growth without re-tuning.
+        const send_buffer = try self.allocator.alloc(u8, 100_000);
+        defer self.allocator.free(send_buffer);
 
         var send_helper = SendTunnelHelper{
             .cm_ptr = if (self.conn_manager != null) &self.conn_manager.? else null,
             .single_ptr = &single_tunnel,
         };
+
+        // ============================================================
+        // DIAGNOSTIC STATS — logged once per second when active.
+        // Investigating: T1 of every connection achieves full DL, but
+        // T2/T3 onwards starve to ~10-16 Mbps while UL stays healthy.
+        // Hypotheses: TLS RX backpressure, kernel queue accumulation,
+        // drain cap bottleneck, or TUN write blocking.
+        // ============================================================
+        const DiagStats = struct {
+            bytes_in: u64 = 0,
+            bytes_out: u64 = 0,
+            pkts_in: u64 = 0,
+            pkts_out: u64 = 0,
+            drain_total: u64 = 0,
+            drain_max: u32 = 0,
+            drain_cap_hits: u64 = 0,
+            ssl_pending_max: u32 = 0,
+            nread_max: u32 = 0,
+            nwrite_max: u32 = 0,
+            pollout_skipped: u64 = 0,
+            tcp_drops_pkts: u64 = 0,
+            tun_eagain: u64 = 0,
+            poll_iters: u64 = 0,
+        };
+        var diag = DiagStats{};
+        var diag_last_ms: i64 = std.time.milliTimestamp();
+        // Cycle 6 adaptive poll: track if last iter did work
+        var last_iter_had_work: bool = false;
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -1517,7 +1586,11 @@ pub const VpnClient = struct {
             };
 
             const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + (if (has_udp) @as(usize, 2) else if (builtin.os.tag == .windows) @as(usize, 0) else @as(usize, 1)));
-            _ = std.posix.poll(poll_fds[0..total_poll_count], 1) catch 0;
+            // Cycle 6: adaptive poll timeout. DIAG showed 1000+ poll iters/sec
+            // busy-spinning when idle (1ms timeout). Use 0 when last iter did
+            // real work (don't wait), 10ms when idle (let CPU sleep).
+            const poll_timeout_ms: i32 = if (last_iter_had_work) 0 else 10;
+            _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
 
             const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[poll_tun_idx].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[poll_udp_idx].revents & std.posix.POLL.IN) != 0;
@@ -1539,9 +1612,12 @@ pub const VpnClient = struct {
                 while (iter.next()) |conn| {
                     const recv_count = conn.tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
                         if (self.should_stop) break;
-                        if (err == error.ConnectionClosed) {
+                        // Treat dead TLS the same as a clean close — mark conn dead so
+                        // cleanupDead() can remove it. Without this, BrokenPipe causes
+                        // an infinite `continue` loop with the same dead fd in poll.
+                        if (err == error.ConnectionClosed or err == error.BrokenPipe) {
                             conn.established = false;
-                            std.log.warn("Connection lost (multi-conn)", .{});
+                            std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
                             continue;
                         }
                         continue;
@@ -1560,20 +1636,78 @@ pub const VpnClient = struct {
                 }
             } else {
                 // Single-connection mode
-                const tls_readable = tls_fd_count > 0 and (poll_fds[0].revents & std.posix.POLL.IN) != 0;
+                // SSL_pending() check: OpenSSL may have decrypted application
+                // data buffered internally that poll() can't see. Without this
+                // OR, the data loop sleeps waiting for kernel readability while
+                // bytes are already decrypted and waiting in the SSL object.
+                //
+                // INBOUND DRAIN LOOP: receiveBlocksBatch reads exactly ONE
+                // SoftEther packet per call. Under heavy DL the server sends
+                // packets back-to-back and many sit decrypted in OpenSSL's
+                // internal buffer. Without a drain loop we'd read 1 packet
+                // per outer-loop iteration → DL bounded by loop iteration
+                // rate (~5000/s = ~7 Mbps for typical packet sizes).
+                //
+                // Drain up to MAX_INBOUND_DRAIN packets per iteration as long
+                // as more TLS data is pending. Cap prevents complete outbound
+                // starvation: even on heavy DL, after 8 drained packets we
+                // yield to the outbound path so ACKs flow and TUN drains.
+                const tls_readable = tls_fd_count > 0 and ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or (self.tls_socket != null and self.tls_socket.?.hasPending()));
                 if (tls_readable) {
-                    const recv_count = single_tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
-                        if (self.should_stop) break;
-                        if (err == error.ConnectionClosed) {
-                            std.log.info("Server closed connection", .{});
+                    // Cycle 6 adaptive poll: signal work to outer loop
+                    last_iter_had_work = true;
+                    // Cycle 6: raise cap 8→64. DIAG showed cap=8 was being
+                    // hit EVERY iteration with ssl_pend_max=15KB still buffered
+                    // — we were forfeiting decrypted data, kernel rcvbuf would
+                    // fill, server's TCP RWND would collapse and never recover.
+                    // hasPending() is the natural terminator; the cap is just a
+                    // safety net to ensure outbound can run occasionally.
+                    // Cycle 5 regression came from batch=32, NOT drain=32.
+                    const MAX_INBOUND_DRAIN: u32 = 64;
+                    var drain_iter: u32 = 0;
+                    var inbound_dead = false;
+                    while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
+                        const recv_count = single_tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
+                            if (self.should_stop) {
+                                inbound_dead = true;
+                                break;
+                            }
+                            // BrokenPipe == TLS dead. Must break, not continue — otherwise we
+                            // spin forever polling a dead fd and silently drop all outbound.
+                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
+                                std.log.info("Server closed connection: {s}", .{@errorName(err)});
+                                inbound_dead = true;
+                                break;
+                            }
+                            // Non-fatal error — stop draining this iteration, retry next.
                             break;
-                        }
-                        continue;
-                    };
+                        };
 
-                    for (recv_slices[0..recv_count]) |block_data| {
-                        self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                        for (recv_slices[0..recv_count]) |block_data| {
+                            diag.bytes_in += block_data.len;
+                            diag.pkts_in += 1;
+                            self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                        }
+
+                        // Stop draining if TLS has no more buffered/decrypted data.
+                        // Without this we'd block on the next readU32() waiting for
+                        // bytes that haven't arrived yet → starves outbound for the
+                        // RTT (~200ms) of waiting for the next packet.
+                        if (self.tls_socket == null or !self.tls_socket.?.hasPending()) break;
                     }
+                    // DIAG: capture drain metrics + queue depths
+                    diag.drain_total += drain_iter;
+                    if (drain_iter > diag.drain_max) diag.drain_max = drain_iter;
+                    if (drain_iter == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
+                    if (self.tls_socket) |ts| {
+                        const pend = ts.pendingBytes();
+                        if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                        const nrd = ts.kernelRecvQueue();
+                        if (nrd > diag.nread_max) diag.nread_max = nrd;
+                        const nwr = ts.kernelSendQueue();
+                        if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
+                    }
+                    if (inbound_dead) break;
                 }
             }
 
@@ -1599,15 +1733,46 @@ pub const VpnClient = struct {
 
             // OUTBOUND: Read from TUN and send to VPN (batched for throughput)
             // Prefer UDP if established, fall back to TCP
+            //
+            // BACKPRESSURE PROBE: Check whether the TLS socket can accept a
+            // write (POLLOUT with 0 timeout). If kernel sndbuf is full,
+            // blocking SSL_write would HANG indefinitely because the data
+            // loop is single-threaded — and inbound ACKs (which would drain
+            // sndbuf) are processed in the same loop. Result: deadlock,
+            // upload stuck at 0 Mbps. Symptom: T1 great, T2/T3 upload=0.
+            //
+            // CRITICAL: We must STILL drain TUN even when tls_can_send=false.
+            // If we skip the TUN read, packets pile up in the kernel TUN
+            // queue, eventually overflow, and user-space TCP sockets see
+            // EAGAIN/socket errors (e.g. "UPLOAD TEST ERROR" in speedtest).
+            //
+            // Behavior when sndbuf is full:
+            //   - UDP path: send via UDP (its own buffer)
+            //   - TCP path: DROP the batch. TCP-layer retransmit at the
+            //     user app handles recovery. Better to drop than to block.
+            //
+            // Skip the probe in multi-connection mode (each conn has its own
+            // sndbuf and we'd need to probe all; deferred).
+            var tls_can_send: bool = true;
+            if (self.conn_manager == null and self.tls_socket != null) {
+                var probe_pfd = [_]std.posix.pollfd{.{
+                    .fd = self.tls_socket.?.getFd(),
+                    .events = std.posix.POLL.OUT,
+                    .revents = 0,
+                }};
+                _ = std.posix.poll(&probe_pfd, 0) catch {};
+                tls_can_send = (probe_pfd[0].revents & std.posix.POLL.OUT) != 0;
+            }
+
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        // Read up to 32 packets from TUN in one batch
+                        // Read up to OUTBOUND_BATCH (16) packets from TUN in one batch
                         var outbound_blocks: [16][]const u8 = undefined;
                         var outbound_count: usize = 0;
                         var outbound_bytes: usize = 0;
 
-                        while (outbound_count < 16) {
+                        while (outbound_count < OUTBOUND_BATCH) {
                             if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                 if (maybe_len) |ip_len| {
                                     if (ip_len > 0 and ip_len <= 1500) {
@@ -1630,9 +1795,35 @@ pub const VpnClient = struct {
                                     udp_sent_count += 1;
                                 }
                             }
-                            // Send remaining packets (not sent via UDP) over TCP
-                            if (udp_sent_count < outbound_count) {
-                                send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], &send_buffer) catch {};
+                            // Send remaining packets (not sent via UDP) over TCP.
+                            // If the TCP path is dead (BrokenPipe / ConnectionClosed) we
+                            // MUST exit the data loop — otherwise upload silently stalls
+                            // at 0 Mbps while the loop spins forever swallowing errors.
+                            //
+                            // Also gated on tls_can_send: if sndbuf is full, drop the
+                            // remaining batch this iteration (TUN buffers them, we'll
+                            // retry next iteration after ACKs drain sndbuf). This is
+                            // what prevents the SSL_write deadlock.
+                            if (udp_sent_count < outbound_count and tls_can_send) {
+                                send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
+                                    error.ConnectionClosed, error.BrokenPipe => {
+                                        std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
+                                        return;
+                                    },
+                                    else => {},
+                                };
+                                // DIAG: count what we actually sent over TCP
+                                diag.pkts_out += outbound_count - udp_sent_count;
+                                for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
+                            } else if (udp_sent_count < outbound_count and !tls_can_send) {
+                                // DIAG: TCP path was blocked, batch dropped (TCP layer will retransmit)
+                                diag.pollout_skipped += 1;
+                                diag.tcp_drops_pkts += outbound_count - udp_sent_count;
+                            }
+                            // DIAG: count UDP-sent too
+                            if (udp_sent_count > 0) {
+                                diag.pkts_out += udp_sent_count;
+                                for (outbound_blocks[0..udp_sent_count]) |b| diag.bytes_out += b.len;
                             }
                             self.stats.recordSent(outbound_bytes);
                         }
@@ -1718,6 +1909,36 @@ pub const VpnClient = struct {
                         std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});
                     }
                 }
+            }
+
+            // ============================================================
+            // DIAG: 1Hz throughput / queue / drain stats
+            // ============================================================
+            diag.poll_iters += 1;
+            // Cycle 6 adaptive poll: snapshot byte counts to detect work this iter.
+            // Done at end of iteration: if bytes changed since iter start, had work.
+            // Reset flag at top of next iter via simple comparison \u2014 we store
+            // last byte total and compare to current.
+            // (Implementation: we set last_iter_had_work based on whether tun_readable
+            //  fired this iteration, since it's in scope here.)
+            last_iter_had_work = tun_readable;
+            if (now - diag_last_ms >= 1000) {
+                if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
+                    const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;
+                    const mbps_out = @as(f64, @floatFromInt(diag.bytes_out)) * 8.0 / 1_000_000.0;
+                    const drain_avg: f64 = if (diag.poll_iters > 0)
+                        @as(f64, @floatFromInt(diag.drain_total)) / @as(f64, @floatFromInt(diag.poll_iters))
+                    else
+                        0.0;
+                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p iters={d}", .{
+                        mbps_in,         diag.pkts_in,    mbps_out,             diag.pkts_out,
+                        drain_avg,       diag.drain_max,  diag.drain_cap_hits,  diag.ssl_pending_max,
+                        diag.nread_max,  diag.nwrite_max, diag.pollout_skipped, diag.tcp_drops_pkts,
+                        diag.poll_iters,
+                    });
+                }
+                diag = DiagStats{};
+                diag_last_ms = now;
             }
         }
 
