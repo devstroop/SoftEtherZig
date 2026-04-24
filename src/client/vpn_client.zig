@@ -1503,6 +1503,32 @@ pub const VpnClient = struct {
             tcp_drops_pkts: u64 = 0,
             tun_eagain: u64 = 0,
             poll_iters: u64 = 0,
+            // Latency tracking (microseconds): per-iteration wall time.
+            // iter_us_max captures the worst single-iter spike — useful to
+            // detect when one iteration starves the rest (e.g. blocking I/O,
+            // GC pause, kernel scheduler hiccup, large drain burst).
+            iter_us_max: u64 = 0,
+            iter_us_total: u64 = 0,
+            iter_slow_10ms: u32 = 0,
+            iter_slow_50ms: u32 = 0,
+            iter_slow_100ms: u32 = 0,
+            // poll() wait time (microseconds) — captures kernel-blocked time.
+            // High poll_us_max with low iter_us_max means we're idle-waiting;
+            // high values on both means a stall.
+            poll_us_max: u32 = 0,
+            poll_us_total: u64 = 0,
+            // Bufferbloat detection: kernel TCP sendq depth, sampled at end
+            // of every iter. Growing sendq while throughput drops = TX-side
+            // queue building (server can't pull, or TCP cwnd shrunk). This
+            // is the smoking gun for the latency-grows / throughput-collapses
+            // pattern that the in-loop iter_us metric cannot see.
+            sendq_max: u32 = 0,
+            sendq_sum: u64 = 0,
+            sendq_samples: u32 = 0,
+            // Count of write_fn calls that hit WANT_WRITE (POLLOUT poll)
+            // since last DIAG. High = TX bound. Diff'd from per-conn
+            // TlsSocket.write_block_count snapshots.
+            write_blocked: u64 = 0,
         };
         var diag = DiagStats{};
         var diag_last_ms: i64 = std.time.milliTimestamp();
@@ -1583,6 +1609,19 @@ pub const VpnClient = struct {
         }
 
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
+            // Latency tracking: capture wall-clock at the very start of every
+            // iteration so we can detect single-iter spikes vs steady state.
+            const iter_start_us = std.time.microTimestamp();
+            // Snapshot per-conn write_block_count so we can diff at end of iter
+            // to count POLLOUT stalls (TCP sndbuf full) attributable to this iter.
+            var iter_wb_start: u64 = 0;
+            if (single_sock) |ss| iter_wb_start += ss.write_block_count;
+            if (self.conn_manager) |cm| {
+                for (cm.connections[0..cm.count]) |maybe_conn| {
+                    if (maybe_conn) |conn| iter_wb_start += conn.tls_socket.write_block_count;
+                }
+            }
+
             // Build poll fd array
             tls_fd_count = 0;
             if (self.conn_manager) |*cm| {
@@ -1615,7 +1654,11 @@ pub const VpnClient = struct {
             // busy-spinning when idle (1ms timeout). Use 0 when last iter did
             // real work (don't wait), 10ms when idle (let CPU sleep).
             const poll_timeout_ms: i32 = if (last_iter_had_work) 0 else 10;
+            const poll_t0 = std.time.microTimestamp();
             _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
+            const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
+            if (poll_us > diag.poll_us_max) diag.poll_us_max = poll_us;
+            diag.poll_us_total += poll_us;
 
             const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[poll_tun_idx].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[poll_udp_idx].revents & std.posix.POLL.IN) != 0;
@@ -1981,6 +2024,40 @@ pub const VpnClient = struct {
             // RWND collapsed to 0, DL throughput dropped from 67→3 Mbps.
             // Use OR so any work source keeps us hot.
             last_iter_had_work = tun_readable or last_iter_had_work;
+
+            // Bufferbloat sampling — snapshot kernel TCP sendq depth across
+            // all conns and accumulate write-blocked deltas.
+            var sendq_now: u32 = 0;
+            var iter_wb_end: u64 = 0;
+            if (single_sock) |ss| {
+                const sq: u32 = @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32)));
+                if (sq > sendq_now) sendq_now = sq;
+                iter_wb_end += ss.write_block_count;
+            }
+            if (self.conn_manager) |cm| {
+                for (cm.connections[0..cm.count]) |maybe_conn| {
+                    if (maybe_conn) |conn| {
+                        const sq: u32 = @intCast(@min(conn.tls_socket.kernelSendQueue(), std.math.maxInt(u32)));
+                        if (sq > sendq_now) sendq_now = sq;
+                        iter_wb_end += conn.tls_socket.write_block_count;
+                    }
+                }
+            }
+            if (sendq_now > diag.sendq_max) diag.sendq_max = sendq_now;
+            diag.sendq_sum += sendq_now;
+            diag.sendq_samples += 1;
+            diag.write_blocked += iter_wb_end - iter_wb_start;
+
+            // Latency tracking: compute iter wall time and update spike counters.
+            // This is the LAST thing in the loop body so it captures everything
+            // including poll(), inbound drain, outbound drain, keepalives, DHCP.
+            const iter_us: u64 = @intCast(@max(0, std.time.microTimestamp() - iter_start_us));
+            if (iter_us > diag.iter_us_max) diag.iter_us_max = iter_us;
+            diag.iter_us_total += iter_us;
+            if (iter_us >= 10_000) diag.iter_slow_10ms += 1;
+            if (iter_us >= 50_000) diag.iter_slow_50ms += 1;
+            if (iter_us >= 100_000) diag.iter_slow_100ms += 1;
+
             if (now - diag_last_ms >= 1000) {
                 if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
                     const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;
@@ -1989,11 +2066,21 @@ pub const VpnClient = struct {
                         @as(f64, @floatFromInt(diag.drain_total)) / @as(f64, @floatFromInt(diag.poll_iters))
                     else
                         0.0;
-                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p iters={d}", .{
-                        mbps_in,         diag.pkts_in,    mbps_out,             diag.pkts_out,
-                        drain_avg,       diag.drain_max,  diag.drain_cap_hits,  diag.ssl_pending_max,
-                        diag.nread_max,  diag.nwrite_max, diag.pollout_skipped, diag.tcp_drops_pkts,
-                        diag.poll_iters,
+                    const iter_avg_us: f64 = if (diag.poll_iters > 0)
+                        @as(f64, @floatFromInt(diag.iter_us_total)) / @as(f64, @floatFromInt(diag.poll_iters))
+                    else
+                        0.0;
+                    const sendq_avg: f64 = if (diag.sendq_samples > 0)
+                        @as(f64, @floatFromInt(diag.sendq_sum)) / @as(f64, @floatFromInt(diag.sendq_samples))
+                    else
+                        0.0;
+                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
+                        mbps_in,             diag.pkts_in,         mbps_out,             diag.pkts_out,
+                        drain_avg,           diag.drain_max,       diag.drain_cap_hits,  diag.ssl_pending_max,
+                        diag.nread_max,      diag.nwrite_max,      diag.pollout_skipped, diag.tcp_drops_pkts,
+                        diag.poll_iters,     iter_avg_us,          diag.iter_us_max,     diag.iter_slow_10ms,
+                        diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,     diag.sendq_max,
+                        sendq_avg,           diag.write_blocked,
                     });
                 }
                 diag = DiagStats{};

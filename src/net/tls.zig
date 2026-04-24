@@ -172,6 +172,10 @@ pub const TlsSocket = struct {
     config: TlsConfig,
     hostname_buf: []u8,
     connected: bool,
+    /// Counter incremented every time writeAllNonBlocking polls POLLOUT (i.e.
+    /// the underlying TCP sndbuf was full). Surfaced via DIAG to detect
+    /// TX-bound bufferbloat.
+    write_block_count: u64 = 0,
 
     /// Connect to hostname:port with TLS
     pub fn connect(allocator: Allocator, hostname: []const u8, port: u16, config: TlsConfig) !TlsSocket {
@@ -226,6 +230,31 @@ pub const TlsSocket = struct {
         std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
             std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
         };
+
+        // BUFFERBLOAT FIX: TCP_NOTSENT_LOWAT (macOS opt 513, Linux opt 25).
+        // Kernel reports "writable" only when UNSENT bytes in sndbuf < lowat.
+        // Without this, our writeAllNonBlocking() never blocks — it keeps stuffing
+        // data into a 4MB SO_SNDBUF, which drains slowly over a 200ms-RTT VPN link.
+        // Measured: sendq peaked at 504 KB during UL bursts, adding ~330ms loaded
+        // latency. With lowat=16KB, kernel pushes back at ~16KB queue depth so
+        // SoftEther's flow control sees real backpressure and doesn't over-buffer.
+        // Throughput is unaffected because the kernel still pulls from us as fast
+        // as cwnd allows; we just stop pre-queuing megabytes ahead of the link.
+        if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
+            const TCP_NOTSENT_LOWAT_DARWIN: u32 = 513;
+            const lowat: u32 = 16 * 1024;
+            if (std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT_DARWIN, std.mem.asBytes(&lowat))) |_| {
+                std.log.info("TCP_NOTSENT_LOWAT set to {d} bytes (Darwin)", .{lowat});
+            } else |err| {
+                std.log.warn("TCP_NOTSENT_LOWAT (Darwin) failed: {}", .{err});
+            }
+        } else if (builtin.os.tag == .linux) {
+            const TCP_NOTSENT_LOWAT_LINUX: u32 = 25;
+            const lowat: u32 = 16 * 1024;
+            std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT_LINUX, std.mem.asBytes(&lowat)) catch |err| {
+                std.log.warn("TCP_NOTSENT_LOWAT (Linux) failed: {}", .{err});
+            };
+        }
 
         // On Windows, disable delayed ACKs — default 200ms ACK delay adds latency
         if (builtin.os.tag == .windows) {
@@ -565,7 +594,7 @@ pub const TlsSocket = struct {
         while (index < data.len) {
             const n = self.write(data[index..]) catch |err| switch (err) {
                 error.WouldBlock => {
-                    // Wait briefly for socket to become writable.
+                    self.write_block_count +%= 1;
                     var pfd = [_]std.posix.pollfd{.{
                         .fd = self.tcp_fd,
                         .events = std.posix.POLL.OUT,
