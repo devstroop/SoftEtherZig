@@ -41,6 +41,16 @@ const Cmsghdr = extern struct {
 };
 
 pub fn main() !void {
+    // SEA-50 fast-path fix: when invoked as a setuid-root binary directly
+    // (no osascript wrapper), our real UID is the invoking user even though
+    // EUID is 0. Spawning child processes (/sbin/ifconfig) inherits the
+    // RUID, which causes "ifconfig: up: permission denied". Promote RUID
+    // to 0 so children inherit full root privileges.
+    //
+    // When invoked via osascript-with-admin (slow path / first install),
+    // both UIDs are already 0, so this is a no-op.
+    _ = std.c.setuid(0);
+
     const args = try std.process.argsAlloc(std.heap.page_allocator);
     defer std.process.argsFree(std.heap.page_allocator, args);
 

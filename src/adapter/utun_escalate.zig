@@ -41,17 +41,66 @@ pub const EscalatedUtun = struct {
 /// Set after successful escalation; used by runPrivilegedCommand().
 pub var privileged_cmd_fd: posix.fd_t = -1;
 
+/// Stable system-wide install path for the privileged helper.
+/// LIBSE-96: Once installed setuid-root here, subsequent connects spawn the
+/// helper directly with no password prompt. The bundled helper inside the
+/// .app is copied here on first run (one-time prompt only).
+const INSTALLED_HELPER_PATH: [:0]const u8 = "/usr/local/libexec/softether-utun-helper";
+
+/// Returns true if INSTALLED_HELPER_PATH exists, is owned by root, and has
+/// the setuid bit set — meaning we can exec it directly with no osascript.
+///
+/// SEA-50 cycle-9 fix: previous version compared mtime(bundled) > mtime(installed)
+/// to detect upgrades, but every Flutter rebuild gives the bundled helper a
+/// fresh mtime, so the check ALWAYS triggered reinstall → sudo prompt every
+/// connect. Now we compare file SIZE instead. If the bundled helper changes
+/// size (real upgrade), reinstall. Otherwise trust the installed copy. This
+/// is conservative: an update with the same byte count won't be detected,
+/// but in practice helper updates change the binary size enough to trigger.
+fn installedHelperReady(bundled_helper: ?[]const u8) bool {
+    var st: std.c.Stat = undefined;
+    if (std.c.stat(INSTALLED_HELPER_PATH.ptr, &st) != 0) return false;
+    // Must be owned by root (uid 0) and have setuid bit (S_ISUID = 0o4000).
+    if (st.uid != 0) return false;
+    if ((st.mode & 0o4000) == 0) return false;
+    // Compare by size to detect real upgrades without false positives from
+    // mtime churn during dev rebuilds.
+    if (bundled_helper) |bp| {
+        var bst: std.c.Stat = undefined;
+        var path_buf: [1024]u8 = undefined;
+        if (bp.len >= path_buf.len) return true;
+        @memcpy(path_buf[0..bp.len], bp);
+        path_buf[bp.len] = 0;
+        if (std.c.stat(@ptrCast(&path_buf), &bst) == 0) {
+            if (bst.size != st.size) return false;
+        }
+    }
+    return true;
+}
+
 /// Attempt to create a utun device via privilege escalation.
-/// Shows the macOS admin password dialog, then creates the utun as root.
+///
+/// LIBSE-96 fast-path: if the setuid helper is already installed at
+/// /usr/local/libexec/softether-utun-helper (from a previous connect), we
+/// spawn it directly — no osascript, no password prompt, ~instant.
+/// Otherwise we run a single-shot install script via osascript that copies
+/// the bundled helper into place setuid-root and execs it. After that, all
+/// future connects take the fast path.
 pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!EscalatedUtun {
     if (builtin.os.tag != .macos) return EscalationError.HelperNotFound;
 
-    // Find the helper binary (next to the dylib or in the app bundle)
+    // Find the bundled helper binary (next to the dylib or in the app bundle).
+    // Used both as the source for one-time install and as a runtime fallback.
     var helper_path_buf: [1024]u8 = undefined;
-    const helper_path = findHelperPath(&helper_path_buf) orelse {
+    const bundled_helper = findHelperPath(&helper_path_buf);
+
+    const installed_ready = installedHelperReady(bundled_helper);
+    if (!installed_ready and bundled_helper == null) {
         std.log.err("utun_escalate: helper binary not found", .{});
         return EscalationError.HelperNotFound;
-    };
+    }
+    // Path we'll actually exec. Prefer the installed setuid copy.
+    const helper_path: []const u8 = if (installed_ready) INSTALLED_HELPER_PATH[0..] else bundled_helper.?;
 
     // Create a temporary Unix domain socket
     var sock_path_buf: [108]u8 = undefined;
@@ -86,12 +135,33 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
         return EscalationError.ListenFailed;
     };
 
-    // Build osascript command to launch helper with admin privileges
-    var cmd_buf: [2048]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "osascript -e 'do shell script \"{s} {s}\" with administrator privileges' 2>&1", .{ helper_path, sock_path }) catch return EscalationError.PathTooLong;
+    // Build the command we'll run.
+    //
+    // Fast path (installed_ready=true): the helper at INSTALLED_HELPER_PATH
+    // is already setuid root, so we exec it directly with NO password prompt.
+    //
+    // Slow path (first run / app updated): wrap the helper invocation in a
+    // single-shot install script and run it via osascript with admin
+    // privileges. The install script is idempotent and atomic; afterward the
+    // setuid binary at INSTALLED_HELPER_PATH lives forever and all future
+    // connects take the fast path.
+    var cmd_buf: [4096]u8 = undefined;
+    const cmd = if (installed_ready) blk: {
+        std.log.info("utun_escalate: using installed setuid helper at {s} (no prompt)", .{helper_path});
+        break :blk std.fmt.bufPrint(&cmd_buf, "{s} {s}", .{ helper_path, sock_path }) catch return EscalationError.PathTooLong;
+    } else blk: {
+        std.log.info("utun_escalate: installing privileged helper to {s} (one-time admin prompt)", .{INSTALLED_HELPER_PATH});
+        // mkdir → cp → chown root:wheel → chmod 4755 → exec
+        // All quoted carefully because osascript wraps the whole thing in
+        // double quotes when handed to /bin/sh.
+        break :blk std.fmt.bufPrint(
+            &cmd_buf,
+            "osascript -e 'do shell script \"mkdir -p /usr/local/libexec && cp -f \\\"{s}\\\" \\\"{s}\\\" && chown root:wheel \\\"{s}\\\" && chmod 4755 \\\"{s}\\\" && exec \\\"{s}\\\" \\\"{s}\\\"\" with administrator privileges' 2>&1",
+            .{ bundled_helper.?, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH, sock_path },
+        ) catch return EscalationError.PathTooLong;
+    };
 
-    // Launch helper via osascript (shows admin dialog)
-    std.log.info("utun_escalate: requesting admin privileges for utun creation...", .{});
+    // Launch helper (fast path: direct setuid exec; slow path: osascript admin dialog)
     var child = std.process.Child.init(
         &[_][]const u8{ "sh", "-c", cmd },
         allocator,
@@ -100,11 +170,13 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
         return EscalationError.HelperLaunchFailed;
     };
 
-    // Accept connection from the helper (with timeout via poll)
+    // Accept connection from the helper. Fast path is near-instant (~50ms);
+    // slow path needs up to 60s for user to type the admin password.
+    const accept_timeout_ms: i32 = if (installed_ready) 5_000 else 60_000;
     var poll_fds = [1]std.posix.pollfd{
         .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
     };
-    const poll_result = std.posix.poll(&poll_fds, 60000) catch { // 60s timeout for user to enter password
+    const poll_result = std.posix.poll(&poll_fds, accept_timeout_ms) catch {
         _ = child.wait() catch {};
         return EscalationError.AcceptFailed;
     };
