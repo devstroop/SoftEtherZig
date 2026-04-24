@@ -157,7 +157,7 @@ pub const ClientConfig = struct {
     use_compression: bool = false,
     use_encryption: bool = true,
     udp_acceleration: bool = false,
-    half_connection: bool = true,
+    half_connection: bool = false,
     qos: bool = true,
     mtu: u16 = 1450,
 
@@ -1418,7 +1418,12 @@ pub const VpnClient = struct {
                 struct {
                     fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
                         const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                        return s.write(data);
+                        // Use writeAllNonBlocking so that even with the data
+                        // socket switched to non-blocking mode, sendBlocks
+                        // sees an atomic "all bytes written" return. WANT_WRITE
+                        // is handled internally via a short poll(POLLOUT).
+                        try s.writeAllNonBlocking(data);
+                        return data.len;
                     }
                 }.write,
             );
@@ -1557,6 +1562,26 @@ pub const VpnClient = struct {
             _ = winmm.timeEndPeriod(1);
         };
 
+        // Switch all data-plane TLS sockets to non-blocking mode now that
+        // the handshake/auth/RPC phases are complete. This is the core of
+        // Option A: SSL_read no longer blocks on mid-record stalls (~RTT
+        // freezes) — instead it returns error.WouldBlock which the
+        // tunnel state machine handles by stashing partial-read state and
+        // letting the poll loop come back around. Sends use
+        // writeAllNonBlocking which polls(POLLOUT) on WANT_WRITE.
+        if (single_sock) |ss| {
+            ss.setNonBlocking() catch |e| std.log.warn("setNonBlocking (single) failed: {}", .{e});
+        }
+        if (self.conn_manager) |*cm| {
+            var ci: usize = 0;
+            while (ci < cm.connections.len) : (ci += 1) {
+                if (cm.connections[ci]) |*conn| {
+                    conn.tls_socket.setNonBlocking() catch |e|
+                        std.log.warn("setNonBlocking (conn {d}) failed: {}", .{ ci, e });
+                }
+            }
+        }
+
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             // Build poll fd array
             tls_fd_count = 0;
@@ -1607,26 +1632,53 @@ pub const VpnClient = struct {
 
             // INBOUND: Receive packets from VPN server (highest priority)
             if (self.conn_manager) |*cm| {
-                // Multi-connection: iterate all readable connections
+                // Multi-connection: iterate all recv-capable connections.
+                // For each readable connection, drain up to MAX_INBOUND_DRAIN
+                // batches while OpenSSL has buffered data — identical to the
+                // single-conn drain loop. Without this, DL is capped at ~1
+                // batch per poll iteration per connection (~7 Mbps).
+                const MAX_INBOUND_DRAIN: u32 = 64;
+                var any_conn_had_data = false;
                 var iter = cm.forEachReadable(poll_fds[0..tls_fd_count]);
                 while (iter.next()) |conn| {
-                    const recv_count = conn.tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
-                        if (self.should_stop) break;
-                        // Treat dead TLS the same as a clean close — mark conn dead so
-                        // cleanupDead() can remove it. Without this, BrokenPipe causes
-                        // an infinite `continue` loop with the same dead fd in poll.
-                        if (err == error.ConnectionClosed or err == error.BrokenPipe) {
-                            conn.established = false;
-                            std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
-                            continue;
-                        }
-                        continue;
-                    };
+                    var drain_iter: u32 = 0;
+                    while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
+                        const recv_count = conn.tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
+                            if (self.should_stop) break;
+                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
+                                conn.established = false;
+                                std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
+                                break;
+                            }
+                            break;
+                        };
 
-                    for (recv_slices[0..recv_count]) |block_data| {
-                        self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                        if (recv_count > 0) {
+                            any_conn_had_data = true;
+                            for (recv_slices[0..recv_count]) |block_data| {
+                                diag.bytes_in += block_data.len;
+                                diag.pkts_in += 1;
+                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                            }
+                        }
+
+                        // Stop draining when SSL has no more buffered data.
+                        // Continuing would block on readU32() for up to RTT.
+                        if (!conn.tls_socket.hasPending()) break;
                     }
+                    // DIAG: drain stats per connection (sum across conns this iter)
+                    diag.drain_total += drain_iter;
+                    if (drain_iter > diag.drain_max) diag.drain_max = drain_iter;
+                    if (drain_iter == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
+                    // SSL pending / kernel queue stats for this conn
+                    const pend = conn.tls_socket.pendingBytes();
+                    if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                    const nrd = conn.tls_socket.kernelRecvQueue();
+                    if (nrd > diag.nread_max) diag.nread_max = nrd;
+                    const nwr = conn.tls_socket.kernelSendQueue();
+                    if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
                 }
+                if (any_conn_had_data) last_iter_had_work = true;
 
                 // Cleanup dead connections
                 if (cm.cleanupDead()) {
@@ -1921,7 +1973,14 @@ pub const VpnClient = struct {
             // last byte total and compare to current.
             // (Implementation: we set last_iter_had_work based on whether tun_readable
             //  fired this iteration, since it's in scope here.)
-            last_iter_had_work = tun_readable;
+            // BUG FIX (multi-conn DL collapse): this used to be `= tun_readable`,
+            // which OVERWROTE the value set by the inbound section (e.g. when
+            // any_conn_had_data was true). With heavy DL but no UL TUN data,
+            // tun_readable=false would force the loop to sleep 10ms even though
+            // server was streaming data. Result: kernel rcvbuf filled up, TCP
+            // RWND collapsed to 0, DL throughput dropped from 67→3 Mbps.
+            // Use OR so any work source keeps us hot.
+            last_iter_had_work = tun_readable or last_iter_had_work;
             if (now - diag_last_ms >= 1000) {
                 if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
                     const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;

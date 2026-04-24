@@ -129,11 +129,21 @@ pub const ConnectionManager = struct {
                     struct {
                         fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
                             const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                            return s.write(data);
+                            // Atomic-from-caller's-view write on a non-blocking
+                            // socket: WANT_WRITE is handled by a short
+                            // poll(POLLOUT) inside writeAllNonBlocking.
+                            try s.writeAllNonBlocking(data);
+                            return data.len;
                         }
                     }.write,
                 );
                 conn_ptr.tunnel.use_compression = self.use_compression;
+
+                // Switch socket to non-blocking now that the TLS handshake
+                // and any per-connection RPC has completed. The tunnel state
+                // machine handles error.WouldBlock from the read adapter.
+                conn_ptr.tls_socket.setNonBlocking() catch |e|
+                    std.log.warn("setNonBlocking failed for conn {d}: {}", .{ i, e });
 
                 self.count += 1;
                 std.log.info("Added connection {d} (direction={s}, primary={}, total={d})", .{
@@ -237,11 +247,19 @@ pub const ConnectionManager = struct {
                 self.current += 1;
 
                 if (idx >= self.poll_fds.len) break;
-                if ((self.poll_fds[idx].revents & std.posix.POLL.IN) == 0) continue;
 
                 const conn_idx = self.manager.poll_conn_map[idx];
                 if (self.manager.connections[conn_idx]) |*conn| {
-                    if (conn.established) return conn;
+                    if (!conn.established) continue;
+                    // Check both kernel readability (poll POLLIN) AND OpenSSL
+                    // internal buffer (hasPending). SSL may have decrypted
+                    // application data that poll() can't see — without this
+                    // check, buffered packets are missed until the next kernel
+                    // event, throttling DL to ~1 batch per poll cycle.
+                    const poll_ready = (self.poll_fds[idx].revents & std.posix.POLL.IN) != 0;
+                    const ssl_pending = conn.tls_socket.hasPending();
+                    if (!poll_ready and !ssl_pending) continue;
+                    return conn;
                 }
             }
             return null;

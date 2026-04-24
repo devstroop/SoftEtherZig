@@ -392,11 +392,21 @@ pub const TlsSocket = struct {
         self.allocator.free(self.hostname_buf);
     }
 
-    /// Read data from the TLS connection
+    /// Read data from the TLS connection.
+    ///
+    /// Semantics:
+    ///   N > 0          : received N bytes
+    ///   0              : peer closed gracefully (TLS close_notify)
+    ///   error.WouldBlock : non-blocking socket has no data right now (caller retry)
+    ///   error.BrokenPipe : hard TLS / TCP error; connection lost
+    ///
+    /// On a blocking socket, WouldBlock should not occur. After calling
+    /// setNonBlocking() (data plane), callers MUST handle WouldBlock as a
+    /// normal "no data yet" signal, not an error.
     pub fn read(self: *TlsSocket, buffer: []u8) !usize {
-        if (!self.connected) return 0;
+        if (!self.connected) return error.BrokenPipe;
 
-        const ssl = self.ssl orelse return 0;
+        const ssl = self.ssl orelse return error.BrokenPipe;
         const ret = c.SSL_read(ssl, buffer.ptr, @intCast(buffer.len));
 
         if (ret <= 0) {
@@ -407,12 +417,12 @@ pub const TlsSocket = struct {
                     return 0;
                 },
                 c.SSL_ERROR_WANT_READ, c.SSL_ERROR_WANT_WRITE => {
-                    // Non-blocking, retry later
-                    return 0;
+                    // Non-blocking socket: nothing available right now.
+                    return error.WouldBlock;
                 },
                 else => {
                     self.connected = false;
-                    return 0;
+                    return error.BrokenPipe;
                 },
             }
         }
@@ -480,7 +490,13 @@ pub const TlsSocket = struct {
         return @intCast(n);
     }
 
-    /// Write data to the TLS connection
+    /// Write data to the TLS connection.
+    ///
+    /// Semantics:
+    ///   N > 0          : wrote N bytes
+    ///   0              : caller-supplied empty buffer
+    ///   error.WouldBlock : non-blocking socket cannot accept data right now
+    ///   error.BrokenPipe : hard TLS / TCP error; connection lost
     pub fn write(self: *TlsSocket, data: []const u8) !usize {
         if (!self.connected) return error.BrokenPipe;
 
@@ -491,7 +507,7 @@ pub const TlsSocket = struct {
             const err = c.SSL_get_error(ssl, ret);
             switch (err) {
                 c.SSL_ERROR_WANT_READ, c.SSL_ERROR_WANT_WRITE => {
-                    return 0; // Let caller retry
+                    return error.WouldBlock;
                 },
                 else => {
                     self.connected = false;
@@ -534,6 +550,53 @@ pub const TlsSocket = struct {
         }
 
         return @intCast(ret);
+    }
+
+    /// Write all data, polling for socket writability when the kernel
+    /// send buffer is full. Safe on a non-blocking socket: WouldBlock from
+    /// SSL_write triggers a short poll(POLLOUT) wait and retry with the
+    /// SAME data pointer (required by OpenSSL non-blocking write semantics).
+    ///
+    /// Used by the data-plane writer adapter so the per-packet sendBlocks
+    /// path remains effectively atomic from the caller's perspective even
+    /// after the socket is switched to non-blocking mode.
+    pub fn writeAllNonBlocking(self: *TlsSocket, data: []const u8) !void {
+        var index: usize = 0;
+        while (index < data.len) {
+            const n = self.write(data[index..]) catch |err| switch (err) {
+                error.WouldBlock => {
+                    // Wait briefly for socket to become writable.
+                    var pfd = [_]std.posix.pollfd{.{
+                        .fd = self.tcp_fd,
+                        .events = std.posix.POLL.OUT,
+                        .revents = 0,
+                    }};
+                    _ = std.posix.poll(&pfd, 50) catch {};
+                    continue;
+                },
+                else => return err,
+            };
+            if (n == 0) return error.BrokenPipe;
+            index += n;
+        }
+    }
+
+    /// Switch the underlying TCP socket to non-blocking mode.
+    /// Call this AFTER the TLS handshake has completed and BEFORE entering
+    /// the data-plane poll loop. Once non-blocking:
+    ///   - read()  returns error.WouldBlock when no data is available
+    ///   - write() returns error.WouldBlock when kernel sndbuf is full
+    /// Use writeAllNonBlocking() for sends that must complete atomically.
+    pub fn setNonBlocking(self: *TlsSocket) !void {
+        if (builtin.os.tag == .windows) {
+            const ws2 = std.os.windows.ws2_32;
+            var nonblocking: c_ulong = 1;
+            _ = ws2.ioctlsocket(self.tcp_fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking);
+        } else {
+            const O_NONBLOCK: usize = 0x0004;
+            const flags = try std.posix.fcntl(self.tcp_fd, std.posix.F.GETFL, 0);
+            _ = try std.posix.fcntl(self.tcp_fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+        }
     }
 
     /// Write all data (blocking until complete)

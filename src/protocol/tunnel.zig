@@ -52,15 +52,28 @@ pub const TunnelConnection = struct {
     // Compression
     use_compression: bool = false,
 
-    // Receive state machine
+    // Receive state machine (resumable across read_fn returning error.WouldBlock)
     recv_state: RecvState = .read_num_blocks,
     num_blocks: u32 = 0,
     current_block: u32 = 0,
     block_size: u32 = 0,
 
-    // Partial read buffer
+    // Partial read buffer (for u32 fields)
     partial_buf: [4]u8 = undefined,
     partial_len: usize = 0,
+
+    // Per-call output progress (carried across receiveBlocksBatch resumes)
+    rx_block_count: usize = 0,
+    rx_scratch_offset: usize = 0,
+
+    // Per-block partial body buffer (for resumable readExact of one block's data)
+    rx_block_buf: [MAX_PACKET_SIZE * 2]u8 = undefined,
+    rx_block_have: u32 = 0,
+
+    // Per-keepalive partial data
+    rx_ka_size: u32 = 0,
+    rx_ka_have: u32 = 0,
+    rx_ka_buf: [MAX_KEEPALIVE_SIZE]u8 = undefined,
 
     // Stats
     total_recv: u64 = 0,
@@ -90,30 +103,55 @@ pub const TunnelConnection = struct {
         };
     }
 
-    /// Read a single u32 (big-endian) from the connection
-    fn readU32(self: *TunnelConnection) !u32 {
-        // First use any partial data
+    /// Try to read a u32 (big-endian). Returns null if read_fn returned
+    /// error.WouldBlock partway through; partial bytes are stashed in
+    /// partial_buf for the next call to resume.
+    fn tryReadU32(self: *TunnelConnection) !?u32 {
         while (self.partial_len < 4) {
-            const n = try self.read_fn(self.context, self.partial_buf[self.partial_len..]);
+            const n = self.read_fn(self.context, self.partial_buf[self.partial_len..]) catch |err| switch (err) {
+                error.WouldBlock => return null,
+                else => return err,
+            };
             if (n == 0) return error.ConnectionClosed;
             self.partial_len += n;
         }
-
         const value = mem.readInt(u32, &self.partial_buf, .big);
         self.partial_len = 0;
         self.total_recv += 4;
         return value;
     }
 
-    /// Read exact number of bytes
-    fn readExact(self: *TunnelConnection, buf: []u8) !void {
-        var offset: usize = 0;
-        while (offset < buf.len) {
-            const n = try self.read_fn(self.context, buf[offset..]);
+    /// Try to fill `buf[have.*..]`. Returns true if buf is fully read,
+    /// false if read_fn returned error.WouldBlock; `have.*` is updated to
+    /// reflect what was read so far so the next call resumes.
+    fn tryReadInto(self: *TunnelConnection, buf: []u8, have: *u32) !bool {
+        while (have.* < buf.len) {
+            const n = self.read_fn(self.context, buf[have.*..]) catch |err| switch (err) {
+                error.WouldBlock => return false,
+                else => return err,
+            };
             if (n == 0) return error.ConnectionClosed;
-            offset += n;
+            have.* += @intCast(n);
         }
         self.total_recv += buf.len;
+        return true;
+    }
+
+    /// Read a single u32 (big-endian) from the connection.
+    /// LEGACY: spin-loops on WouldBlock (only used by legacy receiveBlocks).
+    fn readU32(self: *TunnelConnection) !u32 {
+        while (true) {
+            if (try self.tryReadU32()) |v| return v;
+        }
+    }
+
+    /// Read exact number of bytes.
+    /// LEGACY: spin-loops on WouldBlock (only used by legacy receiveBlocks).
+    fn readExact(self: *TunnelConnection, buf: []u8) !void {
+        var have: u32 = 0;
+        while (true) {
+            if (try self.tryReadInto(buf, &have)) return;
+        }
     }
 
     /// Receive blocks from the tunnel
@@ -177,86 +215,142 @@ pub const TunnelConnection = struct {
         }
     }
 
-    /// Receive a single batch of blocks into provided buffer
-    /// Returns number of blocks received, fills out_data with slices
+    /// Receive a single batch of blocks into provided buffer.
+    /// Returns number of blocks received, fills out_data with slices into
+    /// scratch_buffer.
+    ///
+    /// Resumable: if the underlying read_fn returns error.WouldBlock partway
+    /// through a message, this returns error.WouldBlock and stashes parsing
+    /// state inside `self`. The next call resumes from exactly where it left
+    /// off; the caller must pass the SAME scratch_buffer between resumes if
+    /// it intends to consume blocks across iterations (note: in practice the
+    /// data pump consumes the returned blocks immediately and then moves on,
+    /// so this is a single-shot completion model — partial state is reset
+    /// only when a full message is fully consumed).
+    ///
+    /// Callers should treat error.WouldBlock as a normal "no full message
+    /// yet" signal, NOT as a fatal error.
     pub fn receiveBlocksBatch(
         self: *TunnelConnection,
         out_data: [][]u8,
         scratch_buffer: []u8,
     ) !usize {
-        // Read number of blocks
-        const num_blocks = try self.readU32();
+        // Drive the state machine until a full message is parsed (return
+        // count) or the underlying socket would block (return WouldBlock).
+        while (true) {
+            switch (self.recv_state) {
+                .read_num_blocks => {
+                    const n = (try self.tryReadU32()) orelse return error.WouldBlock;
+                    if (n == KEEP_ALIVE_MAGIC) {
+                        self.recv_state = .read_keepalive_size;
+                        continue;
+                    }
+                    if (n > MAX_RECV_BLOCKS or n > out_data.len) {
+                        std.log.warn("TooManyBlocks: num_blocks={d}, max={d}, out_data.len={d}", .{ n, MAX_RECV_BLOCKS, out_data.len });
+                        // Reset state — drop this message
+                        self.recv_state = .read_num_blocks;
+                        return error.TooManyBlocks;
+                    }
+                    self.num_blocks = n;
+                    self.current_block = 0;
+                    self.rx_block_count = 0;
+                    self.rx_scratch_offset = 0;
+                    if (n == 0) {
+                        // Empty message; nothing to do
+                        self.recv_state = .read_num_blocks;
+                        return 0;
+                    }
+                    self.recv_state = .read_block_size;
+                },
 
-        // Handle keep-alive packet (0xFFFFFFFF followed by size and random data)
-        // This is sent by the server periodically to keep the connection alive
-        if (num_blocks == KEEP_ALIVE_MAGIC) {
-            const ka_size = try self.readU32();
-            if (ka_size > MAX_KEEPALIVE_SIZE) return error.InvalidPacket;
-            var discard_buf: [MAX_KEEPALIVE_SIZE]u8 = undefined;
-            try self.readExact(discard_buf[0..ka_size]);
-            self.keepalives_recv += 1;
-            std.log.debug("Received keep-alive (size={d})", .{ka_size});
-            return 0;
-        }
+                .read_block_size => {
+                    if (self.current_block >= self.num_blocks) {
+                        // Message complete
+                        const cnt = self.rx_block_count;
+                        self.recv_state = .read_num_blocks;
+                        if (cnt > 0) {
+                            std.log.scoped(.packet_trace).debug("Received {d} blocks ({d} bytes)", .{ cnt, self.rx_scratch_offset });
+                        }
+                        return cnt;
+                    }
+                    const bs = (try self.tryReadU32()) orelse return error.WouldBlock;
+                    if (bs == 0) {
+                        self.current_block += 1;
+                        continue;
+                    }
+                    if (bs > MAX_PACKET_SIZE * 2) {
+                        std.log.warn("PacketTooLarge: block_size={d}", .{bs});
+                        // Reset state — connection is now desynced; caller should disconnect
+                        self.recv_state = .read_num_blocks;
+                        return error.PacketTooLarge;
+                    }
+                    self.block_size = bs;
+                    self.rx_block_have = 0;
+                    self.recv_state = .read_block_data;
+                },
 
-        if (num_blocks > MAX_RECV_BLOCKS or num_blocks > out_data.len) {
-            std.log.warn("TooManyBlocks: num_blocks={d}, max={d}, out_data.len={d}", .{ num_blocks, MAX_RECV_BLOCKS, out_data.len });
-            return error.TooManyBlocks;
-        }
+                .read_block_data => {
+                    const done = try self.tryReadInto(self.rx_block_buf[0..self.block_size], &self.rx_block_have);
+                    if (!done) return error.WouldBlock;
 
-        var scratch_offset: usize = 0;
-        var block_count: usize = 0;
+                    // Block body fully read; place into scratch.
+                    if (self.use_compression) {
+                        const remaining = scratch_buffer[self.rx_scratch_offset..];
+                        const decompressed = self.decompressBlock(
+                            self.rx_block_buf[0..self.block_size],
+                            remaining,
+                        ) catch {
+                            // Decompression failed — skip this block, continue parsing
+                            self.current_block += 1;
+                            self.recv_state = .read_block_size;
+                            continue;
+                        };
+                        out_data[self.rx_block_count] = decompressed;
+                        self.rx_scratch_offset += decompressed.len;
+                    } else {
+                        if (self.rx_scratch_offset + self.block_size > scratch_buffer.len) {
+                            std.log.warn("BufferTooSmall: need {d}, have {d}", .{ self.rx_scratch_offset + self.block_size, scratch_buffer.len });
+                            self.recv_state = .read_num_blocks;
+                            return error.BufferTooSmall;
+                        }
+                        @memcpy(
+                            scratch_buffer[self.rx_scratch_offset..][0..self.block_size],
+                            self.rx_block_buf[0..self.block_size],
+                        );
+                        out_data[self.rx_block_count] = scratch_buffer[self.rx_scratch_offset..][0..self.block_size];
+                        self.rx_scratch_offset += self.block_size;
+                    }
+                    self.rx_block_count += 1;
+                    self.current_block += 1;
+                    self.recv_state = .read_block_size;
+                },
 
-        var i: u32 = 0;
-        while (i < num_blocks) : (i += 1) {
-            const block_size = try self.readU32();
+                .read_keepalive_size => {
+                    const ka = (try self.tryReadU32()) orelse return error.WouldBlock;
+                    if (ka > MAX_KEEPALIVE_SIZE) {
+                        self.recv_state = .read_num_blocks;
+                        return error.InvalidPacket;
+                    }
+                    self.rx_ka_size = ka;
+                    self.rx_ka_have = 0;
+                    if (ka == 0) {
+                        self.keepalives_recv += 1;
+                        self.recv_state = .read_num_blocks;
+                        return 0;
+                    }
+                    self.recv_state = .read_keepalive_data;
+                },
 
-            if (block_size == 0) continue;
-            if (block_size > MAX_PACKET_SIZE * 2) {
-                std.log.warn("PacketTooLarge: block_size={d}", .{block_size});
-                return error.PacketTooLarge;
+                .read_keepalive_data => {
+                    const done = try self.tryReadInto(self.rx_ka_buf[0..self.rx_ka_size], &self.rx_ka_have);
+                    if (!done) return error.WouldBlock;
+                    self.keepalives_recv += 1;
+                    std.log.debug("Received keep-alive (size={d})", .{self.rx_ka_size});
+                    self.recv_state = .read_num_blocks;
+                    return 0;
+                },
             }
-
-            if (self.use_compression) {
-                // Read compressed data into temp area at end of scratch buffer
-                const compressed_start = scratch_buffer.len - block_size;
-                if (compressed_start <= scratch_offset) {
-                    std.log.warn("BufferTooSmall for compressed block", .{});
-                    return error.BufferTooSmall;
-                }
-                try self.readExact(scratch_buffer[compressed_start..][0..block_size]);
-
-                // Decompress into scratch buffer at current offset
-                const remaining = scratch_buffer[scratch_offset..compressed_start];
-                const decompressed = self.decompressBlock(
-                    scratch_buffer[compressed_start..][0..block_size],
-                    remaining,
-                ) catch {
-                    continue;
-                };
-
-                out_data[block_count] = decompressed;
-                scratch_offset += decompressed.len;
-            } else {
-                // Uncompressed block — read directly
-                if (scratch_offset + block_size > scratch_buffer.len) {
-                    std.log.warn("BufferTooSmall: need {d}, have {d}", .{ scratch_offset + block_size, scratch_buffer.len });
-                    return error.BufferTooSmall;
-                }
-
-                try self.readExact(scratch_buffer[scratch_offset..][0..block_size]);
-                out_data[block_count] = scratch_buffer[scratch_offset..][0..block_size];
-                scratch_offset += block_size;
-            }
-            block_count += 1;
         }
-
-        if (block_count > 0) {
-            // Per-receive logging at trace level to reduce noise
-            std.log.scoped(.packet_trace).debug("Received {d} blocks ({d} bytes)", .{ block_count, scratch_offset });
-        }
-
-        return block_count;
     }
 
     /// Send blocks through the tunnel using pre-allocated buffer (zero-copy path)
