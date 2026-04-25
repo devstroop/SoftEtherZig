@@ -9,7 +9,54 @@
 //! Output: libsoftether.dylib (macOS), libsoftether.so (Linux), softether.dll (Windows)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+
+// ============================================================================
+// Android logging bridge (routes std.log -> __android_log_print)
+// ============================================================================
+
+const is_android_build = builtin.os.tag == .linux and
+    (builtin.abi == .android or builtin.abi == .androideabi);
+
+const android_log = if (is_android_build) struct {
+    extern "log" fn __android_log_write(prio: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
+    const PRIO_VERBOSE: c_int = 2;
+    const PRIO_DEBUG: c_int = 3;
+    const PRIO_INFO: c_int = 4;
+    const PRIO_WARN: c_int = 5;
+    const PRIO_ERROR: c_int = 6;
+} else struct {};
+
+fn androidLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime fmt: []const u8,
+    args: anytype,
+) void {
+    if (!is_android_build) {
+        std.log.defaultLog(level, scope, fmt, args);
+        return;
+    }
+    var buf: [2048]u8 = undefined;
+    const scope_prefix = if (scope == .default) "" else "[" ++ @tagName(scope) ++ "] ";
+    const text = std.fmt.bufPrintZ(&buf, scope_prefix ++ fmt, args) catch blk: {
+        // Truncate on overflow but still emit
+        buf[buf.len - 1] = 0;
+        break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
+    };
+    const prio: c_int = switch (level) {
+        .err => android_log.PRIO_ERROR,
+        .warn => android_log.PRIO_WARN,
+        .info => android_log.PRIO_INFO,
+        .debug => android_log.PRIO_DEBUG,
+    };
+    _ = android_log.__android_log_write(prio, "libsoftether", text.ptr);
+}
+
+pub const std_options: std.Options = .{
+    .logFn = androidLogFn,
+};
 
 // Import library modules
 const client_mod = @import("client/mod.zig");
@@ -418,6 +465,18 @@ export fn softether_set_qos(client: ?*VpnClient, enabled: bool) void {
 export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: i32) void {
     const c = client orelse return;
     c.config.tunnel_fd = fd;
+}
+
+/// Replace the active TUN fd at runtime (mobile only). Used after DHCP
+/// completes and the platform re-creates the VpnService tunnel with the
+/// server-assigned IP/mask. Returns 0 on success, -1 on error.
+export fn softether_replace_tun_fd(client: ?*VpnClient, fd: i32) c_int {
+    const c = client orelse return -1;
+    c.replaceTunFd(fd) catch |e| {
+        std.log.err("softether_replace_tun_fd failed: {}", .{e});
+        return -1;
+    };
+    return 0;
 }
 
 // ============================================================================

@@ -108,6 +108,11 @@ pub fn build(b: *std.Build) void {
                 step.addIncludePath(.{ .cwd_relative = and_inc });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
                 step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+                // NDK sysroot lib path for liblog, libdl, libm, libc...
+                if (std.posix.getenv("ANDROID_NDK_LIB_DIR")) |ndk_lib| {
+                    step.addLibraryPath(.{ .cwd_relative = ndk_lib });
+                }
+                step.linkSystemLibrary2("log", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             } else if (os == .macos) {
                 step.addLibraryPath(.{ .cwd_relative = mac_lib });
                 step.addIncludePath(.{ .cwd_relative = mac_inc });

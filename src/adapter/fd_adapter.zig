@@ -87,18 +87,33 @@ pub const FdAdapter = struct {
             .connection_start_time = std.time.milliTimestamp(),
         };
 
-        // Set non-blocking using C fcntl (cross-platform: works on macOS + iOS)
-        const F_GETFL = 3;
-        const F_SETFL = 4;
-        const O_NONBLOCK = 0x0004; // Darwin value
-        const flags = std.c.fcntl(fd, F_GETFL, @as(c_int, 0));
-        if (flags < 0) return FdAdapterError.OpenFailed;
-        if (std.c.fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-            return FdAdapterError.OpenFailed;
-        }
+        // Set non-blocking using C fcntl. O_NONBLOCK value differs per OS:
+        // Darwin/iOS: 0x0004, Linux/Android: 0x0800
+        if (setNonBlocking(fd) < 0) return FdAdapterError.OpenFailed;
 
         std.log.info("FdAdapter wrapping fd={d} name={s}", .{ fd, name });
         return device;
+    }
+
+    fn setNonBlocking(fd: posix.fd_t) c_int {
+        const F_GETFL = 3;
+        const F_SETFL = 4;
+        const O_NONBLOCK: c_int = if (builtin.os.tag == .linux) 0x0800 else 0x0004;
+        const flags = std.c.fcntl(fd, F_GETFL, @as(c_int, 0));
+        if (flags < 0) return -1;
+        if (std.c.fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+        return 0;
+    }
+
+    /// Replace the wrapped fd with a new one (e.g. after Android VpnService.Builder
+    /// reconfiguration with DHCP-assigned IP). Does NOT close the old fd — the
+    /// caller (platform) owns its lifecycle and will close the old PFD itself.
+    pub fn replaceFd(self: *FdAdapter, new_fd: posix.fd_t) FdAdapterError!void {
+        if (new_fd < 0) return FdAdapterError.InvalidFd;
+        if (setNonBlocking(new_fd) < 0) return FdAdapterError.OpenFailed;
+        const old_fd = self.fd;
+        @atomicStore(posix.fd_t, &self.fd, new_fd, .release);
+        std.log.info("FdAdapter swapped fd {d} -> {d}", .{ old_fd, new_fd });
     }
 
     /// Close the adapter. Does NOT close the fd (owned by the platform).

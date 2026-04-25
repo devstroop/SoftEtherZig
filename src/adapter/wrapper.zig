@@ -125,6 +125,13 @@ pub const AdapterWrapper = struct {
     /// Configure full-tunnel routing (all traffic through VPN)
     pub fn configureFullTunnel(self: *Self, gateway: u32, server_ip: u32) void {
         self.gateway_ip = gateway;
+        // On Android the VpnService.Builder owns the routing table and the
+        // app sandbox blocks netlink writes via SELinux; skip our own routing.
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
+            std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
+            return;
+        }
         if (self.real_adapter) |*adapter| {
             adapter.configureFullTunnel(gateway, server_ip) catch |err| {
                 std.log.err("Failed to configure full-tunnel routing: {}", .{err});
@@ -146,6 +153,15 @@ pub const AdapterWrapper = struct {
             return adapter.read(buffer);
         }
         return null;
+    }
+
+    /// Replace the wrapped TUN fd (mobile only — after DHCP reconfiguration)
+    pub fn replaceFd(self: *Self, new_fd: i32) !void {
+        if (self.real_adapter) |*adapter| {
+            try adapter.replaceFd(new_fd);
+        } else {
+            return error.DeviceNotOpen;
+        }
     }
 
     /// Write a packet to the adapter (TUN device)

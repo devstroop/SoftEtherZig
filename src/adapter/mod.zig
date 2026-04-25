@@ -4,6 +4,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Android is detected as linux+android ABI; it uses an OS-provided fd from VpnService
+// rather than opening /dev/net/tun directly (which is not permitted to apps).
+const is_android = builtin.os.tag == .linux and (builtin.abi == .android or builtin.abi == .androideabi);
+
 // Re-export submodules
 pub const utun = @import("utun.zig");
 pub const tun_linux = @import("tun_linux.zig");
@@ -29,7 +33,7 @@ pub const FdAdapterError = fd_adapter.FdAdapterError;
 
 // Common types (re-exported from platform-specific modules)
 pub const TunPacket = utun.TunPacket;
-pub const TunStats = if (builtin.os.tag == .linux) tun_linux.TunStats else if (builtin.os.tag == .windows) tap_windows.TunStats else utun.TunStats;
+pub const TunStats = if (is_android) fd_adapter.TunStats else if (builtin.os.tag == .linux) tun_linux.TunStats else if (builtin.os.tag == .windows) tap_windows.TunStats else utun.TunStats;
 pub const DhcpState = utun.DhcpState;
 pub const Ipv4Config = utun.Ipv4Config;
 pub const Ipv6Config = utun.Ipv6Config;
@@ -37,7 +41,9 @@ pub const PacketQueue = utun.PacketQueue;
 
 // Platform-agnostic device type alias
 // iOS and Android use FdAdapter (OS-provided tunnel fd)
-pub const PlatformDevice = if (builtin.os.tag == .linux)
+pub const PlatformDevice = if (is_android)
+    FdAdapter
+else if (builtin.os.tag == .linux)
     TunLinuxDevice
 else if (builtin.os.tag == .windows)
     TapWindowsDevice
@@ -60,9 +66,9 @@ pub const DhcpOption = dhcp.DhcpOption;
 pub const DhcpConfig = dhcp.DhcpConfig;
 
 // Constants - use platform-appropriate values
-pub const TUN_MTU = if (builtin.os.tag == .linux) tun_linux.TUN_MTU else if (builtin.os.tag == .windows) tap_windows.TUN_MTU else utun.TUN_MTU;
-pub const MAX_PACKET_SIZE = if (builtin.os.tag == .linux) tun_linux.MAX_PACKET_SIZE else if (builtin.os.tag == .windows) tap_windows.MAX_PACKET_SIZE else utun.MAX_PACKET_SIZE;
-pub const RECV_QUEUE_MAX = if (builtin.os.tag == .linux) tun_linux.RECV_QUEUE_MAX else if (builtin.os.tag == .windows) tap_windows.RECV_QUEUE_MAX else utun.RECV_QUEUE_MAX;
+pub const TUN_MTU = if (is_android) fd_adapter.TUN_MTU else if (builtin.os.tag == .linux) tun_linux.TUN_MTU else if (builtin.os.tag == .windows) tap_windows.TUN_MTU else utun.TUN_MTU;
+pub const MAX_PACKET_SIZE = if (is_android) fd_adapter.MAX_PACKET_SIZE else if (builtin.os.tag == .linux) tun_linux.MAX_PACKET_SIZE else if (builtin.os.tag == .windows) tap_windows.MAX_PACKET_SIZE else utun.MAX_PACKET_SIZE;
+pub const RECV_QUEUE_MAX = if (is_android) fd_adapter.RECV_QUEUE_MAX else if (builtin.os.tag == .linux) tun_linux.RECV_QUEUE_MAX else if (builtin.os.tag == .windows) tap_windows.RECV_QUEUE_MAX else utun.RECV_QUEUE_MAX;
 
 // Packet building functions
 pub const buildGratuitousArp = utun.buildGratuitousArp;
@@ -140,7 +146,9 @@ pub const VirtualAdapter = struct {
     pub fn open(self: *VirtualAdapter) !void {
         if (self.device != null) return;
 
-        if (builtin.os.tag == .linux) {
+        if (is_android) {
+            return error.UnsupportedPlatform; // Android must use openWithFd()
+        } else if (builtin.os.tag == .linux) {
             self.device = TunLinuxDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open Linux TUN device: {}", .{err});
                 return err;
@@ -227,6 +235,14 @@ pub const VirtualAdapter = struct {
             return dev.getMac();
         }
         return null;
+    }
+
+    /// Replace the wrapped file descriptor (mobile only). Used after DHCP
+    /// completes and the platform has re-created the TUN with the assigned IP.
+    pub fn replaceFd(self: *VirtualAdapter, new_fd: i32) !void {
+        if (PlatformDevice != FdAdapter) return error.UnsupportedPlatform;
+        const dev = self.device orelse return error.DeviceNotOpen;
+        try dev.replaceFd(new_fd);
     }
 
     /// Read a packet from the adapter

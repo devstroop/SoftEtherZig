@@ -259,7 +259,7 @@ pub const VpnClient = struct {
             .readFn = struct {
                 fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
                     const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.read(buffer);
+                    return s.readBlocking(buffer);
                 }
             }.read,
         };
@@ -342,6 +342,17 @@ pub const VpnClient = struct {
 
     pub fn getStats(self: *const Self) ConnectionStats {
         return self.stats;
+    }
+
+    /// Replace the underlying TUN file descriptor at runtime. Used on Android
+    /// after DHCP completes and the platform re-creates the VpnService tunnel
+    /// with the assigned IP. The data loop refreshes the polled fd each iter.
+    pub fn replaceTunFd(self: *Self, new_fd: i32) !void {
+        if (self.adapter_ctx) |*ac| {
+            try ac.replaceFd(new_fd);
+        } else {
+            return error.AdapterNotOpen;
+        }
     }
 
     pub fn getAssignedIp(self: *const Self) u32 {
@@ -1568,8 +1579,10 @@ pub const VpnClient = struct {
         const udp_fd: std.posix.socket_t = if (self.udp_accel) |*ua| ua.getFd() orelse invalid_sock else invalid_sock;
         const has_udp = if (builtin.os.tag == .windows) (udp_fd != invalid_sock) else (udp_fd >= 0);
 
-        // tun_fd is fd_t (not a socket on Windows)
-        const poll_tun_sock: std.posix.socket_t = if (builtin.os.tag == .windows) @ptrCast(tun_fd) else tun_fd;
+        // tun_fd is fd_t (not a socket on Windows). NOTE: this is mutable
+        // because on Android we may swap the TUN fd at runtime after DHCP
+        // completes (see replaceTunFd). Refreshed at the top of every loop iter.
+        var poll_tun_sock: std.posix.socket_t = if (builtin.os.tag == .windows) @ptrCast(tun_fd) else tun_fd;
 
         // Dynamic poll_fds: up to 32 TLS connections + TUN + UDP = 34
         var poll_fds: [34]std.posix.pollfd = undefined;
@@ -1609,6 +1622,18 @@ pub const VpnClient = struct {
         }
 
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
+            // Refresh TUN fd each iter so a runtime fd swap (replaceTunFd) is
+            // picked up by poll(). On non-Windows the FdAdapter exposes the
+            // current fd via getFd(); we reuse the cached value otherwise.
+            if (builtin.os.tag != .windows) {
+                if (self.adapter_ctx) |*ac| {
+                    if (ac.real_adapter) |*ra| {
+                        if (ra.device) |dev| {
+                            poll_tun_sock = dev.getFd();
+                        }
+                    }
+                }
+            }
             // Latency tracking: capture wall-clock at the very start of every
             // iteration so we can detect single-iter spikes vs steady state.
             const iter_start_us = std.time.microTimestamp();

@@ -125,7 +125,8 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
         _ = ws2.ioctlsocket(fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking); // FIONBIO
     } else {
         // POSIX: use fcntl for non-blocking mode
-        const O_NONBLOCK: usize = 0x0004;
+        // O_NONBLOCK differs per OS: macOS/BSD = 0x0004, Linux/Android = 0x0800
+        const O_NONBLOCK: usize = if (builtin.os.tag == .linux) 0x0800 else 0x0004;
         const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
         _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
 
@@ -340,13 +341,44 @@ pub const TlsSocket = struct {
             return TlsError.TlsInitializationFailed;
         }
 
-        // Perform TLS handshake
-        const ret = c.SSL_connect(ssl);
-        if (ret != 1) {
+        // Perform TLS handshake with retry loop for WANT_READ/WANT_WRITE
+        // (defensive: blocking sockets can still return these in edge cases on Android)
+        const fd_for_poll: std.posix.socket_t = tcp_fd;
+        var attempts: u32 = 0;
+        const max_attempts: u32 = 100;
+        while (true) : (attempts += 1) {
+            if (attempts >= max_attempts) {
+                std.log.err("TLS handshake failed: exceeded max retries", .{});
+                return TlsError.HandshakeFailed;
+            }
+            const ret = c.SSL_connect(ssl);
+            if (ret == 1) break;
             const err = c.SSL_get_error(ssl, ret);
-            std.log.err("TLS handshake failed: SSL error {d}", .{err});
-            logOpenSslErrors();
-            return TlsError.HandshakeFailed;
+            switch (err) {
+                c.SSL_ERROR_WANT_READ => {
+                    var pfd = [1]std.posix.pollfd{.{ .fd = fd_for_poll, .events = std.posix.POLL.IN, .revents = 0 }};
+                    const pr = std.posix.poll(&pfd, 30000) catch 0;
+                    if (pr == 0) {
+                        std.log.err("TLS handshake failed: timeout waiting for read", .{});
+                        return TlsError.HandshakeFailed;
+                    }
+                    continue;
+                },
+                c.SSL_ERROR_WANT_WRITE => {
+                    var pfd = [1]std.posix.pollfd{.{ .fd = fd_for_poll, .events = std.posix.POLL.OUT, .revents = 0 }};
+                    const pr = std.posix.poll(&pfd, 30000) catch 0;
+                    if (pr == 0) {
+                        std.log.err("TLS handshake failed: timeout waiting for write", .{});
+                        return TlsError.HandshakeFailed;
+                    }
+                    continue;
+                },
+                else => {
+                    std.log.err("TLS handshake failed: SSL error {d} (ret={d}, errno={d})", .{ err, ret, std.c._errno().* });
+                    logOpenSslErrors();
+                    return TlsError.HandshakeFailed;
+                },
+            }
         }
 
         // Log connection info
@@ -428,6 +460,8 @@ pub const TlsSocket = struct {
                     return error.WouldBlock;
                 },
                 else => {
+                    std.log.err("TlsSocket.read: SSL_get_error={d} ret={d} errno={d}", .{ err, ret, std.c._errno().* });
+                    logOpenSslErrors();
                     self.connected = false;
                     return error.BrokenPipe;
                 },
@@ -435,6 +469,28 @@ pub const TlsSocket = struct {
         }
 
         return @intCast(ret);
+    }
+
+    /// Read with built-in poll-on-WouldBlock retry, for control-plane use
+    /// where the caller expects classical blocking semantics regardless of
+    /// the underlying socket mode. Returns 0 only on graceful TLS close.
+    pub fn readBlocking(self: *TlsSocket, buffer: []u8) !usize {
+        while (true) {
+            const n = self.read(buffer) catch |err| switch (err) {
+                error.WouldBlock => {
+                    var pfd = [_]std.posix.pollfd{.{
+                        .fd = self.tcp_fd,
+                        .events = std.posix.POLL.IN,
+                        .revents = 0,
+                    }};
+                    const pr = std.posix.poll(&pfd, 30000) catch 0;
+                    if (pr == 0) return error.BrokenPipe;
+                    continue;
+                },
+                else => return err,
+            };
+            return n;
+        }
     }
 
     /// Read exactly n bytes
