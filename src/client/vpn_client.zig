@@ -1848,17 +1848,22 @@ pub const VpnClient = struct {
             //
             // Skip the probe in multi-connection mode (each conn has its own
             // sndbuf and we'd need to probe all; deferred).
-            var tls_can_send: bool = true;
-            if (self.conn_manager == null and self.tls_socket != null) {
-                var probe_pfd = [_]std.posix.pollfd{.{
-                    .fd = self.tls_socket.?.getFd(),
-                    .events = std.posix.POLL.OUT,
-                    .revents = 0,
-                }};
-                _ = std.posix.poll(&probe_pfd, 0) catch {};
-                tls_can_send = (probe_pfd[0].revents & std.posix.POLL.OUT) != 0;
-            }
+            // CYCLE 11 (TURN 16c): Probe + drop logic REMOVED.
+            // Was: poll(POLLOUT, timeout=0) on tls socket; drop batch if !writable.
+            // Real-world result: 100% silent outbound drops (0 bytes sent in 2m41s).
+            // Root cause: poll(timeout=0) returns POLL.OUT only when an EDGE event
+            // happened, not when the socket is currently writable. So even with
+            // NOTSENT_LOWAT removed, the probe returned false on idle/normal sockets,
+            // and 100% of TCP outbound was dropped. Bufferbloat fix is provided by
+            // SO_SNDBUF=512KB cap in tls.zig::clearTimeouts().
+            const tls_can_send: bool = true;
 
+            // CYCLE 11 REVERT (TURN 16b): The previous "gate TUN read on tls_can_send"
+            // attempt killed throughput entirely (0 bytes sent). poll(POLLOUT,timeout=0)
+            // returns false too aggressively at high RTT with NOTSENT_LOWAT=16384, so
+            // we'd never drain TUN. NOTSENT_LOWAT is also being removed in tls.zig —
+            // the SO_SNDBUF=512KB cap alone bounds bufferbloat. Without NOTSENT_LOWAT,
+            // POLLOUT only goes false when kernel sndbuf actually fills, which is rare.
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {

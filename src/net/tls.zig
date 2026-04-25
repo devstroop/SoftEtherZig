@@ -231,30 +231,8 @@ pub const TlsSocket = struct {
             std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
         };
 
-        // BUFFERBLOAT FIX: TCP_NOTSENT_LOWAT (macOS opt 513, Linux opt 25).
-        // Kernel reports "writable" only when UNSENT bytes in sndbuf < lowat.
-        // Without this, our writeAllNonBlocking() never blocks — it keeps stuffing
-        // data into a 4MB SO_SNDBUF, which drains slowly over a 200ms-RTT VPN link.
-        // Measured: sendq peaked at 504 KB during UL bursts, adding ~330ms loaded
-        // latency. With lowat=16KB, kernel pushes back at ~16KB queue depth so
-        // SoftEther's flow control sees real backpressure and doesn't over-buffer.
-        // Throughput is unaffected because the kernel still pulls from us as fast
-        // as cwnd allows; we just stop pre-queuing megabytes ahead of the link.
-        if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
-            const TCP_NOTSENT_LOWAT_DARWIN: u32 = 513;
-            const lowat: u32 = 16 * 1024;
-            if (std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT_DARWIN, std.mem.asBytes(&lowat))) |_| {
-                std.log.info("TCP_NOTSENT_LOWAT set to {d} bytes (Darwin)", .{lowat});
-            } else |err| {
-                std.log.warn("TCP_NOTSENT_LOWAT (Darwin) failed: {}", .{err});
-            }
-        } else if (builtin.os.tag == .linux) {
-            const TCP_NOTSENT_LOWAT_LINUX: u32 = 25;
-            const lowat: u32 = 16 * 1024;
-            std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT_LINUX, std.mem.asBytes(&lowat)) catch |err| {
-                std.log.warn("TCP_NOTSENT_LOWAT (Linux) failed: {}", .{err});
-            };
-        }
+        // CYCLE 11 (TURN 16b): TCP_NOTSENT_LOWAT REMOVED — see clearTimeouts() comment.
+        // Bufferbloat is bounded by SO_SNDBUF=512KB cap (set in clearTimeouts post-handshake).
 
         // On Windows, disable delayed ACKs — default 200ms ACK delay adds latency
         if (builtin.os.tag == .windows) {
@@ -702,37 +680,14 @@ pub const TlsSocket = struct {
         const rcv_rc = std.c.getsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, @ptrCast(&rcv_got), &rcv_optlen);
         std.log.info("SO_SNDBUF requested={d} got={d} (rc={d}); SO_RCVBUF requested={d} got={d} (rc={d})", .{ snd_buf_size, snd_got, snd_rc, rcv_buf_size, rcv_got, rcv_rc });
 
-        // BUFFERBLOAT FIX (re-applied AFTER SNDBUF, post-handshake).
-        // Empirically: setting TCP_NOTSENT_LOWAT in createTcpSocket() before
-        // SO_SNDBUF was overridden silently — sendq peaked at 1.1 MB during
-        // VPN UL with pollout_skip=0 (kernel never reported sndbuf-full because
-        // notsent threshold was effectively the full 4MB SNDBUF). Re-apply here
-        // and verify with getsockopt so the kernel actually backpressures
-        // poll(POLLOUT) at ~16KB queued-but-unsent.
-        const IPPROTO_TCP_X: i32 = 6;
-        const lowat: u32 = 16 * 1024;
-        if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
-            const TCP_NOTSENT_LOWAT_DARWIN: u32 = 513;
-            if (std.posix.setsockopt(self.tcp_fd, IPPROTO_TCP_X, TCP_NOTSENT_LOWAT_DARWIN, std.mem.asBytes(&lowat))) |_| {
-                var got: u32 = 0;
-                var optlen: std.posix.socklen_t = @sizeOf(u32);
-                const rc = std.c.getsockopt(self.tcp_fd, IPPROTO_TCP_X, @intCast(TCP_NOTSENT_LOWAT_DARWIN), @ptrCast(&got), &optlen);
-                if (rc == 0) {
-                    std.log.info("TCP_NOTSENT_LOWAT post-handshake: requested={d} got={d} (Darwin)", .{ lowat, got });
-                } else {
-                    std.log.info("TCP_NOTSENT_LOWAT post-handshake: requested={d} (Darwin, getsockopt failed)", .{lowat});
-                }
-            } else |err| {
-                std.log.warn("TCP_NOTSENT_LOWAT post-handshake (Darwin) failed: {}", .{err});
-            }
-        } else if (builtin.os.tag == .linux) {
-            const TCP_NOTSENT_LOWAT_LINUX: u32 = 25;
-            if (std.posix.setsockopt(self.tcp_fd, IPPROTO_TCP_X, TCP_NOTSENT_LOWAT_LINUX, std.mem.asBytes(&lowat))) |_| {
-                std.log.info("TCP_NOTSENT_LOWAT post-handshake set to {d} (Linux)", .{lowat});
-            } else |err| {
-                std.log.warn("TCP_NOTSENT_LOWAT post-handshake (Linux) failed: {}", .{err});
-            }
-        }
+        // CYCLE 11 (TURN 16b): TCP_NOTSENT_LOWAT REMOVED.
+        // Earlier "fix" set it to 16KB to force poll(POLLOUT) to backpressure.
+        // But at our 180ms server RTT, BDP is ~2MB — keeping unsent < 16KB is
+        // physically impossible during normal upload, so POLLOUT was perpetually
+        // false → vpn_client's tls_can_send guard dropped 100% of outbound packets
+        // → user-visible "0 bytes sent" over multi-minute sessions.
+        // SO_SNDBUF=512KB cap above is sufficient to bound bufferbloat.
+        // POLLOUT reverts to standard semantics (false only when sndbuf actually full).
 
         // Enable TCP keepalive
         const keepalive: u32 = 1;
