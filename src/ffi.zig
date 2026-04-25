@@ -170,7 +170,7 @@ export fn softether_create(
         .udp_acceleration = false,
         .half_connection = false,
         .qos = true,
-        .mtu = 1450,
+        .mtu = 1400,
         .verify_certificate = true,
     };
 
@@ -204,7 +204,7 @@ export fn softether_create_anonymous(
         .udp_acceleration = false,
         .half_connection = false,
         .qos = true,
-        .mtu = 1450,
+        .mtu = 1400,
         .verify_certificate = true,
     };
 
@@ -249,7 +249,7 @@ export fn softether_create_certificate(
         .udp_acceleration = false,
         .half_connection = false,
         .qos = true,
-        .mtu = 1450,
+        .mtu = 1400,
         .verify_certificate = true,
     };
 

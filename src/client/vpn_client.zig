@@ -159,7 +159,7 @@ pub const ClientConfig = struct {
     udp_acceleration: bool = false,
     half_connection: bool = false,
     qos: bool = true,
-    mtu: u16 = 1450,
+    mtu: u16 = 1400,
 
     // TLS settings
     verify_certificate: bool = true,
