@@ -675,9 +675,64 @@ pub const TlsSocket = struct {
         // buffer size — it's server-side cwnd starvation when our single-thread loop
         // delays ACKs during heavy UL bursts. Revert to symmetric 4MB; the long-term
         // fix needs separate read/write threads or POLLIN priority over POLLOUT.
-        const buf_size: u32 = 4 * 1024 * 1024;
-        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&buf_size)) catch {};
-        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buf_size)) catch {};
+        //
+        // CYCLE 8 (BUFFERBLOAT FIX): With TCP_NOTSENT_LOWAT now actually engaging
+        // (verified via getsockopt and pollout_skip>0), in-flight bytes still bloat
+        // SNDBUF up to ~1MB during UL → ICMP/ACKs sharing the same TLS stream queue
+        // behind that 1MB of TCP data. Cap SNDBUF at 256KB so total tunnel egress
+        // queue stays ≤ ~25ms at 80 Mbps. RCVBUF stays at 4MB (DL needs full BDP).
+        // If T2/T3 DL collapse returns, the right fix is multi-thread, not buffer
+        // tuning — but we need this for FAIR latency-vs-throughput tradeoff.
+        //
+        // CYCLE 10 (sweet-spot search): 256KB → UDP/latency win, UL=29 Mbps.
+        // 1MB → UL=49 Mbps, latency p99 +130ms regression. Try 512KB:
+        // theoretical 21 Mbps single-flow, real TCP pipelining should give ~40 Mbps,
+        // queue capped at 50% of Patch 3 → latency should sit between Patch 2 and 3.
+        const snd_buf_size: u32 = 512 * 1024;
+        const rcv_buf_size: u32 = 4 * 1024 * 1024;
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_buf_size)) catch {};
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&rcv_buf_size)) catch {};
+        // Verify what the kernel actually clamped — macOS may round up SNDBUF
+        // beyond our request based on kern.ipc.maxsockbuf or autotuning.
+        var snd_got: u32 = 0;
+        var rcv_got: u32 = 0;
+        var snd_optlen: std.posix.socklen_t = @sizeOf(u32);
+        var rcv_optlen: std.posix.socklen_t = @sizeOf(u32);
+        const snd_rc = std.c.getsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, @ptrCast(&snd_got), &snd_optlen);
+        const rcv_rc = std.c.getsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, @ptrCast(&rcv_got), &rcv_optlen);
+        std.log.info("SO_SNDBUF requested={d} got={d} (rc={d}); SO_RCVBUF requested={d} got={d} (rc={d})", .{ snd_buf_size, snd_got, snd_rc, rcv_buf_size, rcv_got, rcv_rc });
+
+        // BUFFERBLOAT FIX (re-applied AFTER SNDBUF, post-handshake).
+        // Empirically: setting TCP_NOTSENT_LOWAT in createTcpSocket() before
+        // SO_SNDBUF was overridden silently — sendq peaked at 1.1 MB during
+        // VPN UL with pollout_skip=0 (kernel never reported sndbuf-full because
+        // notsent threshold was effectively the full 4MB SNDBUF). Re-apply here
+        // and verify with getsockopt so the kernel actually backpressures
+        // poll(POLLOUT) at ~16KB queued-but-unsent.
+        const IPPROTO_TCP_X: i32 = 6;
+        const lowat: u32 = 16 * 1024;
+        if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
+            const TCP_NOTSENT_LOWAT_DARWIN: u32 = 513;
+            if (std.posix.setsockopt(self.tcp_fd, IPPROTO_TCP_X, TCP_NOTSENT_LOWAT_DARWIN, std.mem.asBytes(&lowat))) |_| {
+                var got: u32 = 0;
+                var optlen: std.posix.socklen_t = @sizeOf(u32);
+                const rc = std.c.getsockopt(self.tcp_fd, IPPROTO_TCP_X, @intCast(TCP_NOTSENT_LOWAT_DARWIN), @ptrCast(&got), &optlen);
+                if (rc == 0) {
+                    std.log.info("TCP_NOTSENT_LOWAT post-handshake: requested={d} got={d} (Darwin)", .{ lowat, got });
+                } else {
+                    std.log.info("TCP_NOTSENT_LOWAT post-handshake: requested={d} (Darwin, getsockopt failed)", .{lowat});
+                }
+            } else |err| {
+                std.log.warn("TCP_NOTSENT_LOWAT post-handshake (Darwin) failed: {}", .{err});
+            }
+        } else if (builtin.os.tag == .linux) {
+            const TCP_NOTSENT_LOWAT_LINUX: u32 = 25;
+            if (std.posix.setsockopt(self.tcp_fd, IPPROTO_TCP_X, TCP_NOTSENT_LOWAT_LINUX, std.mem.asBytes(&lowat))) |_| {
+                std.log.info("TCP_NOTSENT_LOWAT post-handshake set to {d} (Linux)", .{lowat});
+            } else |err| {
+                std.log.warn("TCP_NOTSENT_LOWAT post-handshake (Linux) failed: {}", .{err});
+            }
+        }
 
         // Enable TCP keepalive
         const keepalive: u32 = 1;
