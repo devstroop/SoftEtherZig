@@ -195,6 +195,62 @@ void softether_set_event_callback(
 );
 
 /* ========================================================================== */
+/* Diagnostics                                                                */
+/* ========================================================================== */
+
+/** Log levels passed to the external log sink. */
+typedef enum {
+    SOFTETHER_LOG_ERR  = 0,
+    SOFTETHER_LOG_WARN = 1,
+    SOFTETHER_LOG_INFO = 2,
+    SOFTETHER_LOG_DBG  = 3,
+} softether_log_level_t;
+
+/** External log sink signature: receives level and a NUL-terminated UTF-8 message. */
+typedef void (*softether_log_callback_t)(int level, const char* msg);
+
+/**
+ * Register a host-provided log sink. Called synchronously from libsoftether's
+ * std.log, replacing platform-default logging (Android __android_log, iOS stderr).
+ * Pass NULL to unregister and fall back to the default sink.
+ *
+ * Required on iOS NetworkExtension hosts where stderr capture races with
+ * extension teardown — register a callback that calls os_log directly.
+ */
+void softether_set_log_callback(softether_log_callback_t cb);
+
+/**
+ * Bind libsoftether's outbound TLS sockets to a specific network interface
+ * (Darwin IP_BOUND_IF / IPV6_BOUND_IF). Pass NULL or "" to clear.
+ *
+ * REQUIRED on iOS NEPacketTunnelProvider extensions: without this the kernel
+ * NECP layer routes the extension's own VPN-server connection through the
+ * tunnel that's about to be established, giving instant ECONNREFUSED. Pass
+ * the underlying physical interface name (e.g. "en0" for Wi-Fi, "pdp_ip0"
+ * for cellular) before softether_connect().
+ *
+ * No-op on non-Darwin platforms.
+ */
+void softether_set_bind_interface(const char* ifname);
+
+/**
+ * Host-provided TCP dial. When registered, libsoftether calls this instead of
+ * doing its own DNS + POSIX connect(). Receives a NUL-terminated hostname and
+ * port; must return a connected, blocking socket fd, or -1 on failure. The fd
+ * is owned by libsoftether and will be close()d when the TLS session ends.
+ *
+ * REQUIRED on iOS NEPacketTunnelProvider extensions where NECP denies the
+ * extension's own connect() to ANY destination once the tunnel config is
+ * loaded. The host should dial via NEProvider.createTCPConnection (which
+ * bypasses the tunnel) and bridge bytes between an NWTCPConnection and one
+ * end of a socketpair. Returns the OTHER end of the socketpair to libsoftether.
+ *
+ * Pass NULL to clear and revert to the POSIX path.
+ */
+typedef int (*softether_tcp_dial_callback_t)(const char* host, uint16_t port);
+void softether_set_tcp_dial_callback(softether_tcp_dial_callback_t cb);
+
+/* ========================================================================== */
 /* Version                                                                    */
 /* ========================================================================== */
 

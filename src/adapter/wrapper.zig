@@ -132,6 +132,10 @@ pub const AdapterWrapper = struct {
             std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
             return;
         }
+        if (builtin.os.tag == .ios or builtin.os.tag == .tvos or builtin.os.tag == .watchos) {
+            std.log.info("Routing managed by NEPacketTunnelProvider; skipping native route setup", .{});
+            return;
+        }
         if (self.real_adapter) |*adapter| {
             adapter.configureFullTunnel(gateway, server_ip) catch |err| {
                 std.log.err("Failed to configure full-tunnel routing: {}", .{err});

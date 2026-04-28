@@ -1310,6 +1310,15 @@ pub const VpnClient = struct {
                         const blocks = [_][]const u8{req_buf[0..req_size]};
                         send_helper.get().sendBlocks(&blocks) catch {};
                         loop_state.dhcp.state = .request_sent;
+                        // Stash REQUEST params on the handler's config for retry path
+                        // (no ACK in 3s → resend REQUEST using same offered IP/server_id).
+                        // Note: tunnel.dhcp.DhcpConfig != adapter.dhcp.DhcpConfig, copy fields.
+                        loop_state.dhcp.config.ip_address = response.config.ip_address;
+                        loop_state.dhcp.config.subnet_mask = response.config.subnet_mask;
+                        loop_state.dhcp.config.gateway = response.config.gateway;
+                        loop_state.dhcp.config.server_id = response.config.server_id;
+                        loop_state.dhcp.config.lease_time = response.config.lease_time;
+                        loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
                         std.log.info("Sent DHCP REQUEST", .{});
                     }
                 } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
@@ -1686,7 +1695,20 @@ pub const VpnClient = struct {
             // Cycle 6: adaptive poll timeout. DIAG showed 1000+ poll iters/sec
             // busy-spinning when idle (1ms timeout). Use 0 when last iter did
             // real work (don't wait), 10ms when idle (let CPU sleep).
-            const poll_timeout_ms: i32 = if (last_iter_had_work) 0 else 10;
+            const poll_timeout_ms: i32 = if (last_iter_had_work)
+                // iOS-only floor: NEPacketTunnelProvider extensions get killed
+                // by jetsam if they wake the CPU > ~2500 times/sec sustained.
+                // The desktop hot path uses timeout=0 (immediate poll return)
+                // which is fine because last_iter_had_work toggles off whenever
+                // tun_readable goes idle on UL. But on iOS during heavy DL we
+                // observed the flag staying sticky-true for ~18 s straight,
+                // hitting 50k iters/sec → CPU-wakeup-limit kill (45001 wakes/18s).
+                // 1 ms cap = ≤1000 iters/sec sustained, well under the budget,
+                // and benchmarks on macOS showed no measurable throughput loss
+                // (the actual TLS/TUN syscalls dwarf 1 ms).
+                (if (builtin.os.tag == .ios) @as(i32, 1) else @as(i32, 0))
+            else
+                @as(i32, 10);
             const poll_t0 = std.time.microTimestamp();
             _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
@@ -2029,9 +2051,12 @@ pub const VpnClient = struct {
                 loop_state.timing.last_keepalive = now;
             }
 
-            // DHCP retry
-            if (loop_state.dhcp.state == .discover_sent and loop_state.dhcp_retry_count < 5) {
-                if (loop_state.timing.shouldRetryDhcp(now, 3000)) {
+            // DHCP retry — covers both no-OFFER (resend DISCOVER) and no-ACK
+            // (resend REQUEST using stashed OFFER params). Without REQUEST retry,
+            // a single dropped ACK would hang the tunnel until Swift's poll timed
+            // out, even though the only blocker is one lost ACK frame.
+            if (loop_state.dhcp_retry_count < 5 and loop_state.timing.shouldRetryDhcp(now, 3000)) {
+                if (loop_state.dhcp.state == .discover_sent) {
                     var dhcp_buf: [512]u8 = undefined;
                     const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
                     if (dhcp_size > 0) {
@@ -2040,6 +2065,16 @@ pub const VpnClient = struct {
                         loop_state.timing.last_dhcp_time = now;
                         loop_state.dhcp_retry_count += 1;
                         std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});
+                    }
+                } else if (loop_state.dhcp.state == .request_sent and loop_state.dhcp.config.ip_address != 0) {
+                    var req_buf: [512]u8 = undefined;
+                    const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid, loop_state.dhcp.config.ip_address, loop_state.dhcp.config.server_id, &req_buf) catch 0;
+                    if (req_size > 0) {
+                        const blocks = [_][]const u8{req_buf[0..req_size]};
+                        send_helper.get().sendBlocks(&blocks) catch {};
+                        loop_state.timing.last_dhcp_time = now;
+                        loop_state.dhcp_retry_count += 1;
+                        std.log.info("DHCP REQUEST retry #{d}", .{loop_state.dhcp_retry_count});
                     }
                 }
             }

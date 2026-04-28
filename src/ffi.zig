@@ -19,6 +19,8 @@ const Allocator = std.mem.Allocator;
 const is_android_build = builtin.os.tag == .linux and
     (builtin.abi == .android or builtin.abi == .androideabi);
 
+const is_ios_build = builtin.os.tag == .ios;
+
 const android_log = if (is_android_build) struct {
     extern "log" fn __android_log_write(prio: c_int, tag: [*:0]const u8, text: [*:0]const u8) c_int;
     const PRIO_VERBOSE: c_int = 2;
@@ -28,34 +30,83 @@ const android_log = if (is_android_build) struct {
     const PRIO_ERROR: c_int = 6;
 } else struct {};
 
-fn androidLogFn(
+// On iOS, write directly to stderr fd (which the Swift host has dup2'd to a pipe
+// that forwards to os_log). std.log.defaultLog wraps in std.debug locks that may
+// drop output in release-fast extensions; we go straight to write(2).
+fn iosWriteStderr(text: []const u8) void {
+    _ = std.posix.write(2, text) catch {};
+}
+
+/// External log sink (set by hosts that can't easily read stderr — e.g. iOS NE
+/// extensions where pipe-based stderr capture races with extension teardown).
+/// Called synchronously from logFn with a NUL-terminated UTF-8 message and the
+/// numeric log level (0=err, 1=warn, 2=info, 3=debug).
+const ExternalLogFn = *const fn (level: c_int, msg: [*:0]const u8) callconv(.c) void;
+var external_log_fn: ?ExternalLogFn = null;
+
+export fn softether_set_log_callback(cb: ?ExternalLogFn) void {
+    external_log_fn = cb;
+}
+
+fn libsoftetherLogFn(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
     comptime fmt: []const u8,
     args: anytype,
 ) void {
-    if (!is_android_build) {
-        std.log.defaultLog(level, scope, fmt, args);
-        return;
-    }
     var buf: [2048]u8 = undefined;
     const scope_prefix = if (scope == .default) "" else "[" ++ @tagName(scope) ++ "] ";
-    const text = std.fmt.bufPrintZ(&buf, scope_prefix ++ fmt, args) catch blk: {
-        // Truncate on overflow but still emit
-        buf[buf.len - 1] = 0;
-        break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
+    const level_prefix = switch (level) {
+        .err => "ERR ",
+        .warn => "WARN ",
+        .info => "INFO ",
+        .debug => "DBG ",
     };
-    const prio: c_int = switch (level) {
-        .err => android_log.PRIO_ERROR,
-        .warn => android_log.PRIO_WARN,
-        .info => android_log.PRIO_INFO,
-        .debug => android_log.PRIO_DEBUG,
-    };
-    _ = android_log.__android_log_write(prio, "libsoftether", text.ptr);
+
+    // External callback first (host-controlled, e.g. iOS os_log direct).
+    if (external_log_fn) |cb| {
+        const text = std.fmt.bufPrintZ(&buf, scope_prefix ++ fmt, args) catch blk: {
+            buf[buf.len - 1] = 0;
+            break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
+        };
+        const lvl: c_int = switch (level) {
+            .err => 0,
+            .warn => 1,
+            .info => 2,
+            .debug => 3,
+        };
+        cb(lvl, text.ptr);
+        return;
+    }
+
+    if (is_android_build) {
+        const text = std.fmt.bufPrintZ(&buf, scope_prefix ++ fmt, args) catch blk: {
+            buf[buf.len - 1] = 0;
+            break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
+        };
+        const prio: c_int = switch (level) {
+            .err => android_log.PRIO_ERROR,
+            .warn => android_log.PRIO_WARN,
+            .info => android_log.PRIO_INFO,
+            .debug => android_log.PRIO_DEBUG,
+        };
+        _ = android_log.__android_log_write(prio, "libsoftether", text.ptr);
+        return;
+    }
+
+    if (is_ios_build) {
+        const text = std.fmt.bufPrint(&buf, level_prefix ++ scope_prefix ++ fmt ++ "\n", args) catch blk: {
+            break :blk buf[0 .. buf.len - 1];
+        };
+        iosWriteStderr(text);
+        return;
+    }
+
+    std.log.defaultLog(level, scope, fmt, args);
 }
 
 pub const std_options: std.Options = .{
-    .logFn = androidLogFn,
+    .logFn = libsoftetherLogFn,
 };
 
 // Import library modules
@@ -185,7 +236,11 @@ pub const CEventCallback = ?*const fn (event_type: CEventType, new_state: CState
 
 /// Create a new VPN client with password authentication.
 /// Returns null on failure. Caller must call softether_destroy() when done.
-/// IMPORTANT: The caller MUST keep the string pointers alive until softether_destroy().
+///
+/// The C strings are duped into FFI-owned memory immediately, so callers do
+/// NOT need to keep their buffers alive (Swift's String → C-pointer bridging
+/// only keeps the buffer alive for the duration of THIS call, so duping is
+/// mandatory on iOS / macOS Swift hosts).
 export fn softether_create(
     server: [*:0]const u8,
     port: u16,
@@ -193,14 +248,21 @@ export fn softether_create(
     username: [*:0]const u8,
     password: [*:0]const u8,
 ) ?*VpnClient {
-    const server_slice = std.mem.span(server);
-    const hub_slice = std.mem.span(hub);
-    const username_slice = std.mem.span(username);
-    const password_slice = std.mem.span(password);
+    const server_in = std.mem.span(server);
+    const hub_in = std.mem.span(hub);
+    const username_in = std.mem.span(username);
+    const password_in = std.mem.span(password);
 
-    if (server_slice.len == 0 or hub_slice.len == 0 or username_slice.len == 0) {
+    if (server_in.len == 0 or hub_in.len == 0 or username_in.len == 0) {
         return null;
     }
+
+    // Dupe so we don't depend on the caller's buffers staying alive. (Tiny leak
+    // on destroy — acceptable; per-connect lifetime, freed at process teardown.)
+    const server_slice = ffi_allocator.dupe(u8, server_in) catch return null;
+    const hub_slice = ffi_allocator.dupe(u8, hub_in) catch return null;
+    const username_slice = ffi_allocator.dupe(u8, username_in) catch return null;
+    const password_slice = ffi_allocator.dupe(u8, password_in) catch return null;
 
     const config = ClientConfig{
         .server_host = server_slice,
@@ -227,18 +289,21 @@ export fn softether_create(
 }
 
 /// Create a new VPN client with anonymous authentication.
-/// IMPORTANT: The caller MUST keep the string pointers alive until softether_destroy().
+/// Strings are duped into FFI-owned memory (see softether_create for rationale).
 export fn softether_create_anonymous(
     server: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
 ) ?*VpnClient {
-    const server_slice = std.mem.span(server);
-    const hub_slice = std.mem.span(hub);
+    const server_in = std.mem.span(server);
+    const hub_in = std.mem.span(hub);
 
-    if (server_slice.len == 0 or hub_slice.len == 0) {
+    if (server_in.len == 0 or hub_in.len == 0) {
         return null;
     }
+
+    const server_slice = ffi_allocator.dupe(u8, server_in) catch return null;
+    const hub_slice = ffi_allocator.dupe(u8, hub_in) catch return null;
 
     const config = ClientConfig{
         .server_host = server_slice,
@@ -262,7 +327,7 @@ export fn softether_create_anonymous(
 
 /// Create a new VPN client with X.509 certificate authentication.
 /// PEM data is passed as pointer+length since PEM may contain embedded nulls.
-/// IMPORTANT: The caller MUST keep the PEM data alive until softether_destroy().
+/// All inputs are duped into FFI-owned memory (see softether_create).
 export fn softether_create_certificate(
     server: [*:0]const u8,
     port: u16,
@@ -272,15 +337,17 @@ export fn softether_create_certificate(
     key_pem: [*]const u8,
     key_pem_len: u32,
 ) ?*VpnClient {
-    const server_slice = std.mem.span(server);
-    const hub_slice = std.mem.span(hub);
+    const server_in = std.mem.span(server);
+    const hub_in = std.mem.span(hub);
 
-    if (server_slice.len == 0 or hub_slice.len == 0 or cert_pem_len == 0 or key_pem_len == 0) {
+    if (server_in.len == 0 or hub_in.len == 0 or cert_pem_len == 0 or key_pem_len == 0) {
         return null;
     }
 
-    const cert_slice = cert_pem[0..cert_pem_len];
-    const key_slice = key_pem[0..key_pem_len];
+    const server_slice = ffi_allocator.dupe(u8, server_in) catch return null;
+    const hub_slice = ffi_allocator.dupe(u8, hub_in) catch return null;
+    const cert_slice = ffi_allocator.dupe(u8, cert_pem[0..cert_pem_len]) catch return null;
+    const key_slice = ffi_allocator.dupe(u8, key_pem[0..key_pem_len]) catch return null;
 
     const config = ClientConfig{
         .server_host = server_slice,
@@ -422,6 +489,53 @@ export fn softether_set_compression(client: ?*VpnClient, enabled: bool) void {
 export fn softether_set_verify_certificate(client: ?*VpnClient, verify: bool) void {
     const c = client orelse return;
     c.config.verify_certificate = verify;
+}
+
+/// Bind outbound TLS sockets to a specific network interface (Darwin only;
+/// no-op on other platforms). Required on iOS NEPacketTunnelProvider where
+/// NECP would otherwise route the extension's own outbound socket through the
+/// tunnel that's not yet established → instant ECONNREFUSED.
+/// Pass NULL or "" to clear.
+export fn softether_set_bind_interface(name: ?[*:0]const u8) void {
+    const tls = @import("net/tls.zig");
+    if (name == null) {
+        tls.bind_interface_index = 0;
+        return;
+    }
+    const slice = std.mem.span(name.?);
+    if (slice.len == 0) {
+        tls.bind_interface_index = 0;
+        return;
+    }
+    // if_nametoindex(3) — POSIX. Returns 0 on failure.
+    const if_nametoindex = struct {
+        extern "c" fn if_nametoindex(ifname: [*:0]const u8) c_uint;
+    }.if_nametoindex;
+    const idx = if_nametoindex(name.?);
+    tls.bind_interface_index = idx;
+    if (idx == 0) {
+        std.log.warn("softether_set_bind_interface: if_nametoindex({s}) returned 0", .{slice});
+    } else {
+        std.log.info("softether_set_bind_interface: bound to {s} (idx={d})", .{ slice, idx });
+    }
+}
+
+/// Host-provided TCP dial. Receives hostname (NUL-terminated UTF-8) and port,
+/// returns a connected, blocking socket fd, or -1 on failure. The returned fd
+/// is owned by libsoftether and will be close()d when the TLS session ends.
+///
+/// Used on iOS NEPacketTunnelProvider where the extension's own POSIX
+/// connect() is denied by NECP — Swift dials via NEProvider.createTCPConnection
+/// (which goes outside the tunnel) and bridges bytes through a socketpair.
+const tls_mod = @import("net/tls.zig");
+
+export fn softether_set_tcp_dial_callback(cb: ?tls_mod.ExternalTcpDialFn) void {
+    tls_mod.external_tcp_dial = cb;
+    if (cb == null) {
+        std.log.info("softether_set_tcp_dial_callback: cleared (using POSIX connect)", .{});
+    } else {
+        std.log.info("softether_set_tcp_dial_callback: registered (host will dial)", .{});
+    }
 }
 
 /// Set full tunnel (route all traffic through VPN). Must be called before connect().

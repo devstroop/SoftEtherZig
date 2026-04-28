@@ -13,6 +13,26 @@ const c = @cImport({
     @cInclude("openssl/x509.h");
 });
 const Allocator = std.mem.Allocator;
+
+/// Network interface index to bind outbound TLS sockets to (Darwin IP_BOUND_IF /
+/// IPV6_BOUND_IF). Set via softether_set_bind_interface() in ffi.zig. Required on
+/// iOS NEPacketTunnelProvider so the extension's own outbound connection bypasses
+/// the tunnel that's about to be established. Zero = no binding.
+pub var bind_interface_index: c_uint = 0;
+
+/// Optional host-provided TCP dial function. When set, libsoftether's TLS connect
+/// path skips DNS+POSIX-connect and instead asks the host for a connected fd.
+/// Required on iOS NEPacketTunnelProvider where NECP denies the extension's own
+/// connect() — Swift dials via NEProvider.createTCPConnection (outside the
+/// tunnel) and bridges bytes through a socketpair. Zero/null = use POSIX path.
+pub const ExternalTcpDialFn = *const fn (host: [*:0]const u8, port: u16) callconv(.c) c_int;
+pub var external_tcp_dial: ?ExternalTcpDialFn = null;
+
+/// Darwin socket option constants (sys/socket.h). Not in std.posix on iOS.
+const DARWIN_IP_BOUND_IF: c_int = 25;
+const DARWIN_IPV6_BOUND_IF: c_int = 125;
+const DARWIN_IPPROTO_IP: c_int = 0;
+const DARWIN_IPPROTO_IPV6: c_int = 41;
 const testing = std.testing;
 
 const socket_mod = @import("socket.zig");
@@ -89,6 +109,23 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
             _ = std.os.windows.ws2_32.closesocket(fd);
         } else {
             std.posix.close(fd);
+        }
+    }
+
+    // Darwin: bind socket to specific interface BEFORE connect(). Required on iOS
+    // NEPacketTunnelProvider extensions, otherwise the kernel's NECP layer routes
+    // the extension's outbound socket through the (not-yet-established) tunnel
+    // and we get instant ECONNREFUSED.
+    if ((builtin.os.tag == .ios or builtin.os.tag == .macos) and bind_interface_index != 0) {
+        const idx_bytes = std.mem.asBytes(&bind_interface_index);
+        if (address.any.family == std.posix.AF.INET6) {
+            std.posix.setsockopt(fd, DARWIN_IPPROTO_IPV6, DARWIN_IPV6_BOUND_IF, idx_bytes) catch |err| {
+                std.log.warn("TLS: IPV6_BOUND_IF(idx={d}) failed: {}", .{ bind_interface_index, err });
+            };
+        } else {
+            std.posix.setsockopt(fd, DARWIN_IPPROTO_IP, DARWIN_IP_BOUND_IF, idx_bytes) catch |err| {
+                std.log.warn("TLS: IP_BOUND_IF(idx={d}) failed: {}", .{ bind_interface_index, err });
+            };
         }
     }
 
@@ -186,6 +223,24 @@ pub const TlsSocket = struct {
         // Resolve and connect TCP
         var tcp_fd: std.posix.socket_t = undefined;
 
+        // iOS NEPacketTunnelProvider escape hatch: when the host (Swift) has
+        // registered a dial callback, delegate the TCP connection to it. This
+        // bypasses NECP, which denies the extension's own POSIX connect().
+        // The host returns one end of a socketpair connected to its
+        // NWTCPConnection; OpenSSL runs TLS over the UNIX socket.
+        var via_host_dial: bool = false;
+        if (external_tcp_dial) |dial| {
+            const c_host = try allocator.dupeZ(u8, hostname);
+            defer allocator.free(c_host);
+            std.log.info("TLS: dialing {s}:{d} via host callback", .{ hostname, port });
+            const fd_int = dial(c_host.ptr, port);
+            if (fd_int < 0) {
+                std.log.err("TLS: host dial callback returned {d} for {s}:{d}", .{ fd_int, hostname, port });
+                return TlsError.ConnectionFailed;
+            }
+            tcp_fd = @intCast(fd_int);
+            via_host_dial = true;
+        } else
         // First try to parse as IP address
         if (net.Address.resolveIp(hostname, port)) |address| {
             std.log.debug("TLS: Resolved IP address directly: {s}:{d}", .{ hostname, port });
@@ -208,12 +263,28 @@ pub const TlsSocket = struct {
                 return TlsError.ConnectionFailed;
             }
 
-            tcp_fd = tcpConnectWithTimeout(cached_addrs[0], config.timeout_ms) catch |err| {
-                // Invalidate cache on connection failure — address may have changed
+            // Iterate ALL DNS results (RFC 6724 / "Happy Eyeballs"-lite). On iOS the
+            // system resolver typically returns AAAA before A; if the server has no
+            // IPv6 listener (or the path RSTs) we get instant ECONNREFUSED on the
+            // first result and must fall through to the next address. Without this
+            // loop the iOS NEPacketTunnel extension fails to connect even though
+            // macOS/Android happen to work because their first result is reachable.
+            var last_err: anyerror = error.ConnectionRefused;
+            var connected_idx: ?usize = null;
+            for (cached_addrs, 0..) |addr, i| {
+                tcp_fd = tcpConnectWithTimeout(addr, config.timeout_ms) catch |err| {
+                    std.log.warn("TLS: TCP connect to DNS result #{d} failed: {} (trying next)", .{ i, err });
+                    last_err = err;
+                    continue;
+                };
+                connected_idx = i;
+                break;
+            }
+            if (connected_idx == null) {
                 cache.invalidate(hostname);
-                std.log.err("TLS: TCP connect to DNS result failed: {}", .{err});
+                std.log.err("TLS: All {d} DNS results failed for {s}, last err: {}", .{ cached_addrs.len, hostname, last_err });
                 return TlsError.ConnectionFailed;
-            };
+            }
         }
         errdefer {
             if (builtin.os.tag == .windows) {
@@ -223,14 +294,18 @@ pub const TlsSocket = struct {
             }
         }
 
-        // CRITICAL: Disable Nagle's algorithm for low latency
-        // Nagle buffers small packets for up to 200ms, causing latency spikes
-        const nodelay: u32 = 1;
-        const IPPROTO_TCP = 6;
-        const TCP_NODELAY = 1;
-        std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
-            std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
-        };
+        // CRITICAL: Disable Nagle's algorithm for low latency.
+        // Skip on host-dialed sockets (AF_UNIX socketpair from iOS NEPacketTunnel
+        // bridge) — TCP_NODELAY is invalid on AF_UNIX (returns ENOPROTOOPT) and
+        // Nagle is handled by NWTCPConnection on the host side.
+        if (!via_host_dial) {
+            const nodelay: u32 = 1;
+            const IPPROTO_TCP = 6;
+            const TCP_NODELAY = 1;
+            std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NODELAY, std.mem.asBytes(&nodelay)) catch |err| {
+                std.log.warn("Failed to set TCP_NODELAY: {}", .{err});
+            };
+        }
 
         // CYCLE 11 (TURN 16b): TCP_NOTSENT_LOWAT REMOVED — see clearTimeouts() comment.
         // Bufferbloat is bounded by SO_SNDBUF=512KB cap (set in clearTimeouts post-handshake).
