@@ -770,7 +770,17 @@ pub const TlsSocket = struct {
     ///     egress while still allowing autotune RWND headroom on receive.
     ///     This is the latency vs throughput tradeoff for single-thread
     ///     poll-driven encap loop. Long-term fix is split-thread I/O.
-    /// SO_RCVBUF: never touched. Autotune (macOS autorcvbufmax=4MB) is fine.
+    /// SO_RCVBUF policy:
+    ///   - NONE → kernel autotune. In practice on macOS/iOS over TLS the
+    ///     advertised RWND grows VERY slowly because the read pattern is
+    ///     "drain-to-empty then idle" (we read everything ssl_pending says
+    ///     is there, then poll). Autotune sees small instantaneous queue
+    ///     depth (nread_max=8KB observed even mid-DL) and keeps RWND tiny.
+    ///     Server's BDP-bound send cap = RWND/RTT → 8KB/180ms ≈ 360 kbps.
+    ///     This explains DL stuck at 1-2 Mbps even though the loop is idle.
+    ///   - 4MB explicit → forces a large advertised RWND from the start.
+    ///     At 180ms RTT, BDP = 4MB → up to ~178 Mbps single-flow DL ceiling.
+    ///     Memory cost is bounded (one TLS conn → 4MB kernel rcvbuf).
     pub fn clearTimeouts(self: *TlsSocket) void {
         TcpSocket.setReadTimeout(self.tcp_fd, 0) catch {};
         TcpSocket.setWriteTimeout(self.tcp_fd, 0) catch {};
@@ -789,6 +799,28 @@ pub const TlsSocket = struct {
         // parallel flows, DL ping under load stays under ~300ms.
         const snd_cap: u32 = 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
+
+        // SO_RCVBUF: forces a large advertised RWND from the start so the
+        // server isn't BDP-capped by tiny autotune values.
+        //
+        // Platform-specific tuning:
+        //
+        // macOS (and Linux/desktop): 4 MB. Drain via utun fd is very fast
+        //   (100+ Mbps), so a big buffer just enables high-BDP flows. At
+        //   180ms RTT, 4MB → up to ~178 Mbps single-flow DL ceiling.
+        //
+        // iOS: 1 MB. Tradeoff calibrated empirically:
+        //   4 MB → DL 4.4 Mbps but ping_DL=2426ms (massive bufferbloat
+        //          in NEPacketTunnelFlow.writePackets opaque queue)
+        //   256 KB → DL 1.57 Mbps with ping_DL=1351ms (BDP cap too low,
+        //          single-flow throughput collapses)
+        //   1 MB → expected DL ~10-20 Mbps with ping_DL ~600-900ms
+        //          Single-flow BDP at 200ms RTT = 40 Mbps cap.
+        // The fundamental problem is writePackets has no completion API,
+        // so we can't true-backpressure. The outer rcvbuf is our only
+        // throttle on inbound rate. Cap = (rcvbuf / inner-RTT-no-bloat).
+        const rcv_cap: u32 = if (@import("builtin").target.os.tag == .ios) 1024 * 1024 else 4 * 1024 * 1024;
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&rcv_cap)) catch {};
     }
 
     /// Get the hostname this socket connected to

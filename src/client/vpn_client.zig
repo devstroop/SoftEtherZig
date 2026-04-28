@@ -1692,23 +1692,23 @@ pub const VpnClient = struct {
             };
 
             const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + (if (has_udp) @as(usize, 2) else if (builtin.os.tag == .windows) @as(usize, 0) else @as(usize, 1)));
-            // Cycle 6: adaptive poll timeout. DIAG showed 1000+ poll iters/sec
-            // busy-spinning when idle (1ms timeout). Use 0 when last iter did
-            // real work (don't wait), 10ms when idle (let CPU sleep).
-            const poll_timeout_ms: i32 = if (last_iter_had_work)
-                // iOS-only floor: NEPacketTunnelProvider extensions get killed
-                // by jetsam if they wake the CPU > ~2500 times/sec sustained.
-                // The desktop hot path uses timeout=0 (immediate poll return)
-                // which is fine because last_iter_had_work toggles off whenever
-                // tun_readable goes idle on UL. But on iOS during heavy DL we
-                // observed the flag staying sticky-true for ~18 s straight,
-                // hitting 50k iters/sec → CPU-wakeup-limit kill (45001 wakes/18s).
-                // 1 ms cap = ≤1000 iters/sec sustained, well under the budget,
-                // and benchmarks on macOS showed no measurable throughput loss
-                // (the actual TLS/TUN syscalls dwarf 1 ms).
-                (if (builtin.os.tag == .ios) @as(i32, 1) else @as(i32, 0))
-            else
-                @as(i32, 10);
+            // Adaptive poll timeout: timeout=0 (immediate return) when last
+            // iter did productive I/O so we keep up with bursts; timeout=10ms
+            // when idle so the CPU can sleep.
+            //
+            // CRITICAL: last_iter_had_work MUST be cleared at the start of each
+            // iter (see below) so it represents "this iter did work" rather than
+            // "any iter ever did work". A previous version left it sticky-true,
+            // which on iOS caused a 50k iters/sec busy-spin during what should
+            // have been idle periods → CPU-wakeup-limit kill (45001 wakes/18s).
+            // With proper clearing, productive iters drive timeout=0 (real I/O
+            // wakes are not idle wakes) and idle iters drop back to 10ms sleep,
+            // so an iOS-only floor is no longer needed and DL is not throttled.
+            const poll_timeout_ms: i32 = if (last_iter_had_work) @as(i32, 0) else @as(i32, 10);
+            // Reset for this iter — inbound/outbound sections will set it true
+            // again if they observe real work (any_conn_had_data, tls_readable,
+            // or tun_readable at end-of-iter).
+            last_iter_had_work = false;
             const poll_t0 = std.time.microTimestamp();
             _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
@@ -2089,14 +2089,13 @@ pub const VpnClient = struct {
             // last byte total and compare to current.
             // (Implementation: we set last_iter_had_work based on whether tun_readable
             //  fired this iteration, since it's in scope here.)
-            // BUG FIX (multi-conn DL collapse): this used to be `= tun_readable`,
-            // which OVERWROTE the value set by the inbound section (e.g. when
-            // any_conn_had_data was true). With heavy DL but no UL TUN data,
-            // tun_readable=false would force the loop to sleep 10ms even though
-            // server was streaming data. Result: kernel rcvbuf filled up, TCP
-            // RWND collapsed to 0, DL throughput dropped from 67→3 Mbps.
-            // Use OR so any work source keeps us hot.
-            last_iter_had_work = tun_readable or last_iter_had_work;
+            // NOTE: must NOT overwrite (`= tun_readable`) — that would clobber a
+            // true value set earlier this iter by the inbound section (causing the
+            // historic multi-conn DL collapse from 67→3 Mbps when DL had no UL).
+            // Use OR-set so any work source keeps the flag true. The flag is
+            // cleared at the TOP of each iter (just before poll), so this only
+            // preserves work observed during THIS iter, not all prior iters.
+            if (tun_readable) last_iter_had_work = true;
 
             // Bufferbloat sampling — snapshot kernel TCP sendq depth across
             // all conns and accumulate write-blocked deltas.
