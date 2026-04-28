@@ -222,6 +222,7 @@ pub const VpnClient = struct {
 
     server_ip: u32,
     assigned_ip: u32,
+    assigned_mask: u32,
     gateway_ip: u32,
     gateway_mac: ?[6]u8,
 
@@ -289,6 +290,7 @@ pub const VpnClient = struct {
             .last_error = null,
             .server_ip = 0,
             .assigned_ip = 0,
+            .assigned_mask = 0,
             .gateway_ip = 0,
             .gateway_mac = null,
             .effective_server_ip = 0,
@@ -361,6 +363,11 @@ pub const VpnClient = struct {
 
     pub fn getGatewayIp(self: *const Self) u32 {
         return self.gateway_ip;
+    }
+
+    /// DHCP-supplied subnet mask (host byte order). 0 until DHCP completes.
+    pub fn getAssignedMask(self: *const Self) u32 {
+        return self.assigned_mask;
     }
 
     pub fn getDeviceName(self: *const Self) ?[]const u8 {
@@ -1312,6 +1319,7 @@ pub const VpnClient = struct {
                     is_configured.* = true;
                     self.assigned_ip = loop_state.our_ip;
                     self.gateway_ip = loop_state.our_gateway;
+                    self.assigned_mask = response.config.subnet_mask;
 
                     if (adapter.real_adapter) |*real| {
                         if (real.device) |dev| {

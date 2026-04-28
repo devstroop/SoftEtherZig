@@ -683,71 +683,37 @@ pub const TlsSocket = struct {
     }
 
     /// Remove read/write timeouts set during connect phase and configure
-    /// socket for the poll-based data loop. Sets large buffers and enables
-    /// TCP keepalive. Matches C's SetTimeout(sock, INFINITE) after connect.
+    /// socket for the poll-based data loop. Matches C SoftEther's
+    /// SetTimeout(sock, INFINITE) after connect.
+    ///
+    /// SO_SNDBUF policy:
+    ///   - NONE → macOS autotunes to multi-MB → DL ACKs queue behind UL data
+    ///     in TLS egress for 800-1400ms → server sees ACK loss → DL collapses
+    ///     to 5-7 Mbps with 1100ms RTT spikes (Cloudflare-confirmed).
+    ///   - 512KB cap (Cycle 10) → still queues ~50ms of DL ACKs; UL capped.
+    ///   - 128KB cap → bounds DL-ACK queueing latency to ~10ms at 100 Mbps
+    ///     egress while still allowing autotune RWND headroom on receive.
+    ///     This is the latency vs throughput tradeoff for single-thread
+    ///     poll-driven encap loop. Long-term fix is split-thread I/O.
+    /// SO_RCVBUF: never touched. Autotune (macOS autorcvbufmax=4MB) is fine.
     pub fn clearTimeouts(self: *TlsSocket) void {
         TcpSocket.setReadTimeout(self.tcp_fd, 0) catch {};
         TcpSocket.setWriteTimeout(self.tcp_fd, 0) catch {};
 
-        // Set TCP buffers to BDP-sized values for high-RTT/high-throughput paths.
-        //
-        // History:
-        //  - Originally hardcoded 2MB → caused 5-10 Mbps stalls because at 200ms
-        //    RTT the BDP for 100+ Mbps is >2.5MB (we got cwnd-capped).
-        //  - Removed entirely → on macOS, default SO_SNDBUF/RCVBUF is ~128KB and
-        //    DOES NOT auto-tune (unlike Linux). BDP at 200ms RTT capped throughput
-        //    at ~5 Mbps (128KB / 0.2s = 5.12 Mbps theoretical max).
-        //
-        // Solution: set buffers to 4MB. macOS kern.ipc.maxsockbuf default is 8MB,
-        // and the kernel reserves overhead so requesting exactly 8MB may fail.
-        // 4MB covers the BDP for 160 Mbps at 200ms RTT (~4.0 MB) with safety margin.
-        // C SoftEther sets 256MB which means "give me as much as the system allows".
-        //
-        // CYCLE 7 attempted asymmetric (1MB SND / 6MB RCV) hoping smaller SNDBUF would
-        // prevent UL from choking DL. Result: T1 DL recovered to 68 Mbps but T2/T3 DL
-        // still collapsed to 9-10 Mbps and UL capped at 21 Mbps. Root cause is NOT
-        // buffer size — it's server-side cwnd starvation when our single-thread loop
-        // delays ACKs during heavy UL bursts. Revert to symmetric 4MB; the long-term
-        // fix needs separate read/write threads or POLLIN priority over POLLOUT.
-        //
-        // CYCLE 8 (BUFFERBLOAT FIX): With TCP_NOTSENT_LOWAT now actually engaging
-        // (verified via getsockopt and pollout_skip>0), in-flight bytes still bloat
-        // SNDBUF up to ~1MB during UL → ICMP/ACKs sharing the same TLS stream queue
-        // behind that 1MB of TCP data. Cap SNDBUF at 256KB so total tunnel egress
-        // queue stays ≤ ~25ms at 80 Mbps. RCVBUF stays at 4MB (DL needs full BDP).
-        // If T2/T3 DL collapse returns, the right fix is multi-thread, not buffer
-        // tuning — but we need this for FAIR latency-vs-throughput tradeoff.
-        //
-        // CYCLE 10 (sweet-spot search): 256KB → UDP/latency win, UL=29 Mbps.
-        // 1MB → UL=49 Mbps, latency p99 +130ms regression. Try 512KB:
-        // theoretical 21 Mbps single-flow, real TCP pipelining should give ~40 Mbps,
-        // queue capped at 50% of Patch 3 → latency should sit between Patch 2 and 3.
-        const snd_buf_size: u32 = 512 * 1024;
-        const rcv_buf_size: u32 = 4 * 1024 * 1024;
-        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_buf_size)) catch {};
-        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&rcv_buf_size)) catch {};
-        // Verify what the kernel actually clamped — macOS may round up SNDBUF
-        // beyond our request based on kern.ipc.maxsockbuf or autotuning.
-        var snd_got: u32 = 0;
-        var rcv_got: u32 = 0;
-        var snd_optlen: std.posix.socklen_t = @sizeOf(u32);
-        var rcv_optlen: std.posix.socklen_t = @sizeOf(u32);
-        const snd_rc = std.c.getsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, @ptrCast(&snd_got), &snd_optlen);
-        const rcv_rc = std.c.getsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, @ptrCast(&rcv_got), &rcv_optlen);
-        std.log.info("SO_SNDBUF requested={d} got={d} (rc={d}); SO_RCVBUF requested={d} got={d} (rc={d})", .{ snd_buf_size, snd_got, snd_rc, rcv_buf_size, rcv_got, rcv_rc });
-
-        // CYCLE 11 (TURN 16b): TCP_NOTSENT_LOWAT REMOVED.
-        // Earlier "fix" set it to 16KB to force poll(POLLOUT) to backpressure.
-        // But at our 180ms server RTT, BDP is ~2MB — keeping unsent < 16KB is
-        // physically impossible during normal upload, so POLLOUT was perpetually
-        // false → vpn_client's tls_can_send guard dropped 100% of outbound packets
-        // → user-visible "0 bytes sent" over multi-minute sessions.
-        // SO_SNDBUF=512KB cap above is sufficient to bound bufferbloat.
-        // POLLOUT reverts to standard semantics (false only when sndbuf actually full).
-
         // Enable TCP keepalive
         const keepalive: u32 = 1;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&keepalive)) catch {};
+
+        // SO_SNDBUF sizing tradeoff at typical 180ms tunnel RTT:
+        //   128KB → UL choked at 5 Mbps (BDP cap, single-flow)
+        //   256KB → UL ~11 Mbps, ~22ms ACK queue
+        //   512KB → UL ~22 Mbps, ~45ms ACK queue
+        //   1MB   → UL ~45 Mbps, ~90ms ACK queue (ping spike +90ms)
+        //   2MB+  → UL good, but DL ACKs bloat → 1100ms+ ping → DL collapse
+        // 1MB is the best single-knob compromise: full UL via single OR
+        // parallel flows, DL ping under load stays under ~300ms.
+        const snd_cap: u32 = 1024 * 1024;
+        std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
     }
 
     /// Get the hostname this socket connected to

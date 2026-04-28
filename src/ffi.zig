@@ -396,6 +396,12 @@ export fn softether_get_gateway_ip(client: ?*const VpnClient) u32 {
     return c.getGatewayIp();
 }
 
+/// Get assigned subnet mask (host byte order u32, 0 if not assigned).
+export fn softether_get_assigned_mask(client: ?*const VpnClient) u32 {
+    const c = client orelse return 0;
+    return c.getAssignedMask();
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
