@@ -37,20 +37,54 @@ pub fn build(b: *std.Build) void {
 
     // Windows: detect OpenSSL installation path
     const win_openssl_lib: []const u8 = if (target_os == .windows) blk: {
-        const candidates = [_][]const u8{
-            "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD",
-            "C:/Program Files/OpenSSL-Win64/lib",
-        };
-        for (candidates) |p| {
-            if (std.fs.cwd().access(p, .{})) |_| {
-                break :blk p;
+        // Check OPENSSL_DIR env var (set by CI via vcpkg)
+        check_env: {
+            const env_dir = std.process.getEnvVarOwned(b.allocator, "OPENSSL_DIR") catch break :check_env;
+            defer b.allocator.free(env_dir);
+            const joined = std.fs.path.join(b.allocator, &[_][]const u8{ env_dir, "lib" }) catch break :check_env;
+            if (std.fs.cwd().access(joined, .{})) |_| {
+                break :blk joined;
             } else |_| {
-                continue;
+                b.allocator.free(joined);
             }
         }
+
+        // Check vcpkg default path
+        if (std.fs.cwd().access("C:/vcpkg/installed/x64-windows/lib", .{})) |_| {
+            break :blk "C:/vcpkg/installed/x64-windows/lib";
+        } else |_| {}
+
+        // Check standard installation paths
+        for ([_] []const u8{
+            "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD",
+            "C:/Program Files/OpenSSL-Win64/lib",
+        }) |p| {
+            if (std.fs.cwd().access(p, .{})) |_| {
+                break :blk p;
+            } else |_| {}
+        }
+
         break :blk "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD";
     } else "";
     const win_openssl_include: []const u8 = if (target_os == .windows) blk: {
+        // Check OPENSSL_DIR env var
+        check_env_inc: {
+            const env_dir = std.process.getEnvVarOwned(b.allocator, "OPENSSL_DIR") catch break :check_env_inc;
+            defer b.allocator.free(env_dir);
+            const joined = std.fs.path.join(b.allocator, &[_][]const u8{ env_dir, "include" }) catch break :check_env_inc;
+            if (std.fs.cwd().access(joined, .{})) |_| {
+                break :blk joined;
+            } else |_| {
+                b.allocator.free(joined);
+            }
+        }
+
+        // Check vcpkg default include path
+        if (std.fs.cwd().access("C:/vcpkg/installed/x64-windows/include", .{})) |_| {
+            break :blk "C:/vcpkg/installed/x64-windows/include";
+        } else |_| {}
+
+        // Check standard include path
         const inc_path = "C:/Program Files/OpenSSL-Win64/include";
         if (std.fs.cwd().access(inc_path, .{})) |_| {
             break :blk inc_path;
