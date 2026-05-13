@@ -107,16 +107,17 @@ pub fn build(b: *std.Build) void {
 
     // Helper to link OpenSSL for a given compile step
     const linkOpenSsl = struct {
-        fn link(step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
+        fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
             if (android) {
                 step.addLibraryPath(.{ .cwd_relative = and_lib });
                 step.addIncludePath(.{ .cwd_relative = and_inc });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
                 step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
                 // NDK sysroot lib path for liblog, libdl, libm, libc...
-                if (std.posix.getenv("ANDROID_NDK_LIB_DIR")) |ndk_lib| {
-                    step.addLibraryPath(.{ .cwd_relative = ndk_lib });
-                }
+                if (std.process.getEnvVarOwned(builder.allocator, "ANDROID_NDK_LIB_DIR")) |ndk_lib_result| {
+                    defer builder.allocator.free(ndk_lib_result);
+                    step.addLibraryPath(.{ .cwd_relative = ndk_lib_result });
+                } else |_| {}
                 step.linkSystemLibrary2("log", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             } else if (os == .macos) {
                 step.addLibraryPath(.{ .cwd_relative = mac_lib });
@@ -201,7 +202,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link OpenSSL for shared library too
-    linkOpenSsl(shared_lib, target_os, is_android, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
+    linkOpenSsl(b, shared_lib, target_os, is_android, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
     addZlib(shared_lib, b);
 
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});

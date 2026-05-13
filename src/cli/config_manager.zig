@@ -151,13 +151,17 @@ pub const ConfigManager = struct {
 
     /// Get default configuration file path
     pub fn getDefaultPath(allocator: Allocator) ![]const u8 {
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoHomeDir;
+        defer allocator.free(home);
         return try std.fmt.allocPrint(allocator, "{s}/.config/softether-zig/config.json", .{home});
     }
 
     /// Check if default config file exists
     pub fn defaultConfigExists() bool {
-        const home = std.posix.getenv("HOME") orelse return false;
+        const allocator = std.heap.page_allocator;
+        const home = std.process.getEnvVarOwned(allocator, "HOME") catch return false;
+        defer allocator.free(home);
+
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/.config/softether-zig/config.json", .{home}) catch return false;
 
@@ -450,7 +454,7 @@ test "validateConfig invalid max_connections" {
 
 test "getDefaultPath" {
     // Only run if HOME is set
-    if (std.posix.getenv("HOME")) |_| {
+    if (std.process.hasEnvVar(std.testing.allocator, "HOME") catch false) {
         const path = try ConfigManager.getDefaultPath(std.testing.allocator);
         defer std.testing.allocator.free(path);
 

@@ -248,29 +248,30 @@ pub const ArgParser = struct {
 
     /// Load from environment variables
     pub fn loadFromEnv(self: *Self) void {
-        if (std.posix.getenv("SOFTETHER_SERVER")) |v| {
+        const allocator = std.heap.page_allocator;
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_SERVER")) |v| {
             if (self.args.server == null) self.args.server = v;
-        }
-        if (std.posix.getenv("SOFTETHER_PORT")) |v| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PORT")) |v| {
             if (self.args.port == 443) {
                 self.args.port = std.fmt.parseInt(u16, v, 10) catch 443;
             }
-        }
-        if (std.posix.getenv("SOFTETHER_HUB")) |v| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_HUB")) |v| {
             if (self.args.hub == null) self.args.hub = v;
-        }
-        if (std.posix.getenv("SOFTETHER_USER")) |v| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_USER")) |v| {
             if (self.args.username == null) self.args.username = v;
-        }
-        if (std.posix.getenv("SOFTETHER_PASSWORD")) |v| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD")) |v| {
             if (self.args.password == null) self.args.password = v;
-        }
-        if (std.posix.getenv("SOFTETHER_PASSWORD_HASH")) |v| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD_HASH")) |v| {
             if (self.args.password_hash == null) self.args.password_hash = v;
-        }
-        if (std.posix.getenv("SOFTETHER_CONFIG")) |v| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONFIG")) |v| {
             if (self.args.config_file == null) self.args.config_file = v;
-        }
+        } else |_| {}
     }
 };
 
