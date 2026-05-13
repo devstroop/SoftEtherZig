@@ -1530,6 +1530,8 @@ pub const VpnClient = struct {
             pollout_skipped: u64 = 0,
             tcp_drops_pkts: u64 = 0,
             tun_eagain: u64 = 0,
+            tx_drops_delta: u64 = 0,  // FdAdapter ring buffer drops (this second)
+            tx_drops_last: u64 = 0,   // cumulative tx_drops at last flush
             poll_iters: u64 = 0,
             // Latency tracking (microseconds): per-iteration wall time.
             // iter_us_max captures the worst single-iter spike — useful to
@@ -2142,17 +2144,28 @@ pub const VpnClient = struct {
                         @as(f64, @floatFromInt(diag.iter_us_total)) / @as(f64, @floatFromInt(diag.poll_iters))
                     else
                         0.0;
+                    // Sample tx_drops from the adapter (FdAdapter ring buffer drops).
+                    // On desktop (utun/tun) this always returns 0; on mobile it reveals
+                    // how many packets were dropped because the ring was full — the
+                    // smoking gun for TCP retrans storms and bufferbloat.
+                    const tx_drops_now: u64 = if (adapter.real_adapter) |*ra|
+                        ra.getTxDrops()
+                    else
+                        0;
+                    diag.tx_drops_delta = tx_drops_now -| diag.tx_drops_last;
+                    diag.tx_drops_last = tx_drops_now;
+
                     const sendq_avg: f64 = if (diag.sendq_samples > 0)
                         @as(f64, @floatFromInt(diag.sendq_sum)) / @as(f64, @floatFromInt(diag.sendq_samples))
                     else
                         0.0;
-                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
+                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p fda_drop={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
                         mbps_in,             diag.pkts_in,         mbps_out,             diag.pkts_out,
                         drain_avg,           diag.drain_max,       diag.drain_cap_hits,  diag.ssl_pending_max,
                         diag.nread_max,      diag.nwrite_max,      diag.pollout_skipped, diag.tcp_drops_pkts,
-                        diag.poll_iters,     iter_avg_us,          diag.iter_us_max,     diag.iter_slow_10ms,
-                        diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,     diag.sendq_max,
-                        sendq_avg,           diag.write_blocked,
+                        diag.tx_drops_delta, diag.poll_iters,      iter_avg_us,          diag.iter_us_max,
+                        diag.iter_slow_10ms, diag.iter_slow_50ms,  diag.iter_slow_100ms, diag.poll_us_max,
+                        diag.sendq_max,      sendq_avg,            diag.write_blocked,
                     });
                 }
                 diag = DiagStats{};

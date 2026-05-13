@@ -295,6 +295,16 @@ pub const VirtualAdapter = struct {
         return null;
     }
 
+    /// Get total dropped packet count from the device's ring buffer.
+    /// Returns 0 for non-FdAdapter devices (desktop utun/tun have no ring).
+    pub fn getTxDrops(self: *const VirtualAdapter) u64 {
+        const device = self.device orelse return 0;
+        if (@hasDecl(@TypeOf(device.*), "getTxDrops")) {
+            return device.getTxDrops();
+        }
+        return 0;
+    }
+
     /// Get DHCP configuration
     pub fn getDhcpConfig(self: *const VirtualAdapter) ?DhcpConfig {
         if (self.dhcp_config.isValid()) {
