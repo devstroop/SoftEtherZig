@@ -18,6 +18,8 @@ const ssl = @cImport({
     @cInclude("openssl/x509.h");
     @cInclude("openssl/bio.h");
     @cInclude("openssl/err.h");
+    @cInclude("openssl/md4.h");
+    @cInclude("openssl/des.h");
 });
 
 /// SHA-0 digest length
@@ -310,9 +312,9 @@ pub const MsChapV2 = struct {
             utf16_len += 2;
         }
 
-        // MD4 hash
+        // MD4 hash via OpenSSL (deprecated but still present in OpenSSL 3.x)
         var hash: [16]u8 = undefined;
-        std.crypto.hash.Md4.hash(utf16_buf[0..utf16_len], &hash, .{});
+        _ = ssl.MD4(@ptrCast(&utf16_buf), @intCast(utf16_len), &hash);
         return hash;
     }
 
@@ -616,9 +618,8 @@ const test_key_pem =
     "-----END RSA PRIVATE KEY-----\n";
 
 test "ClientAuth certificate" {
-    const auth = ClientAuth.initCertificate("certuser", test_cert_pem, test_key_pem);
+    const auth = ClientAuth.initCertificate(test_cert_pem, test_key_pem);
     try testing.expectEqual(AuthType.user_cert, auth.auth_type);
-    try testing.expectEqualStrings("certuser", auth.username.?);
     try testing.expect(auth.client_cert != null);
     try testing.expect(auth.client_key != null);
 }

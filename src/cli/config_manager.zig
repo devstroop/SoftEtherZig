@@ -76,6 +76,7 @@ pub const ConfigManager = struct {
     config: ConfigFile,
     config_path: ?[]const u8,
     json_source: ?[]const u8,
+    parsed: ?std.json.Parsed(ConfigFile) = null,
 
     const Self = @This();
 
@@ -85,6 +86,7 @@ pub const ConfigManager = struct {
             .config = .{},
             .config_path = null,
             .json_source = null,
+            .parsed = null,
         };
     }
 
@@ -95,6 +97,11 @@ pub const ConfigManager = struct {
         if (self.config_path) |path| {
             self.allocator.free(path);
         }
+        if (self.parsed) |p| {
+            p.deinit();
+            self.parsed = null;
+        }
+        self.config = .{};
     }
 
     /// Load configuration from file
@@ -122,23 +129,24 @@ pub const ConfigManager = struct {
 
     /// Load from JSON string
     pub fn loadFromString(self: *Self, json: []const u8) !void {
+        if (self.parsed) |p| {
+            p.deinit();
+        }
         try self.parseJson(json);
     }
 
     fn parseJson(self: *Self, json: []const u8) !void {
-        const parsed = std.json.parseFromSlice(ConfigFile, self.allocator, json, .{
+        if (self.parsed) |p| {
+            p.deinit();
+            self.parsed = null;
+        }
+        self.parsed = std.json.parseFromSlice(ConfigFile, self.allocator, json, .{
             .ignore_unknown_fields = true,
-            .allocate = .alloc_always, // Allocate copies of strings
+            .allocate = .alloc_always,
         }) catch {
             return error.InvalidJson;
         };
-        // Don't deinit - we keep the parsed strings
-        // The parsed.value contains slices pointing to allocated memory
-        // that we need to keep alive
-
-        self.config = parsed.value;
-        // Note: The parsed arena will be kept alive with the strings
-        // In production, we'd want to manage this more carefully
+        self.config = self.parsed.?.value;
     }
 
     /// Get default configuration file path

@@ -413,7 +413,8 @@ pub fn mergeConfigs(
 test "load from file - nonexistent file" {
     const allocator = std.testing.allocator;
     const config = try loadFromFile(allocator, "/nonexistent/config.json");
-    try std.testing.expect(config.server == null);
+    defer config.deinit();
+    try std.testing.expect(config.value.server == null);
 }
 
 test "expand path with tilde" {

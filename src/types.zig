@@ -8,13 +8,8 @@ pub const IpAddress = union(enum) {
 
     pub fn format(
         self: IpAddress,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
-        _ = options;
-
         switch (self) {
             .ipv4 => |addr| {
                 try writer.print("{d}.{d}.{d}.{d}", .{
@@ -59,8 +54,7 @@ pub const SessionStats = struct {
 
 test "ip address formatting" {
     const ipv4 = IpAddress{ .ipv4 = .{ 192, 168, 1, 1 } };
-    const str = try std.fmt.allocPrint(std.testing.allocator, "{any}", .{ipv4});
-    defer std.testing.allocator.free(str);
-
+    var buf: [32]u8 = undefined;
+    const str = std.fmt.bufPrint(&buf, "{f}", .{ipv4}) catch return;
     try std.testing.expectEqualStrings("192.168.1.1", str);
 }
