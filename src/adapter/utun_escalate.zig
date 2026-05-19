@@ -116,7 +116,11 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
     const listen_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
         return EscalationError.SocketCreateFailed;
     };
-    defer posix.close(listen_fd);
+    // errdefer ensures listen_fd is closed on ANY error return.
+    // Using errdefer instead of defer: if bind/listen below fails, this
+    // closes the socket before we return. Without this, a failed bind
+    // would leak listen_fd (defer only runs on normal exit).
+    errdefer posix.close(listen_fd);
 
     var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
     @memset(&addr.path, 0);
@@ -126,7 +130,7 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
         return EscalationError.BindFailed;
     };
 
-    // Clean up socket file on exit
+    // Clean up socket file on exit (listen_fd stays open for accept)
     defer {
         _ = std.c.unlink(@ptrCast(&addr.path));
     }
@@ -227,6 +231,9 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
     // Extract fd from control message
     const cmsg: *const Cmsghdr = @ptrCast(@alignCast(&cmsg_buf));
     if (cmsg.cmsg_level != SOL_SOCKET or cmsg.cmsg_type != SCM_RIGHTS) {
+        // NOTE: client_fd is NOT closed here — the Unix domain socket to the
+        // helper stays open as our privileged command channel. The helper
+        // owns it; we don't need it after receiving the utun fd.
         return EscalationError.NoFdReceived;
     }
 
@@ -290,6 +297,124 @@ pub fn runPrivilegedCommand(cmd: []const u8) bool {
         std.log.warn("utun_escalate: privileged command returned exit code {d}", .{resp[0]});
     }
     return resp[0] == 0;
+}
+
+/// Ensure a privileged command channel exists without opening a utun device.
+/// Called after a direct utun open so that routing commands (route add/delete)
+/// can still be executed as root via the setuid helper.
+/// No-op if the channel is already established.
+/// If the installed helper is stale (size mismatch vs bundled), reinstalls it
+/// via a one-time osascript admin prompt before connecting.
+pub fn ensurePrivilegedChannel(allocator: std.mem.Allocator) void {
+    if (privileged_cmd_fd >= 0) return;
+
+    var helper_path_buf: [1024]u8 = undefined;
+    const bundled_helper = findHelperPath(&helper_path_buf);
+
+    if (!installedHelperReady(bundled_helper)) {
+        if (bundled_helper == null) {
+            std.log.warn("utun_escalate: helper binary not found; route commands cannot run as root", .{});
+            return;
+        }
+        // Installed helper is missing or stale — reinstall setuid-root via osascript.
+        std.log.info("utun_escalate: installing/updating privileged helper (one-time admin prompt)", .{});
+        var reinstall_buf: [4096]u8 = undefined;
+        const reinstall_cmd = std.fmt.bufPrint(
+            &reinstall_buf,
+            "osascript -e 'do shell script \"mkdir -p /usr/local/libexec && cp -f \\\"{s}\\\" \\\"{s}\\\" && chown root:wheel \\\"{s}\\\" && chmod 4755 \\\"{s}\\\"\" with administrator privileges' 2>&1",
+            .{ bundled_helper.?, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH },
+        ) catch return;
+        var install_child = std.process.Child.init(&[_][]const u8{ "sh", "-c", reinstall_cmd }, allocator);
+        const term = install_child.spawnAndWait() catch return;
+        switch (term) {
+            .Exited => |code| if (code != 0) {
+                std.log.err("utun_escalate: helper install failed (exit {d})", .{code});
+                return;
+            },
+            else => return,
+        }
+        std.log.info("utun_escalate: helper installed to {s}", .{INSTALLED_HELPER_PATH});
+    }
+
+    // Create a temporary Unix socket for the helper to connect back on.
+    var sock_path_buf: [108]u8 = undefined;
+    var rand_bytes: [8]u8 = undefined;
+    std.crypto.random.bytes(&rand_bytes);
+    const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/se-cmd-{x}{x}{x}{x}{x}{x}{x}{x}.sock", .{
+        rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
+        rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7],
+    }) catch return;
+
+    const listen_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch return;
+
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    if (sock_path.len >= addr.path.len) {
+        posix.close(listen_fd);
+        return;
+    }
+    @memcpy(addr.path[0..sock_path.len], sock_path);
+
+    posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch {
+        posix.close(listen_fd);
+        return;
+    };
+    defer _ = std.c.unlink(@ptrCast(&addr.path));
+
+    posix.listen(listen_fd, 1) catch {
+        posix.close(listen_fd);
+        return;
+    };
+
+    // Launch the setuid helper in cmd-only mode (no utun, no password prompt).
+    var cmd_buf: [1200]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "{s} {s} --cmd-only", .{ INSTALLED_HELPER_PATH, sock_path }) catch {
+        posix.close(listen_fd);
+        return;
+    };
+
+    var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
+    child.spawn() catch {
+        posix.close(listen_fd);
+        return;
+    };
+
+    // Wait for helper to connect (5 s — setuid exec is near-instant).
+    var poll_fds = [1]std.posix.pollfd{
+        .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    const poll_result = std.posix.poll(&poll_fds, 5_000) catch {
+        _ = child.wait() catch {};
+        posix.close(listen_fd);
+        return;
+    };
+    if (poll_result == 0) {
+        std.log.err("utun_escalate: timeout waiting for cmd-only helper", .{});
+        _ = child.wait() catch {};
+        posix.close(listen_fd);
+        return;
+    }
+
+    const client_fd = posix.accept(listen_fd, null, null, 0) catch {
+        _ = child.wait() catch {};
+        posix.close(listen_fd);
+        return;
+    };
+    posix.close(listen_fd);
+
+    // Read the 1-byte ready signal from the helper.
+    var ready: [1]u8 = undefined;
+    const n = posix.read(client_fd, &ready) catch {
+        posix.close(client_fd);
+        return;
+    };
+    if (n == 0 or ready[0] != 0x00) {
+        posix.close(client_fd);
+        return;
+    }
+
+    privileged_cmd_fd = client_fd;
+    std.log.info("utun_escalate: privileged command channel established via cmd-only helper (fd={d})", .{client_fd});
 }
 
 /// Close the privileged command channel and signal the helper to exit.

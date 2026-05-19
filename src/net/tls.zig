@@ -709,13 +709,42 @@ pub const TlsSocket = struct {
                         .events = std.posix.POLL.OUT,
                         .revents = 0,
                     }};
-                    _ = std.posix.poll(&pfd, 50) catch {};
+                    // 1ms poll — enough for kernel to drain some sndbuf bytes
+                    // without stalling the data loop long enough to cause
+                    // ACK starvation. 50ms was causing the retrans-storm
+                    // cascade by freezing inbound processing for too long.
+                    _ = std.posix.poll(&pfd, 1) catch {};
                     continue;
                 },
                 else => return err,
             };
             if (n == 0) return error.BrokenPipe;
             index += n;
+
+            // Active backpressure: if the kernel send queue exceeds BDP,
+            // add a brief poll to let it drain. Without this, the 4MB
+            // SO_SNDBUF buffer fills with unsent data on slow links,
+            // adding seconds of latency without improving throughput.
+            // macOS: SO_NWRITE reports bytes in the send buffer.
+            // Other platforms: skipped (rely on WouldBlock from smaller
+            // effective buffer).
+            if (builtin.os.tag == .macos) {
+                const sq = self.kernelSendQueue();
+                // BDP threshold for ~8Mbps at 200ms RTT = ~200KB.
+                // When send queue exceeds this, the bottleneck is the
+                // physical link, not our buffer. Throttle writes.
+                if (sq > 192 * 1024) {
+                    var pfd = [_]std.posix.pollfd{.{
+                        .fd = self.tcp_fd,
+                        .events = std.posix.POLL.OUT,
+                        .revents = 0,
+                    }};
+                    // Cap poll to 5ms — brief enough to avoid ACK starvation.
+                    const excess = sq - 192 * 1024;
+                    const poll_ms = @min(@as(i32, @intCast(excess >> 18)), 5);
+                    _ = std.posix.poll(&pfd, poll_ms) catch {};
+                }
+            }
         }
     }
 
@@ -790,14 +819,16 @@ pub const TlsSocket = struct {
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&keepalive)) catch {};
 
         // SO_SNDBUF sizing tradeoff at typical 180ms tunnel RTT:
-        //   128KB → UL choked at 5 Mbps (BDP cap, single-flow)
-        //   256KB → UL ~11 Mbps, ~22ms ACK queue
-        //   512KB → UL ~22 Mbps, ~45ms ACK queue
-        //   1MB   → UL ~45 Mbps, ~90ms ACK queue (ping spike +90ms)
-        //   2MB+  → UL good, but DL ACKs bloat → 1100ms+ ping → DL collapse
-        // 1MB is the best single-knob compromise: full UL via single OR
-        // parallel flows, DL ping under load stays under ~300ms.
-        const snd_cap: u32 = 1024 * 1024;
+        //   Baseline 86 Mbps was achieved at 4MB (no cap, kernel autotune).
+        //   Caps ≤1MB cause sndbuf-full → SSL_write stalls for 50ms polling
+        //   POLLOUT → data loop can't process inbound during stall → ACK
+        //   starvation → server retransmits → inner cwnd collapse → retrans
+        //   storms on ALL platforms (macOS/Android/iOS). Cascade defeats
+        //   any latency benefit from a smaller buffer.
+        //   4MB → kernel doubles to ~8MB = 4× BDP at 86 Mbps/180ms RTT.
+        //   Sndbuf never fills in steady state; no stalls, no cascade.
+        //   Memory cost: 4MB per TLS connection (negligible).
+        const snd_cap: u32 = 4 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the

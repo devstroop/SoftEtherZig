@@ -61,6 +61,13 @@ pub const RoutingState = struct {
     routes_configured: bool,
     device_name: [64]u8,
     device_name_len: usize,
+    // Physical interface name (e.g. "en1") captured before routing changes
+    physical_interface: [64]u8,
+    physical_interface_len: usize,
+    // IPv6 leak prevention: service name whose IPv6 was disabled on connect
+    ipv6_service: [256]u8,
+    ipv6_service_len: usize,
+    ipv6_disabled: bool,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) RoutingState {
@@ -72,6 +79,11 @@ pub const RoutingState = struct {
             .routes_configured = false,
             .device_name = [_]u8{0} ** 64,
             .device_name_len = 0,
+            .physical_interface = [_]u8{0} ** 64,
+            .physical_interface_len = 0,
+            .ipv6_service = [_]u8{0} ** 256,
+            .ipv6_service_len = 0,
+            .ipv6_disabled = false,
             .allocator = allocator,
         };
     }
@@ -84,6 +96,16 @@ pub const RoutingState = struct {
         // Calculate local network from gateway (assume /24)
         self.local_network = self.original_default_gateway & 0xFFFFFF00;
         self.local_netmask = 0xFFFFFF00;
+
+        // Capture physical interface name BEFORE routing changes
+        if (builtin.os.tag == .macos) {
+            var iface_buf: [64]u8 = undefined;
+            if (getDefaultInterfaceMacOS(self.allocator, &iface_buf)) |iface| {
+                const len = @min(iface.len, self.physical_interface.len);
+                @memcpy(self.physical_interface[0..len], iface[0..len]);
+                self.physical_interface_len = len;
+            }
+        }
     }
 
     /// Restore original routing state after VPN disconnect
@@ -96,6 +118,12 @@ pub const RoutingState = struct {
         // Restore original default route
         if (self.original_default_gateway != 0) {
             try addRoute(0, 0, self.original_default_gateway, null);
+        }
+
+        // Re-enable IPv6 if we disabled it
+        if (self.ipv6_disabled and self.ipv6_service_len > 0) {
+            enableIpv6OnService(self.ipv6_service[0..self.ipv6_service_len]);
+            self.ipv6_disabled = false;
         }
 
         self.routes_configured = false;
@@ -177,6 +205,21 @@ pub const RouteManager = struct {
             std.log.warn("[ROUTING] SKIPPING host route - vpn_server={d}, orig_gw={d}", .{ vpn_server, self.state.original_default_gateway });
         }
 
+        // Capture the physical interface and its network service name NOW, before
+        // we delete the default route. After step 3/4 the default points to utun,
+        // so route-based lookups return the VPN interface instead of en0/en1.
+        if (builtin.os.tag == .macos) {
+            var iface_buf: [64]u8 = undefined;
+            if (getDefaultInterfaceMacOS(self.allocator, &iface_buf)) |iface| {
+                var svc_buf: [256]u8 = undefined;
+                if (getNetworkServiceForInterface(self.allocator, iface, &svc_buf)) |svc| {
+                    const svc_len = @min(svc.len, self.state.ipv6_service.len);
+                    @memcpy(self.state.ipv6_service[0..svc_len], svc[0..svc_len]);
+                    self.state.ipv6_service_len = svc_len;
+                }
+            }
+        }
+
         // 3. Delete existing default route
         std.log.debug("[ROUTING] Step 3: Deleting existing default route...", .{});
         _ = deleteDefaultRoute() catch {};
@@ -195,6 +238,16 @@ pub const RouteManager = struct {
 
         std.log.info("[ROUTING] ✅ Full-tunnel routing configured successfully", .{});
         self.state.routes_configured = true;
+
+        // Disable IPv6 on the physical interface using the service name captured
+        // before the routing change. On Jio Fiber and similar networks that have
+        // public IPv6 but CGNAT IPv4, apps use IPv6 via Happy Eyeballs and bypass
+        // the IPv4-only VPN tunnel unless IPv6 is suppressed on the physical NIC.
+        if (builtin.os.tag == .macos and self.state.ipv6_service_len > 0) {
+            const svc = self.state.ipv6_service[0..self.state.ipv6_service_len];
+            disableIpv6OnService(svc);
+            self.state.ipv6_disabled = true;
+        }
     }
 
     /// Configure split-tunnel VPN routing (only specified networks through VPN)
@@ -379,7 +432,7 @@ pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]cons
             std.fmt.bufPrint(&cmd_buf, "ip route add {s}/{d} via {s}", .{
                 trimNull(&dest_str), prefix, trimNull(&gw_str),
             }) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
     } else {
         // macOS uses 'route' command
         const cmd = if (destination == 0 and netmask == 0)
@@ -392,7 +445,7 @@ pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]cons
             std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} {s}", .{
                 trimNull(&dest_str), prefix, trimNull(&gw_str),
             }) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
     }
 }
 
@@ -407,12 +460,12 @@ pub fn addHostRoute(host: u32, gateway: u32) !void {
         const cmd = std.fmt.bufPrint(&cmd_buf, "ip route add {s}/32 via {s}", .{
             trimNull(&host_str), trimNull(&gw_str),
         }) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
     } else {
         const cmd = std.fmt.bufPrint(&cmd_buf, "route add -host {s} {s}", .{
             trimNull(&host_str), trimNull(&gw_str),
         }) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
     }
 }
 
@@ -484,6 +537,80 @@ pub fn clearDns() !void {
     _ = runCommand("networksetup -setdnsservers Wi-Fi Empty");
 }
 
+// ============================================
+// IPv6 Leak Prevention (macOS)
+// ============================================
+
+/// Get the macOS network service name (e.g. "Wi-Fi") for a given interface (e.g. "en1").
+/// Writes into buf, returns slice on success or null on failure.
+pub fn getNetworkServiceForInterface(allocator: std.mem.Allocator, iface: []const u8, buf: []u8) ?[]u8 {
+    if (builtin.os.tag != .macos) return null;
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = std.fmt.bufPrint(
+        &cmd_buf,
+        "networksetup -listnetworkserviceorder | grep -B1 'Device: {s})' | grep -v 'Device:' | grep -v '^--$' | head -1 | sed 's/^([0-9]*) //'",
+        .{iface},
+    ) catch return null;
+
+    var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Close;
+    child.spawn() catch return null;
+
+    const n = child.stdout.?.read(buf) catch {
+        _ = child.wait() catch {};
+        return null;
+    };
+    _ = child.wait() catch {};
+
+    var end = n;
+    while (end > 0 and (buf[end - 1] == '\n' or buf[end - 1] == '\r' or buf[end - 1] == ' ')) end -= 1;
+    if (end == 0) return null;
+    return buf[0..end];
+}
+
+/// Get the interface name that carries the IPv4 default route (e.g. "en1").
+pub fn getDefaultInterfaceMacOS(allocator: std.mem.Allocator, buf: []u8) ?[]u8 {
+    if (builtin.os.tag != .macos) return null;
+    var child = std.process.Child.init(
+        &[_][]const u8{ "sh", "-c", "route -n get default 2>/dev/null | awk '/interface:/{print $2}'" },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Close;
+    child.spawn() catch return null;
+
+    const n = child.stdout.?.read(buf) catch {
+        _ = child.wait() catch {};
+        return null;
+    };
+    _ = child.wait() catch {};
+
+    var end = n;
+    while (end > 0 and (buf[end - 1] == '\n' or buf[end - 1] == '\r' or buf[end - 1] == ' ')) end -= 1;
+    if (end == 0) return null;
+    return buf[0..end];
+}
+
+/// Disable IPv6 on a network service (e.g. "Wi-Fi") to prevent IPv6 leaks.
+/// Runs as root via the privileged channel (route commands already need root).
+pub fn disableIpv6OnService(service: []const u8) void {
+    if (builtin.os.tag != .macos) return;
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6off \"{s}\"", .{service}) catch return;
+    _ = runCommand(cmd);
+    std.log.info("[ROUTING] IPv6 disabled on service \"{s}\" (leak prevention)", .{service});
+}
+
+/// Re-enable IPv6 on a network service after VPN disconnect.
+pub fn enableIpv6OnService(service: []const u8) void {
+    if (builtin.os.tag != .macos) return;
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6automatic \"{s}\"", .{service}) catch return;
+    _ = runCommand(cmd);
+    std.log.info("[ROUTING] IPv6 re-enabled on service \"{s}\"", .{service});
+}
+
 /// Run a shell command (helper function).
 /// On macOS, tries the privileged command channel first (for root operations
 /// like route/ifconfig), then falls back to direct execution.
@@ -501,8 +628,11 @@ fn runCommand(cmd: []const u8) bool {
     );
     child.stderr_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
-    _ = child.spawnAndWait() catch return false;
-    return true;
+    const term = child.spawnAndWait() catch return false;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Parse IPv4 address string to u32

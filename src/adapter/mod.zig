@@ -159,7 +159,7 @@ pub const VirtualAdapter = struct {
                 // Direct utun creation failed (likely EPERM) — try privilege escalation
                 std.log.warn("Direct utun open failed ({}) — attempting privilege escalation...", .{direct_err});
                 const escalated = utun_escalate.escalatedUtunOpen(self.allocator) catch |esc_err| {
-                    std.log.err("Privilege escalation also failed: {}", .{esc_err});
+                    std.log.err("Privilege escalation also failed: esc_err={}, returning direct_err={}", .{ esc_err, direct_err });
                     return direct_err;
                 };
                 self.device = UtunDevice.fromFd(self.allocator, escalated.fd, escalated.device_name, escalated.device_name_len) catch |fd_err| {
@@ -169,6 +169,9 @@ pub const VirtualAdapter = struct {
                 // Already configured by helper — skip configureTemporary
                 return;
             };
+            // Direct utun open succeeded. Still need the privileged command channel
+            // so that route add/delete commands run as root during tunnel setup.
+            utun_escalate.ensurePrivilegedChannel(self.allocator);
             try self.device.?.configureTemporary();
         } else if (builtin.os.tag == .windows) {
             self.device = TapWindowsDevice.open(self.allocator) catch |err| {

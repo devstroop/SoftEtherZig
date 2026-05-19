@@ -1479,14 +1479,14 @@ pub const VpnClient = struct {
         defer self.allocator.free(recv_scratch);
         var recv_slices: [512][]u8 = undefined;
 
-        // Outbound packet buffers — heap-allocated to allow larger batch (32)
-        // without blowing the Dart isolate's ~512KB stack. 16x2048 + 16x1600 =
-        // 57KB, kept on heap for safety in ReleaseFast mode.
+        // Outbound packet buffers — heap-allocated to allow larger batch (64)
+        // without blowing the Dart isolate's ~512KB stack. 64x2048 + 64x1600 =
+        // 230KB, kept on heap for safety in ReleaseFast mode.
         //
-        // Cycle 5 attempted batch=32 + drain=32 — regressed throughput
-        // (T1 67→40 Mbps, avg 31→22 Mbps). Reverted to 16/8. Larger drain
-        // starves outbound; larger batch holds TUN packets too long.
-        const OUTBOUND_BATCH: usize = 16;
+        // On iOS the TUN fd is a socketpair bridged to Swift pump; the bottleneck
+        // is Swift pump throughput, not data-loop iterations. A larger batch reduces
+        // per-packet overhead (fewer data-loop iters for same packet count).
+        const OUTBOUND_BATCH: usize = 64;
         const tun_read_bufs = try self.allocator.alloc([2048]u8, OUTBOUND_BATCH);
         defer self.allocator.free(tun_read_bufs);
         const outbound_eth_bufs = try self.allocator.alloc([1600]u8, OUTBOUND_BATCH);
@@ -1496,12 +1496,9 @@ pub const VpnClient = struct {
         var arp_buf: [64]u8 = undefined;
 
         // Heap-allocated send buffer for zero-copy outbound path.
-        // Heap (not stack) because this loop may run on a Dart isolate thread
-        // with a small (~512KB) stack — a 25KB stack array plus other locals
-        // (tun_read_bufs 32KB, outbound_eth_bufs 25KB, recv_scratch, poll_fds)
-        // crosses safety margins in ReleaseFast mode. Sized at 100KB to leave
-        // headroom for future batch-size growth without re-tuning.
-        const send_buffer = try self.allocator.alloc(u8, 100_000);
+        // Sized for 64-packet batch (worst case ~64 * ~1518B = ~97KB compressed)
+        // plus SoftEther block headers. 256KB headroom for maximum batch + overhead.
+        const send_buffer = try self.allocator.alloc(u8, 262_144);
         defer self.allocator.free(send_buffer);
 
         var send_helper = SendTunnelHelper{
@@ -1924,8 +1921,8 @@ pub const VpnClient = struct {
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        // Read up to OUTBOUND_BATCH (16) packets from TUN in one batch
-                        var outbound_blocks: [16][]const u8 = undefined;
+                        // Read up to OUTBOUND_BATCH packets from TUN in one batch
+                        var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
                         var outbound_bytes: usize = 0;
 
@@ -1962,16 +1959,25 @@ pub const VpnClient = struct {
                             // retry next iteration after ACKs drain sndbuf). This is
                             // what prevents the SSL_write deadlock.
                             if (udp_sent_count < outbound_count and tls_can_send) {
+                                var tls_send_ok = true;
                                 send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
                                     error.ConnectionClosed, error.BrokenPipe => {
                                         std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
                                         return;
                                     },
-                                    else => {},
+                                    else => {
+                                        // Non-fatal: likely WANT_WRITE (TLS sndbuf full).
+                                        tls_send_ok = false;
+                                    },
                                 };
-                                // DIAG: count what we actually sent over TCP
-                                diag.pkts_out += outbound_count - udp_sent_count;
-                                for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
+                                if (tls_send_ok) {
+                                    // DIAG: count what we actually sent over TCP
+                                    diag.pkts_out += outbound_count - udp_sent_count;
+                                    for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
+                                } else {
+                                    // DIAG: send failed — count as dropped
+                                    diag.tcp_drops_pkts += outbound_count - udp_sent_count;
+                                }
                             } else if (udp_sent_count < outbound_count and !tls_can_send) {
                                 // DIAG: TCP path was blocked, batch dropped (TCP layer will retransmit)
                                 diag.pollout_skipped += 1;

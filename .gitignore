@@ -38,6 +38,7 @@ main
 
 # Temporary build files
 *.dSYM/
+build/
 
 config.json
 config*.json

@@ -55,11 +55,40 @@ pub fn main() !void {
     defer std.process.argsFree(std.heap.page_allocator, args);
 
     if (args.len < 2) {
-        std.debug.print("Usage: softether-utun-helper <unix-socket-path>\n", .{});
+        std.debug.print("Usage: softether-utun-helper <unix-socket-path> [--cmd-only]\n", .{});
         std.process.exit(1);
     }
 
     const socket_path = args[1];
+
+    // --cmd-only: skip utun creation, only establish the privileged command channel.
+    // Used when the app opened utun directly but still needs root for route commands.
+    const cmd_only = args.len >= 3 and std.mem.eql(u8, args[2], "--cmd-only");
+    if (cmd_only) {
+        const sock_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
+            std.debug.print("ERROR: socket(AF_UNIX) failed\n", .{});
+            std.process.exit(10);
+        };
+        defer posix.close(sock_fd);
+
+        var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+        @memset(&addr.path, 0);
+        if (socket_path.len >= addr.path.len) std.process.exit(11);
+        @memcpy(addr.path[0..socket_path.len], socket_path);
+
+        posix.connect(sock_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch {
+            std.debug.print("ERROR: connect to parent socket failed\n", .{});
+            std.process.exit(12);
+        };
+
+        // Send 1-byte ready signal so parent knows the channel is up
+        const ready = [_]u8{0x00};
+        _ = posix.write(sock_fd, &ready) catch std.process.exit(13);
+
+        std.debug.print("OK: cmd-only mode, entering privileged command loop\n", .{});
+        runCommandLoop(sock_fd);
+        return;
+    }
 
     // Step 1: Create utun device
     const temp_fd = posix.socket(AF_SYSTEM, posix.SOCK.DGRAM, SYSPROTO_CONTROL) catch {
@@ -220,27 +249,28 @@ pub fn main() !void {
     std.debug.print("OK: Created {s} (fd={d}), sent to parent\n", .{ dev_name_slice, utun_fd });
 
     // Step 4: Enter privileged command loop.
-    // Parent sends commands for ifconfig/route that need root.
-    // Protocol: [u16 LE length][command bytes] -> [u8 exit_code]
-    // Length 0 = EXIT.
     std.debug.print("OK: Entering privileged command loop\n", .{});
+    runCommandLoop(sock_fd);
+    std.debug.print("OK: Command loop ended, helper exiting\n", .{});
+}
+
+/// Privileged command loop.
+/// Protocol: [u16 LE length][command bytes] -> [u8 exit_code]. Length 0 = EXIT.
+fn runCommandLoop(sock_fd: posix.fd_t) void {
     while (true) {
-        // Read 2-byte length prefix (little-endian)
         var len_buf: [2]u8 = undefined;
         if (!readExact(sock_fd, &len_buf)) break;
 
         const cmd_len: u16 = @as(u16, len_buf[0]) | (@as(u16, len_buf[1]) << 8);
-        if (cmd_len == 0) break; // EXIT signal
-        if (cmd_len > 2048) break; // Safety limit
+        if (cmd_len == 0) break;
+        if (cmd_len > 2048) break;
 
-        // Read command bytes
         var cmd_data: [2048]u8 = undefined;
         if (!readExact(sock_fd, cmd_data[0..cmd_len])) break;
 
         const cmd_str = cmd_data[0..cmd_len];
         std.debug.print("CMD: {s}\n", .{cmd_str});
 
-        // Execute as root via /bin/sh
         var proc = std.process.Child.init(
             &[_][]const u8{ "/bin/sh", "-c", cmd_str },
             std.heap.page_allocator,
@@ -254,11 +284,8 @@ pub fn main() !void {
         };
 
         const exit_code: u8 = if (proc_term.Exited <= 255) @intCast(proc_term.Exited) else 1;
-        const resp = [_]u8{exit_code};
-        _ = posix.write(sock_fd, &resp) catch break;
+        _ = posix.write(sock_fd, &[_]u8{exit_code}) catch break;
     }
-
-    std.debug.print("OK: Command loop ended, helper exiting\n", .{});
 }
 
 /// Read exactly buf.len bytes from fd. Returns false on EOF or error.
