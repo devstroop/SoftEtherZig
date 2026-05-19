@@ -796,6 +796,10 @@ pub const VpnClient = struct {
                         .certificate => |cert| cert.key_data,
                         else => null,
                     },
+                    // Use the original server hostname for SNI, not the
+                    // redirect IP literal. Load balancers routing on SNI
+                    // will drop connections with an IP as SNI.
+                    .sni_hostname = self.config.server_host,
                 };
 
                 self.tls_socket = tls.TlsSocket.connect(
@@ -1057,7 +1061,9 @@ pub const VpnClient = struct {
         // Primary is now owned by the manager; clear self.tls_socket
         self.tls_socket = null;
 
-        // Build TLS config (reuse from primary)
+        // Build TLS config (reuse from primary). After a cluster redirect
+        // self.effective_server_ip is an IP literal; use the original server
+        // hostname for SNI so load balancers can route the TLS handshake.
         const tls_config = tls.TlsConfig{
             .verify_certificate = self.config.verify_certificate,
             .allow_self_signed = !self.config.verify_certificate,
@@ -1070,6 +1076,7 @@ pub const VpnClient = struct {
                 .certificate => |cert| cert.key_data,
                 else => null,
             },
+            .sni_hostname = self.config.server_host,
         };
 
         // Format effective server IP for HTTP Host header and TLS connect

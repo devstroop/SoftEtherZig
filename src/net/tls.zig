@@ -98,6 +98,12 @@ pub const TlsConfig = struct {
 
     /// Client private key PEM data (for certificate authentication)
     client_key_pem: ?[]const u8 = null,
+
+    /// SNI hostname override. When set, this is used for the TLS SNI extension
+    /// instead of the hostname passed to connect(). Required on cluster-redirect
+    /// where the TCP connection goes to an IP literal but the load balancer needs
+    /// the original server hostname to route the TLS handshake.
+    sni_hostname: ?[]const u8 = null,
 };
 
 /// TCP connect with configurable timeout using non-blocking socket + poll.
@@ -404,8 +410,12 @@ pub const TlsSocket = struct {
         };
         errdefer c.SSL_free(ssl);
 
-        // Set hostname for SNI
-        const hostname_z = try allocator.dupeZ(u8, hostname);
+        // Set hostname for SNI. On a cluster redirect the TCP connection goes
+        // to an IP literal but the load balancer may need the original server
+        // hostname to route the TLS handshake; config.sni_hostname lets the
+        // caller override what is sent in the SNI extension.
+        const sni_name = config.sni_hostname orelse hostname;
+        const hostname_z = try allocator.dupeZ(u8, sni_name);
         defer allocator.free(hostname_z);
         _ = c.SSL_set_tlsext_host_name(ssl, hostname_z.ptr);
 
