@@ -30,7 +30,7 @@ jobs:
           - name: Windows
             runner: windows-latest
             build: shared-lib
-            deps: vcpkg install openssl:x64-windows
+            deps: choco install openssl -y --no-progress
             artifact: windows-lib
             lib_glob: "*.dll"
             windows: true
@@ -57,17 +57,6 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Cache vcpkg packages
-        if: matrix.windows
-        id: cache-vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\vcpkg\installed
-            C:\vcpkg\downloads
-            C:\vcpkg\packages
-          key: vcpkg-openssl-x64-windows
-
       - name: Install dependencies
         if: matrix.deps
         run: ${{ matrix.deps }}
@@ -75,7 +64,7 @@ jobs:
       - name: Set OPENSSL_DIR
         if: matrix.windows
         shell: pwsh
-        run: echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        run: echo "OPENSSL_DIR=C:\OpenSSL-Win64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Android NDK
         if: matrix.ndk
