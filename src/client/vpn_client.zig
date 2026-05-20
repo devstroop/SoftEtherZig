@@ -1430,11 +1430,12 @@ pub const VpnClient = struct {
         };
 
         const tun_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(tun_fd) else @as(usize, @intCast(tun_fd));
+        const tls_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(single_sock.?.getFd()) else @as(usize, @intCast(single_sock.?.getFd()));
         if (builtin.os.tag != .windows) {
             if (multi_conn) {
                 std.log.debug("Using poll() for multi-connection I/O: {d} TCP connections, TUN fd={d}", .{ self.conn_manager.?.count, tun_fd_int });
             } else {
-                std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ single_sock.?.getFd(), tun_fd_int });
+                std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd_int, tun_fd_int });
             }
         } else {
             std.log.debug("Using Windows event-based I/O for data loop", .{});
