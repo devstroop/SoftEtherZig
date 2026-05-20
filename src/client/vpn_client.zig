@@ -1482,7 +1482,7 @@ pub const VpnClient = struct {
         // (Dart Isolate.run() threads have ~1MB stack; these buffers are 800KB+)
         const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
         defer self.allocator.free(recv_scratch);
-        const recv_slices = try self.allocator.alloc([]u8, 512);
+        var recv_slices = try self.allocator.alloc([]u8, 512);
         defer self.allocator.free(recv_slices);
 
         // Outbound packet buffers — heap-allocated to allow larger batch (64)
