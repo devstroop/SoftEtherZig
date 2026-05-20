@@ -150,7 +150,8 @@ pub const FdAdapter = struct {
         }
 
         // All mobile platforms: direct writes, no ring buffer, no writer thread.
-        std.log.info("FdAdapter wrapping fd={d} name={s} (direct writes, no ring buffer)", .{ fd, name });
+        const fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(fd) else @as(usize, @intCast(fd));
+        std.log.info("FdAdapter wrapping fd={d} name={s} (direct writes, no ring buffer)", .{ fd_val, name });
 
         return device;
     }
@@ -173,7 +174,9 @@ pub const FdAdapter = struct {
         if (setNonBlocking(new_fd) < 0) return FdAdapterError.OpenFailed;
         const old_fd = self.fd;
         @atomicStore(posix.fd_t, &self.fd, new_fd, .release);
-        std.log.info("FdAdapter swapped fd {d} -> {d}", .{ old_fd, new_fd });
+        const old_fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(old_fd) else @as(usize, @intCast(old_fd));
+        const new_fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(new_fd) else @as(usize, @intCast(new_fd));
+        std.log.info("FdAdapter swapped fd {d} -> {d}", .{ old_fd_val, new_fd_val });
     }
 
     /// Close the adapter. Does NOT close the fd (owned by the platform).
