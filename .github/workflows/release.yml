@@ -26,42 +26,63 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── Executable binaries ──
           - name: macOS (arm64)
             runner: macos-14
-            build: shared-lib
-            artifact: libsoftether-macos-arm64
+            build: ""
+            artifact: softether-zig-macos-arm64
             archive: tar.gz
 
           - name: Linux (x86_64)
             runner: ubuntu-latest
-            build: shared-lib
-            artifact: libsoftether-linux-x86_64
+            build: ""
+            artifact: softether-zig-linux-x86_64
             archive: tar.gz
 
           - name: Windows (x64)
             runner: windows-latest
-            build: shared-lib
-            artifact: libsoftether-windows-x64
+            build: ""
+            artifact: softether-zig-windows-x64
             archive: zip
             windows: true
 
-          - name: iOS (arm64 device)
+          # ── Library only ──
+          - name: macOS lib (arm64)
             runner: macos-14
-            build: static-lib -Dtarget=aarch64-ios
-            artifact: libsoftether-ios-arm64
+            build: shared-lib
+            artifact: libsoftether-zig-macos-arm64
             archive: tar.gz
 
-          - name: Android (arm64-v8a)
+          - name: Linux lib (x86_64)
+            runner: ubuntu-latest
+            build: shared-lib
+            artifact: libsoftether-zig-linux-x86_64
+            archive: tar.gz
+
+          - name: Windows lib (x64)
+            runner: windows-latest
+            build: shared-lib
+            artifact: libsoftether-zig-windows-x64
+            archive: zip
+            windows: true
+
+          - name: iOS lib (arm64 device)
+            runner: macos-14
+            build: static-lib -Dtarget=aarch64-ios
+            artifact: libsoftether-zig-ios-arm64
+            archive: tar.gz
+
+          - name: Android lib (arm64-v8a)
             runner: ubuntu-latest
             build: static-lib -Dtarget=aarch64-linux-android
-            artifact: libsoftether-android-arm64-v8a
+            artifact: libsoftether-zig-android-arm64-v8a
             archive: tar.gz
             ndk: true
 
-          - name: Android (armeabi-v7a)
+          - name: Android lib (armeabi-v7a)
             runner: ubuntu-latest
             build: static-lib -Dtarget=arm-linux-androideabi
-            artifact: libsoftether-android-armeabi-v7a
+            artifact: libsoftether-zig-android-armeabi-v7a
             archive: tar.gz
             ndk: true
 
@@ -141,8 +162,26 @@ jobs:
           echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
-      - name: Build (${{ matrix.build }})
-        run: zig build ${{ matrix.build }} --release=fast --summary all
+      - name: Build
+        if: "!matrix.windows"
+        shell: bash
+        run: |
+          if [ -z "${{ matrix.build }}" ]; then
+            zig build --release=fast --summary all
+          else
+            zig build ${{ matrix.build }} --release=fast --summary all
+          fi
+
+      - name: Build (Windows)
+        if: matrix.windows
+        shell: pwsh
+        run: |
+          $buildTarget = "${{ matrix.build }}"
+          if ([string]::IsNullOrEmpty($buildTarget)) {
+            zig build --release=fast --summary all
+          } else {
+            zig build $buildTarget --release=fast --summary all
+          }
 
       - name: List build outputs
         shell: bash
