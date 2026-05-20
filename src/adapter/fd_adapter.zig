@@ -91,7 +91,9 @@ pub const FdAdapter = struct {
     tx_head: usize,
     tx_tail: usize,
     tx_count: usize,
-    tx_drops: u64,
+    // Stored as usize so 32-bit targets (Android armeabi-v7a) can use native
+    // atomic ops. Zig disallows @atomicStore(u64, ...) on 32-bit ARM.
+    tx_drops: usize,
     tx_mutex: std.Thread.Mutex,
     tx_cond: std.Thread.Condition,
     tx_thread: ?std.Thread,
@@ -250,16 +252,16 @@ pub const FdAdapter = struct {
         // Direct write on all mobile platforms — iOS and Android.
         const written = posix.write(self.fd, data) catch |err| switch (err) {
             error.WouldBlock => {
-                @atomicStore(u64, &self.tx_drops, self.tx_drops + 1, .release);
+                @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
                 return FdAdapterError.WriteFailed;
             },
             else => {
-                @atomicStore(u64, &self.tx_drops, self.tx_drops + 1, .release);
+                @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
                 return FdAdapterError.WriteFailed;
             },
         };
         if (written == 0) {
-            @atomicStore(u64, &self.tx_drops, self.tx_drops + 1, .release);
+            @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
             return FdAdapterError.WriteFailed;
         }
         self.stats.send_bytes += written;
@@ -275,6 +277,6 @@ pub const FdAdapter = struct {
     /// Get total dropped packet count since creation.
     /// Tracks EWOULDBLOCK drops from direct writes on all mobile platforms.
     pub fn getTxDrops(self: *const FdAdapter) u64 {
-        return @atomicLoad(u64, &self.tx_drops, .acquire);
+        return @intCast(@atomicLoad(usize, &self.tx_drops, .acquire));
     }
 };
