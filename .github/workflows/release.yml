@@ -1,20 +1,18 @@
-name: CI
+name: Release
 
 on:
   push:
-    branches: [ master ]
-  pull_request:
-    branches: [ '**' ]
+    tags:
+      - 'v*'
 
 jobs:
   build-macos:
-    name: Build SoftEtherClient (macOS)
+    name: Build macOS
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: recursive
 
       - name: Setup Zig
         run: |
@@ -24,28 +22,24 @@ jobs:
           sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
           echo "/usr/local/zig" >> $GITHUB_PATH
 
-      - name: Show Zig version
-        run: zig version
-
       - name: Install dependencies
         run: brew install openssl@3
 
-      - name: Build SoftEtherClient
-        run: |
-          zig build
-          ls -lh zig-out/
+      - name: Build shared library
+        run: zig build shared-lib -Doptimize=ReleaseFast
 
-      - name: Run tests
-        run: zig build test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-lib
+          path: zig-out/lib/
 
   build-linux:
-    name: Build SoftEtherClient (Linux)
+    name: Build Linux
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: recursive
 
       - name: Setup Zig
         run: |
@@ -55,39 +49,33 @@ jobs:
           sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
           echo "/usr/local/zig" >> $GITHUB_PATH
 
-      - name: Show Zig version
-        run: zig version
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev
 
-      - name: Build SoftEtherClient
-        run: |
-          zig build
-          ls -lh zig-out/
+      - name: Build shared library
+        run: zig build shared-lib -Doptimize=ReleaseFast
 
-      - name: Run tests
-        run: zig build test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-lib
+          path: zig-out/lib/
 
   build-windows:
-    name: Build SoftEtherClient (Windows)
+    name: Build Windows
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: recursive
 
       - name: Setup Zig
+        shell: pwsh
         run: |
           curl -LO https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip
           Expand-Archive zig-x86_64-windows-0.15.2.zip -DestinationPath C:\
           echo "C:\zig-x86_64-windows-0.15.2" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Show Zig version
-        run: zig version
 
       - name: Cache vcpkg packages
         id: cache-vcpkg
@@ -106,22 +94,21 @@ jobs:
       - name: Set OPENSSL_DIR
         run: echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build SoftEtherClient
-        run: |
-          zig build
-          ls zig-out/
+      - name: Build shared library
+        run: zig build shared-lib -Doptimize=ReleaseFast
 
-      - name: Run tests
-        run: zig build test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-lib
+          path: zig-out/lib/
 
   build-ios:
-    name: Build (iOS)
+    name: Build iOS
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: recursive
 
       - name: Setup Zig
         run: |
@@ -131,22 +118,21 @@ jobs:
           sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
           echo "/usr/local/zig" >> $GITHUB_PATH
 
-      - name: Show Zig version
-        run: zig version
+      - name: Build static library (arm64)
+        run: zig build static-lib -Dtarget=aarch64-ios -Doptimize=ReleaseFast
 
-      - name: Build iOS static library (arm64)
-        run: |
-          zig build static-lib -Dtarget=aarch64-ios -Doptimize=ReleaseFast
-          ls -lh zig-out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-lib
+          path: zig-out/lib/
 
   build-android:
-    name: Build (Android)
+    name: Build Android
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: recursive
 
       - name: Setup Zig
         run: |
@@ -156,15 +142,35 @@ jobs:
           sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
           echo "/usr/local/zig" >> $GITHUB_PATH
 
-      - name: Show Zig version
-        run: zig version
+      - name: Build static library (arm64)
+        run: zig build static-lib -Dtarget=aarch64-linux-android -Doptimize=ReleaseFast
 
-      - name: Build Android static library (arm64)
-        run: |
-          zig build static-lib -Dtarget=aarch64-linux-android -Doptimize=ReleaseFast
-          ls -lh zig-out/
+      - name: Build static library (armv7)
+        run: zig build static-lib -Dtarget=arm-linux-android -Doptimize=ReleaseFast
 
-      - name: Build Android static library (armv7)
-        run: |
-          zig build static-lib -Dtarget=arm-linux-android -Doptimize=ReleaseFast
-          ls -lh zig-out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-lib
+          path: zig-out/lib/
+
+  create-release:
+    name: Create GitHub Release
+    needs:
+      - build-macos
+      - build-linux
+      - build-windows
+      - build-ios
+      - build-android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
