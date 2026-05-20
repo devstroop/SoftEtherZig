@@ -244,7 +244,12 @@ pub const TlsSocket = struct {
                 std.log.err("TLS: host dial callback returned {d} for {s}:{d}", .{ fd_int, hostname, port });
                 return TlsError.ConnectionFailed;
             }
-            tcp_fd = @intCast(fd_int);
+            // Windows: socket_t is an opaque *SOCKET pointer; reconstruct from the integer fd.
+            // Other platforms: socket_t is an integer.
+            tcp_fd = if (builtin.os.tag == .windows)
+                @ptrFromInt(@as(usize, @intCast(fd_int)))
+            else
+                @intCast(fd_int);
             via_host_dial = true;
         } else
         // First try to parse as IP address
@@ -611,7 +616,7 @@ pub const TlsSocket = struct {
     /// values mean we're not draining fast enough → server's advertised
     /// window is shrinking → TCP backpressure.
     pub fn kernelRecvQueue(self: *const TlsSocket) u32 {
-        if (builtin.os.tag != .macos) return 0;
+        if (comptime builtin.os.tag != .macos) return 0;
         var n: c_int = 0;
         var len: u32 = @sizeOf(c_int);
         // SO_NREAD = 0x1020 on macOS/Darwin
@@ -627,7 +632,7 @@ pub const TlsSocket = struct {
     /// can't push outbound fast enough → our send window is full → upload
     /// backpressure / risk of SSL_write deadlock.
     pub fn kernelSendQueue(self: *const TlsSocket) u32 {
-        if (builtin.os.tag != .macos) return 0;
+        if (comptime builtin.os.tag != .macos) return 0;
         var n: c_int = 0;
         var len: u32 = @sizeOf(c_int);
         // SO_NWRITE = 0x1024 on macOS/Darwin
