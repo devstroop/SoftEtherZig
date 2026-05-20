@@ -18,6 +18,14 @@ const Mutex = Thread.Mutex;
 const builtin = @import("builtin");
 const net = std.net;
 
+fn socketToInt(sock: std.posix.socket_t) usize {
+    return @as(usize, @bitCast(sock));
+}
+
+fn fdToInt(fd: std.posix.fd_t) usize {
+    return @as(usize, @bitCast(fd));
+}
+
 // Import core utilities
 const core = @import("../core/mod.zig");
 const parseIpv4 = core.parseIpv4;
@@ -1429,14 +1437,8 @@ pub const VpnClient = struct {
             return ClientError.AdapterConfigurationFailed;
         };
 
-        const tun_fd_int: usize = switch (comptime builtin.os.tag) {
-            .windows => @intFromPtr(@as(*align(1) u8, @ptrCast(tun_fd))),
-            else => @as(usize, @intCast(tun_fd)),
-        };
-        const tls_fd_int: usize = switch (comptime builtin.os.tag) {
-            .windows => @intFromPtr(@as(*align(1) u8, @ptrCast(single_sock.?.getFd()))),
-            else => @as(usize, @intCast(single_sock.?.getFd())),
-        };
+        const tun_fd_int = fdToInt(tun_fd);
+        const tls_fd_int = socketToInt(single_sock.?.getFd());
         if (builtin.os.tag != .windows) {
             if (multi_conn) {
                 std.log.debug("Using poll() for multi-connection I/O: {d} TCP connections, TUN fd={d}", .{ self.conn_manager.?.count, tun_fd_int });
