@@ -54,12 +54,14 @@ pub fn build(b: *std.Build) void {
             break :blk "C:/vcpkg/installed/x64-windows/lib";
         } else |_| {}
 
-        // Check standard installation paths (choco installs to C:/OpenSSL-Win64)
+        // Check standard installation paths (choco installs to C:/OpenSSL-Win64 or C:/Program Files/OpenSSL)
         for ([_][]const u8{
             "C:/OpenSSL-Win64/lib/VC/x64/MD",
             "C:/OpenSSL-Win64/lib",
             "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD",
             "C:/Program Files/OpenSSL-Win64/lib",
+            "C:/Program Files/OpenSSL/lib/VC/x64/MD",
+            "C:/Program Files/OpenSSL/lib",
         }) |p| {
             if (std.fs.cwd().access(p, .{})) |_| {
                 break :blk p;
@@ -90,6 +92,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{
             "C:/OpenSSL-Win64/include",
             "C:/Program Files/OpenSSL-Win64/include",
+            "C:/Program Files/OpenSSL/include",
         }) |p| {
             if (std.fs.cwd().access(p, .{})) |_| {
                 break :blk p;
