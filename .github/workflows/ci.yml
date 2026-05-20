@@ -89,10 +89,22 @@ jobs:
       - name: Show Zig version
         run: zig version
 
+      - name: Cache vcpkg packages
+        id: cache-vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\downloads
+            C:\vcpkg\packages
+          key: vcpkg-openssl-x64-windows-${{ runner.os }}
+
       - name: Install dependencies
-        run: |
-          vcpkg install openssl:x64-windows
-          echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+        run: vcpkg install openssl:x64-windows
+
+      - name: Set OPENSSL_DIR
+        run: echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build SoftEtherClient
         run: |
