@@ -4,6 +4,7 @@
 //! Supports PID file management and connection progress display.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const cli = @import("../cli/mod.zig");
 const client = @import("../client/mod.zig");
@@ -30,6 +31,14 @@ fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "/tmp/{s}", .{pid_filename}) catch null;
 }
 
+fn getCurrentPid() u32 {
+    if (builtin.os.tag == .windows) {
+        return @intCast(std.os.windows.GetCurrentProcessId());
+    } else {
+        return @intCast(std.c.getpid());
+    }
+}
+
 fn writePidFile(display_ctx: *cli.display.DisplayContext) bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pid_path = getPidFilePath(&path_buf) orelse return false;
@@ -41,21 +50,20 @@ fn writePidFile(display_ctx: *cli.display.DisplayContext) bool {
         const n = file.readAll(&read_buf) catch 0;
         if (n > 0) {
             const content = std.mem.trim(u8, read_buf[0..n], " \n\r\t");
-            if (std.fmt.parseInt(std.posix.pid_t, content, 10)) |old_pid| {
+            if (std.fmt.parseInt(u32, content, 10)) |old_pid| {
                 // Check if process still exists (signal 0 = check only)
-                if (std.posix.kill(old_pid, 0)) {
-                    // Process still running
-                    cli.display.failure(display_ctx, "Another instance is running (PID {d})", .{old_pid});
-                    return false;
-                } else |_| {
-                    // Process doesn't exist — stale PID file, overwrite it
+                if (builtin.os.tag != .windows) {
+                    if (std.posix.kill(@as(i32, @intCast(old_pid)), 0)) {
+                        cli.display.failure(display_ctx, "Another instance is running (PID {d})", .{old_pid});
+                        return false;
+                    } else |_| {}
                 }
             } else |_| {}
         }
     } else |_| {}
 
     // Write current PID
-    const pid = std.c.getpid();
+    const pid = getCurrentPid();
     const file = std.fs.cwd().createFile(pid_path, .{}) catch |err| {
         cli.display.warning(display_ctx, "Could not write PID file: {s}", .{@errorName(err)});
         return true; // Non-fatal
