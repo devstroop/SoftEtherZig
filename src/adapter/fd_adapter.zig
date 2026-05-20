@@ -22,19 +22,6 @@ pub const RECV_QUEUE_MAX: usize = 64;
 
 const is_ios = builtin.os.tag == .ios;
 
-const fdToInt = switch (comptime builtin.os.tag) {
-    .windows => struct {
-        fn f(fd: posix.fd_t) usize {
-            return @intFromPtr(@as(*align(1) const u8, @ptrCast(fd)));
-        }
-    }.f,
-    else => struct {
-        fn f(fd: posix.fd_t) usize {
-            return @as(usize, @intCast(fd));
-        }
-    }.f,
-};
-
 // Ring buffer structs are preserved in layout for ABI stability but are
 // never allocated on iOS/Android since direct writes replaced the ring path.
 const TX_RING_SLOTS: usize = 1024;
@@ -163,7 +150,7 @@ pub const FdAdapter = struct {
         }
 
         // All mobile platforms: direct writes, no ring buffer, no writer thread.
-        const fd_val = fdToInt(fd);
+        const fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(fd) else @as(usize, @intCast(fd));
         std.log.info("FdAdapter wrapping fd={d} name={s} (direct writes, no ring buffer)", .{ fd_val, name });
 
         return device;
@@ -187,8 +174,8 @@ pub const FdAdapter = struct {
         if (setNonBlocking(new_fd) < 0) return FdAdapterError.OpenFailed;
         const old_fd = self.fd;
         @atomicStore(posix.fd_t, &self.fd, new_fd, .release);
-        const old_fd_val = fdToInt(old_fd);
-        const new_fd_val = fdToInt(new_fd);
+        const old_fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(old_fd) else @as(usize, @intCast(old_fd));
+        const new_fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(new_fd) else @as(usize, @intCast(new_fd));
         std.log.info("FdAdapter swapped fd {d} -> {d}", .{ old_fd_val, new_fd_val });
     }
 

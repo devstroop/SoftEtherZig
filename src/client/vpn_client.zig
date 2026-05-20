@@ -18,32 +18,6 @@ const Mutex = Thread.Mutex;
 const builtin = @import("builtin");
 const net = std.net;
 
-const socketToInt = switch (comptime builtin.os.tag) {
-    .windows => struct {
-        fn f(sock: std.posix.socket_t) usize {
-            return @intFromPtr(@as(*align(1) const u8, @ptrCast(sock)));
-        }
-    }.f,
-    else => struct {
-        fn f(sock: std.posix.socket_t) usize {
-            return @as(usize, @intCast(sock));
-        }
-    }.f,
-};
-
-const fdToInt = switch (comptime builtin.os.tag) {
-    .windows => struct {
-        fn f(fd: std.posix.fd_t) usize {
-            return @intFromPtr(@as(*align(1) const u8, @ptrCast(fd)));
-        }
-    }.f,
-    else => struct {
-        fn f(fd: std.posix.fd_t) usize {
-            return @as(usize, @intCast(fd));
-        }
-    }.f,
-};
-
 // Import core utilities
 const core = @import("../core/mod.zig");
 const parseIpv4 = core.parseIpv4;
@@ -1455,13 +1429,12 @@ pub const VpnClient = struct {
             return ClientError.AdapterConfigurationFailed;
         };
 
-        const tun_fd_int = fdToInt(tun_fd);
-        const tls_fd_int = socketToInt(single_sock.?.getFd());
+        const tun_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(tun_fd) else @as(usize, @intCast(tun_fd));
         if (builtin.os.tag != .windows) {
             if (multi_conn) {
                 std.log.debug("Using poll() for multi-connection I/O: {d} TCP connections, TUN fd={d}", .{ self.conn_manager.?.count, tun_fd_int });
             } else {
-                std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ tls_fd_int, tun_fd_int });
+                std.log.debug("Using poll() for concurrent I/O: TLS fd={d}, TUN fd={d}", .{ single_sock.?.getFd(), tun_fd_int });
             }
         } else {
             std.log.debug("Using Windows event-based I/O for data loop", .{});
