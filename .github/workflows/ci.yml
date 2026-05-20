@@ -7,153 +7,85 @@ on:
     branches: [ '**' ]
 
 jobs:
-  build-macos:
-    name: Build SoftEtherClient (macOS)
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-14
+            build: shared-lib
+            test: test
+            deps: brew install openssl@3
 
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          curl -LO https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
-          tar -xf zig-aarch64-macos-0.15.2.tar.xz
-          sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
+          - name: Linux
+            runner: ubuntu-latest
+            build: shared-lib
+            test: test
+            deps: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+          - name: Windows
+            runner: windows-latest
+            build: shared-lib
+            test: test
+            deps: vcpkg install openssl:x64-windows
+            windows: true
+
+          - name: iOS
+            runner: macos-14
+            build: static-lib -Dtarget=aarch64-ios
+
+          - name: Android
+            runner: ubuntu-latest
+            build: static-lib -Dtarget=aarch64-linux-android
+            ndk: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Show Zig version
         run: zig version
+
+      - name: Cache vcpkg packages
+        if: matrix.windows
+        id: cache-vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\downloads
+            C:\vcpkg\packages
+          key: vcpkg-openssl-x64-windows
 
       - name: Install dependencies
-        run: brew install openssl@3
-
-      - name: Build SoftEtherClient
-        run: |
-          zig build
-          ls -lh zig-out/
-
-      - name: Run tests
-        run: zig build test
-
-  build-linux:
-    name: Build SoftEtherClient (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-          tar -xf zig-x86_64-linux-0.15.2.tar.xz
-          sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Show Zig version
-        run: zig version
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev
-
-      - name: Build SoftEtherClient
-        run: |
-          zig build
-          ls -lh zig-out/
-
-      - name: Run tests
-        run: zig build test
-
-  build-windows:
-    name: Build SoftEtherClient (Windows)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Setup Zig
-        run: |
-          curl -LO https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip
-          Expand-Archive zig-x86_64-windows-0.15.2.zip -DestinationPath C:\
-          echo "C:\zig-x86_64-windows-0.15.2" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Show Zig version
-        run: zig version
-
-      - name: Install OpenSSL
-        run: choco install openssl --no-progress -y
+        if: matrix.deps
+        run: ${{ matrix.deps }}
 
       - name: Set OPENSSL_DIR
-        run: echo "OPENSSL_DIR=C:\Program Files\OpenSSL-Win64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        if: matrix.windows
+        shell: pwsh
+        run: echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build SoftEtherClient
-        run: |
-          zig build
-          ls zig-out/
+      - name: Setup Android NDK
+        if: matrix.ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+
+      - name: Build
+        run: zig build ${{ matrix.build }} --release=fast
+
+      - name: List artifacts
+        run: ls -lh zig-out/
 
       - name: Run tests
-        run: zig build test
-
-  build-ios:
-    name: Build (iOS)
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          curl -LO https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
-          tar -xf zig-aarch64-macos-0.15.2.tar.xz
-          sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Show Zig version
-        run: zig version
-
-      - name: Build iOS static library (arm64)
-        run: |
-          zig build static-lib -Dtarget=aarch64-ios -Doptimize=ReleaseFast
-          ls -lh zig-out/
-
-  build-android:
-    name: Build (Android)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-          tar -xf zig-x86_64-linux-0.15.2.tar.xz
-          sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Show Zig version
-        run: zig version
-
-      - name: Build Android static library (arm64)
-        run: |
-          zig build static-lib -Dtarget=aarch64-linux-android -Doptimize=ReleaseFast
-          ls -lh zig-out/
-
-      - name: Build Android static library (armv7)
-        run: |
-          zig build static-lib -Dtarget=arm-linux-android -Doptimize=ReleaseFast
-          ls -lh zig-out/
+        if: matrix.test
+        run: zig build ${{ matrix.test }} --release=fast

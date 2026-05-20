@@ -54,8 +54,10 @@ pub fn build(b: *std.Build) void {
             break :blk "C:/vcpkg/installed/x64-windows/lib";
         } else |_| {}
 
-        // Check standard installation paths
-        for ([_] []const u8{
+        // Check standard installation paths (choco installs to C:/OpenSSL-Win64)
+        for ([_][]const u8{
+            "C:/OpenSSL-Win64/lib/VC/x64/MD",
+            "C:/OpenSSL-Win64/lib",
             "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD",
             "C:/Program Files/OpenSSL-Win64/lib",
         }) |p| {
@@ -64,7 +66,7 @@ pub fn build(b: *std.Build) void {
             } else |_| {}
         }
 
-        break :blk "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD";
+        break :blk "C:/OpenSSL-Win64/lib";
     } else "";
     const win_openssl_include: []const u8 = if (target_os == .windows) blk: {
         // Check OPENSSL_DIR env var
@@ -84,13 +86,16 @@ pub fn build(b: *std.Build) void {
             break :blk "C:/vcpkg/installed/x64-windows/include";
         } else |_| {}
 
-        // Check standard include path
-        const inc_path = "C:/Program Files/OpenSSL-Win64/include";
-        if (std.fs.cwd().access(inc_path, .{})) |_| {
-            break :blk inc_path;
-        } else |_| {
-            break :blk "";
+        // Check standard include paths
+        for ([_][]const u8{
+            "C:/OpenSSL-Win64/include",
+            "C:/Program Files/OpenSSL-Win64/include",
+        }) |p| {
+            if (std.fs.cwd().access(p, .{})) |_| {
+                break :blk p;
+            } else |_| {}
         }
+        break :blk "C:/OpenSSL-Win64/include";
     } else "";
 
     // Android: per-arch OpenSSL deps
@@ -139,10 +144,40 @@ pub fn build(b: *std.Build) void {
         }
     }.add;
 
+    // Helper to add Android NDK sysroot include paths (for C sources and @cImport)
+    const addAndroidSysroot = struct {
+        fn add(builder: *std.Build, step: *std.Build.Step.Compile, arch: std.Target.Cpu.Arch) void {
+            const ndk_home = std.process.getEnvVarOwned(builder.allocator, "ANDROID_NDK_HOME") catch return;
+            defer builder.allocator.free(ndk_home);
+
+            const host_triple = switch (@import("builtin").os.tag) {
+                .macos => "darwin-x86_64",
+                .linux => "linux-x86_64",
+                .windows => "windows-x86_64",
+                else => return,
+            };
+            const sysroot = std.fs.path.join(builder.allocator, &[_][]const u8{ ndk_home, "toolchains", "llvm", "prebuilt", host_triple, "sysroot" }) catch return;
+            defer builder.allocator.free(sysroot);
+
+            const usr_include = std.fs.path.join(builder.allocator, &[_][]const u8{ sysroot, "usr", "include" }) catch return;
+            step.addSystemIncludePath(.{ .cwd_relative = usr_include });
+
+            const arch_triple = switch (arch) {
+                .aarch64 => "aarch64-linux-android",
+                .arm => "arm-linux-androideabi",
+                .x86_64 => "x86_64-linux-android",
+                else => return,
+            };
+            const arch_include = std.fs.path.join(builder.allocator, &[_][]const u8{ usr_include, arch_triple }) catch return;
+            step.addSystemIncludePath(.{ .cwd_relative = arch_include });
+        }
+    }.add;
+
     // Helper to link OpenSSL for a given compile step
     const linkOpenSsl = struct {
-        fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
+        fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, arch: std.Target.Cpu.Arch, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
             if (android) {
+                addAndroidSysroot(builder, step, arch);
                 step.addLibraryPath(.{ .cwd_relative = and_lib });
                 step.addIncludePath(.{ .cwd_relative = and_inc });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
@@ -207,6 +242,7 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary("ssl");
         vpnclient.linkSystemLibrary("crypto");
     }
+    if (is_android) addAndroidSysroot(b, vpnclient, target_arch);
     vpnclient.linkLibC();
     addZlib(vpnclient, b);
 
@@ -236,7 +272,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link OpenSSL for shared library too
-    linkOpenSsl(b, shared_lib, target_os, is_android, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
+    linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
     addZlib(shared_lib, b);
 
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
@@ -266,6 +302,7 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (is_android) {
+        addAndroidSysroot(b, static_lib, target_arch);
         static_lib.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
         static_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
@@ -361,6 +398,7 @@ pub fn build(b: *std.Build) void {
             t.linkSystemLibrary("ssl");
             t.linkSystemLibrary("crypto");
         }
+        if (is_android) addAndroidSysroot(b, t, target_arch);
         t.linkLibC();
 
         const run_t = b.addRunArtifact(t);

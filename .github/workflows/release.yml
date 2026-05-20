@@ -6,78 +6,59 @@ on:
       - 'v*'
 
 jobs:
-  build-macos:
-    name: Build macOS
-    runs-on: macos-14
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-14
+            build: shared-lib
+            deps: brew install openssl@3
+            artifact: macos-lib
+            lib_glob: "*.dylib"
+
+          - name: Linux
+            runner: ubuntu-latest
+            build: shared-lib
+            deps: sudo apt-get update && sudo apt-get install -y libssl-dev
+            artifact: linux-lib
+            lib_glob: "*.so"
+
+          - name: Windows
+            runner: windows-latest
+            build: shared-lib
+            deps: vcpkg install openssl:x64-windows
+            artifact: windows-lib
+            lib_glob: "*.dll"
+            windows: true
+
+          - name: iOS
+            runner: macos-14
+            build: static-lib -Dtarget=aarch64-ios
+            artifact: ios-lib
+            lib_glob: "*.a"
+
+          - name: Android
+            runner: ubuntu-latest
+            build: static-lib -Dtarget=aarch64-linux-android
+            artifact: android-lib
+            lib_glob: "*.a"
+            ndk: true
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          curl -LO https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
-          tar -xf zig-aarch64-macos-0.15.2.tar.xz
-          sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: brew install openssl@3
-
-      - name: Build shared library
-        run: zig build shared-lib -Doptimize=ReleaseFast
-
-      - uses: actions/upload-artifact@v4
+      - uses: mlugg/setup-zig@v2
         with:
-          name: macos-lib
-          path: zig-out/lib/
-
-  build-linux:
-    name: Build Linux
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-          tar -xf zig-x86_64-linux-0.15.2.tar.xz
-          sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev
-
-      - name: Build shared library
-        run: zig build shared-lib -Doptimize=ReleaseFast
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-lib
-          path: zig-out/lib/
-
-  build-windows:
-    name: Build Windows
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Zig
-        shell: pwsh
-        run: |
-          curl -LO https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip
-          Expand-Archive zig-x86_64-windows-0.15.2.zip -DestinationPath C:\
-          echo "C:\zig-x86_64-windows-0.15.2" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          version: 0.15.2
 
       - name: Cache vcpkg packages
+        if: matrix.windows
         id: cache-vcpkg
         uses: actions/cache@v4
         with:
@@ -85,82 +66,34 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\downloads
             C:\vcpkg\packages
-          key: vcpkg-openssl-x64-windows-${{ runner.os }}
+          key: vcpkg-openssl-x64-windows
 
       - name: Install dependencies
-        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
-        run: vcpkg install openssl:x64-windows
+        if: matrix.deps
+        run: ${{ matrix.deps }}
 
       - name: Set OPENSSL_DIR
+        if: matrix.windows
+        shell: pwsh
         run: echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build shared library
-        run: zig build shared-lib -Doptimize=ReleaseFast
+      - name: Setup Android NDK
+        if: matrix.ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+
+      - name: Build
+        run: zig build ${{ matrix.build }} --release=fast
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-lib
-          path: zig-out/lib/
-
-  build-ios:
-    name: Build iOS
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          curl -LO https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz
-          tar -xf zig-aarch64-macos-0.15.2.tar.xz
-          sudo mv zig-aarch64-macos-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Build static library (arm64)
-        run: zig build static-lib -Dtarget=aarch64-ios -Doptimize=ReleaseFast
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios-lib
-          path: zig-out/lib/
-
-  build-android:
-    name: Build Android
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Zig
-        run: |
-          cd /tmp
-          wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-          tar -xf zig-x86_64-linux-0.15.2.tar.xz
-          sudo mv zig-x86_64-linux-0.15.2 /usr/local/zig
-          echo "/usr/local/zig" >> $GITHUB_PATH
-
-      - name: Build static library (arm64)
-        run: zig build static-lib -Dtarget=aarch64-linux-android -Doptimize=ReleaseFast
-
-      - name: Build static library (armv7)
-        run: zig build static-lib -Dtarget=arm-linux-android -Doptimize=ReleaseFast
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: android-lib
-          path: zig-out/lib/
+          name: ${{ matrix.artifact }}
+          path: zig-out/lib/${{ matrix.lib_glob }}
 
   create-release:
     name: Create GitHub Release
-    needs:
-      - build-macos
-      - build-linux
-      - build-windows
-      - build-ios
-      - build-android
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -169,8 +102,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           generate_release_notes: true
