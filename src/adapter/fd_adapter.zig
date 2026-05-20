@@ -22,9 +22,18 @@ pub const RECV_QUEUE_MAX: usize = 64;
 
 const is_ios = builtin.os.tag == .ios;
 
-fn fdToInt(fd: posix.fd_t) usize {
-    return @as(usize, @bitCast(fd));
-}
+const fdToInt = switch (comptime builtin.os.tag) {
+    .windows => struct {
+        fn f(fd: posix.fd_t) usize {
+            return @intFromPtr(@as(*align(1) const u8, @ptrCast(fd)));
+        }
+    }.f,
+    else => struct {
+        fn f(fd: posix.fd_t) usize {
+            return @as(usize, @intCast(fd));
+        }
+    }.f,
+};
 
 // Ring buffer structs are preserved in layout for ABI stability but are
 // never allocated on iOS/Android since direct writes replaced the ring path.

@@ -18,13 +18,31 @@ const Mutex = Thread.Mutex;
 const builtin = @import("builtin");
 const net = std.net;
 
-fn socketToInt(sock: std.posix.socket_t) usize {
-    return @as(usize, @bitCast(sock));
-}
+const socketToInt = switch (comptime builtin.os.tag) {
+    .windows => struct {
+        fn f(sock: std.posix.socket_t) usize {
+            return @intFromPtr(@as(*align(1) const u8, @ptrCast(sock)));
+        }
+    }.f,
+    else => struct {
+        fn f(sock: std.posix.socket_t) usize {
+            return @as(usize, @intCast(sock));
+        }
+    }.f,
+};
 
-fn fdToInt(fd: std.posix.fd_t) usize {
-    return @as(usize, @bitCast(fd));
-}
+const fdToInt = switch (comptime builtin.os.tag) {
+    .windows => struct {
+        fn f(fd: std.posix.fd_t) usize {
+            return @intFromPtr(@as(*align(1) const u8, @ptrCast(fd)));
+        }
+    }.f,
+    else => struct {
+        fn f(fd: std.posix.fd_t) usize {
+            return @as(usize, @intCast(fd));
+        }
+    }.f,
+};
 
 // Import core utilities
 const core = @import("../core/mod.zig");
