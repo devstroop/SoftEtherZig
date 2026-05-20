@@ -1746,7 +1746,7 @@ pub const VpnClient = struct {
                 while (iter.next()) |conn| {
                     var drain_iter: u32 = 0;
                     while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
-                        const recv_count = conn.tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
+                        const recv_count = conn.tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
                             if (self.should_stop) break;
                             if (err == error.ConnectionClosed or err == error.BrokenPipe) {
                                 conn.established = false;
@@ -1822,7 +1822,7 @@ pub const VpnClient = struct {
                     var drain_iter: u32 = 0;
                     var inbound_dead = false;
                     while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
-                        const recv_count = single_tunnel.receiveBlocksBatch(&recv_slices, recv_scratch) catch |err| {
+                        const recv_count = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
                             if (self.should_stop) {
                                 inbound_dead = true;
                                 break;
