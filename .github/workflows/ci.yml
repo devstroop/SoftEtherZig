@@ -3,78 +3,138 @@ name: CI
 on:
   push:
     branches: [ master ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   pull_request:
     branches: [ '**' ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ZIG_VERSION: 0.15.2
 
 jobs:
   build:
-    name: Build (${{ matrix.name }})
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: macOS
+          - name: macOS (arm64)
             runner: macos-14
             build: shared-lib
-            test: test
-            deps: brew install openssl@3
+            test: true
 
-          - name: Linux
+          - name: Linux (x86_64)
             runner: ubuntu-latest
             build: shared-lib
-            test: test
-            deps: sudo apt-get update && sudo apt-get install -y libssl-dev
+            test: true
 
-          - name: Windows
+          - name: Windows (x64)
             runner: windows-latest
             build: shared-lib
-            test: test
-            deps: choco install openssl -y --no-progress
+            test: true
             windows: true
 
-          - name: iOS
+          - name: iOS (arm64)
             runner: macos-14
             build: static-lib -Dtarget=aarch64-ios
 
-          - name: Android
+          - name: Android (arm64-v8a)
             runner: ubuntu-latest
             build: static-lib -Dtarget=aarch64-linux-android
             ndk: true
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - uses: mlugg/setup-zig@v2
+      - name: Setup Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
 
-      - name: Show Zig version
-        run: zig version
+      - name: Install OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install openssl@3
 
-      - name: Install dependencies
-        if: matrix.deps
-        run: ${{ matrix.deps }}
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux' && !matrix.ndk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
 
-      - name: Set OPENSSL_DIR
+      - name: Cache vcpkg packages (Windows)
+        if: matrix.windows
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+          key: vcpkg-openssl-${{ runner.os }}-x64-v2
+          restore-keys: |
+            vcpkg-openssl-${{ runner.os }}-x64-
+
+      - name: Install OpenSSL (Windows via vcpkg)
         if: matrix.windows
         shell: pwsh
-        run: echo "OPENSSL_DIR=C:\OpenSSL-Win64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        run: |
+          $opensslDir = "C:\vcpkg\installed\x64-windows"
+          if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
+            Write-Host "Cache miss; installing OpenSSL via vcpkg..."
+            vcpkg install openssl:x64-windows
+          } else {
+            Write-Host "Using cached OpenSSL"
+          }
+          if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
+            Write-Error "libssl.lib not found after vcpkg install"
+            Get-ChildItem "$opensslDir" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 50
+            exit 1
+          }
+          echo "OPENSSL_DIR=$opensslDir" >> $env:GITHUB_ENV
+          Write-Host "OpenSSL ready at $opensslDir"
 
       - name: Setup Android NDK
         if: matrix.ndk
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27
+          add-to-path: false
 
-      - name: Build
-        run: zig build ${{ matrix.build }} --release=fast
+      - name: Export NDK env
+        if: matrix.ndk
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
-      - name: List artifacts
-        run: ls -lh zig-out/
+      - name: Show toolchain versions
+        run: zig version
+
+      - name: Build (${{ matrix.build }})
+        run: zig build ${{ matrix.build }} --release=fast --summary all
+
+      - name: List build outputs
+        shell: bash
+        run: ls -lhR zig-out/
 
       - name: Run tests
         if: matrix.test
-        run: zig build ${{ matrix.test }} --release=fast
+        run: zig build test --release=fast --summary all

@@ -4,94 +4,232 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to release (e.g. v0.1.0)'
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: 0.15.2
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: macOS
+          - name: macOS (arm64)
             runner: macos-14
             build: shared-lib
-            deps: brew install openssl@3
-            artifact: macos-lib
-            lib_glob: "*.dylib"
+            artifact: libsoftether-macos-arm64
+            archive: tar.gz
 
-          - name: Linux
+          - name: Linux (x86_64)
             runner: ubuntu-latest
             build: shared-lib
-            deps: sudo apt-get update && sudo apt-get install -y libssl-dev
-            artifact: linux-lib
-            lib_glob: "*.so"
+            artifact: libsoftether-linux-x86_64
+            archive: tar.gz
 
-          - name: Windows
+          - name: Windows (x64)
             runner: windows-latest
             build: shared-lib
-            deps: choco install openssl -y --no-progress
-            artifact: windows-lib
-            lib_glob: "*.dll"
+            artifact: libsoftether-windows-x64
+            archive: zip
             windows: true
 
-          - name: iOS
+          - name: iOS (arm64 device)
             runner: macos-14
             build: static-lib -Dtarget=aarch64-ios
-            artifact: ios-lib
-            lib_glob: "*.a"
+            artifact: libsoftether-ios-arm64
+            archive: tar.gz
 
-          - name: Android
+          - name: Android (arm64-v8a)
             runner: ubuntu-latest
             build: static-lib -Dtarget=aarch64-linux-android
-            artifact: android-lib
-            lib_glob: "*.a"
+            artifact: libsoftether-android-arm64-v8a
+            archive: tar.gz
+            ndk: true
+
+          - name: Android (armeabi-v7a)
+            runner: ubuntu-latest
+            build: static-lib -Dtarget=arm-linux-androideabi
+            artifact: libsoftether-android-armeabi-v7a
+            archive: tar.gz
             ndk: true
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: mlugg/setup-zig@v2
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
 
-      - name: Install dependencies
-        if: matrix.deps
-        run: ${{ matrix.deps }}
+      - name: Install OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install openssl@3
 
-      - name: Set OPENSSL_DIR
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux' && !matrix.ndk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Cache vcpkg packages (Windows)
+        if: matrix.windows
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+          key: vcpkg-openssl-${{ runner.os }}-x64-v2
+          restore-keys: |
+            vcpkg-openssl-${{ runner.os }}-x64-
+
+      - name: Install OpenSSL (Windows via vcpkg)
         if: matrix.windows
         shell: pwsh
-        run: echo "OPENSSL_DIR=C:\OpenSSL-Win64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        run: |
+          $opensslDir = "C:\vcpkg\installed\x64-windows"
+          if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
+            Write-Host "Cache miss; installing OpenSSL via vcpkg..."
+            vcpkg install openssl:x64-windows
+          } else {
+            Write-Host "Using cached OpenSSL"
+          }
+          if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
+            Write-Error "libssl.lib not found after vcpkg install"
+            Get-ChildItem "$opensslDir" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 50
+            exit 1
+          }
+          echo "OPENSSL_DIR=$opensslDir" >> $env:GITHUB_ENV
+          Write-Host "OpenSSL ready at $opensslDir"
 
       - name: Setup Android NDK
         if: matrix.ndk
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27
+          add-to-path: false
 
-      - name: Build
-        run: zig build ${{ matrix.build }} --release=fast
+      - name: Export NDK env
+        if: matrix.ndk
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - name: Build (${{ matrix.build }})
+        run: zig build ${{ matrix.build }} --release=fast --summary all
+
+      - name: List build outputs
+        shell: bash
+        run: ls -lhR zig-out/
+
+      - name: Stage release files
+        shell: bash
+        run: |
+          set -eu
+          STAGE="staging/${{ matrix.artifact }}"
+          mkdir -p "$STAGE"
+          cp -r zig-out/. "$STAGE/"
+          if [ -d include ]; then
+            mkdir -p "$STAGE/include"
+            cp -r include/. "$STAGE/include/"
+          fi
+          echo "${{ steps.version.outputs.tag }}" > "$STAGE/VERSION"
+          echo "${{ github.sha }}" > "$STAGE/COMMIT"
+          ls -lhR "$STAGE"
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -eu
+          cd staging
+          tar -czf "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz" "${{ matrix.artifact }}"
+          ls -lh "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz"
+
+      - name: Create archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Set-Location staging
+          Compress-Archive -Path "${{ matrix.artifact }}" -DestinationPath "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.zip" -Force
+          Get-Item "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.zip" | Format-List Name,Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: zig-out/lib/${{ matrix.lib_glob }}
+          path: staging/${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
 
   create-release:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - uses: softprops/action-gh-release@v2
+      - name: Collect release assets and generate checksums
+        run: |
+          set -eu
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          echo "Release assets:"
+          ls -lh
+          echo ""
+          echo "Checksums:"
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          files: release/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-rc') || contains(steps.version.outputs.tag, '-beta') || contains(steps.version.outputs.tag, '-alpha') }}
