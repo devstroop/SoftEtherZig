@@ -1440,9 +1440,11 @@ pub const VpnClient = struct {
             std.log.debug("Using Windows event-based I/O for data loop", .{});
         }
 
-        // Create single tunnel connection (only used in single-connection mode)
-        var single_tunnel: protocol_tunnel_mod.TunnelConnection = if (single_sock) |ss| blk: {
-            var t = protocol_tunnel_mod.TunnelConnection.init(
+        // Create single tunnel connection on heap (avoids stack overflow on Dart isolate threads)
+        const single_tunnel = try self.allocator.create(protocol_tunnel_mod.TunnelConnection);
+        defer self.allocator.destroy(single_tunnel);
+        if (single_sock) |ss| {
+            single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
                 self.allocator,
                 @ptrCast(ss),
                 struct {
@@ -1454,18 +1456,13 @@ pub const VpnClient = struct {
                 struct {
                     fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
                         const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                        // Use writeAllNonBlocking so that even with the data
-                        // socket switched to non-blocking mode, sendBlocks
-                        // sees an atomic "all bytes written" return. WANT_WRITE
-                        // is handled internally via a short poll(POLLOUT).
                         try s.writeAllNonBlocking(data);
                         return data.len;
                     }
                 }.write,
             );
-            t.use_compression = self.config.use_compression;
-            break :blk t;
-        } else undefined;
+            single_tunnel.use_compression = self.config.use_compression;
+        }
 
         // Get MAC address
         const mac = adapter.getMac();
@@ -1485,7 +1482,8 @@ pub const VpnClient = struct {
         // (Dart Isolate.run() threads have ~1MB stack; these buffers are 800KB+)
         const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
         defer self.allocator.free(recv_scratch);
-        var recv_slices: [512][]u8 = undefined;
+        const recv_slices = try self.allocator.alloc([]u8, 512);
+        defer self.allocator.free(recv_slices);
 
         // Outbound packet buffers — heap-allocated to allow larger batch (64)
         // without blowing the Dart isolate's ~512KB stack. 64x2048 + 64x1600 =
@@ -1511,7 +1509,7 @@ pub const VpnClient = struct {
 
         var send_helper = SendTunnelHelper{
             .cm_ptr = if (self.conn_manager != null) &self.conn_manager.? else null,
-            .single_ptr = &single_tunnel,
+            .single_ptr = single_tunnel,
         };
 
         // ============================================================

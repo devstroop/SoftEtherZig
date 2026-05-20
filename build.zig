@@ -147,49 +147,105 @@ pub fn build(b: *std.Build) void {
         }
     }.add;
 
-    // Helper to add Android NDK sysroot include paths (for C sources and @cImport)
-    const addAndroidSysroot = struct {
-        fn add(builder: *std.Build, step: *std.Build.Step.Compile, arch: std.Target.Cpu.Arch) void {
-            const ndk_home = std.process.getEnvVarOwned(builder.allocator, "ANDROID_NDK_HOME") catch return;
+    // Helper to set up Android NDK sysroot include paths, library paths,
+    // and generate a libc configuration file at build time.
+    // Requires ANDROID_NDK_HOME env var. Optional ANDROID_API_LEVEL (default 21).
+    const setupAndroidNdk = struct {
+        fn setup(builder: *std.Build, step: *std.Build.Step.Compile, arch: std.Target.Cpu.Arch) void {
+            const ndk_home = std.process.getEnvVarOwned(builder.allocator, "ANDROID_NDK_HOME") catch {
+                std.log.err("ANDROID_NDK_HOME must be set for Android builds", .{});
+                std.process.exit(1);
+            };
             defer builder.allocator.free(ndk_home);
 
             const host_triple = switch (@import("builtin").os.tag) {
-                .macos => "darwin-x86_64",
+                .macos => switch (@import("builtin").target.cpu.arch) {
+                    .aarch64 => "darwin-aarch64",
+                    else => "darwin-x86_64",
+                },
                 .linux => "linux-x86_64",
                 .windows => "windows-x86_64",
-                else => return,
+                else => {
+                    std.log.err("Unsupported host OS for Android cross-build", .{});
+                    std.process.exit(1);
+                },
             };
-            const sysroot = std.fs.path.join(builder.allocator, &[_][]const u8{ ndk_home, "toolchains", "llvm", "prebuilt", host_triple, "sysroot" }) catch return;
+
+            const sysroot = std.fs.path.join(builder.allocator, &[_][]const u8{ ndk_home, "toolchains", "llvm", "prebuilt", host_triple, "sysroot" }) catch {
+                std.log.err("NDK sysroot not found at {s}/toolchains/llvm/prebuilt/{s}/sysroot", .{ ndk_home, host_triple });
+                std.process.exit(1);
+            };
             defer builder.allocator.free(sysroot);
 
             const usr_include = std.fs.path.join(builder.allocator, &[_][]const u8{ sysroot, "usr", "include" }) catch return;
+            defer builder.allocator.free(usr_include);
             step.addSystemIncludePath(.{ .cwd_relative = usr_include });
 
             const arch_triple = switch (arch) {
                 .aarch64 => "aarch64-linux-android",
                 .arm => "arm-linux-androideabi",
                 .x86_64 => "x86_64-linux-android",
-                else => return,
+                else => {
+                    std.log.err("Unsupported Android arch", .{});
+                    std.process.exit(1);
+                },
             };
+
             const arch_include = std.fs.path.join(builder.allocator, &[_][]const u8{ usr_include, arch_triple }) catch return;
+            defer builder.allocator.free(arch_include);
             step.addSystemIncludePath(.{ .cwd_relative = arch_include });
+
+            // Determine API level (default 21)
+            const api_level = if (std.process.getEnvVarOwned(builder.allocator, "ANDROID_API_LEVEL")) |level| blk: {
+                defer builder.allocator.free(level);
+                break :blk level;
+            } else |_| "21";
+
+            // Compute NDK lib dir for system libs (liblog, libc, libm, libdl)
+            const ndk_lib_dir = std.fs.path.join(builder.allocator, &[_][]const u8{ sysroot, "usr", "lib", arch_triple, api_level }) catch return;
+            defer builder.allocator.free(ndk_lib_dir);
+            step.addLibraryPath(.{ .cwd_relative = ndk_lib_dir });
+
+            // Generate libc config file for CRT objects (crtbegin_so.o, crtend_so.o)
+            const libc_config = std.fmt.allocPrint(builder.allocator,
+                \\include_dir={s}
+                \\sys_include_dir={s}
+                \\crt_dir={s}
+                \\msvc_lib_dir=
+                \\kernel32_lib_dir=
+                \\gcc_dir=
+            , .{ usr_include, arch_include, ndk_lib_dir }) catch return;
+            defer builder.allocator.free(libc_config);
+
+            const conf_name = std.fmt.allocPrint(builder.allocator, "android-libc-{s}.conf", .{@tagName(arch)}) catch return;
+            defer builder.allocator.free(conf_name);
+
+            const conf_path = std.fs.path.join(builder.allocator, &[_][]const u8{ ".zig-cache", conf_name }) catch return;
+            {
+                std.fs.cwd().makePath(".zig-cache") catch {};
+                const f = std.fs.cwd().createFile(conf_path, .{}) catch {
+                    std.log.err("Failed to write libc config to {s}", .{conf_path});
+                    std.process.exit(1);
+                };
+                defer f.close();
+                f.writeAll(libc_config) catch {
+                    std.log.err("Failed to write libc config to {s}", .{conf_path});
+                    std.process.exit(1);
+                };
+            }
+            step.setLibCFile(.{ .cwd_relative = conf_path });
         }
-    }.add;
+    }.setup;
 
     // Helper to link OpenSSL for a given compile step
     const linkOpenSsl = struct {
         fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, arch: std.Target.Cpu.Arch, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
             if (android) {
-                addAndroidSysroot(builder, step, arch);
+                setupAndroidNdk(builder, step, arch);
                 step.addLibraryPath(.{ .cwd_relative = and_lib });
                 step.addIncludePath(.{ .cwd_relative = and_inc });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
                 step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-                // NDK sysroot lib path for liblog, libdl, libm, libc...
-                if (std.process.getEnvVarOwned(builder.allocator, "ANDROID_NDK_LIB_DIR")) |ndk_lib_result| {
-                    defer builder.allocator.free(ndk_lib_result);
-                    step.addLibraryPath(.{ .cwd_relative = ndk_lib_result });
-                } else |_| {}
                 step.linkSystemLibrary2("log", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             } else if (os == .macos) {
                 step.addLibraryPath(.{ .cwd_relative = mac_lib });
@@ -245,7 +301,7 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary("ssl");
         vpnclient.linkSystemLibrary("crypto");
     }
-    if (is_android) addAndroidSysroot(b, vpnclient, target_arch);
+    if (is_android) setupAndroidNdk(b, vpnclient, target_arch);
     vpnclient.linkLibC();
     addZlib(vpnclient, b);
 
@@ -305,7 +361,7 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (is_android) {
-        addAndroidSysroot(b, static_lib, target_arch);
+        setupAndroidNdk(b, static_lib, target_arch);
         static_lib.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
         static_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
@@ -401,7 +457,7 @@ pub fn build(b: *std.Build) void {
             t.linkSystemLibrary("ssl");
             t.linkSystemLibrary("crypto");
         }
-        if (is_android) addAndroidSysroot(b, t, target_arch);
+        if (is_android) setupAndroidNdk(b, t, target_arch);
         t.linkLibC();
 
         const run_t = b.addRunArtifact(t);
