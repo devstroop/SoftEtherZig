@@ -1429,8 +1429,14 @@ pub const VpnClient = struct {
             return ClientError.AdapterConfigurationFailed;
         };
 
-        const tun_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(tun_fd) else @as(usize, @intCast(tun_fd));
-        const tls_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(single_sock.?.getFd()) else @as(usize, @intCast(single_sock.?.getFd()));
+        const tun_fd_int: usize = switch (comptime builtin.os.tag) {
+            .windows => @intFromPtr(@as(*align(1) u8, @ptrCast(tun_fd))),
+            else => @as(usize, @intCast(tun_fd)),
+        };
+        const tls_fd_int: usize = switch (comptime builtin.os.tag) {
+            .windows => @intFromPtr(@as(*align(1) u8, @ptrCast(single_sock.?.getFd()))),
+            else => @as(usize, @intCast(single_sock.?.getFd())),
+        };
         if (builtin.os.tag != .windows) {
             if (multi_conn) {
                 std.log.debug("Using poll() for multi-connection I/O: {d} TCP connections, TUN fd={d}", .{ self.conn_manager.?.count, tun_fd_int });
