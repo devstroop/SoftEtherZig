@@ -36,7 +36,12 @@ jobs:
       matrix:
         include:
           - name: macOS (arm64)
-            runner: macos-14
+            runner: macos-15
+            build: shared-lib
+            test: true
+
+          - name: macOS (x86_64)
+            runner: macos-15-intel
             build: shared-lib
             test: true
 
@@ -52,12 +57,17 @@ jobs:
             windows: true
 
           - name: iOS (arm64)
-            runner: macos-14
+            runner: macos-15
             build: static-lib -Dtarget=aarch64-ios
 
           - name: Android (arm64-v8a)
             runner: ubuntu-latest
             build: static-lib -Dtarget=aarch64-linux-android
+            ndk: true
+
+          - name: Android (x86_64)
+            runner: ubuntu-latest
+            build: static-lib -Dtarget=x86_64-linux-android
             ndk: true
 
     steps:
@@ -66,10 +76,17 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Cache Zig compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/setup-zig
+          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}
+
       - name: Setup Zig ${{ env.ZIG_VERSION }}
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+          cache: true
 
       - name: Install OpenSSL (macOS)
         if: runner.os == 'macOS'
@@ -88,7 +105,7 @@ jobs:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-openssl-${{ runner.os }}-x64-v2
+          key: vcpkg-openssl-${{ runner.os }}-x64-v3
           restore-keys: |
             vcpkg-openssl-${{ runner.os }}-x64-
 
@@ -113,17 +130,15 @@ jobs:
 
       - name: Setup Android NDK
         if: matrix.ndk
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
+        uses: android-actions/setup-android@v4
         with:
-          ndk-version: r27
-          add-to-path: false
+          packages: 'ndk;27.0.11902837'
 
       - name: Export NDK env
         if: matrix.ndk
         run: |
-          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.11902837" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.0.11902837" >> $GITHUB_ENV
 
       - name: Show toolchain versions
         run: zig version

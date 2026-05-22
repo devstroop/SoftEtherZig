@@ -28,9 +28,15 @@ jobs:
         include:
           # ── Executable binaries ──
           - name: macOS (arm64)
-            runner: macos-14
+            runner: macos-15
             build: ""
             artifact: softether-zig-macos-arm64
+            archive: tar.gz
+
+          - name: macOS (x86_64)
+            runner: macos-15-intel
+            build: ""
+            artifact: softether-zig-macos-x86_64
             archive: tar.gz
 
           - name: Linux (x86_64)
@@ -48,9 +54,15 @@ jobs:
 
           # ── Library only ──
           - name: macOS lib (arm64)
-            runner: macos-14
+            runner: macos-15
             build: shared-lib
             artifact: libsoftether-zig-macos-arm64
+            archive: tar.gz
+
+          - name: macOS lib (x86_64)
+            runner: macos-15-intel
+            build: shared-lib
+            artifact: libsoftether-zig-macos-x86_64
             archive: tar.gz
 
           - name: Linux lib (x86_64)
@@ -67,7 +79,7 @@ jobs:
             windows: true
 
           - name: iOS lib (arm64 device)
-            runner: macos-14
+            runner: macos-15
             build: static-lib -Dtarget=aarch64-ios
             artifact: libsoftether-zig-ios-arm64
             archive: tar.gz
@@ -83,6 +95,13 @@ jobs:
             runner: ubuntu-latest
             build: static-lib -Dtarget=arm-linux-androideabi
             artifact: libsoftether-zig-android-armeabi-v7a
+            archive: tar.gz
+            ndk: true
+
+          - name: Android lib (x86_64)
+            runner: ubuntu-latest
+            build: static-lib -Dtarget=x86_64-linux-android
+            artifact: libsoftether-zig-android-x86_64
             archive: tar.gz
             ndk: true
 
@@ -103,10 +122,17 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Cache Zig compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/setup-zig
+          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}
+
       - name: Setup Zig ${{ env.ZIG_VERSION }}
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+          cache: true
 
       - name: Install OpenSSL (macOS)
         if: runner.os == 'macOS'
@@ -125,7 +151,7 @@ jobs:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-openssl-${{ runner.os }}-x64-v2
+          key: vcpkg-openssl-${{ runner.os }}-x64-v3
           restore-keys: |
             vcpkg-openssl-${{ runner.os }}-x64-
 
@@ -150,17 +176,21 @@ jobs:
 
       - name: Setup Android NDK
         if: matrix.ndk
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
+        uses: android-actions/setup-android@v4
         with:
-          ndk-version: r27
-          add-to-path: false
+          packages: 'ndk;27.0.11902837'
 
       - name: Export NDK env
         if: matrix.ndk
         run: |
-          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.11902837" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.0.11902837" >> $GITHUB_ENV
+
+      - name: Show toolchain versions
+        run: zig version
+
+      - name: Run tests
+        run: zig build test --release=fast --summary all
 
       - name: Build
         if: "!matrix.windows"
