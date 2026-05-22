@@ -65,9 +65,9 @@ jobs:
             build: static-lib -Dtarget=aarch64-linux-android
             ndk: true
 
-          - name: Android (x86_64)
+          - name: Android (armeabi-v7a)
             runner: ubuntu-latest
-            build: static-lib -Dtarget=x86_64-linux-android
+            build: static-lib -Dtarget=arm-linux-androideabi
             ndk: true
 
     steps:
@@ -130,15 +130,17 @@ jobs:
 
       - name: Setup Android NDK
         if: matrix.ndk
-        uses: android-actions/setup-android@v4
-        with:
-          packages: 'ndk;27.0.11902837'
-
-      - name: Export NDK env
-        if: matrix.ndk
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.11902837" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.0.11902837" >> $GITHUB_ENV
+          NDK_VERSION="27.0.11902837"
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          if [ ! -d "$NDK_DIR" ]; then
+            echo "NDK $NDK_VERSION not found, installing..."
+            yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "ndk;$NDK_VERSION"
+          else
+            echo "NDK $NDK_VERSION already installed"
+          fi
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
 
       - name: Show toolchain versions
         run: zig version
