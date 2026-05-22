@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 // Modules
 const cli = @import("cli/mod.zig");
 const app = @import("app/mod.zig");
+const lib = @import("lib.zig");
 
 // ============================================================================
 // Logging Configuration
@@ -23,7 +24,7 @@ pub const std_options: std.Options = .{
 };
 
 // Version info
-pub const version = "0.2.0";
+pub const version = lib.version;
 pub const build_date = "2024-12-21";
 
 // ============================================================================

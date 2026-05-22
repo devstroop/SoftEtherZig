@@ -1,6 +1,38 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    // ============================================
+    // Version Validation
+    // ============================================
+    // Validate that the git release tag matches the version const in lib.zig.
+    // Reads GITHUB_REF_NAME (CI) or runs `git describe --tags`.
+    blk: {
+        const content = std.fs.cwd().readFileAlloc(b.allocator, "src/lib.zig", 10_000) catch |err| {
+            std.debug.print("warning: cannot read src/lib.zig for version validation: {s}\n", .{@errorName(err)});
+            break :blk;
+        };
+        defer b.allocator.free(content);
+        const marker = "pub const version = \"";
+        if (std.mem.indexOf(u8, content, marker)) |start| {
+            const qs = start + marker.len;
+            if (std.mem.indexOfScalar(u8, content[qs..], '"')) |end| {
+                const lib_version = content[qs .. qs + end];
+
+                if (getGitTag(b)) |tag| {
+                    defer b.allocator.free(tag);
+                    const expected = if (tag.len > 0 and tag[0] == 'v') tag[1..] else tag;
+                    if (!std.mem.eql(u8, expected, lib_version)) {
+                        std.debug.print("error: version mismatch! git tag '{s}' but lib.zig version is '{s}'\n", .{ tag, lib_version });
+                        std.process.exit(1);
+                    }
+                    std.debug.print("version validated: git tag '{s}' matches lib.zig version '{s}'\n", .{ tag, lib_version });
+                } else {
+                    std.debug.print("version {s} (no git tag found, skipping validation)\n", .{lib_version});
+                }
+            }
+        }
+    }
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
         .preferred_optimize_mode = .ReleaseFast,
@@ -520,4 +552,30 @@ pub fn build(b: *std.Build) void {
         \\
     });
     help_step.dependOn(&help_run.step);
+}
+
+/// Read the git tag from GITHUB_REF_NAME env (CI) or git describe --tags.
+/// Returns null if no tag can be determined. Caller owns the memory.
+fn getGitTag(b: *std.Build) ?[]const u8 {
+    // CI: GITHUB_REF_NAME is set to the tag name (e.g. "v0.2.0")
+    if (std.process.getEnvVarOwned(b.allocator, "GITHUB_REF_NAME")) |tag| {
+        return tag;
+    } else |_| {}
+
+    // Local: run git describe --tags --exact-match --match 'v*' (only exact tags)
+    const result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &[_][]const u8{ "git", "describe", "--tags", "--exact-match", "--match", "v*" },
+        .max_output_bytes = 1024,
+    }) catch return null;
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) return null;
+        },
+        else => return null,
+    }
+
+    const trimmed = std.mem.trim(u8, result.stdout, " \n\r");
+    return b.allocator.dupe(u8, trimmed) catch null;
 }

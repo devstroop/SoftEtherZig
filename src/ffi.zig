@@ -11,6 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const lib = @import("lib.zig");
 
 // ============================================================================
 // Android logging bridge (routes std.log -> __android_log_print)
@@ -649,7 +650,7 @@ export fn softether_set_event_callback(
 
 /// Get library version string. Returns pointer to static string.
 export fn softether_version() [*:0]const u8 {
-    return "0.2.0";
+    return lib.version;
 }
 
 // ============================================================================
