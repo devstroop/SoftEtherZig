@@ -347,6 +347,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Leave room for install_name_tool to rewrite dylib install name at bundle time
+    if (target_os == .macos) {
+        shared_lib.addLinkerArg("-headerpad_max_install_names");
+    }
+
     // Link OpenSSL for shared library too
     linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
     addZlib(shared_lib, b);
