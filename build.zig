@@ -343,7 +343,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/ffi.zig"),
             .target = target,
             .optimize = optimize,
-            .strip = optimize != .Debug,
+            .strip = optimize != .Debug and target_os != .macos,
         }),
     });
 
