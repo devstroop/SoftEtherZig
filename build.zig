@@ -159,9 +159,21 @@ pub fn build(b: *std.Build) void {
             defer builder.allocator.free(ndk_home);
 
             const host_triple = switch (@import("builtin").os.tag) {
-                .macos => switch (@import("builtin").target.cpu.arch) {
-                    .aarch64 => "darwin-aarch64",
-                    else => "darwin-x86_64",
+                .macos => blk: {
+                    // NDK prebuilts may be darwin-x86_64 even on ARM Macs
+                    const arch_triple = switch (@import("builtin").target.cpu.arch) {
+                        .aarch64 => "darwin-aarch64",
+                        else => "darwin-x86_64",
+                    };
+                    const prebuilt_dir = std.fs.path.join(builder.allocator, &[_][]const u8{
+                        ndk_home, "toolchains", "llvm", "prebuilt", arch_triple,
+                    }) catch break :blk "darwin-x86_64";
+                    defer builder.allocator.free(prebuilt_dir);
+                    if (std.fs.cwd().access(prebuilt_dir, .{})) |_| {
+                        break :blk arch_triple;
+                    } else |_| {
+                        break :blk "darwin-x86_64";
+                    }
                 },
                 .linux => "linux-x86_64",
                 .windows => "windows-x86_64",
@@ -327,6 +339,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/ffi.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = optimize != .Debug,
         }),
     });
 
@@ -349,6 +362,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/ffi.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = optimize != .Debug,
         }),
     });
 

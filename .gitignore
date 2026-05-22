@@ -3,6 +3,9 @@
 zig-cache/
 zig-out/
 
+# Auto-generated Android NDK libc configs
+android-libc-*.conf
+
 # iOS build artifacts
 build_ios/
 xcframework/
