@@ -55,12 +55,16 @@ pub fn build(b: *std.Build) void {
         } else |_| {}
 
         // Check standard installation paths (choco installs to C:/OpenSSL-Win64 or C:/Program Files/OpenSSL)
-        for ([_][]const u8{
+        for ([_] []const u8{
             "C:/OpenSSL-Win64/lib/VC/x64/MD",
+            "C:/OpenSSL-Win64/lib/VC/arm64/MD",
             "C:/OpenSSL-Win64/lib",
             "C:/Program Files/OpenSSL-Win64/lib/VC/x64/MD",
+            "C:/Program Files/OpenSSL-Win64/lib/VC/arm64/MD",
             "C:/Program Files/OpenSSL-Win64/lib",
             "C:/Program Files/OpenSSL/lib/VC/x64/MD",
+            "C:/Program Files/OpenSSL/lib/VC/arm64/MD",
+            "C:/Program Files/OpenSSL/lib/VC/arm64",
             "C:/Program Files/OpenSSL/lib",
         }) |p| {
             if (std.fs.cwd().access(p, .{})) |_| {
