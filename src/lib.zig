@@ -84,7 +84,7 @@ pub const formatIpv4 = core.formatIpv4;
 // ============================================================================
 
 /// Library version
-pub const version = "0.2.0";
+pub const version = "0.1.0";
 
 /// Get version string
 pub fn getVersion() []const u8 {
