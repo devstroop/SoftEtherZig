@@ -557,9 +557,14 @@ pub fn build(b: *std.Build) void {
 /// Read the git tag from GITHUB_REF_NAME env (CI) or git describe --tags.
 /// Returns null if no tag can be determined. Caller owns the memory.
 fn getGitTag(b: *std.Build) ?[]const u8 {
-    // CI: GITHUB_REF_NAME is set to the tag name (e.g. "v0.2.0")
-    if (std.process.getEnvVarOwned(b.allocator, "GITHUB_REF_NAME")) |tag| {
-        return tag;
+    // CI: GITHUB_REF_NAME is set to the tag name (e.g. "v0.1.0") or branch (e.g. "master").
+    // Only treat it as a tag if it starts with 'v'.
+    if (std.process.getEnvVarOwned(b.allocator, "GITHUB_REF_NAME")) |ref| {
+        if (ref.len > 0 and ref[0] == 'v') {
+            return ref;
+        }
+        // Not a tag (e.g., branch name), fall through to git describe.
+        b.allocator.free(ref);
     } else |_| {}
 
     // Local: run git describe --tags --exact-match --match 'v*' (only exact tags)
