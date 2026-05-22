@@ -349,7 +349,7 @@ pub fn build(b: *std.Build) void {
 
     // Leave room for install_name_tool to rewrite dylib install name at bundle time
     if (target_os == .macos) {
-        shared_lib.addLinkerArg("-headerpad_max_install_names");
+        shared_lib.headerpad_max_install_names = true;
     }
 
     // Link OpenSSL for shared library too
