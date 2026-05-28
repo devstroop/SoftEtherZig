@@ -665,29 +665,16 @@ pub const VpnClient = struct {
                     // Convert from host byte order (LE on macOS) to network byte order
                     const server_ip_be = @byteSwap(srv.in.sa.addr);
                     ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
-                    std.log.info("[DIAG] configureFullTunnel APPLIED (configureAdapter): gw={x:0>8} server={x:0>8}", .{ self.gateway_ip, server_ip_be });
-                } else {
-                    // v0.1.0 always called configureFullTunnel; v0.1.1 silently skips
-                    // when server_ip is IPv6. Loud so the perf-test trace catches it.
-                    std.log.err("[DIAG] configureFullTunnel SKIPPED (configureAdapter): server_ip family={d}, full-tunnel route exclusion NOT installed", .{srv.any.family});
                 }
-            } else {
-                std.log.err("[DIAG] configureFullTunnel SKIPPED (configureAdapter): server_ip=null, full-tunnel route exclusion NOT installed", .{});
             }
         }
     }
 
     fn scheduleReconnect(self: *Self) void {
-        if (!self.config.reconnect.enabled) {
-            std.log.warn("[DIAG] scheduleReconnect: reconnect disabled, giving up. last_error={?} disconnect_reason={s}", .{ self.last_error, @tagName(self.disconnect_reason) });
-            return;
-        }
+        if (!self.config.reconnect.enabled) return;
 
         const max = self.config.reconnect.max_attempts;
-        if (max > 0 and self.reconnect_attempt >= max) {
-            std.log.warn("[DIAG] scheduleReconnect: max attempts ({d}) reached, giving up. last_error={?}", .{ max, self.last_error });
-            return;
-        }
+        if (max > 0 and self.reconnect_attempt >= max) return;
 
         self.reconnect_attempt += 1;
         self.stats.reconnect_count += 1;
@@ -697,16 +684,6 @@ pub const VpnClient = struct {
             @as(u32, @intFromFloat(@as(f32, @floatFromInt(backoff)) * self.config.reconnect.backoff_multiplier)),
             self.config.reconnect.max_backoff_ms,
         );
-
-        // If this fires more than once per actual perf-test session, throughput
-        // instability is reconnect-loop-induced, not data-plane-induced.
-        std.log.err("[DIAG] RECONNECT attempt={d}/{d} backoff_ms={d} last_error={?} disconnect_reason={s}", .{
-            self.reconnect_attempt,
-            max,
-            backoff,
-            self.last_error,
-            @tagName(self.disconnect_reason),
-        });
 
         self.transitionState(.reconnecting);
     }
@@ -833,12 +810,7 @@ pub const VpnClient = struct {
                             if (srv.any.family == std.posix.AF.INET) {
                                 const server_ip_be = @byteSwap(srv.in.sa.addr);
                                 adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
-                                std.log.info("[DIAG] configureFullTunnel APPLIED (DHCP-configured): gw={x:0>8} server={x:0>8}", .{ loop_state.our_gateway, server_ip_be });
-                            } else {
-                                std.log.err("[DIAG] configureFullTunnel SKIPPED (DHCP-configured): server_ip family={d}, route exclusion missing", .{srv.any.family});
                             }
-                        } else {
-                            std.log.err("[DIAG] configureFullTunnel SKIPPED (DHCP-configured): server_ip=null, route exclusion missing — packets to VPN server will try to go through the tunnel", .{});
                         }
                     }
 

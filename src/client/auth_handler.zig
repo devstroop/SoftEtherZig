@@ -85,15 +85,6 @@ pub fn run(client: *VpnClient) !void {
         .use_compression = client.config.use_compression,
     };
 
-    // Hypothesis B trace: if is_hashed is wrong for this caller, we'd see
-    // auth succeed once and then fail on redirect/reconnect. Log which builder
-    // is chosen so the perf trace shows the dispatched path.
-    switch (client.config.auth) {
-        .password => |p| std.log.info("[DIAG] auth-method=password is_hashed={} username='{s}' hub='{s}'", .{ p.is_hashed, p.username, client.config.hub_name }),
-        .anonymous => std.log.info("[DIAG] auth-method=anonymous hub='{s}'", .{client.config.hub_name}),
-        .certificate => std.log.info("[DIAG] auth-method=certificate hub='{s}'", .{client.config.hub_name}),
-    }
-
     const auth_data = switch (client.config.auth) {
         .password => |p| blk: {
             if (p.is_hashed) {
@@ -196,12 +187,7 @@ fn runRedirect(
     bulk_keys_ptr: ?*const softether_proto.UdpBulkKeys,
     session_opts: softether_proto.SessionOptions,
 ) !void {
-    // If this fires on every connect, the server is in cluster-redirect mode
-    // and every session is going through the ticket-auth code path — which is
-    // where Hypothesis A (session_key not returned) and Finding #3 (fallback
-    // skip) live.
-    const rip_bytes: [4]u8 = @bitCast(redirect.ip);
-    std.log.err("[DIAG] REDIRECT triggered by server: target={d}.{d}.{d}.{d}:{d}", .{ rip_bytes[0], rip_bytes[1], rip_bytes[2], rip_bytes[3], redirect.port });
+    std.log.debug("Redirecting to data server...", .{});
 
     // Store the ticket for redirect auth
     const ticket = redirect.ticket;
@@ -425,22 +411,12 @@ fn runRedirect(
         return ClientError.AuthenticationFailed;
     }
 
-    // Hypothesis A trace: if the server doesn't return a session_key on the
-    // ticket auth response, the data session falls into the unencrypted branch
-    // in session_setup.createSession, which then desyncs with what an
-    // encrypted-by-default server expects → variable / collapsing throughput.
-    std.log.err("[DIAG] REDIRECT ticket-auth session_key_present={} use_encryption_config={} (if false, downstream session will be UNENCRYPTED)", .{
-        ticket_auth_result.session_key != null,
-        client.config.use_encryption,
-    });
-
     // Store session key from ticket auth for session encryption
     if (ticket_auth_result.session_key) |key| {
         client.auth_session_key = key;
         client.auth_hello_random = redirect_hello.random;
-        std.log.info("[DIAG] REDIRECT stored auth_session_key (20B) and auth_hello_random — encryption will be enabled", .{});
     } else {
-        std.log.err("[DIAG] REDIRECT session_key=null — encryption WILL BE SKIPPED, server will likely reject/silently drop data", .{});
+        std.log.warn("Ticket auth succeeded but no session_key in response — session will be unencrypted", .{});
     }
 
     // Apply server overrides from redirect server too

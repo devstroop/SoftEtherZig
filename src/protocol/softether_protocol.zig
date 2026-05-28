@@ -1181,20 +1181,6 @@ pub fn uploadAuth(
         const redirect_ip = resp_pack.getInt("Ip") orelse 0;
         const redirect_port: u16 = @intCast(resp_pack.getInt("Port") orelse 443);
 
-        // Servers in some cluster configurations pack multiple Port values.
-        // We only use the first today; dump all of them so we can see whether
-        // an alternate port would be reachable when 443 isn't.
-        if (resp_pack.findElementConst("Port")) |port_elem| {
-            if (port_elem.values.items.len > 1) {
-                std.log.warn("[DIAG] Server packed {d} Port values for redirect — currently using only the first ({d}). Others:", .{
-                    port_elem.values.items.len, redirect_port,
-                });
-                for (port_elem.values.items, 0..) |v, i| {
-                    std.log.warn("  Port[{d}] = {d}", .{ i, v.int });
-                }
-            }
-        }
-
         var ticket: [Protocol.sha1_size]u8 = .{0} ** Protocol.sha1_size;
         if (resp_pack.getData("Ticket")) |ticket_data| {
             std.log.info("Ticket data length: {d}", .{ticket_data.len});
