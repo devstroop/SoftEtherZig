@@ -337,6 +337,177 @@ test "uploadAuth detects server redirect to cluster member" {
     try testing.expectEqualSlices(u8, &ticket, &result.redirect.?.ticket);
 }
 
+// ============================================================================
+// Certificate auth fixtures
+// ============================================================================
+
+// Self-signed RSA-2048 test cert / key pair, generated specifically for this
+// test (CN=softetherzig-test, 100-year validity). Real enough that OpenSSL
+// accepts it; the auth-pack builder will DER-encode it and produce a real
+// signature over the server random.
+const test_cert_pem =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIDGzCCAgOgAwIBAgIUWzDOPt4fAApVpYbc07Jo38epctswDQYJKoZIhvcNAQEL
+    \\BQAwHDEaMBgGA1UEAwwRc29mdGV0aGVyemlnLXRlc3QwIBcNMjYwNTI4MTAxODQ0
+    \\WhgPMjEyNjA1MDQxMDE4NDRaMBwxGjAYBgNVBAMMEXNvZnRldGhlcnppZy10ZXN0
+    \\MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx3KGxGaRbUnqw1P4keSw
+    \\k+kvihtVQNGMoLI7u72R7cck7DaOOZbdVi2OemBc0OPDHwG+HdDWH209zpAJLI57
+    \\5+rhaEUqmw9N6CLTCYLvrcFV2zORag7lNoJRrVNNTkKD9s575Mu4V+rLTzHzluPb
+    \\1rA6UGgESmCnK6feTDEXLciPQJe/WL/IWpOCNdVWu1WZPlLhdOrXnmzrx0w7E/4L
+    \\gNh2KmByXy4Zf56TWrox1GXl2CA/5Ume7t0EN/Mf2oUfdEdrJ0+hKQLnp2Ceb9as
+    \\9Q93ffuzUngz7awtgBR+dIyY5Qf24CG3EbUGioLaF7EPyz4NUrV+QdU6MdsDBf46
+    \\SQIDAQABo1MwUTAdBgNVHQ4EFgQUxYCGUvKvVkDxN7kESaXCs40mNRYwHwYDVR0j
+    \\BBgwFoAUxYCGUvKvVkDxN7kESaXCs40mNRYwDwYDVR0TAQH/BAUwAwEB/zANBgkq
+    \\hkiG9w0BAQsFAAOCAQEARTmRwRttVTl6gp0ulZvHpRp72aq1hDlEzBKx/SDr2/tW
+    \\gVqivw5NTiBdzzMt1jxnGagroQU7KxnaNV2YpmZOrIOUNZzcAtPqdBCMEArCnc3Z
+    \\CgmyRt4RY+bmD6yNBY8JNTGm8zeMiuoIVSh/KEIsRAQmD9AjKmHxWolbC0baH6fC
+    \\Cx7WTmg3bCMCkjqgTGFizgjm9DmBSKSUlj15Ohb6QKHmqCPTQTztNY6X2iI2+IAX
+    \\z0Svw9E0gEbe1q8Q0o9TcMQ2VJ4S19I/xJESc5oxkUFIfUIt1tlYQvPKKt+mxJ6O
+    \\KIZzxZqXDecGIYvPijJSlfsqm8SzrabIFQEiP9NoDg==
+    \\-----END CERTIFICATE-----
+    \\
+;
+
+const test_key_pem =
+    \\-----BEGIN PRIVATE KEY-----
+    \\MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDHcobEZpFtSerD
+    \\U/iR5LCT6S+KG1VA0Yygsju7vZHtxyTsNo45lt1WLY56YFzQ48MfAb4d0NYfbT3O
+    \\kAksjnvn6uFoRSqbD03oItMJgu+twVXbM5FqDuU2glGtU01OQoP2znvky7hX6stP
+    \\MfOW49vWsDpQaARKYKcrp95MMRctyI9Al79Yv8hak4I11Va7VZk+UuF06teebOvH
+    \\TDsT/guA2HYqYHJfLhl/npNaujHUZeXYID/lSZ7u3QQ38x/ahR90R2snT6EpAuen
+    \\YJ5v1qz1D3d9+7NSeDPtrC2AFH50jJjlB/bgIbcRtQaKgtoXsQ/LPg1StX5B1Tox
+    \\2wMF/jpJAgMBAAECggEAHdhugE9U7cTE46vaI4LURZ38Zi9G56cz4wwo0iRBBRLq
+    \\3IohaE7CGlZA3uEyonOizC4HlBCfKh6/w/xb0xYTRpYoWuEWyhNVNiqX5/F3CkpH
+    \\HcEuvm8yL6D6tfQkOlTLyJAHjCpMEKPq/pPb/rVkPVEruMKH+dVSzr6VDlO+QzRe
+    \\1ggUnVpnh//lRO34GB3zfigDo9yqdkV3JegitbutbF60p8JhMstCOQW4GYGzAfhc
+    \\TsVEn4e/0DukQv9BxFXPQyMq1ZHcAbOr+bf9XfMrQyfWNF4BQMMGuL043vP5uoog
+    \\JiwX1OaYCzXyU2Nw+0o18r7KaSL3ZmgVeaRPVGw+vQKBgQD+x4MzXH25HKxryji1
+    \\ykKVnTSBDwZaJ/DnNZGFPiuiDB+MMCFTGYADBCJnrp59eDY8xW9gSJuyS/yZEypp
+    \\YRN5NJN3ksGq9Dp9tdB5wukEKepvBgNI+nbvDbZImG5k4M6OAUtBgq3O7uAPDnIM
+    \\rvEJamwRyjm1KcCSlp3rf80qcwKBgQDIZyYtFjRpB0GbygyWV1+3o228yFkdCXoT
+    \\QYfyyoJE6M10/obUla0fHYn58EvuUbV8xXyn1V38TIobP9cTd39JPgwUI3sZiTyw
+    \\SH1YplYRq450+hD2gE1L+zAxspwi9gboCILWEsI4OkX7cZP23nklmXjpjK0o7/+r
+    \\m4FapN/tUwKBgFnzUoz1oKWUTAOaV79G848i+4B9L37xDwpyTTg/pOQHZ7P04i8W
+    \\l6147jSw39/oay21fwb9W4rtbPcWXyjpTxjByTa0J5AVvfjYEgyLFf2UVuJvuwUu
+    \\+IKZ0rt6pa8T95kHN+yfGIIwsAZg0T9NHGh4nEMDpLAjV4vphUO50VOlAoGBAIIH
+    \\g5q/jJQVNDm8OLyXxrBlpv9V05RmoMG7xFUBltLVZvIhcCShVWoaBXuZsfrZI3Po
+    \\w8A2Tjw1AWs62fd0kq9YRggPGYFxLWKINmR90Ny4Pr+hvb3jc8P4IMYuSObaUZLe
+    \\at4x37kR/nRutn34zgxabzzCnVwxlOepB55j2jOnAoGAD7jJy92uHfEBy3eOi0/f
+    \\MMTxfiIFwTqk0CYmuQLDGArSxX1Zwq9Wz5ewgaev6yRO4H6hmOU8T8VSBm6rHWKB
+    \\XXsSKBl9MkfR6Em9NzEx5JtPH1tseDpnmcb/cjRGb4A8xevOh+e4JNJFN5BnJLzF
+    \\zE4IFszqO+6+7vp3GbDvRE4=
+    \\-----END PRIVATE KEY-----
+    \\
+;
+
+test "buildCertificateAuth produces a well-formed cert auth pack" {
+    const allocator = testing.allocator;
+
+    const server_random: [20]u8 = .{0xcc} ** 20;
+    const session_opts = proto.SessionOptions{};
+
+    const auth_pack_bytes = try proto.buildCertificateAuth(
+        allocator,
+        test_cert_pem,
+        test_key_pem,
+        "DEFAULT",
+        &server_random,
+        false, // udp_accel
+        null, // bulk_keys
+        session_opts,
+    );
+    defer allocator.free(auth_pack_bytes);
+
+    // Parse the pack the client just produced and assert the cert-auth fields
+    // are populated. This guards against silent regressions in PEM parsing,
+    // DER encoding, or the OpenSSL signing path — any of those breaking will
+    // leave a key field missing or empty.
+    var parsed = try Pack.fromBytes(allocator, auth_pack_bytes);
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings("login", parsed.getStr("method").?);
+    try testing.expectEqualStrings("DEFAULT", parsed.getStr("hubname").?);
+
+    // authtype must be the certificate variant (3 per AuthType enum)
+    try testing.expectEqual(@as(u32, 3), parsed.getInt("authtype").?);
+
+    // Username comes from the cert CN ("softetherzig-test") via
+    // extractCertCommonName — if that path breaks we get "certificate_user".
+    const username = parsed.getStr("username").?;
+    try testing.expect(username.len > 0);
+    try testing.expect(std.mem.indexOf(u8, username, "softetherzig-test") != null);
+
+    // The DER-encoded cert must be present and start with ASN.1 SEQUENCE (0x30).
+    const cert_der = parsed.getData("cert").?;
+    try testing.expect(cert_der.len > 0);
+    try testing.expectEqual(@as(u8, 0x30), cert_der[0]);
+
+    // The RSA signature over server_random must be present and non-empty.
+    // For RSA-2048, the signature is exactly 256 bytes.
+    const sig = parsed.getData("sign").?;
+    try testing.expectEqual(@as(usize, 256), sig.len);
+
+    // Client metadata fields the server expects.
+    try testing.expect(parsed.getStr("client_str") != null);
+    try testing.expect(parsed.getInt("client_ver") != null);
+    try testing.expect(parsed.getInt("client_build") != null);
+}
+
+test "cert auth full handshake against scripted server" {
+    const allocator = testing.allocator;
+    var transport = ScriptedTransport{ .allocator = allocator };
+    defer transport.deinit();
+
+    // The server expects to see signature → hello-out, then ack of upload.
+    // For protocol-level tests we drive the client through the *application*
+    // surface: build the cert auth pack with the same builder used in
+    // production, then upload it and assert the server's response is parsed
+    // correctly.
+    const server_random: [20]u8 = .{0xab} ** 20;
+    const expected_session_key: [20]u8 = .{0xcd} ** 20;
+
+    const auth_resp = try buildAuthSuccessPack(allocator, &expected_session_key, 1, true);
+    defer allocator.free(auth_resp);
+    const http_response = try buildPackResponse(allocator, auth_resp);
+    defer allocator.free(http_response);
+    transport.server_out = http_response;
+
+    // Build the cert auth pack — this exercises certPemToDer +
+    // signWithPrivateKey + extractCertCommonName through OpenSSL.
+    const auth_pack_bytes = try proto.buildCertificateAuth(
+        allocator,
+        test_cert_pem,
+        test_key_pem,
+        "DEFAULT",
+        &server_random,
+        false,
+        null,
+        proto.SessionOptions{},
+    );
+    defer allocator.free(auth_pack_bytes);
+
+    // Drive uploadAuth — same code path the production client uses, just
+    // pointed at the scripted transport.
+    var result = try proto.uploadAuth(
+        allocator,
+        transport.writer(),
+        transport.reader(),
+        "vpn.example.com",
+        auth_pack_bytes,
+    );
+    defer result.deinit(allocator);
+
+    try testing.expect(result.success);
+    try testing.expect(result.session_key != null);
+    try testing.expectEqualSlices(u8, &expected_session_key, &result.session_key.?);
+
+    // Verify the bytes the client sent are: POST headers + the cert auth body
+    // (byte-identical to what we built above).
+    const out = transport.client_out.items;
+    const body_start = std.mem.indexOf(u8, out, "\r\n\r\n").? + 4;
+    try testing.expectEqualSlices(u8, auth_pack_bytes, out[body_start..]);
+}
+
 test "performHandshake drives signature + hello + auth end-to-end" {
     const allocator = testing.allocator;
     var transport = ScriptedTransport{ .allocator = allocator };

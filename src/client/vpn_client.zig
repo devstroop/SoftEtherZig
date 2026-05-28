@@ -499,7 +499,11 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.authenticating);
-        auth_handler.run(self) catch {
+        auth_handler.run(self) catch |err| {
+            // Application-level err so operators grepping `(err)` still see auth
+            // failures even though the protocol layer logs server-side rejections
+            // at warn (those are normal protocol outcomes, not library bugs).
+            std.log.err("Authentication failed for hub '{s}': {}", .{ self.config.hub_name, err });
             self.disconnect_reason = .auth_failed;
             return ClientError.AuthenticationFailed;
         };
