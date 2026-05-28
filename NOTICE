@@ -1,0 +1,23 @@
+SoftEtherZig
+Copyright 2025-2026 Devstroop Technologies (https://devstroop.com)
+
+This product implements the SoftEther VPN protocol in Zig. The SoftEther VPN
+protocol specification is the work of the SoftEther VPN Project
+(https://www.softether.org/); this implementation is independent and shares
+no source code with the original.
+
+The WorxVPN client application that embeds this library is a separate,
+proprietary product and is not covered by the Apache License 2.0 governing
+this library.
+
+This product links the following third-party software at runtime or build time:
+
+  * OpenSSL (https://www.openssl.org/) — TLS implementation.
+    Licensed under the Apache License 2.0.
+
+  * zlib (https://zlib.net/) — compression library, vendored in deps/zlib/.
+    Licensed under the zlib License (https://zlib.net/zlib_license.html).
+
+Per Section 4(d) of the Apache License 2.0, downstream redistributors must
+include this NOTICE file unchanged in any copy or derivative work that
+includes a substantial portion of this library.

@@ -348,7 +348,17 @@ Check username, password, hub name, and that the account is enabled on server.
 
 ## License
 
-Apache License 2.0
+**Apache License 2.0.**
+Copyright © Devstroop Technologies. 
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Library-level issues, security disclosures, and protocol questions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Maintainer
+
+Maintained by **[Devstroop Technologies](https://devstroop.com)** 
+
+Contact: `info@devstroop.com`.
 
 ## Credits
 
