@@ -106,6 +106,7 @@ pub const Dhcpv6Client = struct {
     pub fn init(allocator: std.mem.Allocator, mac: [6]u8) Dhcpv6Client {
         var xid: u32 = 0;
         std.crypto.random.bytes(std.mem.asBytes(&xid));
+        xid &= 0x00FFFFFF; // RFC 8415 §7.1: XID is 24-bit
 
         // Build DUID-LLT (type 2): 2-byte type + 2-byte hw type + 4-byte time + 6-byte MAC
         var duid: [14]u8 = undefined;
@@ -132,7 +133,7 @@ pub const Dhcpv6Client = struct {
 
     /// Build a DHCPv6 Solicit message
     /// Returns the message payload (no UDP/IP headers — caller wraps)
-    pub fn buildSolicit(self: *Dhcpv6Client, buffer: []u8) !usize {
+    pub fn buildSolicit(self: *const Dhcpv6Client, buffer: []u8) !usize {
         if (buffer.len < 100) return error.BufferTooSmall;
 
         var pos: usize = 0;
@@ -201,7 +202,7 @@ pub const Dhcpv6Client = struct {
     }
 
     /// Build a DHCPv6 Request message (after receiving Advertise)
-    pub fn buildRequest(self: *Dhcpv6Client, buffer: []u8, server_duid: []const u8, offered_addr: [16]u8) !usize {
+    pub fn buildRequest(self: *const Dhcpv6Client, buffer: []u8, server_duid: []const u8, offered_addr: [16]u8) !usize {
         if (buffer.len < 150) return error.BufferTooSmall;
 
         var pos: usize = 0;

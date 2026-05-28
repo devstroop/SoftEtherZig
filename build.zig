@@ -546,6 +546,29 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_integration_test.step);
     }
 
+    // DHCPv6 wire-format tests — validates byte layout of Solicit/Request/Reply
+    // messages against RFC 8415. No sockets, no live server, CI-friendly.
+    {
+        const dhcpv6_mod = b.createModule(.{
+            .root_source_file = b.path("src/net/dhcpv6.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("test/integration/dhcpv6_wire_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        test_mod.addImport("dhcpv6", dhcpv6_mod);
+
+        const dhcpv6_test = b.addTest(.{ .root_module = test_mod });
+        if (target_os == .macos) {
+            dhcpv6_test.linkLibC();
+        }
+        const run_dhcpv6_test = b.addRunArtifact(dhcpv6_test);
+        test_step.dependOn(&run_dhcpv6_test.step);
+    }
+
     // ============================================
     // HELP
     // ============================================
