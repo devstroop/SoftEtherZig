@@ -43,8 +43,8 @@ const tls = net_mod.tls;
 // Import session module
 const session_mod = @import("../session/mod.zig");
 const RealSession = session_mod.Session;
-const SessionOptions = session_mod.SessionOptions;
-const SessionWrapper = session_mod.SessionWrapper;
+pub const SessionOptions = session_mod.SessionOptions;
+pub const SessionWrapper = session_mod.SessionWrapper;
 
 // Import adapter module
 const adapter_mod = @import("../adapter/mod.zig");
@@ -76,6 +76,9 @@ const TcpDirection = connection_manager.TcpDirection;
 // optional cluster redirect → ticket re-auth) lives in a sibling file to
 // keep this orchestration file focused on lifecycle + state machine.
 const auth_handler = @import("auth_handler.zig");
+
+// Session setup — session creation + multi-connection establishment.
+const session_setup = @import("session_setup.zig");
 
 // Windows multimedia timer API (for high-resolution poll timeouts)
 const winmm = if (builtin.os.tag == .windows) struct {
@@ -514,19 +517,12 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.establishing_session);
-        self.establishSession() catch {
-            self.disconnect_reason = .protocol_error;
-            return ClientError.SessionEstablishmentFailed;
-        };
+        session_setup.run(self);
 
         if (@atomicLoad(bool, &self.should_stop, .acquire)) {
             self.disconnect_reason = .user_requested;
             return ClientError.OperationCancelled;
         }
-
-        // Establish additional TCP connections (multi-connection mode)
-        // Non-fatal: if some fail, we continue with what we have
-        self.establishAdditionalConnections();
 
         self.transitionState(.configuring_adapter);
         self.configureAdapter() catch {
@@ -617,204 +613,6 @@ pub const VpnClient = struct {
         return ClientError.DnsResolutionFailed;
     }
 
-
-    fn establishSession(self: *Self) !void {
-        std.log.info("LIBSE-95 establishSession entry: use_encryption={} auth_session_key_some={} auth_hello_random_some={}", .{
-            self.config.use_encryption,
-            self.auth_session_key != null,
-            self.auth_hello_random != null,
-        });
-        if (self.config.use_encryption and self.auth_session_key != null and self.auth_hello_random != null) {
-            // Create a full session with encryption using auth-derived keys
-            const username = switch (self.config.auth) {
-                .password => |p| p.username,
-                .anonymous => "anonymous",
-                .certificate => "certificate",
-            };
-            const options = SessionOptions{
-                .host = self.config.server_host,
-                .port = self.config.server_port,
-                .hub = self.config.hub_name,
-                .username = username,
-                .use_encryption = true,
-                .use_compression = self.config.use_compression,
-            };
-            self.session = SessionWrapper.initWithOptions(self.allocator, options);
-
-            // Derive encryption keys from session key + server challenge
-            if (self.session) |*sess| {
-                sess.initEncryption(&self.auth_session_key.?, &self.auth_hello_random.?);
-            }
-            std.log.info("Session established with AES-256-CBC encryption", .{});
-        } else {
-            // No encryption (server didn't provide session key or encryption disabled)
-            self.session = SessionWrapper.init(self.allocator, false);
-            std.log.info("Session established without encryption", .{});
-        }
-    }
-
-    /// Establish additional TCP connections for multi-connection mode.
-    /// When max_connections > 1, opens N-1 additional TCP connections,
-    /// each performing the additional_connect handshake.
-    /// Non-fatal: continues with fewer connections if some fail.
-    fn establishAdditionalConnections(self: *Self) void {
-        if (self.config.max_connections <= 1) return;
-
-        const session_key = self.auth_session_key orelse {
-            std.log.warn("No session key available, skipping additional connections", .{});
-            return;
-        };
-
-        // Initialize conn_manager directly on self (NOT a local variable) so that
-        // TunnelConnection context pointers inside ManagedConnections reference the
-        // stable heap location. Using a local var + value-copy would leave dangling
-        // pointers after the stack frame is reclaimed.
-        self.conn_manager = ConnectionManager.init(
-            self.allocator,
-            self.config.max_connections,
-            self.config.half_connection,
-            self.config.use_compression,
-        );
-
-        // Transfer primary socket to the manager
-        const primary_sock = self.tls_socket orelse {
-            std.log.warn("No primary socket, skipping additional connections", .{});
-            self.conn_manager = null;
-            return;
-        };
-
-        // Primary direction: C2S in half-connection mode, bidirectional otherwise
-        const primary_direction: TcpDirection = if (self.config.half_connection)
-            .client_to_server
-        else
-            .bidirectional;
-
-        _ = self.conn_manager.?.addConnection(primary_sock, primary_direction, true) catch |err| {
-            std.log.err("Failed to add primary connection to manager: {}", .{err});
-            self.conn_manager = null;
-            return;
-        };
-
-        // Primary is now owned by the manager; clear self.tls_socket
-        self.tls_socket = null;
-
-        // Build TLS config (reuse from primary). After a cluster redirect
-        // self.effective_server_ip is an IP literal; use the original server
-        // hostname for SNI so load balancers can route the TLS handshake.
-        const tls_config = tls.TlsConfig{
-            .verify_certificate = self.config.verify_certificate,
-            .allow_self_signed = !self.config.verify_certificate,
-            .timeout_ms = self.config.connect_timeout_ms,
-            .client_cert_pem = switch (self.config.auth) {
-                .certificate => |cert| cert.cert_data,
-                else => null,
-            },
-            .client_key_pem = switch (self.config.auth) {
-                .certificate => |cert| cert.key_data,
-                else => null,
-            },
-            .sni_hostname = self.config.server_host,
-        };
-
-        // Format effective server IP for HTTP Host header and TLS connect
-        var ip_str_buf: [16]u8 = undefined;
-        const host_for_http = formatIpv4Buf(self.effective_server_ip, &ip_str_buf);
-
-        // Establish N-1 additional connections
-        var established: u8 = 1; // counting primary
-        var i: u8 = 1;
-        while (i < self.config.max_connections) : (i += 1) {
-            if (@atomicLoad(bool, &self.should_stop, .acquire)) break;
-
-            self.establishOneAdditionalConnection(
-                &self.conn_manager.?,
-                &session_key,
-                tls_config,
-                host_for_http,
-                i,
-            );
-            established = self.conn_manager.?.count;
-        }
-
-        std.log.info("Established {d}/{d} TCP connections (half_connection={})", .{
-            established,
-            self.config.max_connections,
-            self.config.half_connection,
-        });
-    }
-
-    /// Establish a single additional TCP connection to the server.
-    fn establishOneAdditionalConnection(
-        self: *Self,
-        cm: *ConnectionManager,
-        session_key: *const [20]u8,
-        tls_config: tls.TlsConfig,
-        host_for_http: []const u8,
-        conn_index: u8,
-    ) void {
-        // Open new TLS connection to the effective server (may differ from
-        // config.server_host after a cluster redirect).
-        var new_sock = tls.TlsSocket.connect(
-            self.allocator,
-            host_for_http, // IP string of effective server
-            self.effective_server_port,
-            tls_config,
-        ) catch |err| {
-            std.log.warn("Additional connection {d} TLS failed: {}", .{ conn_index, err });
-            return;
-        };
-
-        // Create writer/reader for the new socket
-        const writer = makeProtoWriter(&new_sock);
-        const reader = makeProtoReader(&new_sock);
-
-        // Upload signature
-        softether_proto.uploadSignature(self.allocator, writer, host_for_http) catch |err| {
-            std.log.warn("Additional connection {d} signature failed: {}", .{ conn_index, err });
-            new_sock.close();
-            return;
-        };
-
-        // Download hello
-        var hello = softether_proto.downloadHello(self.allocator, reader) catch |err| {
-            std.log.warn("Additional connection {d} hello failed: {}", .{ conn_index, err });
-            new_sock.close();
-            return;
-        };
-        hello.deinit(self.allocator);
-
-        // Send additional_connect with session key
-        const result = softether_proto.uploadAdditionalConnect(
-            self.allocator,
-            writer,
-            reader,
-            host_for_http,
-            session_key,
-        ) catch |err| {
-            std.log.warn("Additional connection {d} handshake failed: {}", .{ conn_index, err });
-            new_sock.close();
-            return;
-        };
-
-        if (!result.success) {
-            std.log.warn("Additional connection {d} rejected: error_code={d}", .{ conn_index, result.error_code });
-            new_sock.close();
-            return;
-        }
-
-        // Map server direction value to TcpDirection
-        const direction: TcpDirection = switch (result.direction) {
-            1 => .server_to_client,
-            2 => .client_to_server,
-            else => .bidirectional,
-        };
-
-        _ = cm.addConnection(new_sock, direction, false) catch |err| {
-            std.log.warn("Additional connection {d} add failed: {}", .{ conn_index, err });
-            new_sock.close();
-            return;
-        };
-    }
 
     fn configureAdapter(self: *Self) !void {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);

@@ -6,6 +6,21 @@
 //! - Certificate: X.509 client certificate
 //!
 //! Password hashing uses SHA-0 (SoftEther-specific) for legacy compatibility.
+//!
+//! # SECURITY WARNING — Broken / Deprecated Crypto
+//!
+//! This module implements three cryptographically broken primitives, all
+//! required by the SoftEther protocol for legacy interop:
+//!
+//! - **SHA-0** — collision attacks since 1998. Used for password hashing.
+//! - **MD4** — collision attacks since 1995. Used for MS-CHAPv2 NT hash.
+//! - **DES** — 56-bit key, brute-forceable since 1998. Used in MS-CHAPv2.
+//!
+//! None of these provide meaningful security against a modern attacker.
+//! They exist solely because SoftEther servers expect this exact handshake.
+//! The actual session encryption (AES-256-CBC) uses keys derived from these
+//! hashes, but the overall auth scheme is not resistant to offline brute-force
+//! if an attacker captures the handshake.
 
 const std = @import("std");
 const mem = std.mem;
@@ -298,8 +313,16 @@ pub fn computeSecurePassword(
 
 /// MS-CHAPv2 authentication support
 /// (For Windows domain authentication compatibility)
+///
+/// SECURITY: DES-ECB and MD4 used here are both broken. MS-CHAPv2 is
+/// trivially crackable offline. This is SoftEther protocol compat, not
+/// a secure auth mechanism.
 pub const MsChapV2 = struct {
     /// NT hash (MD4 of UTF-16LE password)
+    ///
+    /// SECURITY: MD4 is broken — collision attacks since 1995.
+    /// Used only for SoftEther MS-CHAPv2 compatibility.
+    /// DO NOT use for any other purpose.
     pub fn ntHash(password: []const u8) [16]u8 {
         // Convert password to UTF-16LE
         var utf16_buf: [256]u8 = undefined;

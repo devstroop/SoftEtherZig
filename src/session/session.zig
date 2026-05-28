@@ -42,7 +42,11 @@ fn toHex(comptime len: usize, data: *const [len]u8) [len * 2]u8 {
     return result;
 }
 
-/// Simple AES-256-CBC implementation for session encryption
+/// Simple AES-256-CBC implementation for session encryption.
+///
+/// SECURITY: AES-CBC is **unauthenticated** (no MAC). This follows the
+/// SoftEther protocol spec — integrity relies on the TLS transport layer.
+/// The IV is randomly generated per-packet and prepended to ciphertext.
 pub const Aes256Cbc = struct {
     key: [32]u8,
     iv: [16]u8,
@@ -798,7 +802,10 @@ pub const Session = struct {
         self.state = .error_state;
     }
 
-    /// Initialize encryption with derived keys
+    /// Initialize encryption with derived keys.
+    ///
+    /// SECURITY: Sets up AES-256-CBC per SoftEther spec. No integrity MAC —
+    /// transport-layer TLS is the trust boundary.
     pub fn initEncryption(self: *Session, password_hash: *const [20]u8, challenge: *const [20]u8) void {
         self.keys = SessionKeys.deriveFromAuth(password_hash, challenge);
 

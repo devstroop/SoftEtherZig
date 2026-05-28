@@ -3,6 +3,16 @@
 //! SoftEther VPN uses SHA-0 (not SHA-1!) for password hashing.
 //! SHA-0 differs from SHA-1 only in the message schedule - no rotation.
 //! This is a critical compatibility requirement.
+//!
+//! # SECURITY WARNING — Broken Algorithm
+//!
+//! SHA-0 is cryptographically broken. Collision attacks have been publicly
+//! demonstrated since 1998 (Chabaud & Joux). Do NOT use for any purpose
+//! outside SoftEther protocol compatibility.
+//!
+//! This implementation exists solely to interoperate with existing SoftEther
+//! VPN servers that use SHA-0 in their auth handshake. It provides NO security
+//! guarantees against a motivated attacker.
 
 const std = @import("std");
 const testing = std.testing;

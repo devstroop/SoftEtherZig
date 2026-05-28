@@ -1,6 +1,18 @@
 //! Symmetric Encryption Module
 //!
 //! AES encryption for SoftEther VPN data channels.
+//!
+//! # SECURITY NOTE — Unauthenticated AES-CBC
+//!
+//! The AES-CBC implementations in this module provide **confidentiality only**.
+//! There is no MAC / integrity tag — ciphertexts can be silently tampered with
+//! by an active attacker. This is by SoftEther protocol design: the data
+//! channel runs over TLS 1.2+, which provides transport-layer integrity.
+//!
+//! Do NOT use these AES-CBC primitives outside the SoftEther data channel
+//! unless you also add a separate MAC (e.g. HMAC-SHA256 Encrypt-then-MAC).
+//! For general-purpose encryption, prefer AES-GCM (`Aes128Gcm` / `Aes256Gcm`)
+//! which provides authenticated encryption.
 
 const std = @import("std");
 const crypto = std.crypto;
@@ -13,7 +25,12 @@ pub const block_size = 16;
 // AES-CBC mode (used by SoftEther for some operations)
 // ============================================================================
 
-/// AES-128-CBC encryption - manual implementation
+/// AES-128-CBC encryption — manual implementation, **unauthenticated**.
+///
+/// SECURITY: CBC mode provides no integrity verification. A passive attacker
+/// can decrypt, an active attacker can flip bits in plaintext (padding oracle
+/// risks if errors are distinguishable). NOT suitable outside the SoftEther
+/// data channel without an outer MAC.
 pub const Aes128Cbc = struct {
     const Self = @This();
     const Aes128 = crypto.core.aes.Aes128;
@@ -83,7 +100,10 @@ pub const Aes128Cbc = struct {
     }
 };
 
-/// AES-256-CBC encryption - manual implementation
+/// AES-256-CBC encryption — manual implementation, **unauthenticated**.
+///
+/// SECURITY: Same caveats as Aes128Cbc. Used by the SoftEther session layer
+/// for data channel encryption. Integrity is expected from the TLS transport.
 pub const Aes256Cbc = struct {
     const Self = @This();
     const Aes256 = crypto.core.aes.Aes256;
