@@ -82,6 +82,120 @@ pub const parseDhcpResponse = dhcp.parseDhcpResponse;
 pub const parseArpRequest = dhcp.parseArpRequest;
 pub const parseArpReply = dhcp.parseArpReply;
 
+// DHCPv6 ports
+pub const DHCPV6_CLIENT_PORT: u16 = 546;
+pub const DHCPV6_SERVER_PORT: u16 = 547;
+
+/// Build a DHCPv6 Ethernet frame by wrapping a raw DHCPv6 payload
+/// in Ethernet + IPv6 + UDP headers.
+/// mac: client MAC address
+/// dhcpv6_payload: the raw DHCPv6 message (msg_type + xid + options)
+/// buffer: output buffer (must be >= 14 + 40 + 8 + dhcpv6_payload.len)
+/// Returns total frame length.
+pub fn buildDhcpv6Frame(mac: [6]u8, dhcpv6_payload: []const u8, buffer: []u8) !usize {
+    const total = 14 + 40 + 8 + dhcpv6_payload.len;
+    if (buffer.len < total) return error.BufferTooSmall;
+
+    var pos: usize = 0;
+
+    // === Ethernet Header (14 bytes) ===
+    // Destination: IPv6 multicast MAC for ff02::1:2
+    buffer[pos] = 0x33; buffer[pos + 1] = 0x33;
+    buffer[pos + 2] = 0x00; buffer[pos + 3] = 0x01;
+    buffer[pos + 4] = 0x00; buffer[pos + 5] = 0x02;
+    pos += 6;
+    // Source: our MAC
+    @memcpy(buffer[pos..][0..6], &mac);
+    pos += 6;
+    // EtherType: IPv6 (0x86DD)
+    buffer[pos] = 0x86;
+    buffer[pos + 1] = 0xDD;
+    pos += 2;
+
+    // === IPv6 Header (40 bytes) ===
+    // Version (6), Traffic Class (0), Flow Label (0)
+    buffer[pos] = 0x60;
+    buffer[pos + 1] = 0x00;
+    buffer[pos + 2] = 0x00;
+    buffer[pos + 3] = 0x00;
+    pos += 4;
+
+    // Payload length: UDP header (8) + DHCPv6 payload
+    const payload_len: u16 = @intCast(8 + dhcpv6_payload.len);
+    buffer[pos] = @intCast((payload_len >> 8) & 0xFF);
+    buffer[pos + 1] = @intCast(payload_len & 0xFF);
+    pos += 2;
+
+    // Next Header: UDP (17)
+    buffer[pos] = 17;
+    pos += 1;
+
+    // Hop Limit: 1 (link-local scope)
+    buffer[pos] = 1;
+    pos += 1;
+
+    // Source Address: :: (unspecified — we don't have an IPv6 address yet)
+    @memset(buffer[pos..][0..16], 0);
+    pos += 16;
+
+    // Destination Address: ff02::1:2 (All DHCPv6 Relay Agents and Servers)
+    buffer[pos] = 0xFF; buffer[pos + 1] = 0x02;
+    @memset(buffer[pos + 2..][0..13], 0);
+    buffer[pos + 15] = 0x02;
+    pos += 16;
+
+    // === UDP Header (8 bytes) ===
+    // Source port: 546 (DHCPv6 client)
+    buffer[pos] = @intCast((DHCPV6_CLIENT_PORT >> 8) & 0xFF);
+    buffer[pos + 1] = @intCast(DHCPV6_CLIENT_PORT & 0xFF);
+    pos += 2;
+    // Destination port: 547 (DHCPv6 server)
+    buffer[pos] = @intCast((DHCPV6_SERVER_PORT >> 8) & 0xFF);
+    buffer[pos + 1] = @intCast(DHCPV6_SERVER_PORT & 0xFF);
+    pos += 2;
+    // UDP length
+    buffer[pos] = @intCast((payload_len >> 8) & 0xFF);
+    buffer[pos + 1] = @intCast(payload_len & 0xFF);
+    pos += 2;
+    // UDP checksum (0 for now — SoftEther's L2 bridge doesn't validate)
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+
+    // === DHCPv6 Payload ===
+    @memcpy(buffer[pos..][0..dhcpv6_payload.len], dhcpv6_payload);
+    pos += dhcpv6_payload.len;
+
+    return pos;
+}
+
+/// Parse a DHCPv6 Reply from an Ethernet frame.
+/// Returns the DHCPv6 message payload if the frame is a valid DHCPv6 Reply,
+/// or null if not.
+pub fn parseDhcpv6Reply(data: []const u8) ?[]const u8 {
+    if (data.len < 14 + 40 + 8 + 4) return null; // min: eth + ipv6 + udp + dhcpv6 header
+
+    // Check EtherType: IPv6 (0x86DD)
+    if (data[12] != 0x86 or data[13] != 0xDD) return null;
+
+    // Verify IPv6 next header is UDP (17)
+    if (data[14 + 6] != 17) return null;
+
+    // Verify UDP destination port is 546 (client)
+    const udp_start = 14 + 40;
+    const dst_port = (@as(u16, data[udp_start + 2]) << 8) | data[udp_start + 3];
+    if (dst_port != DHCPV6_CLIENT_PORT) return null;
+
+    // Extract DHCPv6 message type
+    const dhcpv6_start = udp_start + 8;
+    const msg_type = data[dhcpv6_start];
+
+    // Only return Reply (7) messages
+    if (msg_type != 7) return null;
+
+    return data[dhcpv6_start..];
+}
+
 // Route functions
 pub const parseIpv4 = route.parseIpv4;
 pub const formatIpv4 = route.formatIpv4;

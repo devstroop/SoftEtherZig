@@ -122,6 +122,15 @@ pub const AdapterWrapper = struct {
         self.gateway_ip = gateway;
     }
 
+    /// Configure IPv6 on the adapter
+    pub fn configureIpv6(self: *Self, address: [16]u8, prefix_len: u8, gateway: []const u8) void {
+        if (self.real_adapter) |*adapter| {
+            adapter.configureIpv6(address, prefix_len, gateway) catch |err| {
+                std.log.err("Failed to configure IPv6: {}", .{err});
+            };
+        }
+    }
+
     /// Configure full-tunnel routing (all traffic through VPN)
     pub fn configureFullTunnel(self: *Self, gateway: u32, server_ip: u32) void {
         self.gateway_ip = gateway;

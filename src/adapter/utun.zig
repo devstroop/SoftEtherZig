@@ -599,8 +599,9 @@ pub const UtunDevice = struct {
 
         // Format the IPv6 address string
         var addr_buf: [40]u8 = undefined;
-        const addr_str = std.fmt.bufPrint(&addr_buf, "{}", .{
-            std.net.fmt_ipv6(address),
+        const ip6 = std.net.Ip6Address.init(address, 0, 0, 0);
+        const addr_str = std.fmt.bufPrint(&addr_buf, "{f}", .{
+            ip6,
         }) catch return UtunError.InterfaceConfigFailed;
 
         var cmd_buf: [256]u8 = undefined;

@@ -107,8 +107,58 @@ pub fn purgeStaleRoutes(allocator: std.mem.Allocator) u32 {
         deleteRouteByLine(allocator, line);
     }
 
+    // IPv6 scan — separate pass because output format and delete syntax differ
+    if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
+        const v6_cmd = if (builtin.os.tag == .macos) "netstat -rn -f inet6 2>/dev/null" else "ip -6 route show 2>/dev/null";
+        if (runCommandCapture(allocator, v6_cmd)) |v6_output| {
+            defer allocator.free(v6_output);
+            var v6_lines = std.mem.splitScalar(u8, v6_output, '\n');
+            while (v6_lines.next()) |line| {
+                if (line.len == 0) continue;
+                if (std.mem.startsWith(u8, line, "Internet") or
+                    std.mem.startsWith(u8, line, "Kernel") or
+                    std.mem.startsWith(u8, line, "Destination") or
+                    std.mem.startsWith(u8, line, "default"))
+                {
+                    continue;
+                }
+
+                const utun_pos = std.mem.indexOf(u8, line, "utun") orelse continue;
+                if (utun_pos + 5 > line.len) continue;
+
+                const num_start = utun_pos + 4;
+                var num_end = num_start;
+                while (num_end < line.len and line[num_end] >= '0' and line[num_end] <= '9') {
+                    num_end += 1;
+                }
+                if (num_end == num_start) continue;
+
+                const utun_num = std.fmt.parseInt(u8, line[num_start..num_end], 10) catch continue;
+                if (utun_num >= MAX_UTUN) continue;
+                if (live[utun_num]) continue;
+
+                std.log.warn("[ROUTE-HEAL] Purging stale IPv6 route: {s} (utun{d} is gone)", .{ line, utun_num });
+                removed += 1;
+
+                // Delete using IPv6-aware syntax
+                if (builtin.os.tag == .macos) {
+                    var parts = std.mem.splitScalar(u8, line, ' ');
+                    const dest = parts.next() orelse continue;
+                    if (dest.len == 0 or std.mem.eql(u8, dest, "default")) continue;
+                    var cmd_buf: [128]u8 = undefined;
+                    const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 delete {s} 2>/dev/null", .{dest}) catch continue;
+                    _ = runCommand(allocator, cmd);
+                } else if (builtin.os.tag == .linux) {
+                    var cmd_buf: [512]u8 = undefined;
+                    const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route del {s} 2>/dev/null", .{line}) catch continue;
+                    _ = runCommand(allocator, cmd);
+                }
+            }
+        }
+    }
+
     if (removed > 0) {
-        std.log.info("[ROUTE-HEAL] Purged {} stale route(s)", .{removed});
+        std.log.info("[ROUTE-HEAL] Purged {} stale route(s) (including IPv6)", .{removed});
     }
     return removed;
 }
@@ -196,21 +246,27 @@ fn resolveToIp(allocator: std.mem.Allocator, hostname: []const u8) ?[]u8 {
 /// Delete a route by parsing a routing table line.
 /// Best-effort: logs and ignores failures.
 fn deleteRouteByLine(allocator: std.mem.Allocator, line: []const u8) void {
+    const is_v6 = std.mem.indexOf(u8, line, ":") != null and
+        (std.mem.indexOf(u8, line, ".") == null or
+            std.mem.startsWith(u8, line, "default") == false);
+
     if (builtin.os.tag == .macos) {
-        // netstat -rn format: "destination  gateway  flags  ...
-        // We need "route delete <dest>"
         var parts = std.mem.splitScalar(u8, line, ' ');
         const dest = parts.next() orelse return;
         if (dest.len == 0 or std.mem.eql(u8, dest, "default")) return;
 
         var cmd_buf: [128]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route delete -net {s} 2>/dev/null", .{dest}) catch return;
+        const cmd = if (is_v6)
+            std.fmt.bufPrint(&cmd_buf, "route -A inet6 delete {s} 2>/dev/null", .{dest}) catch return
+        else
+            std.fmt.bufPrint(&cmd_buf, "route delete -net {s} 2>/dev/null", .{dest}) catch return;
         _ = runCommand(allocator, cmd);
     } else if (builtin.os.tag == .linux) {
-        // ip route format: "dest/proto via gw dev iface ..."
-        // "ip route del <full line>"
         var cmd_buf: [512]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route del {s} 2>/dev/null", .{line}) catch return;
+        const cmd = if (is_v6)
+            std.fmt.bufPrint(&cmd_buf, "ip -6 route del {s} 2>/dev/null", .{line}) catch return
+        else
+            std.fmt.bufPrint(&cmd_buf, "ip route del {s} 2>/dev/null", .{line}) catch return;
         _ = runCommand(allocator, cmd);
     }
 }

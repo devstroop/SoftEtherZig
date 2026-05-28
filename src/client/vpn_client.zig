@@ -69,6 +69,10 @@ const dhcp_mod = @import("../adapter/dhcp.zig");
 // Import route healing (#9, #10)
 const route_heal = @import("../adapter/route_heal.zig");
 
+// Import DHCPv6
+const dhcpv6_mod = @import("../net/dhcpv6.zig");
+const Dhcpv6Client = dhcpv6_mod.Dhcpv6Client;
+
 // Import connection manager for multi-TCP
 const connection_manager = @import("connection_manager.zig");
 const ConnectionManager = connection_manager.ConnectionManager;
@@ -271,6 +275,12 @@ pub const VpnClient = struct {
     gateway_ip: u32,
     gateway_mac: ?[6]u8,
 
+    // IPv6 state
+    dhcpv6_client: ?Dhcpv6Client = null,
+    ipv6_assigned_addr: [16]u8 = [_]u8{0} ** 16,
+    ipv6_configured: bool = false,
+    ipv6_dhcp_sent: bool = false,
+
     /// Server IP that we actually connected to (may differ from server_ip after redirect)
     effective_server_ip: ?net.Address = null,
     effective_server_port: u16,
@@ -312,6 +322,10 @@ pub const VpnClient = struct {
             .assigned_mask = 0,
             .gateway_ip = 0,
             .gateway_mac = null,
+            .dhcpv6_client = null,
+            .ipv6_assigned_addr = [_]u8{0} ** 16,
+            .ipv6_configured = false,
+            .ipv6_dhcp_sent = false,
             .effective_server_ip = null,
             .effective_server_port = config.server_port,
             .auth_credentials = null,
@@ -668,6 +682,19 @@ pub const VpnClient = struct {
                     self.gateway_ip = parseIpv4(gw_str) orelse 0;
                 }
             }
+            if (static.ipv6_address) |ip6_str| {
+                var addr: [16]u8 = undefined;
+                if (parseIpv6Address(ip6_str, &addr)) {
+                    const prefix = static.ipv6_prefix_len orelse 64;
+                    const gateway = static.ipv6_gateway orelse "";
+                    ctx.configureIpv6(addr, prefix, gateway);
+                    @memcpy(&self.ipv6_assigned_addr, &addr);
+                    self.ipv6_configured = true;
+                    std.log.info("Configured static IPv6 address", .{});
+                } else {
+                    std.log.err("Failed to parse static IPv6 address: {s}", .{ip6_str});
+                }
+            }
         }
 
         if (self.config.routing.default_route and self.gateway_ip != 0) {
@@ -840,6 +867,45 @@ pub const VpnClient = struct {
                 }
             }
         }
+
+        // DHCPv6 Reply parsing — runs regardless of IPv4 DHCP state
+        if (!self.ipv6_configured and self.ipv6_dhcp_sent) {
+            const dv6_payload = adapter_mod.parseDhcpv6Reply(block_data);
+            if (dv6_payload) |payload| {
+                if (self.dhcpv6_client) |*client| {
+                    const parse_result = client.parseResponse(payload) catch null;
+                    if (parse_result) |parsed| {
+                        if (parsed.msg_type == .reply and client.config.isValid()) {
+                            std.log.info("DHCPv6 REPLY received — configuring IPv6 address", .{});
+                            @memcpy(&self.ipv6_assigned_addr, &client.config.address);
+                            self.ipv6_configured = true;
+
+                            // Configure IPv6 on the adapter
+                            adapter.configureIpv6(
+                                client.config.address,
+                                client.config.prefix_len,
+                                "fe80::1", // link-local gateway for the VPN tunnel
+                            );
+
+                            // Add IPv6 default route if full-tunnel is enabled
+                            if (self.config.routing.default_route) {
+                                adapter_mod.route.addIpv6DefaultRoute("fe80::1%utun") catch |err| {
+                                    std.log.warn("Failed to add IPv6 default route: {}", .{err});
+                                };
+                            }
+
+                            if (self.event_callback) |cb| {
+                                cb(.{ .state_changed = .{
+                                    .old_state = self.state,
+                                    .new_state = self.state,
+                                } }, self.event_user_data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         self.stats.recordReceived(block_data.len);
     }
 
@@ -1063,6 +1129,27 @@ pub const VpnClient = struct {
                 loop_state.dhcp.state = .discover_sent;
                 loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
                 std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
+            }
+        }
+
+        // Send DHCPv6 Solicit (regardless of IPv4 DHCP — server may handle v6 independently)
+        {
+            self.dhcpv6_client = Dhcpv6Client.init(self.allocator, mac);
+            var dhcpv6_raw: [256]u8 = undefined;
+            if (self.dhcpv6_client) |*client| {
+                const dv6_len = client.buildSolicit(&dhcpv6_raw) catch 0;
+                if (dv6_len > 0) {
+                    var dv6_frame: [512]u8 = undefined;
+                    const frame_len = adapter_mod.buildDhcpv6Frame(mac, dhcpv6_raw[0..dv6_len], &dv6_frame) catch 0;
+                    if (frame_len > 0) {
+                        const blocks = [_][]const u8{dv6_frame[0..frame_len]};
+                        send_helper.get().sendBlocks(&blocks) catch |err| {
+                            std.log.err("Failed to send DHCPv6 Solicit: {}", .{err});
+                        };
+                        self.ipv6_dhcp_sent = true;
+                        std.log.debug("Sent DHCPv6 SOLICIT (xid=0x{x:0>8})", .{client.transaction_id});
+                    }
+                }
             }
         }
 
@@ -1817,4 +1904,86 @@ test "AdapterWrapper" {
     try std.testing.expectEqual(@as(u8, 0x02), ad.mac[0]); // Locally administered
     try std.testing.expectEqual(@as(u8, 0x00), ad.mac[1]);
     try std.testing.expectEqual(@as(u8, 0x5E), ad.mac[2]);
+}
+
+/// Parse an IPv6 address string into 16-byte binary representation.
+/// Supports full and compressed notation (e.g., "2001:db8::1").
+fn parseIpv6Address(str: []const u8, out: *[16]u8) bool {
+    @memset(out, 0);
+
+    var colon_count: usize = 0;
+    var double_colon = false;
+    for (str, 0..) |c, i| {
+        if (c == ':') {
+            colon_count += 1;
+            if (i > 0 and str[i - 1] == ':') double_colon = true;
+        }
+    }
+
+    var parts: [8][]const u8 = undefined;
+    var part_count: usize = 0;
+
+    if (double_colon) {
+        var left_end: usize = 0;
+        if (std.mem.indexOfScalar(u8, str, ':')) |first| {
+            if (first > 0) {
+                const left = str[0..first];
+                var iter = std.mem.splitScalar(u8, left, ':');
+                while (iter.next()) |p| {
+                    if (p.len == 0) continue;
+                    if (part_count >= 8) return false;
+                    parts[part_count] = p;
+                    part_count += 1;
+                }
+            }
+            left_end = first;
+        }
+        var right_start: usize = left_end + 2;
+        if (right_start < str.len and str[right_start] == ':') right_start += 1;
+
+        var right_parts: [8][]const u8 = undefined;
+        var right_count: usize = 0;
+        if (right_start < str.len) {
+            const right = str[right_start..];
+            var iter = std.mem.splitScalar(u8, right, ':');
+            while (iter.next()) |p| {
+                if (p.len == 0) continue;
+                if (right_count >= 8) return false;
+                right_parts[right_count] = p;
+                right_count += 1;
+            }
+        }
+
+        const zeros = 8 - part_count - right_count;
+        var idx: usize = 0;
+        for (parts[0..part_count]) |p| {
+            const val = std.fmt.parseInt(u16, p, 16) catch return false;
+            out[idx * 2] = @intCast((val >> 8) & 0xFF);
+            out[idx * 2 + 1] = @intCast(val & 0xFF);
+            idx += 1;
+        }
+        idx += zeros;
+        for (right_parts[0..right_count]) |p| {
+            const val = std.fmt.parseInt(u16, p, 16) catch return false;
+            out[idx * 2] = @intCast((val >> 8) & 0xFF);
+            out[idx * 2 + 1] = @intCast(val & 0xFF);
+            idx += 1;
+        }
+        return true;
+    } else {
+        var iter = std.mem.splitScalar(u8, str, ':');
+        while (iter.next()) |p| {
+            if (p.len == 0) continue;
+            if (part_count >= 8) return false;
+            parts[part_count] = p;
+            part_count += 1;
+        }
+        if (part_count != 8) return false;
+        for (parts, 0..) |p, i| {
+            const val = std.fmt.parseInt(u16, p, 16) catch return false;
+            out[i * 2] = @intCast((val >> 8) & 0xFF);
+            out[i * 2 + 1] = @intCast(val & 0xFF);
+        }
+        return true;
+    }
 }
