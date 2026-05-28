@@ -215,6 +215,30 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
     return fd;
 }
 
+/// Emit a contextual error message for a TCP connect failure. For the
+/// generic case this is just the error tag; for `AddressNotAvailable` on
+/// Darwin/Linux this expands into a stale-route diagnosis with the exact
+/// `route delete` command the operator should run.
+///
+/// Background: a previous VPN session that crashed or was kill -9'd leaves
+/// behind a host route to the server pointing through a now-defunct utunN
+/// interface. When the kernel resolves the destination, it picks the dead
+/// interface, can't bind a source address, and returns EADDRNOTAVAIL — even
+/// though the destination is otherwise reachable (verifiable with `nc -vz`).
+fn logConnectError(err: anyerror, hostname: []const u8, port: u16) void {
+    if (err == error.AddressNotAvailable) {
+        std.log.err(
+            "TLS: TCP connect to {s}:{d} failed with AddressNotAvailable. " ++
+                "This is almost always a stale host route from a previous VPN session " ++
+                "(usually pointing through a now-defunct utunN interface). " ++
+                "Recover with:  sudo route -n delete {s}  — then retry.",
+            .{ hostname, port, hostname },
+        );
+    } else {
+        std.log.err("TLS: TCP connect to {s}:{d} failed: {}", .{ hostname, port, err });
+    }
+}
+
 /// TLS-wrapped socket using OpenSSL
 pub const TlsSocket = struct {
     allocator: Allocator,
@@ -270,7 +294,7 @@ pub const TlsSocket = struct {
         if (net.Address.resolveIp(hostname, port)) |address| {
             std.log.debug("TLS: Resolved IP address directly: {s}:{d}", .{ hostname, port });
             tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms) catch |err| {
-                std.log.err("TLS: TCP connect failed: {}", .{err});
+                logConnectError(err, hostname, port);
                 return TlsError.ConnectionFailed;
             };
         } else |resolve_err| {
@@ -308,6 +332,11 @@ pub const TlsSocket = struct {
             if (connected_idx == null) {
                 cache.invalidate(hostname);
                 std.log.err("TLS: All {d} DNS results failed for {s}, last err: {}", .{ cached_addrs.len, hostname, last_err });
+                // Same stale-route diagnosis path: if every result died with
+                // AddressNotAvailable, surface the recovery hint once.
+                if (last_err == error.AddressNotAvailable) {
+                    logConnectError(last_err, hostname, port);
+                }
                 return TlsError.ConnectionFailed;
             }
         }
