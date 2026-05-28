@@ -23,6 +23,16 @@ pub fn run(client: *VpnClient) void {
 }
 
 fn createSession(client: *VpnClient) void {
+    // Hypothesis A trace: this is where the encrypted-vs-unencrypted session
+    // decision is made. If `Session established without encryption` fires on
+    // a server that expects encryption, every subsequent data packet is
+    // malformed → server drops → reconnect / throughput collapse.
+    std.log.err("[DIAG] createSession decision: cfg.use_encryption={} auth_session_key_present={} auth_hello_random_present={}", .{
+        client.config.use_encryption,
+        client.auth_session_key != null,
+        client.auth_hello_random != null,
+    });
+
     if (client.config.use_encryption and client.auth_session_key != null and client.auth_hello_random != null) {
         const username = switch (client.config.auth) {
             .password => |p| p.username,
@@ -42,10 +52,10 @@ fn createSession(client: *VpnClient) void {
         if (client.session) |*sess| {
             sess.initEncryption(&client.auth_session_key.?, &client.auth_hello_random.?);
         }
-        std.log.info("Session established with AES-256-CBC encryption", .{});
+        std.log.info("[DIAG] Session ENCRYPTED (AES-256-CBC)", .{});
     } else {
         client.session = SessionWrapper.init(client.allocator, false);
-        std.log.info("Session established without encryption", .{});
+        std.log.err("[DIAG] Session UNENCRYPTED — if the server requires encryption, expect dropped/garbled data and throughput collapse", .{});
     }
 }
 
@@ -100,8 +110,18 @@ fn establishAdditionalConnections(client: *VpnClient) void {
     };
 
     var ip_str_buf: [48]u8 = undefined;
-    const host_for_http = if (client.effective_server_ip) |addr| formatAddress(addr, &ip_str_buf) else
-        client.config.server_host;
+    const host_for_http = if (client.effective_server_ip) |addr| blk: {
+        const s = formatAddress(addr, &ip_str_buf);
+        std.log.info("[DIAG] establishAdditionalConnections: host_for_http='{s}' (from effective_server_ip)", .{s});
+        break :blk s;
+    } else blk: {
+        // If this branch fires, every additional TCP connection re-resolves DNS.
+        // Round-robin DNS can spread the connections across different load-
+        // balancer backends, breaking server-side session affinity → unstable
+        // multi-TCP throughput.
+        std.log.err("[DIAG] establishAdditionalConnections: effective_server_ip=null, falling back to hostname '{s}' — each additional connection will re-resolve DNS, possibly hitting different backends", .{client.config.server_host});
+        break :blk client.config.server_host;
+    };
 
     var established: u8 = 1;
     var i: u8 = 1;

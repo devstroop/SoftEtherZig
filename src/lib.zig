@@ -84,7 +84,7 @@ pub const formatIpv4 = core.formatIpv4;
 // ============================================================================
 
 /// Library version
-pub const version = "0.1.0";
+pub const version = "0.1.2-dev-diag";
 
 /// Get version string
 pub fn getVersion() []const u8 {
@@ -114,5 +114,5 @@ test "library exports" {
 }
 
 test "version" {
-    try std.testing.expectEqualStrings("0.2.0", getVersion());
+    try std.testing.expectEqualStrings("0.1.2-dev-diag", getVersion());
 }
