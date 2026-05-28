@@ -522,6 +522,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        // proto_mod compiles auth.zig which uses @cImport(openssl/pem.h)
+        // and needs the include path to find the header.
+        if (target_os == .macos) {
+            proto_mod.addIncludePath(.{ .cwd_relative = openssl_include });
+        } else if (target_os == .windows) {
+            proto_mod.addIncludePath(.{ .cwd_relative = win_openssl_include });
+        }
         const test_mod = b.createModule(.{
             .root_source_file = b.path("test/integration/handshake_fixture_test.zig"),
             .target = target,
