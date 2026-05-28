@@ -476,6 +476,20 @@ export fn softether_get_assigned_mask(client: ?*const VpnClient) u32 {
     return c.getAssignedMask();
 }
 
+/// Get the IPv4 server address this client actually connected to (host byte
+/// order u32, 0 if not yet connected or if redirected to an IPv6 target).
+///
+/// May differ from the configured server after a cluster-redirect — in that
+/// case this returns the physical backend's IP, while the configured server
+/// (a load-balancer hostname) is the entry point. Letting the host app log
+/// this on every connect makes silent redirect-target rotations visible.
+export fn softether_get_effective_server_ip(client: ?*const VpnClient) u32 {
+    const c = client orelse return 0;
+    const addr = c.effective_server_ip orelse return 0;
+    if (addr.any.family != std.posix.AF.INET) return 0;
+    return addr.in.sa.addr;
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================

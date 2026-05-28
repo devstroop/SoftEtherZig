@@ -185,6 +185,14 @@ uint32_t softether_get_gateway_ip(const softether_client_t client);
 /** Get DHCP-assigned subnet mask (host byte order, 0 if not assigned). */
 uint32_t softether_get_assigned_mask(const softether_client_t client);
 
+/**
+ * Get the IPv4 server address actually connected to (host byte order, 0 if
+ * not connected or if the target is IPv6). After a cluster redirect this
+ * differs from the configured server hostname/IP and reveals which physical
+ * backend the session landed on.
+ */
+uint32_t softether_get_effective_server_ip(const softether_client_t client);
+
 /* ========================================================================== */
 /* Configuration (call before connect)                                        */
 /* ========================================================================== */

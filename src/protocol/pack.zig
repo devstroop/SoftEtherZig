@@ -106,7 +106,7 @@ pub const Pack = struct {
     }
 
     /// Find an element by name (const, case-insensitive)
-    fn findElementConst(self: *const Self, name: []const u8) ?*const Element {
+    pub fn findElementConst(self: *const Self, name: []const u8) ?*const Element {
         for (self.elements.items) |*e| {
             if (eqlIgnoreCase(e.name, name)) {
                 return e;

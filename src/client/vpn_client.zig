@@ -506,6 +506,16 @@ pub const VpnClient = struct {
 
         self.transitionState(.authenticating);
         auth_handler.run(self) catch |err| {
+            // Preserve the error type from auth_handler. When runRedirect
+            // returns ConnectionFailed (redirect backend unreachable), we
+            // must NOT map it to AuthenticationFailed — the retry loop and
+            // UI both need to distinguish "infrastructure down" from
+            // "wrong password".
+            if (err == ClientError.ConnectionFailed) {
+                std.log.err("Connection failed for hub '{s}' (redirect backend unreachable): {}", .{ self.config.hub_name, err });
+                self.disconnect_reason = .network_error;
+                return ClientError.ConnectionFailed;
+            }
             // Application-level err so operators grepping `(err)` still see auth
             // failures even though the protocol layer logs server-side rejections
             // at warn (those are normal protocol outcomes, not library bugs).

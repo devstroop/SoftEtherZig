@@ -245,6 +245,11 @@ fn runRedirect(
     // Redirects are IPv4-only in the current protocol (RedirectInfo.ip is u32).
     var connected = false;
     var actual_ip: u32 = redirect_ip;
+    var last_connect_error: ?anyerror = null;
+    // True when we land on the original server because the redirect target
+    // was unreachable. The ticket we received is only valid for the redirect
+    // target, so ticket auth will almost certainly fail on the original.
+    var used_fallback_after_redirect_unreachable = false;
 
     const original = blk: {
         if (client.server_ip) |srv| {
@@ -295,18 +300,46 @@ fn runRedirect(
             redirect_port,
             redirect_tls_config,
         ) catch |err| {
+            last_connect_error = err;
             std.log.warn("Failed to connect to {s}:{d}: {}", .{ try_hostname, redirect_port, err });
             continue;
         };
 
         connected = true;
         actual_ip = try_ip;
+        used_fallback_after_redirect_unreachable = (try_ip != redirect_ip);
         break;
     }
 
     if (!connected) {
-        std.log.err("Failed to connect to any redirect server", .{});
+        // Specific message for the most common transient failure mode: the
+        // redirect target's backend went down briefly. Operators / users can
+        // act on this (wait + retry) instead of treating it as a credentials
+        // problem.
+        const rip = @as([4]u8, @bitCast(redirect_ip));
+        const is_unreachable = if (last_connect_error) |e| e == error.AddressNotAvailable else false;
+        if (is_unreachable) {
+            std.log.err(
+                "Redirect target {d}.{d}.{d}.{d}:{d} is UNREACHABLE (AddressNotAvailable). " ++
+                    "This is usually a transient infrastructure issue — the VPN server's data " ++
+                    "backend is offline or unreachable from this network. Wait a few minutes " ++
+                    "and retry. If it persists, the backend may be down for maintenance.",
+                .{ rip[0], rip[1], rip[2], rip[3], redirect_port },
+            );
+        } else {
+            std.log.err("Failed to connect to any redirect server (last error: {?})", .{last_connect_error});
+        }
         return ClientError.ConnectionFailed;
+    }
+
+    if (used_fallback_after_redirect_unreachable) {
+        const rip = @as([4]u8, @bitCast(redirect_ip));
+        std.log.warn(
+            "Redirect target {d}.{d}.{d}.{d}:{d} was unreachable; connected to original server instead. " ++
+                "Ticket auth that follows is likely to fail because the ticket is bound to the redirect target. " ++
+                "If ticket auth fails with code 9, the redirect target's backend is down — not a credentials issue.",
+            .{ rip[0], rip[1], rip[2], rip[3], redirect_port },
+        );
     }
 
     // Update server IP to what we actually connected to
@@ -373,6 +406,21 @@ fn runRedirect(
     defer ticket_auth_result.deinit(client.allocator);
 
     if (!ticket_auth_result.success) {
+        if (used_fallback_after_redirect_unreachable) {
+            // The ticket was issued by the redirect target. We couldn't reach
+            // it and connected to the original instead — the original
+            // (typically a load balancer) doesn't honour tickets meant for a
+            // specific backend. Surface this as ConnectionFailed so the
+            // caller / UI distinguishes "infrastructure problem" from "wrong
+            // password" — both used to look the same in the logs.
+            std.log.err(
+                "Ticket auth failed (code {d}) on FALLBACK connection — the redirect target was unreachable " ++
+                    "and the original server doesn't accept the ticket. This is an infrastructure issue, " ++
+                    "not a credentials issue. Retry after the redirect target's backend recovers.",
+                .{ticket_auth_result.error_code},
+            );
+            return ClientError.ConnectionFailed;
+        }
         std.log.err("Ticket authentication failed: code {d}", .{ticket_auth_result.error_code});
         return ClientError.AuthenticationFailed;
     }
