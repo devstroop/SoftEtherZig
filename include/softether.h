@@ -128,6 +128,22 @@ softether_client_t softether_create_anonymous(
     const char* hub
 );
 
+/**
+ * Create a VPN client with certificate (X.509) authentication.
+ * PEM data is passed as pointer+length since PEM may contain embedded nulls.
+ * All inputs are duped into FFI-owned memory.
+ * @return Client handle, or NULL on failure.
+ */
+softether_client_t softether_create_certificate(
+    const char* server,
+    uint16_t port,
+    const char* hub,
+    const uint8_t* cert_pem,
+    uint32_t cert_pem_len,
+    const uint8_t* key_pem,
+    uint32_t key_pem_len
+);
+
 /** Destroy a client and free all resources. Safe to call with NULL. */
 void softether_destroy(softether_client_t client);
 
@@ -180,8 +196,27 @@ void softether_set_full_tunnel(softether_client_t client, bool enabled);
 void softether_set_mtu(softether_client_t client, uint16_t mtu);
 void softether_set_reconnect(softether_client_t client, bool enabled, uint32_t max_attempts);
 
+/** Set max parallel TCP connections (1-32). Out-of-range values are ignored. */
+void softether_set_max_connections(softether_client_t client, uint8_t count);
+
+/** Enable half-connection mode (separate upload/download TCP sockets). */
+void softether_set_half_connection(softether_client_t client, bool enabled);
+
+/** Enable VoIP / QoS packet prioritization. */
+void softether_set_qos(softether_client_t client, bool enabled);
+
 /** Set tunnel file descriptor (utun fd) for packet I/O. Call after connect(). */
 void softether_set_tunnel_fd(softether_client_t client, int32_t fd);
+
+/**
+ * Replace the active TUN fd at runtime (mobile only).
+ *
+ * Used after DHCP completes and the platform re-creates the VpnService
+ * tunnel with the server-assigned IP/mask.
+ *
+ * @return 0 on success, -1 on error.
+ */
+int softether_replace_tun_fd(softether_client_t client, int32_t fd);
 
 /* ========================================================================== */
 /* Event Callback                                                             */

@@ -376,6 +376,12 @@ export fn softether_create_certificate(
 /// Destroy a VPN client and free all resources.
 export fn softether_destroy(client: ?*VpnClient) void {
     const c = client orelse return;
+    // Free FFI-owned callback context before deinit. Holding the lock guards
+    // against a late event firing into a half-freed context, though deinit
+    // also tears down the worker thread that would dispatch one.
+    c.mutex.lock();
+    clearFfiCallbackCtxLocked(c);
+    c.mutex.unlock();
     c.deinit();
     ffi_allocator.destroy(c);
 }
@@ -604,43 +610,74 @@ export fn softether_replace_tun_fd(client: ?*VpnClient, fd: i32) c_int {
 // Event Callback
 // ============================================================================
 
+/// Per-client FFI callback context. Heap-allocated so multiple VpnClient
+/// instances can each carry their own C callback + user_data without
+/// stomping over a shared global.
+const FfiCallbackCtx = struct {
+    c_callback: *const fn (CEventType, CState, ?*anyopaque) callconv(.c) void,
+    c_user_data: ?*anyopaque,
+};
+
+/// Dispatcher passed to VpnClient.setEventCallback. The Zig-level user_data
+/// pointer carries the per-client FfiCallbackCtx.
+fn ffiDispatchEvent(event: client_mod.ClientEvent, ud: ?*anyopaque) void {
+    const ctx_ptr = ud orelse return;
+    const ctx = @as(*FfiCallbackCtx, @ptrCast(@alignCast(ctx_ptr)));
+    const event_type: CEventType = switch (event) {
+        .state_changed => .state_changed,
+        .connected => .connected,
+        .disconnected => .disconnected,
+        .stats_updated => .stats_updated,
+        .error_occurred => .error_occurred,
+        else => return,
+    };
+    const state: CState = switch (event) {
+        .state_changed => |sc| mapState(sc.new_state),
+        .connected => CState.connected,
+        .disconnected => CState.disconnected,
+        else => CState.disconnected,
+    };
+    ctx.c_callback(event_type, state, ctx.c_user_data);
+}
+
+/// Free any FFI-owned callback context attached to the client and clear the
+/// callback slot. Safe to call when none is set. Caller must hold c.mutex.
+fn clearFfiCallbackCtxLocked(c: *VpnClient) void {
+    if (c.event_callback) |cb| {
+        // Only FFI-installed callbacks point at ffiDispatchEvent — Zig-native
+        // consumers attach their own function pointers and own their user_data.
+        if (cb == ffiDispatchEvent) {
+            if (c.event_user_data) |old| {
+                const old_ctx = @as(*FfiCallbackCtx, @ptrCast(@alignCast(old)));
+                ffi_allocator.destroy(old_ctx);
+            }
+        }
+    }
+    c.event_callback = null;
+    c.event_user_data = null;
+}
+
 /// Register an event callback. Pass null to unregister.
+///
+/// Each client carries its own heap-allocated context, so multiple
+/// simultaneously-live clients each route events to their own callback.
 export fn softether_set_event_callback(
     client: ?*VpnClient,
     callback: CEventCallback,
     user_data: ?*anyopaque,
 ) void {
     const c = client orelse return;
-    if (callback) |cb| {
-        // Store the C callback info in a wrapper
-        const wrapper = struct {
-            var c_callback: *const fn (CEventType, CState, ?*anyopaque) callconv(.c) void = undefined;
-            var c_user_data: ?*anyopaque = null;
 
-            fn dispatch(event: client_mod.ClientEvent, ud: ?*anyopaque) void {
-                _ = ud;
-                const event_type: CEventType = switch (event) {
-                    .state_changed => .state_changed,
-                    .connected => .connected,
-                    .disconnected => .disconnected,
-                    .stats_updated => .stats_updated,
-                    .error_occurred => .error_occurred,
-                    else => return,
-                };
-                const state = switch (event) {
-                    .state_changed => |sc| mapState(sc.new_state),
-                    .connected => CState.connected,
-                    .disconnected => CState.disconnected,
-                    else => CState.disconnected,
-                };
-                c_callback(event_type, state, c_user_data);
-            }
-        };
-        wrapper.c_callback = cb;
-        wrapper.c_user_data = user_data;
-        c.setEventCallback(wrapper.dispatch, null);
-    } else {
-        c.setEventCallback(null, null);
+    c.mutex.lock();
+    defer c.mutex.unlock();
+
+    clearFfiCallbackCtxLocked(c);
+
+    if (callback) |cb| {
+        const ctx = ffi_allocator.create(FfiCallbackCtx) catch return;
+        ctx.* = .{ .c_callback = cb, .c_user_data = user_data };
+        c.event_callback = ffiDispatchEvent;
+        c.event_user_data = @as(*anyopaque, @ptrCast(ctx));
     }
 }
 
@@ -660,6 +697,94 @@ export fn softether_version() [*:0]const u8 {
 test "ffi error mapping" {
     const err = mapClientError(ClientError.ConnectionFailed);
     try std.testing.expectEqual(SoftetherError.connection_failed, err);
+}
+
+test "ffi callback context routes to per-client user_data" {
+    // Two distinct clients with two distinct callbacks must each receive
+    // their own user_data, not a shared global slot.
+    const Counters = struct {
+        var a_calls: u32 = 0;
+        var b_calls: u32 = 0;
+        var last_a_ud: ?*anyopaque = null;
+        var last_b_ud: ?*anyopaque = null;
+
+        fn cbA(_: CEventType, _: CState, ud: ?*anyopaque) callconv(.c) void {
+            a_calls += 1;
+            last_a_ud = ud;
+        }
+        fn cbB(_: CEventType, _: CState, ud: ?*anyopaque) callconv(.c) void {
+            b_calls += 1;
+            last_b_ud = ud;
+        }
+    };
+    Counters.a_calls = 0;
+    Counters.b_calls = 0;
+    Counters.last_a_ud = null;
+    Counters.last_b_ud = null;
+
+    var marker_a: u32 = 0xAAAA;
+    var marker_b: u32 = 0xBBBB;
+
+    var client_a = VpnClient.init(std.testing.allocator, .{
+        .server_host = "a",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer client_a.deinit();
+
+    var client_b = VpnClient.init(std.testing.allocator, .{
+        .server_host = "b",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer client_b.deinit();
+
+    softether_set_event_callback(&client_a, Counters.cbA, @ptrCast(&marker_a));
+    softether_set_event_callback(&client_b, Counters.cbB, @ptrCast(&marker_b));
+
+    // Dispatch one event into each client. The wrapper must route to the
+    // correct C callback with the correct user_data pointer.
+    const dispatch_a = client_a.event_callback.?;
+    const dispatch_b = client_b.event_callback.?;
+    dispatch_a(.{ .connected = .{ .server_ip = 0, .assigned_ip = 0, .gateway_ip = 0 } }, client_a.event_user_data);
+    dispatch_b(.{ .connected = .{ .server_ip = 0, .assigned_ip = 0, .gateway_ip = 0 } }, client_b.event_user_data);
+
+    try std.testing.expectEqual(@as(u32, 1), Counters.a_calls);
+    try std.testing.expectEqual(@as(u32, 1), Counters.b_calls);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&marker_a)), Counters.last_a_ud);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&marker_b)), Counters.last_b_ud);
+
+    // Unregister both — must free the heap-allocated contexts (verified by
+    // testing.allocator: a leak would fail this test).
+    softether_set_event_callback(&client_a, null, null);
+    softether_set_event_callback(&client_b, null, null);
+
+    try std.testing.expect(client_a.event_callback == null);
+    try std.testing.expect(client_b.event_callback == null);
+}
+
+test "ffi callback context replaced cleanly on re-register" {
+    const NoOp = struct {
+        fn cb(_: CEventType, _: CState, _: ?*anyopaque) callconv(.c) void {}
+    };
+
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_host = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    // Register, replace, replace, unregister — every step must free the old
+    // context. The testing allocator catches any leak.
+    softether_set_event_callback(&c, NoOp.cb, null);
+    softether_set_event_callback(&c, NoOp.cb, null);
+    softether_set_event_callback(&c, NoOp.cb, null);
+    softether_set_event_callback(&c, null, null);
+    try std.testing.expect(c.event_callback == null);
 }
 
 test "ffi state mapping" {

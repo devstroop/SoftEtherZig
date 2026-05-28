@@ -2251,7 +2251,7 @@ test "ClientConfig defaults" {
         .auth = .{ .anonymous = {} },
     };
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
-    try std.testing.expect(config.default_route);
+    try std.testing.expect(config.routing.default_route);
     try std.testing.expect(config.use_encryption);
     try std.testing.expect(config.reconnect.enabled);
 }

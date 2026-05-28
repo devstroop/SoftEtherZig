@@ -13,6 +13,41 @@ A SoftEther VPN client written in Zig — standalone CLI + embeddable C library 
 
 Implements the full SoftEther VPN protocol: HTTPS tunnel, AES-256 encryption, DHCP, ARP, keepalive, auto-reconnect.
 
+## Why Zig?
+
+This is a real-world rewrite of a production VPN client. Before landing on Zig we tried four other approaches in earnest. Each one hit a wall specific to this problem — embedding a TLS + protocol stack as a shared library across macOS / Linux / Windows / iOS / Android, callable from Flutter / Swift / Kotlin.
+
+### The original C (SoftEther's own codebase)
+
+500K+ lines, written for a Visual Studio + Cedar build system that pre-dates the modern cross-compilation story. Building for iOS arm64 + Android arm64 + Windows from the same machine meant maintaining three separate toolchains, three sets of OpenSSL static libs, and three flavours of preprocessor flags. Most of the file is `#ifdef WIN32 / #ifdef UNIX / #ifdef OS_MACOS` triplets. Adding a feature meant editing in three places and hoping CI caught the one you missed.
+
+### Rust
+
+C FFI works, but every `extern "C"` export needs a hand-maintained header (`cbindgen` is close but drifts), an `unsafe` block, and a `repr(C)` mirror of any struct that crosses the boundary. For a project with 20+ exports and several callback signatures, that's real overhead. Cross-compiling to Android NDK + iOS + Windows from one host requires `cargo-cross` + per-target sysroots; it works but is materially more fragile than `zig build -Dtarget=...`. Linking OpenSSL statically into a `.a` for iOS is solvable but painful. The borrow checker also fought the protocol's natural shape: long-lived sessions, raw byte buffers shared between an I/O thread and a state machine, host-supplied tunnel fds. Workable, but every fight cost time.
+
+### Native Swift
+
+Swift on Linux exists; Swift on Windows and Android does not, in any practical sense. Producing a `libfoo.so` that Dart FFI can `dlopen` on Android arm64 is not Swift's path. We hit the same wall every Apple-first stack hits: the moment one target is non-Apple, you're back to writing the real implementation in C-ish code and wrapping it in Swift on iOS only — at which point Swift is a UI layer, not the core.
+
+### Go
+
+A Go `c-shared` library is technically possible, but:
+- The Go runtime ships in every binary — a ~5 MB minimum for what should be a ~500 KB component embedded in a Flutter app.
+- The GC's stop-the-world pauses are visible in packet I/O timing on slower mobile hardware.
+- `cgo` calls are not signal-safe; the protocol code calls OpenSSL on every packet, so the cgo boundary is hot.
+- Cross-compiling cgo to Android NDK is exactly the workflow cgo was designed to make hard — you need a C toolchain *and* the Go toolchain configured for the same target. Some mobile linkers reject the generated archives.
+
+### What Zig delivered for this specific project
+
+- **One toolchain, every target.** `zig build -Dtarget=aarch64-ios`, `aarch64-linux-android`, `x86_64-windows-gnu`, `aarch64-macos`, all from the same Mac, no extra installs. `zig cc` is a drop-in C cross-compiler that solved our OpenSSL build pipeline too (`scripts/build_openssl_ios.sh`).
+- **C interop is symmetric and zero-overhead.** Calling OpenSSL is `@cImport({ @cInclude("openssl/ssl.h"); })` and then `ssl.SSL_read(...)`. Exporting to C is one line per function: `export fn softether_connect(...) c_int`. No bindings layer, no codegen step, no drift.
+- **No hidden allocator.** Every allocation in this codebase goes through an explicit `Allocator` parameter. For a long-lived background process that runs for days inside a mobile VPN extension, that predictability matters — we audited every alloc path during the iOS NetworkExtension memory-cap work.
+- **Comptime replaced macros.** The original C uses preprocessor macros for endianness, packing, and protocol field tables. In Zig the same logic is `comptime` Zig — type-checked, debuggable, no separate language.
+- **Binary size.** `ReleaseSmall` produces a ~500 KB `libsoftether.so` for arm64-android — small enough that Flutter app bundles don't notice it.
+- **No runtime.** No GC pauses, no async scheduler, no surprise threads. Predictable enough to ship inside an iOS Network Extension where the kernel will SIGKILL the process if it crosses memory or CPU limits.
+
+The kicker: Zig is pre-1.0 and we still found it the *most* stable foundation for this particular problem shape. Andrew Kelley's [2026 interview on Zig's "worse is better" philosophy and no-AI policy](https://youtu.be/iqddnwKF8HQ) explains why that's not the contradiction it looks like.
+
 ## Platform Support
 
 | Platform | Build Target | Output | Status |

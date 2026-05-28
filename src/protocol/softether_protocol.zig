@@ -15,7 +15,7 @@ const Allocator = mem.Allocator;
 const crypto = std.crypto;
 
 const pack = @import("pack.zig");
-const Pack = pack.Pack;
+pub const Pack = pack.Pack;
 const rpc = @import("rpc.zig");
 const auth_mod = @import("auth.zig");
 
@@ -351,7 +351,10 @@ pub fn downloadHello(
     // Parse HTTP response
     const parsed = try rpc.parseHttpResponse(header_buf[0..header_len]);
     if (parsed.status_code != 200) {
-        std.log.err("Hello response status: {d}", .{parsed.status_code});
+        // Server-side rejection — surface to the caller via the returned
+        // error. Logged at warn so the caller can decide whether this is
+        // fatal; tests intentionally drive this path.
+        std.log.warn("Hello response status: {d}", .{parsed.status_code});
         return ProtocolError.ServerError;
     }
 
@@ -387,7 +390,8 @@ pub fn downloadHello(
     // Check for error
     if (pack_obj.getInt("error")) |err_code| {
         if (err_code != 0) {
-            std.log.err("Server returned error: {d}", .{err_code});
+            // Server-side rejection — surface via returned error.
+            std.log.warn("Server returned error: {d}", .{err_code});
             return ProtocolError.ServerError;
         }
     }
@@ -395,11 +399,11 @@ pub fn downloadHello(
     // Extract Hello data
     std.log.debug("Extracting hello data...", .{});
     const random_data = pack_obj.getData("random") orelse {
-        std.log.err("No 'random' field in hello Pack", .{});
+        std.log.warn("No 'random' field in hello Pack", .{});
         return ProtocolError.InvalidHello;
     };
     if (random_data.len != Protocol.sha1_size) {
-        std.log.err("Invalid random size: {d}, expected {d}", .{ random_data.len, Protocol.sha1_size });
+        std.log.warn("Invalid random size: {d}, expected {d}", .{ random_data.len, Protocol.sha1_size });
         return ProtocolError.InvalidHello;
     }
 
@@ -1128,7 +1132,9 @@ pub fn uploadAuth(
     var resp_pack = try Pack.fromBytes(allocator, body);
     defer resp_pack.deinit();
 
-    // Debug: list all fields in response
+    // Debug: list all fields in response.
+    // Use stack-buffered formatting for ints so we don't leak per-field
+    // allocations on every auth response.
     std.log.debug("Auth response fields:", .{});
     for (resp_pack.elements.items) |elem| {
         const elem_type_str = switch (elem.value_type) {
@@ -1138,11 +1144,12 @@ pub fn uploadAuth(
             .unistr => "unistr",
             .int64 => "int64",
         };
-        const first_val = if (elem.values.items.len > 0) blk: {
+        var num_buf: [32]u8 = undefined;
+        const first_val: []const u8 = if (elem.values.items.len > 0) blk: {
             const val = elem.values.items[0];
             break :blk switch (elem.value_type) {
-                .int => std.fmt.allocPrint(allocator, "{d}", .{val.int}) catch "?",
-                .int64 => std.fmt.allocPrint(allocator, "{d}", .{val.int64}) catch "?",
+                .int => std.fmt.bufPrint(&num_buf, "{d}", .{val.int}) catch "?",
+                .int64 => std.fmt.bufPrint(&num_buf, "{d}", .{val.int64}) catch "?",
                 .str => val.str,
                 else => "(data)",
             };
@@ -1154,7 +1161,9 @@ pub fn uploadAuth(
     const err_code = resp_pack.getInt("error") orelse 0;
     if (err_code != 0) {
         const err_msg = resp_pack.getStr("error_str");
-        std.log.err("Authentication failed: {d} - {s}", .{ err_code, err_msg orelse "Unknown error" });
+        // Bad password / wrong hub / etc. — normal protocol outcome,
+        // surfaced via AuthResult.success=false. Caller logs at .err.
+        std.log.warn("Authentication failed: {d} - {s}", .{ err_code, err_msg orelse "Unknown error" });
 
         return AuthResult{
             .success = false,

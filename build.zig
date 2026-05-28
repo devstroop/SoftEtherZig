@@ -487,6 +487,57 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_t.step);
     }
 
+    // FFI tests — ffi.zig imports the full client module tree, so it builds
+    // as a whole-package test with the same OpenSSL/zlib linkage as the
+    // shared library. The filter restricts execution to tests defined in
+    // ffi.zig itself; transitive test blocks in other files have their own
+    // entries above (or are intentionally excluded as stale).
+    {
+        const ffi_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ffi.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"ffi"},
+        });
+        linkOpenSsl(b, ffi_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
+        addZlib(ffi_test, b);
+        if (is_android) setupAndroidNdk(b, ffi_test, target_arch);
+        ffi_test.linkLibC();
+
+        const run_ffi_test = b.addRunArtifact(ffi_test);
+        test_step.dependOn(&run_ffi_test.step);
+    }
+
+    // Protocol integration tests — drive the full handshake (signature →
+    // hello → auth) against a scripted in-memory transport. Lives under
+    // test/integration so it is clearly separate from in-source unit tests.
+    // Imports the protocol module by name since Zig 0.15 disallows relative
+    // imports that escape the module's source root.
+    {
+        const proto_mod = b.createModule(.{
+            .root_source_file = b.path("src/protocol/softether_protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path("test/integration/handshake_fixture_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        test_mod.addImport("proto", proto_mod);
+
+        const integration_test = b.addTest(.{ .root_module = test_mod });
+        linkOpenSsl(b, integration_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
+        addZlib(integration_test, b);
+        if (is_android) setupAndroidNdk(b, integration_test, target_arch);
+        integration_test.linkLibC();
+
+        const run_integration_test = b.addRunArtifact(integration_test);
+        test_step.dependOn(&run_integration_test.step);
+    }
+
     // ============================================
     // HELP
     // ============================================
