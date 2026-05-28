@@ -280,6 +280,8 @@ pub const VpnClient = struct {
     ipv6_assigned_addr: [16]u8 = [_]u8{0} ** 16,
     ipv6_configured: bool = false,
     ipv6_dhcp_sent: bool = false,
+    ipv6_dhcp_retry_count: u32 = 0,
+    last_dhcpv6_time: i64 = 0,
 
     /// Server IP that we actually connected to (may differ from server_ip after redirect)
     effective_server_ip: ?net.Address = null,
@@ -326,6 +328,8 @@ pub const VpnClient = struct {
             .ipv6_assigned_addr = [_]u8{0} ** 16,
             .ipv6_configured = false,
             .ipv6_dhcp_sent = false,
+            .ipv6_dhcp_retry_count = 0,
+            .last_dhcpv6_time = 0,
             .effective_server_ip = null,
             .effective_server_port = config.server_port,
             .auth_credentials = null,
@@ -881,17 +885,32 @@ pub const VpnClient = struct {
                             self.ipv6_configured = true;
 
                             // Configure IPv6 on the adapter
-                            adapter.configureIpv6(
-                                client.config.address,
-                                client.config.prefix_len,
-                                "fe80::1", // link-local gateway for the VPN tunnel
-                            );
+                            if (adapter.getName()) |ifname| {
+                                var gw_buf: [64]u8 = undefined;
+                                const gw = std.fmt.bufPrint(&gw_buf, "fe80::1%{s}", .{ifname}) catch "fe80::1";
+                                adapter.configureIpv6(
+                                    client.config.address,
+                                    client.config.prefix_len,
+                                    gw,
+                                );
 
-                            // Add IPv6 default route if full-tunnel is enabled
-                            if (self.config.routing.default_route) {
-                                adapter_mod.route.addIpv6DefaultRoute("fe80::1%utun") catch |err| {
-                                    std.log.warn("Failed to add IPv6 default route: {}", .{err});
-                                };
+                                // Add IPv6 default route if full-tunnel is enabled
+                                if (self.config.routing.default_route) {
+                                    adapter_mod.route.addIpv6DefaultRoute(gw) catch |err| {
+                                        std.log.warn("Failed to add IPv6 default route: {}", .{err});
+                                    };
+                                }
+                            } else {
+                                adapter.configureIpv6(
+                                    client.config.address,
+                                    client.config.prefix_len,
+                                    "fe80::1",
+                                );
+                                if (self.config.routing.default_route) {
+                                    adapter_mod.route.addIpv6DefaultRoute("fe80::1%utun") catch |err| {
+                                        std.log.warn("Failed to add IPv6 default route: {}", .{err});
+                                    };
+                                }
                             }
 
                             if (self.event_callback) |cb| {
@@ -1132,6 +1151,13 @@ pub const VpnClient = struct {
             }
         }
 
+        // Reset IPv6 state (handles reconnect: old ipv6_configured/retry_count
+        // must not carry over from a prior session)
+        self.ipv6_configured = false;
+        self.ipv6_dhcp_sent = false;
+        self.ipv6_dhcp_retry_count = 0;
+        self.last_dhcpv6_time = 0;
+
         // Send DHCPv6 Solicit (regardless of IPv4 DHCP — server may handle v6 independently)
         {
             self.dhcpv6_client = Dhcpv6Client.init(self.allocator, mac);
@@ -1147,6 +1173,7 @@ pub const VpnClient = struct {
                             std.log.err("Failed to send DHCPv6 Solicit: {}", .{err});
                         };
                         self.ipv6_dhcp_sent = true;
+                        self.last_dhcpv6_time = std.time.milliTimestamp();
                         std.log.debug("Sent DHCPv6 SOLICIT (xid=0x{x:0>8})", .{client.transaction_id});
                     }
                 }
@@ -1647,6 +1674,34 @@ pub const VpnClient = struct {
                         loop_state.dhcp_retry_count += 1;
                         std.log.info("DHCP REQUEST retry #{d}", .{loop_state.dhcp_retry_count});
                     }
+                }
+            }
+
+            // DHCPv6 retry — server may drop IPv6 (FilterIPv6=1); retry 3x then give up
+            if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count < 3) {
+                if (now - self.last_dhcpv6_time >= 5000) {
+                    if (self.dhcpv6_client) |*client| {
+                        var dhcpv6_raw: [256]u8 = undefined;
+                        const dv6_len = client.buildSolicit(&dhcpv6_raw) catch 0;
+                        if (dv6_len > 0) {
+                            var dv6_frame: [512]u8 = undefined;
+                            const frame_len = adapter_mod.buildDhcpv6Frame(mac, dhcpv6_raw[0..dv6_len], &dv6_frame) catch 0;
+                            if (frame_len > 0) {
+                                const blocks = [_][]const u8{dv6_frame[0..frame_len]};
+                                send_helper.get().sendBlocks(&blocks) catch {};
+                                self.last_dhcpv6_time = now;
+                                self.ipv6_dhcp_retry_count += 1;
+                                std.log.debug("DHCPv6 SOLICIT retry #{d} (xid=0x{x:0>6})", .{ self.ipv6_dhcp_retry_count, client.transaction_id });
+                            }
+                        }
+                    }
+                }
+            }
+            // Give up on DHCPv6 after max retries — interface already has link-local
+            if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count >= 3) {
+                if (now - self.last_dhcpv6_time >= 5000) {
+                    std.log.warn("DHCPv6: no Reply after {d} retries — server does not support IPv6 (check FilterIPv6 policy)", .{self.ipv6_dhcp_retry_count});
+                    self.ipv6_configured = true;
                 }
             }
 
