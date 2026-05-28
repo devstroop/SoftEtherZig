@@ -498,11 +498,13 @@ pub const TunnelConnection = struct {
         for (blocks) |block| {
             if (self.use_compression) {
                 if (compressBlock(&compress_buf, block) catch null) |compressed| {
-                    mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed.len), .big);
-                    offset += 4;
-                    @memcpy(packet[offset..][0..compressed.len], compressed);
-                    offset += compressed.len;
-                    continue;
+                    if (compressed.len < block.len) {
+                        mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed.len), .big);
+                        offset += 4;
+                        @memcpy(packet[offset..][0..compressed.len], compressed);
+                        offset += compressed.len;
+                        continue;
+                    }
                 }
             }
             mem.writeInt(u32, packet[offset..][0..4], @intCast(block.len), .big);
