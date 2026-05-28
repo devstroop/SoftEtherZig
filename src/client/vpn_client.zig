@@ -72,6 +72,11 @@ const connection_manager = @import("connection_manager.zig");
 const ConnectionManager = connection_manager.ConnectionManager;
 const TcpDirection = connection_manager.TcpDirection;
 
+// Auth handler — full SoftEther handshake (signature → hello → auth →
+// optional cluster redirect → ticket re-auth) lives in a sibling file to
+// keep this orchestration file focused on lifecycle + state machine.
+const auth_handler = @import("auth_handler.zig");
+
 // Windows multimedia timer API (for high-resolution poll timeouts)
 const winmm = if (builtin.os.tag == .windows) struct {
     extern "winmm" fn timeBeginPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
@@ -184,6 +189,38 @@ pub const ClientConfig = struct {
 };
 
 // ============================================================================
+// Transport helpers
+// ============================================================================
+
+/// Create a protocol Writer wrapping a TLS socket pointer.
+/// File-scope (not a method) so sibling modules — currently auth_handler.zig —
+/// can build readers/writers from a `*VpnClient`'s socket.
+pub fn makeProtoWriter(sock: *tls.TlsSocket) softether_proto.Writer {
+    return .{
+        .context = @ptrCast(sock),
+        .writeFn = struct {
+            fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
+                const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                return s.write(data);
+            }
+        }.write,
+    };
+}
+
+/// Create a protocol Reader wrapping a TLS socket pointer.
+pub fn makeProtoReader(sock: *tls.TlsSocket) softether_proto.Reader {
+    return .{
+        .context = @ptrCast(sock),
+        .readFn = struct {
+            fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+                const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                return s.readBlocking(buffer);
+            }
+        }.read,
+    };
+}
+
+// ============================================================================
 // VPN Client Implementation
 // ============================================================================
 
@@ -239,32 +276,6 @@ pub const VpnClient = struct {
     last_keepalive_recv: i64,
 
     const Self = @This();
-
-    /// Create a protocol Writer wrapping a TLS socket pointer.
-    fn makeProtoWriter(sock: *tls.TlsSocket) softether_proto.Writer {
-        return .{
-            .context = @ptrCast(sock),
-            .writeFn = struct {
-                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.write(data);
-                }
-            }.write,
-        };
-    }
-
-    /// Create a protocol Reader wrapping a TLS socket pointer.
-    fn makeProtoReader(sock: *tls.TlsSocket) softether_proto.Reader {
-        return .{
-            .context = @ptrCast(sock),
-            .readFn = struct {
-                fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.readBlocking(buffer);
-                }
-            }.read,
-        };
-    }
 
     pub fn init(allocator: Allocator, config: ClientConfig) Self {
         return .{
@@ -488,7 +499,7 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.authenticating);
-        self.performAuthentication() catch {
+        auth_handler.run(self) catch {
             self.disconnect_reason = .auth_failed;
             return ClientError.AuthenticationFailed;
         };
@@ -602,384 +613,6 @@ pub const VpnClient = struct {
         return ClientError.DnsResolutionFailed;
     }
 
-    fn performAuthentication(self: *Self) !void {
-        // Get the TLS socket for communication
-        const sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
-
-        // Create protocol writer and reader wrappers for TLS socket
-        const writer = makeProtoWriter(sock);
-        const reader = makeProtoReader(sock);
-
-        // Format server IP as string for HTTP Host header (like C code does)
-        var ip_str_buf: [16]u8 = undefined;
-        const host_for_http = formatIpv4Buf(self.server_ip, &ip_str_buf);
-
-        std.log.debug("Uploading protocol signature...", .{});
-
-        // Step 1: Upload signature (WaterMark)
-        softether_proto.uploadSignature(self.allocator, writer, host_for_http) catch |err| {
-            std.log.err("Failed to upload signature: {}", .{err});
-            return ClientError.ProtocolError;
-        };
-
-        std.log.debug("Downloading server hello...", .{});
-
-        // Step 2: Download Hello (get server random challenge)
-        var hello = softether_proto.downloadHello(self.allocator, reader) catch |err| {
-            std.log.err("Failed to download hello: {}", .{err});
-            return ClientError.ProtocolError;
-        };
-        defer hello.deinit(self.allocator);
-
-        std.log.debug("Building authentication request...", .{});
-
-        // Generate bulk encryption keys for UDP acceleration
-        var bulk_keys_storage: softether_proto.UdpBulkKeys = if (self.config.udp_acceleration)
-            softether_proto.UdpBulkKeys.generate()
-        else
-            undefined;
-        const bulk_keys_ptr: ?*const softether_proto.UdpBulkKeys = if (self.config.udp_acceleration)
-            &bulk_keys_storage
-        else
-            null;
-        if (self.config.udp_acceleration) {
-            self.bulk_keys = bulk_keys_storage;
-        }
-
-        // Step 3: Build and upload auth
-        const session_opts = softether_proto.SessionOptions{
-            .max_connection = self.config.max_connections,
-            .half_connection = self.config.half_connection,
-            .qos = self.config.qos,
-            .use_encryption = self.config.use_encryption,
-            .use_compression = self.config.use_compression,
-        };
-        const auth_data = switch (self.config.auth) {
-            .password => |p| blk: {
-                if (p.is_hashed) {
-                    // Password is pre-hashed (base64 encoded), decode and use directly
-                    break :blk softether_proto.buildPasswordAuthWithHash(
-                        self.allocator,
-                        p.username,
-                        p.password, // base64-encoded hash
-                        self.config.hub_name,
-                        &hello.random,
-                        self.config.udp_acceleration,
-                        bulk_keys_ptr,
-                        session_opts,
-                    ) catch return ClientError.OutOfMemory;
-                } else {
-                    // Password is plain text, hash it first
-                    break :blk softether_proto.buildPasswordAuth(
-                        self.allocator,
-                        p.username,
-                        p.password,
-                        self.config.hub_name,
-                        &hello.random,
-                        self.config.udp_acceleration,
-                        bulk_keys_ptr,
-                        session_opts,
-                    ) catch return ClientError.OutOfMemory;
-                }
-            },
-            .anonymous => softether_proto.buildAnonymousAuth(
-                self.allocator,
-                self.config.hub_name,
-                self.config.udp_acceleration,
-                bulk_keys_ptr,
-                session_opts,
-            ) catch return ClientError.OutOfMemory,
-            .certificate => |cert| softether_proto.buildCertificateAuth(
-                self.allocator,
-                cert.cert_data,
-                cert.key_data,
-                self.config.hub_name,
-                &hello.random,
-                self.config.udp_acceleration,
-                bulk_keys_ptr,
-                session_opts,
-            ) catch return ClientError.AuthenticationFailed,
-        };
-        defer self.allocator.free(auth_data);
-
-        std.log.debug("Uploading authentication...", .{});
-
-        // Step 4: Upload auth and get result (use IP address for Host header like C code)
-        var auth_result = softether_proto.uploadAuth(
-            self.allocator,
-            writer,
-            reader,
-            host_for_http,
-            auth_data,
-        ) catch |err| {
-            std.log.err("Failed to upload auth: {}", .{err});
-            return ClientError.AuthenticationFailed;
-        };
-        defer auth_result.deinit(self.allocator);
-
-        if (!auth_result.success) {
-            std.log.err("Authentication failed: code {d}", .{auth_result.error_code});
-            if (auth_result.error_message) |msg| {
-                std.log.err("Error: {s}", .{msg});
-            }
-            return ClientError.AuthenticationFailed;
-        }
-
-        // Check for redirect (cluster server setup)
-        if (auth_result.redirect) |redirect| {
-            std.log.debug("Redirecting to data server...", .{});
-
-            // Store the ticket for redirect auth
-            const ticket = redirect.ticket;
-            const redirect_ip = redirect.ip;
-            const redirect_port = redirect.port;
-            const original_server_ip = self.server_ip; // Save original for fallback
-
-            // CRITICAL: Send empty pack to acknowledge redirect before disconnecting
-            // This tells the controller we received the redirect info
-            std.log.debug("Sending redirect acknowledgment...", .{});
-            var empty_pack = pack_mod.Pack.init(self.allocator);
-            defer empty_pack.deinit();
-            const empty_data = empty_pack.toBytes(self.allocator) catch {
-                std.log.err("Failed to serialize empty pack", .{});
-                return ClientError.ProtocolError;
-            };
-            defer self.allocator.free(empty_data);
-
-            // Send via HTTP POST
-            const current_sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
-            const ack_writer = makeProtoWriter(current_sock);
-
-            // Get current host for HTTP header
-            var current_ip_buf: [16]u8 = undefined;
-            const current_host = formatIpv4Buf(self.server_ip, &current_ip_buf);
-
-            softether_proto.sendHttpPost(self.allocator, ack_writer, current_host, empty_data) catch {
-                std.log.err("Failed to send redirect ack", .{});
-                return ClientError.ProtocolError;
-            };
-
-            // Wait a moment for the server to process the redirect
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-
-            // Close current connection
-            if (self.tls_socket) |*old_sock| {
-                old_sock.close();
-                self.tls_socket = null;
-            }
-
-            // Try redirect IP first, then fallback to original server IP
-            const ips_to_try = [_]u32{ redirect_ip, original_server_ip };
-            var connected = false;
-            var actual_connect_ip: u32 = redirect_ip;
-
-            for (ips_to_try) |try_ip| {
-                // Format IP as hostname string
-                var try_ip_str: [16]u8 = undefined;
-                const try_hostname = formatIpv4Buf(try_ip, &try_ip_str);
-
-                if (try_ip == redirect_ip) {
-                    std.log.debug("Connecting to redirect server: {s}:{d}", .{ try_hostname, redirect_port });
-                } else {
-                    std.log.info("Redirect server unreachable, trying original server: {s}:{d}", .{ try_hostname, redirect_port });
-                }
-
-                const redirect_tls_config = tls.TlsConfig{
-                    .verify_certificate = self.config.verify_certificate,
-                    .allow_self_signed = !self.config.verify_certificate,
-                    .timeout_ms = self.config.connect_timeout_ms,
-                    .client_cert_pem = switch (self.config.auth) {
-                        .certificate => |cert| cert.cert_data,
-                        else => null,
-                    },
-                    .client_key_pem = switch (self.config.auth) {
-                        .certificate => |cert| cert.key_data,
-                        else => null,
-                    },
-                    // Use the original server hostname for SNI, not the
-                    // redirect IP literal. Load balancers routing on SNI
-                    // will drop connections with an IP as SNI.
-                    .sni_hostname = self.config.server_host,
-                };
-
-                self.tls_socket = tls.TlsSocket.connect(
-                    self.allocator,
-                    try_hostname,
-                    redirect_port,
-                    redirect_tls_config,
-                ) catch |err| {
-                    std.log.warn("Failed to connect to {s}:{d}: {}", .{ try_hostname, redirect_port, err });
-                    continue;
-                };
-
-                connected = true;
-                actual_connect_ip = try_ip;
-                break;
-            }
-
-            if (!connected) {
-                std.log.err("Failed to connect to any redirect server", .{});
-                return ClientError.ConnectionFailed;
-            }
-
-            // Update server IP to what we actually connected to
-            self.server_ip = actual_connect_ip;
-            self.effective_server_ip = actual_connect_ip;
-            self.effective_server_port = redirect_port;
-
-            // Get username for ticket auth
-            const username = switch (self.config.auth) {
-                .password => |p| p.username,
-                .anonymous => "anonymous",
-                .certificate => "certificate",
-            };
-
-            // Redo authentication with ticket
-            const redirect_sock = &(self.tls_socket orelse return ClientError.ConnectionFailed);
-            const redirect_writer = makeProtoWriter(redirect_sock);
-            const redirect_reader = makeProtoReader(redirect_sock);
-
-            // Format actual connected IP for HTTP Host header
-            var redirect_ip_buf: [16]u8 = undefined;
-            const redirect_host = formatIpv4Buf(actual_connect_ip, &redirect_ip_buf);
-
-            // Upload signature to redirect server
-            softether_proto.uploadSignature(self.allocator, redirect_writer, redirect_host) catch |err| {
-                std.log.err("Failed to upload signature to redirect server: {}", .{err});
-                return ClientError.AuthenticationFailed;
-            };
-
-            // Download hello from redirect server
-            var redirect_hello = softether_proto.downloadHello(self.allocator, redirect_reader) catch |err| {
-                std.log.err("Failed to download hello from redirect server: {}", .{err});
-                return ClientError.AuthenticationFailed;
-            };
-            defer redirect_hello.deinit(self.allocator);
-
-            // Build ticket auth
-            const ticket_auth_data = softether_proto.buildTicketAuth(
-                self.allocator,
-                self.config.hub_name,
-                username,
-                &ticket,
-                self.config.udp_acceleration,
-                bulk_keys_ptr,
-                session_opts,
-            ) catch return ClientError.OutOfMemory;
-            defer self.allocator.free(ticket_auth_data);
-
-            // Upload ticket auth
-            var ticket_auth_result = softether_proto.uploadAuth(
-                self.allocator,
-                redirect_writer,
-                redirect_reader,
-                redirect_host,
-                ticket_auth_data,
-            ) catch |err| {
-                std.log.err("Failed to upload ticket auth: {}", .{err});
-                return ClientError.AuthenticationFailed;
-            };
-            defer ticket_auth_result.deinit(self.allocator);
-
-            if (!ticket_auth_result.success) {
-                std.log.err("Ticket authentication failed: code {d}", .{ticket_auth_result.error_code});
-                return ClientError.AuthenticationFailed;
-            }
-
-            // LIBSE-95 probe: verify session_key arrived at consumer site
-            std.log.info("LIBSE-95 consumer probe: ticket_auth_result.session_key is_some={}", .{ticket_auth_result.session_key != null});
-
-            // Store session key from ticket auth for session encryption
-            if (ticket_auth_result.session_key) |key| {
-                self.auth_session_key = key;
-                self.auth_hello_random = redirect_hello.random;
-                std.log.info("LIBSE-95 consumer: stored auth_session_key (20B) and auth_hello_random", .{});
-            } else {
-                std.log.warn("LIBSE-95 consumer: ticket_auth_result.session_key was null — skipping store", .{});
-            }
-
-            // Apply server overrides from redirect server too
-            self.applyServerOverrides(ticket_auth_result);
-
-            std.log.debug("Ticket authentication successful!", .{});
-            return;
-        }
-
-        // Store session key and server challenge for session encryption
-        if (auth_result.session_key) |key| {
-            self.auth_session_key = key;
-            self.auth_hello_random = hello.random;
-        }
-
-        // Apply server-overridden session parameters (C: Protocol.c:4720-4741)
-        self.applyServerOverrides(auth_result);
-
-        // Initialize UDP acceleration if server supports it
-        if (auth_result.udp_accel_enabled and self.config.udp_acceleration) {
-            if (self.bulk_keys) |bk| {
-                // Server's send key is our recv key and vice versa
-                const recv_key = auth_result.server_bulk_send_key orelse bk.recv_key;
-                const send_key = auth_result.server_bulk_recv_key orelse bk.send_key;
-
-                // Derive HMAC keys from bulk keys (SHA-1 of the key)
-                var send_hmac: [20]u8 = undefined;
-                var recv_hmac: [20]u8 = undefined;
-                std.crypto.hash.Sha1.hash(&send_key, &send_hmac, .{});
-                std.crypto.hash.Sha1.hash(&recv_key, &recv_hmac, .{});
-
-                // Use server IP for UDP if no specific UDP IP provided
-                var server_ip_buf: [16]u8 = undefined;
-                const server_ip_str = formatIpv4Buf(self.server_ip, &server_ip_buf);
-
-                const udp_config = udp_accel_mod.UdpAccelConfig{
-                    .server_ip = server_ip_str,
-                    .server_port = auth_result.udp_accel_port,
-                    .use_encryption = auth_result.udp_accel_use_encryption,
-                    .send_key = send_key,
-                    .recv_key = recv_key,
-                    .send_hmac_key = send_hmac,
-                    .recv_hmac_key = recv_hmac,
-                };
-
-                self.udp_accel = udp_accel_mod.UdpAccelEngine.init(self.allocator, udp_config);
-                self.udp_accel.?.start() catch |err| {
-                    std.log.warn("Failed to start UDP acceleration: {}", .{err});
-                    self.udp_accel = null;
-                };
-            }
-        }
-
-        std.log.info("Authentication successful!", .{});
-    }
-
-    /// Apply server-overridden session parameters (C: Protocol.c:4720-4741).
-    /// The server is authoritative and may cap or change what the client requested.
-    fn applyServerOverrides(self: *Self, result: softether_proto.AuthResult) void {
-        var effective_max = result.server_max_connection;
-        effective_max = @min(effective_max, self.config.max_connections);
-        effective_max = @min(effective_max, 32); // MAX_TCP_CONNECTION
-        effective_max = @max(effective_max, 1);
-
-        const effective_half = result.server_half_connection;
-
-        // QoS requires minimum connections (C: Protocol.c:4737-4740)
-        if (result.server_qos) {
-            const qos_min: u32 = if (effective_half) 4 else 2;
-            effective_max = @max(effective_max, qos_min);
-        }
-
-        if (effective_max != self.config.max_connections) {
-            std.log.info("Server overrode max_connections: {d} -> {d}", .{ self.config.max_connections, effective_max });
-        }
-        if (effective_half != self.config.half_connection) {
-            std.log.info("Server overrode half_connection: {} -> {}", .{ self.config.half_connection, effective_half });
-        }
-
-        self.config.max_connections = @intCast(effective_max);
-        self.config.half_connection = effective_half;
-        self.config.use_compression = result.server_use_compress;
-        self.config.use_encryption = result.server_use_encrypt;
-    }
 
     fn establishSession(self: *Self) !void {
         std.log.info("LIBSE-95 establishSession entry: use_encryption={} auth_session_key_some={} auth_hello_random_some={}", .{
