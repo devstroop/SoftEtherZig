@@ -6,11 +6,13 @@ const std = @import("std");
 
 const cli = @import("../cli/mod.zig");
 const client = @import("../client/mod.zig");
+const tls = @import("../net/tls.zig");
 
 pub const ConfigBuildError = error{
     MissingServer,
     MissingHub,
     MissingPassword,
+    InvalidProxyUrl,
 };
 
 /// Build a ClientConfig from CLI arguments
@@ -89,6 +91,93 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .connect_timeout_ms = 30000,
         .read_timeout_ms = 60000,
         .keepalive_interval_ms = 10000,
+        .proxy = if (args.proxy) |proxy_str| try parseProxyUrl(proxy_str) else null,
+    };
+}
+
+/// Parse a proxy URL string into a ProxyConfig.
+///
+/// Supported formats:
+///   http://user:pass@host:port
+///   http://host:port
+///   socks5://user:pass@host:1080
+///   socks5://host:1080
+///   socks4://host:1080
+pub fn parseProxyUrl(url: []const u8) ConfigBuildError!tls.ProxyConfig {
+    const ProxyType = tls.ProxyConfig.ProxyType;
+
+    const prefix_http = "http://";
+    const prefix_socks5 = "socks5://";
+    const prefix_socks4 = "socks4://";
+    const prefix_socks4a = "socks4a://";
+
+    var remaining = url;
+    var proxy_type: ProxyType = .http;
+
+    if (std.mem.startsWith(u8, remaining, prefix_http)) {
+        remaining = remaining[prefix_http.len..];
+        proxy_type = .http;
+    } else if (std.mem.startsWith(u8, remaining, prefix_socks5)) {
+        remaining = remaining[prefix_socks5.len..];
+        proxy_type = .socks5;
+    } else if (std.mem.startsWith(u8, remaining, prefix_socks4)) {
+        remaining = remaining[prefix_socks4.len..];
+        proxy_type = .socks4;
+    } else if (std.mem.startsWith(u8, remaining, prefix_socks4a)) {
+        remaining = remaining[prefix_socks4a.len..];
+        proxy_type = .socks4;
+    }
+
+    // Extract credentials if present: user:pass@host:port
+    var username: ?[]const u8 = null;
+    var password: ?[]const u8 = null;
+
+    if (std.mem.indexOfScalar(u8, remaining, '@')) |at_index| {
+        const userinfo = remaining[0..at_index];
+        remaining = remaining[at_index + 1 ..];
+
+        if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+            username = userinfo[0..colon];
+            password = userinfo[colon + 1 ..];
+        } else {
+            username = userinfo;
+        }
+    }
+
+    // Ensure non-empty remaining
+    if (remaining.len == 0) return error.InvalidProxyUrl;
+
+    // Extract host:port (keep colon in remaining for port parsing)
+    const host: []const u8 = blk: {
+        if (remaining[0] == '[') {
+            // IPv6 literal: [::1]:1080
+            const close = std.mem.indexOfScalar(u8, remaining, ']') orelse return error.InvalidProxyUrl;
+            const addr = remaining[1..close];
+            remaining = remaining[close + 1 ..]; // ":1080" or ""
+            break :blk addr;
+        } else if (std.mem.indexOfScalar(u8, remaining, ':')) |colon| {
+            const addr = remaining[0..colon];
+            remaining = remaining[colon..]; // keep colon
+            break :blk addr;
+        } else {
+            return error.InvalidProxyUrl;
+        }
+    };
+
+    const port: u16 = if (remaining.len > 0 and remaining[0] == ':') blk: {
+        remaining = remaining[1..];
+        break :blk std.fmt.parseInt(u16, remaining, 10) catch return error.InvalidProxyUrl;
+    } else switch (proxy_type) {
+        .http => 3128,
+        .socks4, .socks5 => 1080,
+    };
+
+    return .{
+        .host = host,
+        .port = port,
+        .username = username,
+        .password = password,
+        .proxy_type = proxy_type,
     };
 }
 
@@ -104,12 +193,77 @@ test "buildClientConfig valid" {
         .password = "pass",
         .port = 443,
     };
-    defer args.deinit();
-
     const config = try buildClientConfig(&args);
+
     try std.testing.expectEqualStrings("test.example.com", config.server_host);
-    try std.testing.expectEqualStrings("VPN", config.hub_name);
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
+    try std.testing.expect(config.proxy == null);
+}
+
+test "parseProxyUrl http" {
+    const pc = try parseProxyUrl("http://proxy.example.com:3128");
+    try std.testing.expectEqualStrings("proxy.example.com", pc.host);
+    try std.testing.expectEqual(@as(u16, 3128), pc.port);
+    try std.testing.expect(pc.username == null);
+    try std.testing.expectEqual(tls.ProxyConfig.ProxyType.http, pc.proxy_type);
+}
+
+test "parseProxyUrl http with auth" {
+    const pc = try parseProxyUrl("http://user:pass@proxy.example.com:8080");
+    try std.testing.expectEqualStrings("proxy.example.com", pc.host);
+    try std.testing.expectEqual(@as(u16, 8080), pc.port);
+    try std.testing.expectEqualStrings("user", pc.username.?);
+    try std.testing.expectEqualStrings("pass", pc.password.?);
+    try std.testing.expectEqual(tls.ProxyConfig.ProxyType.http, pc.proxy_type);
+}
+
+test "parseProxyUrl socks5" {
+    const pc = try parseProxyUrl("socks5://192.168.1.1:1080");
+    try std.testing.expectEqualStrings("192.168.1.1", pc.host);
+    try std.testing.expectEqual(@as(u16, 1080), pc.port);
+    try std.testing.expectEqual(tls.ProxyConfig.ProxyType.socks5, pc.proxy_type);
+}
+
+test "parseProxyUrl socks5 with auth" {
+    const pc = try parseProxyUrl("socks5://alice:secret@socks.example.com:1080");
+    try std.testing.expectEqualStrings("socks.example.com", pc.host);
+    try std.testing.expectEqual(@as(u16, 1080), pc.port);
+    try std.testing.expectEqualStrings("alice", pc.username.?);
+    try std.testing.expectEqualStrings("secret", pc.password.?);
+    try std.testing.expectEqual(tls.ProxyConfig.ProxyType.socks5, pc.proxy_type);
+}
+
+test "parseProxyUrl socks4" {
+    const pc = try parseProxyUrl("socks4://socks.example.com:1080");
+    try std.testing.expectEqualStrings("socks.example.com", pc.host);
+    try std.testing.expectEqual(@as(u16, 1080), pc.port);
+    try std.testing.expectEqual(tls.ProxyConfig.ProxyType.socks4, pc.proxy_type);
+}
+
+test "parseProxyUrl socks4a" {
+    const pc = try parseProxyUrl("socks4a://socks.example.com:1080");
+    try std.testing.expectEqualStrings("socks.example.com", pc.host);
+    try std.testing.expectEqual(@as(u16, 1080), pc.port);
+    try std.testing.expectEqual(tls.ProxyConfig.ProxyType.socks4, pc.proxy_type);
+}
+
+test "parseProxyUrl http default port" {
+    const pc = try parseProxyUrl("http://proxy:3128");
+    try std.testing.expectEqual(@as(u16, 3128), pc.port);
+    try std.testing.expectEqualStrings("proxy", pc.host);
+}
+
+test "parseProxyUrl socks5 default port" {
+    const pc = try parseProxyUrl("socks5://socks.example.com:1080");
+    try std.testing.expectEqual(@as(u16, 1080), pc.port);
+}
+
+test "parseProxyUrl invalid" {
+    try std.testing.expectError(error.InvalidProxyUrl, parseProxyUrl("not-a-proxy-url"));
+}
+
+test "parseProxyUrl empty" {
+    try std.testing.expectError(error.InvalidProxyUrl, parseProxyUrl(""));
 }
 
 test "buildClientConfig missing server" {

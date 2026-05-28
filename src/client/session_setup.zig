@@ -96,6 +96,7 @@ fn establishAdditionalConnections(client: *VpnClient) void {
             else => null,
         },
         .sni_hostname = client.config.server_host,
+        .proxy = client.config.proxy,
     };
 
     var ip_str_buf: [16]u8 = undefined;

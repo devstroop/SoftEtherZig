@@ -68,6 +68,9 @@ pub const CliArgs = struct {
     gen_hash_user: ?[]const u8 = null,
     gen_hash_pass: ?[]const u8 = null,
 
+    // Proxy
+    proxy: ?[]const u8 = null,
+
     // Allocator for dynamic data
     allocator: ?Allocator = null,
 
@@ -221,6 +224,9 @@ pub const ArgParser = struct {
                 self.args.gen_hash_user = try self.requireValue(argv, i, "--gen-hash username");
                 i += 1;
                 self.args.gen_hash_pass = try self.requireValue(argv, i, "--gen-hash password");
+            } else if (std.mem.eql(u8, arg, "--proxy")) {
+                i += 1;
+                self.args.proxy = try self.requireValue(argv, i, "--proxy");
             } else if (arg.len > 0 and arg[0] == '-') {
                 return ParseError.UnknownArgument;
             }

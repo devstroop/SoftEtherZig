@@ -7,6 +7,7 @@ pub const socket = @import("socket.zig");
 pub const tls = @import("tls.zig");
 pub const http = @import("http.zig");
 pub const dns_cache = @import("dns_cache.zig");
+pub const socks = @import("socks.zig");
 
 // Re-export commonly used types
 pub const TcpSocket = socket.TcpSocket;

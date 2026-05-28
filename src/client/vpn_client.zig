@@ -186,6 +186,9 @@ pub const ClientConfig = struct {
     read_timeout_ms: u32 = 60000,
     keepalive_interval_ms: u32 = 10000,
 
+    // Proxy (optional)
+    proxy: ?tls.ProxyConfig = null,
+
     // Mobile: external tunnel fd provided by platform (iOS/Android)
     // When set, the VPN client uses this fd instead of opening its own adapter.
     tunnel_fd: ?i32 = null,
@@ -484,6 +487,7 @@ pub const VpnClient = struct {
                 .certificate => |cert| cert.key_data,
                 else => null,
             },
+            .proxy = self.config.proxy,
         };
 
         self.tls_socket = tls.TlsSocket.connect(

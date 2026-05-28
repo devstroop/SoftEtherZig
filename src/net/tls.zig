@@ -38,6 +38,10 @@ const testing = std.testing;
 const socket_mod = @import("socket.zig");
 const TcpSocket = socket_mod.TcpSocket;
 const dns_cache_mod = @import("dns_cache.zig");
+const http_mod = @import("http.zig");
+
+/// Proxy configuration for TLS connect. Re-exported for convenience.
+pub const ProxyConfig = http_mod.ProxyConfig;
 
 /// Global DNS cache instance for TLS connections
 var global_dns_cache: ?dns_cache_mod.DnsCache = null;
@@ -104,6 +108,10 @@ pub const TlsConfig = struct {
     /// where the TCP connection goes to an IP literal but the load balancer needs
     /// the original server hostname to route the TLS handshake.
     sni_hostname: ?[]const u8 = null,
+
+    /// Proxy configuration. When set, the TCP connection is established through
+    /// the proxy before the TLS handshake. Supports HTTP CONNECT, SOCKS4, SOCKS5.
+    proxy: ?ProxyConfig = null,
 };
 
 /// TCP connect with configurable timeout using non-blocking socket + poll.
@@ -251,6 +259,12 @@ pub const TlsSocket = struct {
             else
                 @intCast(fd_int);
             via_host_dial = true;
+        } else if (config.proxy) |proxy| {
+            // Proxy connect: delegate TCP establishment to the proxy (HTTP CONNECT,
+            // SOCKS4, or SOCKS5). TLS is layered on top as usual.
+            var proxy_sock = try http_mod.connectViaProxy(allocator, proxy, hostname, port);
+            errdefer proxy_sock.close();
+            tcp_fd = proxy_sock.stream.handle;
         } else
         // First try to parse as IP address
         if (net.Address.resolveIp(hostname, port)) |address| {

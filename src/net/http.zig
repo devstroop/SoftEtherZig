@@ -6,9 +6,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const net = std.net;
 
 const socket = @import("socket.zig");
 const TcpSocket = socket.TcpSocket;
+const socks = @import("socks.zig");
 
 /// HTTP method
 pub const Method = enum {
@@ -300,10 +302,42 @@ pub const ProxyConfig = struct {
     port: u16,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
+    proxy_type: ProxyType = .http,
+
+    pub const ProxyType = enum {
+        http,
+        socks4,
+        socks5,
+    };
 };
 
-/// Connect through HTTP CONNECT proxy
+/// Connect through proxy (HTTP CONNECT, SOCKS4, or SOCKS5).
+/// Returns a TcpSocket connected to the target host through the proxy.
 pub fn connectViaProxy(
+    allocator: Allocator,
+    proxy: ProxyConfig,
+    target_host: []const u8,
+    target_port: u16,
+) !TcpSocket {
+    return switch (proxy.proxy_type) {
+        .http => connectViaHttpConnect(allocator, proxy, target_host, target_port),
+        .socks4 => socks.connectViaSocks4(allocator, .{
+            .host = proxy.host,
+            .port = proxy.port,
+            .username = proxy.username,
+            .password = proxy.password,
+        }, target_host, target_port),
+        .socks5 => socks.connectViaSocks5(allocator, .{
+            .host = proxy.host,
+            .port = proxy.port,
+            .username = proxy.username,
+            .password = proxy.password,
+        }, target_host, target_port),
+    };
+}
+
+/// Connect through HTTP CONNECT proxy
+fn connectViaHttpConnect(
     allocator: Allocator,
     proxy: ProxyConfig,
     target_host: []const u8,
@@ -346,7 +380,7 @@ pub fn connectViaProxy(
     try tcp.writeAll(request_data);
 
     // Read response
-    var response = try parseResponse(allocator, tcp.stream.reader());
+    var response = try parseResponse(allocator, tcp.stream);
     defer response.deinit();
 
     if (!response.status_code.isSuccess()) {

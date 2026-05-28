@@ -258,6 +258,7 @@ fn runRedirect(
             // redirect IP literal. Load balancers routing on SNI
             // will drop connections with an IP as SNI.
             .sni_hostname = client.config.server_host,
+            .proxy = client.config.proxy,
         };
 
         client.tls_socket = tls.TlsSocket.connect(
