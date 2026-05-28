@@ -591,6 +591,65 @@ pub const UtunDevice = struct {
         try self.configure(temp_ip, temp_mask, temp_peer);
     }
 
+    /// Configure IPv6 address on the tunnel interface
+    /// On macOS: ifconfig <dev> inet6 <addr>/<prefix_len> 1
+    /// On Linux: ip -6 addr add <addr>/<prefix_len> dev <dev>
+    pub fn configureIpv6(self: *UtunDevice, address: [16]u8, prefix_len: u8) !void {
+        if (!self.is_open) return UtunError.DeviceNotOpen;
+
+        // Format the IPv6 address string
+        var addr_buf: [40]u8 = undefined;
+        const addr_str = std.fmt.bufPrint(&addr_buf, "{}", .{
+            std.net.fmt_ipv6(address),
+        }) catch return UtunError.InterfaceConfigFailed;
+
+        var cmd_buf: [256]u8 = undefined;
+
+        if (builtin.os.tag == .macos) {
+            const cmd = std.fmt.bufPrint(&cmd_buf, "/sbin/ifconfig {s} inet6 {s}/{d} 1", .{
+                self.getName(),
+                addr_str,
+                prefix_len,
+            }) catch return UtunError.InterfaceConfigFailed;
+
+            // Try privileged channel first
+            const escalate = @import("utun_escalate.zig");
+            if (escalate.runPrivilegedCommand(cmd)) return;
+
+            var child = std.process.Child.init(
+                &[_][]const u8{ "/bin/sh", "-c", cmd },
+                self.allocator,
+            );
+            _ = child.spawnAndWait() catch {
+                return UtunError.InterfaceConfigFailed;
+            };
+        } else if (builtin.os.tag == .linux) {
+            const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 addr add {s}/{d} dev {s}", .{
+                addr_str,
+                prefix_len,
+                self.getName(),
+            }) catch return UtunError.InterfaceConfigFailed;
+
+            var child = std.process.Child.init(
+                &[_][]const u8{ "/bin/sh", "-c", cmd },
+                self.allocator,
+            );
+            _ = child.spawnAndWait() catch {
+                return UtunError.InterfaceConfigFailed;
+            };
+        }
+
+        // Update stored config
+        @memcpy(&self.ipv6_config.address, &address);
+        self.ipv6_config.prefix_len = prefix_len;
+        self.ipv6_config.configured = true;
+        std.log.info("IPv6 address configured on {s}: {s}/{d}", .{
+            self.getName(),
+            addr_str,
+            prefix_len,
+        });
+    }
+
     /// Get file descriptor for polling
     pub fn getFd(self: *const UtunDevice) posix.fd_t {
         return self.fd;

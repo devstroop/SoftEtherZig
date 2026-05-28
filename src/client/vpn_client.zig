@@ -66,6 +66,9 @@ const tunnel_mod = @import("../tunnel/mod.zig");
 // Import DHCP parsing
 const dhcp_mod = @import("../adapter/dhcp.zig");
 
+// Import route healing (#9, #10)
+const route_heal = @import("../adapter/route_heal.zig");
+
 // Import connection manager for multi-TCP
 const connection_manager = @import("connection_manager.zig");
 const ConnectionManager = connection_manager.ConnectionManager;
@@ -457,6 +460,14 @@ pub const VpnClient = struct {
     }
 
     fn performConnection(self: *Self) ClientError!void {
+        // #10: Startup self-check — purge routes through vanished utun interfaces
+        if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
+            const purged = route_heal.purgeStaleRoutes(self.allocator);
+            if (purged > 0) {
+                std.log.info("[STARTUP] Repaired {} stale route(s) from previous session", .{purged});
+            }
+        }
+
         self.transitionState(.resolving_dns);
         self.server_ip = self.resolveDns() catch {
             self.disconnect_reason = .network_error;

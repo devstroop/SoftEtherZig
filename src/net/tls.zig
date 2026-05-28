@@ -39,6 +39,7 @@ const socket_mod = @import("socket.zig");
 const TcpSocket = socket_mod.TcpSocket;
 const dns_cache_mod = @import("dns_cache.zig");
 const http_mod = @import("http.zig");
+const route_heal = @import("../adapter/route_heal.zig");
 
 /// Proxy configuration for TLS connect. Re-exported for convenience.
 pub const ProxyConfig = http_mod.ProxyConfig;
@@ -293,10 +294,24 @@ pub const TlsSocket = struct {
         // First try to parse as IP address
         if (net.Address.resolveIp(hostname, port)) |address| {
             std.log.debug("TLS: Resolved IP address directly: {s}:{d}", .{ hostname, port });
-            tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms) catch |err| {
-                logConnectError(err, hostname, port);
-                return TlsError.ConnectionFailed;
-            };
+            const connect_result = tcpConnectWithTimeout(address, config.timeout_ms);
+            if (connect_result) |fd| {
+                tcp_fd = fd;
+            } else |err| {
+                // #9: Auto-repair stale host route on EADDRNOTAVAIL, then retry once
+                if (err == error.AddressNotAvailable and
+                    route_heal.repairStaleHostRoute(allocator, hostname, port))
+                {
+                    std.log.info("TLS: Retrying {s}:{d} after stale-route repair", .{ hostname, port });
+                    tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms) catch |retry_err| {
+                        logConnectError(retry_err, hostname, port);
+                        return TlsError.ConnectionFailed;
+                    };
+                } else {
+                    logConnectError(err, hostname, port);
+                    return TlsError.ConnectionFailed;
+                }
+            }
         } else |resolve_err| {
             std.log.debug("TLS: Not an IP, trying DNS for: {s} (err: {})", .{ hostname, resolve_err });
 
@@ -321,23 +336,44 @@ pub const TlsSocket = struct {
             var last_err: anyerror = error.ConnectionRefused;
             var connected_idx: ?usize = null;
             for (cached_addrs, 0..) |addr, i| {
-                tcp_fd = tcpConnectWithTimeout(addr, config.timeout_ms) catch |err| {
+                const result = tcpConnectWithTimeout(addr, config.timeout_ms);
+                if (result) |fd| {
+                    tcp_fd = fd;
+                    connected_idx = i;
+                    break;
+                } else |err| {
                     std.log.warn("TLS: TCP connect to DNS result #{d} failed: {} (trying next)", .{ i, err });
                     last_err = err;
-                    continue;
-                };
-                connected_idx = i;
-                break;
+                }
             }
             if (connected_idx == null) {
                 cache.invalidate(hostname);
                 std.log.err("TLS: All {d} DNS results failed for {s}, last err: {}", .{ cached_addrs.len, hostname, last_err });
-                // Same stale-route diagnosis path: if every result died with
-                // AddressNotAvailable, surface the recovery hint once.
-                if (last_err == error.AddressNotAvailable) {
-                    logConnectError(last_err, hostname, port);
+                // #9: Auto-repair stale host route on EADDRNOTAVAIL, then retry once
+                if (last_err == error.AddressNotAvailable and
+                    route_heal.repairStaleHostRoute(allocator, hostname, port))
+                {
+                    std.log.info("TLS: Retrying {s}:{d} after stale-route repair", .{ hostname, port });
+                    for (cached_addrs, 0..) |addr, retry_i| {
+                        const retry_result = tcpConnectWithTimeout(addr, config.timeout_ms);
+                        if (retry_result) |fd| {
+                            tcp_fd = fd;
+                            connected_idx = retry_i;
+                            break;
+                        } else |retry_err| {
+                            std.log.warn("TLS: Retry #{d} failed: {}", .{ retry_i, retry_err });
+                        }
+                    }
+                    if (connected_idx == null) {
+                        logConnectError(last_err, hostname, port);
+                        return TlsError.ConnectionFailed;
+                    }
+                } else {
+                    if (last_err == error.AddressNotAvailable) {
+                        logConnectError(last_err, hostname, port);
+                    }
+                    return TlsError.ConnectionFailed;
                 }
-                return TlsError.ConnectionFailed;
             }
         }
         errdefer {

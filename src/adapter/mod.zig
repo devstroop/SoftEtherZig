@@ -290,6 +290,26 @@ pub const VirtualAdapter = struct {
         try self.routes.configureFullTunnel(vpn_gateway, vpn_server, dev.getName());
     }
 
+    /// Configure IPv6 on the tunnel interface and add IPv6 routes
+    pub fn configureIpv6(self: *VirtualAdapter, address: [16]u8, prefix_len: u8, gateway: []const u8) !void {
+        const dev = self.device orelse return UtunError.DeviceNotOpen;
+
+        // Configure IPv6 address on the interface (utun only — Linux TUN and Windows TAP TODO)
+        if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
+            if (@hasDecl(@TypeOf(dev.*), "configureIpv6")) {
+                try dev.configureIpv6(address, prefix_len);
+            }
+        }
+
+        // Add IPv6 default route through gateway
+        const route_mod = @import("route.zig");
+        if (gateway.len > 0) {
+            route_mod.addIpv6DefaultRoute(gateway) catch |err| {
+                std.log.warn("Failed to add IPv6 default route: {}", .{err});
+            };
+        }
+    }
+
     /// Get traffic statistics
     pub fn getStats(self: *const VirtualAdapter) ?TunStats {
         if (self.device) |dev| {

@@ -504,6 +504,58 @@ pub fn deleteRoute(destination: u32, netmask: u32) !void {
 }
 
 // ============================================
+// IPv6 Route Operations
+// ============================================
+
+/// Add an IPv6 default route through a gateway
+pub fn addIpv6DefaultRoute(gateway: []const u8) !void {
+    var cmd_buf: [256]u8 = undefined;
+
+    if (builtin.os.tag == .linux) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route add default via {s}", .{gateway}) catch return RouteError.CommandFailed;
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
+    } else if (builtin.os.tag == .macos) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 add default {s}", .{gateway}) catch return RouteError.CommandFailed;
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
+    }
+}
+
+/// Add an IPv6 host route (for VPN server leak prevention)
+pub fn addIpv6HostRoute(host: []const u8, gateway: []const u8) !void {
+    var cmd_buf: [256]u8 = undefined;
+
+    if (builtin.os.tag == .linux) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route add {s}/128 via {s}", .{ host, gateway }) catch return RouteError.CommandFailed;
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
+    } else if (builtin.os.tag == .macos) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 add {s} {s}", .{ host, gateway }) catch return RouteError.CommandFailed;
+        if (!runCommand(cmd)) return RouteError.CommandFailed;
+    }
+}
+
+/// Delete the IPv6 default route
+pub fn deleteIpv6DefaultRoute() void {
+    if (builtin.os.tag == .linux) {
+        _ = runCommand("ip -6 route del default 2>/dev/null");
+    } else if (builtin.os.tag == .macos) {
+        _ = runCommand("route -A inet6 delete default 2>/dev/null");
+    }
+}
+
+/// Delete a specific IPv6 route
+pub fn deleteIpv6Route(prefix: []const u8) void {
+    var cmd_buf: [256]u8 = undefined;
+
+    if (builtin.os.tag == .linux) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route del {s}", .{prefix}) catch return;
+        _ = runCommand(cmd);
+    } else if (builtin.os.tag == .macos) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 delete {s}", .{prefix}) catch return;
+        _ = runCommand(cmd);
+    }
+}
+
+// ============================================
 // DNS Configuration (macOS specific)
 // ============================================
 
