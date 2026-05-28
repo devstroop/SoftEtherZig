@@ -3,7 +3,7 @@ const std = @import("std");
 const tls = @import("../net/net.zig").tls;
 const softether_proto = @import("../protocol/softether_protocol.zig");
 const core = @import("../core/mod.zig");
-const formatIpv4Buf = core.formatIpv4;
+const formatAddress = core.formatAddressForHost;
 
 const vpn_client = @import("vpn_client.zig");
 const VpnClient = vpn_client.VpnClient;
@@ -99,8 +99,9 @@ fn establishAdditionalConnections(client: *VpnClient) void {
         .proxy = client.config.proxy,
     };
 
-    var ip_str_buf: [16]u8 = undefined;
-    const host_for_http = formatIpv4Buf(client.effective_server_ip, &ip_str_buf);
+    var ip_str_buf: [48]u8 = undefined;
+    const host_for_http = if (client.effective_server_ip) |addr| formatAddress(addr, &ip_str_buf) else
+        client.config.server_host;
 
     var established: u8 = 1;
     var i: u8 = 1;

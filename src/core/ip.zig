@@ -4,6 +4,58 @@
 //! Used throughout the codebase for handling IPv4/IPv6 addresses.
 
 const std = @import("std");
+const net = std.net;
+const posix = std.posix;
+
+/// Format a `std.net.Address` (v4 or v6) as a string into the given buffer.
+/// For IPv6 the result uses RFC 3986 notation (`::1` — no brackets, no port).
+/// Returns an empty slice on buffer overflow.
+pub fn formatAddress(addr: net.Address, buf: []u8) []const u8 {
+    switch (addr.any.family) {
+        posix.AF.INET => {
+            return formatIpv4Buf(addr, buf);
+        },
+        posix.AF.INET6 => {
+            // macOS sockaddr_in6 has addr: [16]u8
+            const bytes = &addr.in6.sa.addr;
+            return std.fmt.bufPrint(
+                buf,
+                "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}",
+                .{
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[8], bytes[9], bytes[10], bytes[11],
+                    bytes[12], bytes[13], bytes[14], bytes[15],
+                },
+            ) catch "";
+        },
+        else => return "",
+    }
+}
+
+/// Format Address as Host header value (bracket-notation for IPv6, plain for IPv4).
+pub fn formatAddressForHost(addr: net.Address, buf: []u8) []const u8 {
+    switch (addr.any.family) {
+        posix.AF.INET => return formatAddress(addr, buf),
+        posix.AF.INET6 => {
+            const raw = formatAddress(addr, buf);
+            if (raw.len == 0) return "";
+            if (buf.len < raw.len + 2) return "";
+            std.mem.copyBackwards(u8, buf[1 .. raw.len + 1], raw);
+            buf[0] = '[';
+            buf[raw.len + 1] = ']';
+            return buf[0 .. raw.len + 2];
+        },
+        else => return "",
+    }
+}
+
+fn formatIpv4Buf(addr: net.Address, buf: []u8) []const u8 {
+    const ip4 = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+        ip4[0], ip4[1], ip4[2], ip4[3],
+    }) catch "";
+}
 
 /// Parse IPv4 address string to u32 in host byte order (little-endian on x86/ARM)
 /// Returns null if the string is not a valid IPv4 address.

@@ -11,13 +11,14 @@
 //! overridable fields). Returns `ClientError` on failure.
 
 const std = @import("std");
+const net = std.net;
 
 const tls = @import("../net/net.zig").tls;
 const softether_proto = @import("../protocol/softether_protocol.zig");
 const pack_mod = @import("../protocol/pack.zig");
 const udp_accel_mod = @import("../net/udp_accel.zig");
 const core = @import("../core/mod.zig");
-const formatIpv4Buf = core.formatIpv4;
+const formatAddress = core.formatAddressForHost;
 
 const vpn_client = @import("vpn_client.zig");
 const VpnClient = vpn_client.VpnClient;
@@ -40,8 +41,8 @@ pub fn run(client: *VpnClient) !void {
     const reader = makeProtoReader(sock);
 
     // Format server IP as string for HTTP Host header (like C code does)
-    var ip_str_buf: [16]u8 = undefined;
-    const host_for_http = formatIpv4Buf(client.server_ip, &ip_str_buf);
+    var ip_str_buf: [48]u8 = undefined;
+    const host_for_http = if (client.server_ip) |addr| formatAddress(addr, &ip_str_buf) else client.config.server_host;
 
     std.log.debug("Uploading protocol signature...", .{});
 
@@ -191,7 +192,6 @@ fn runRedirect(
     const ticket = redirect.ticket;
     const redirect_ip = redirect.ip;
     const redirect_port = redirect.port;
-    const original_server_ip = client.server_ip; // Save original for fallback
 
     // CRITICAL: Send empty pack to acknowledge redirect before disconnecting
     // This tells the controller we received the redirect info
@@ -209,8 +209,8 @@ fn runRedirect(
     const ack_writer = makeProtoWriter(current_sock);
 
     // Get current host for HTTP header
-    var current_ip_buf: [16]u8 = undefined;
-    const current_host = formatIpv4Buf(client.server_ip, &current_ip_buf);
+    var current_ip_buf: [48]u8 = undefined;
+    const current_host = if (client.server_ip) |addr| formatAddress(addr, &current_ip_buf) else client.config.server_host;
 
     softether_proto.sendHttpPost(client.allocator, ack_writer, current_host, empty_data) catch {
         std.log.err("Failed to send redirect ack", .{});
@@ -226,15 +226,28 @@ fn runRedirect(
         client.tls_socket = null;
     }
 
-    // Try redirect IP first, then fallback to original server IP
-    const ips_to_try = [_]u32{ redirect_ip, original_server_ip };
+    // Try redirect IP first, then fallback to original server IP.
+    // Redirects are IPv4-only in the current protocol (RedirectInfo.ip is u32).
     var connected = false;
-    var actual_connect_ip: u32 = redirect_ip;
+    var actual_ip: u32 = redirect_ip;
 
-    for (ips_to_try) |try_ip| {
-        // Format IP as hostname string
-        var try_ip_str: [16]u8 = undefined;
-        const try_hostname = formatIpv4Buf(try_ip, &try_ip_str);
+    const original = blk: {
+        if (client.server_ip) |srv| {
+            if (srv.any.family == std.posix.AF.INET) {
+                break :blk srv.in.sa.addr;
+            }
+        }
+        break :blk redirect_ip;
+    };
+
+    for ([_]u32{ redirect_ip, original }) |try_ip| {
+        var try_ip_str: [48]u8 = undefined;
+        // Build an Address just for formatting
+        const addr_for_fmt = net.Address.initIp4(
+            @as(*const [4]u8, @ptrCast(&try_ip)).*,
+            redirect_port,
+        );
+        const try_hostname = formatAddress(addr_for_fmt, &try_ip_str);
 
         if (try_ip == redirect_ip) {
             std.log.debug("Connecting to redirect server: {s}:{d}", .{ try_hostname, redirect_port });
@@ -272,7 +285,7 @@ fn runRedirect(
         };
 
         connected = true;
-        actual_connect_ip = try_ip;
+        actual_ip = try_ip;
         break;
     }
 
@@ -282,8 +295,12 @@ fn runRedirect(
     }
 
     // Update server IP to what we actually connected to
-    client.server_ip = actual_connect_ip;
-    client.effective_server_ip = actual_connect_ip;
+    const actual_addr = net.Address.initIp4(
+        @as(*const [4]u8, @ptrCast(&actual_ip)).*,
+        redirect_port,
+    );
+    client.server_ip = actual_addr;
+    client.effective_server_ip = actual_addr;
     client.effective_server_port = redirect_port;
 
     // Get username for ticket auth
@@ -299,8 +316,8 @@ fn runRedirect(
     const redirect_reader = makeProtoReader(redirect_sock);
 
     // Format actual connected IP for HTTP Host header
-    var redirect_ip_buf: [16]u8 = undefined;
-    const redirect_host = formatIpv4Buf(actual_connect_ip, &redirect_ip_buf);
+    var redirect_ip_buf: [48]u8 = undefined;
+    const redirect_host = formatAddress(actual_addr, &redirect_ip_buf);
 
     // Upload signature to redirect server
     softether_proto.uploadSignature(client.allocator, redirect_writer, redirect_host) catch |err| {
@@ -408,9 +425,10 @@ fn startUdpAcceleration(client: *VpnClient, auth_result: softether_proto.AuthRes
     std.crypto.hash.Sha1.hash(&send_key, &send_hmac, .{});
     std.crypto.hash.Sha1.hash(&recv_key, &recv_hmac, .{});
 
-    // Use server IP for UDP if no specific UDP IP provided
-    var server_ip_buf: [16]u8 = undefined;
-    const server_ip_str = formatIpv4Buf(client.server_ip, &server_ip_buf);
+    // Use server IP for UDP
+    var server_ip_buf: [48]u8 = undefined;
+    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else
+        client.config.server_host;
 
     const udp_config = udp_accel_mod.UdpAccelConfig{
         .server_ip = server_ip_str,

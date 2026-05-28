@@ -21,7 +21,6 @@ const net = std.net;
 // Import core utilities
 const core = @import("../core/mod.zig");
 const parseIpv4 = core.parseIpv4;
-const formatIpv4Buf = core.formatIpv4;
 
 // Import extracted client modules
 const state_mod = @import("state.zig");
@@ -263,14 +262,14 @@ pub const VpnClient = struct {
     reconnect_backoff_ms: u32,
     last_error: ?ClientError,
 
-    server_ip: u32,
+    server_ip: ?net.Address = null,
     assigned_ip: u32,
     assigned_mask: u32,
     gateway_ip: u32,
     gateway_mac: ?[6]u8,
 
-    // Effective server address for additional connections (updated after redirect)
-    effective_server_ip: u32,
+    /// Server IP that we actually connected to (may differ from server_ip after redirect)
+    effective_server_ip: ?net.Address = null,
     effective_server_port: u16,
 
     // Authentication state
@@ -305,12 +304,12 @@ pub const VpnClient = struct {
             .reconnect_attempt = 0,
             .reconnect_backoff_ms = config.reconnect.min_backoff_ms,
             .last_error = null,
-            .server_ip = 0,
+            .server_ip = null,
             .assigned_ip = 0,
             .assigned_mask = 0,
             .gateway_ip = 0,
             .gateway_mac = null,
-            .effective_server_ip = 0,
+            .effective_server_ip = null,
             .effective_server_port = config.server_port,
             .auth_credentials = null,
             .auth_session_key = null,
@@ -538,8 +537,12 @@ pub const VpnClient = struct {
         self.stats.connect_time_ms = std.time.milliTimestamp();
 
         if (self.event_callback) |cb| {
+            const server_ip_u32 = if (self.server_ip) |srv| blk: {
+                if (srv.any.family == std.posix.AF.INET) break :blk srv.in.sa.addr;
+                break :blk @as(u32, 0);
+            } else 0;
             cb(.{ .connected = .{
-                .server_ip = self.server_ip,
+                .server_ip = server_ip_u32,
                 .assigned_ip = self.assigned_ip,
                 .gateway_ip = self.gateway_ip,
             } }, self.event_user_data);
@@ -590,13 +593,17 @@ pub const VpnClient = struct {
         }
     }
 
-    fn resolveDns(self: *Self) !u32 {
+    fn resolveDns(self: *Self) !net.Address {
         const host = self.config.server_host;
 
         // First try parsing as IP address (fast path)
-        if (parseIpv4(host)) |ip| {
-            return ip;
-        }
+        if (net.Address.parseIp4(host, self.config.server_port)) |addr| {
+            return addr;
+        } else |_| {}
+
+        if (net.Address.parseIp6(host, self.config.server_port)) |addr| {
+            return addr;
+        } else |_| {}
 
         // Real DNS resolution using std.net
         const addrs = net.getAddressList(self.allocator, host, self.config.server_port) catch {
@@ -604,14 +611,9 @@ pub const VpnClient = struct {
         };
         defer addrs.deinit();
 
-        // Look for first IPv4 address
-        for (addrs.addrs) |addr| {
-            if (addr.any.family == std.posix.AF.INET) {
-                // Extract IPv4 address as u32 in host byte order (little-endian)
-                // The addr.in.sa.addr is already in network byte order, bitcast gives us host order
-                const bytes = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
-                return @as(u32, @bitCast(bytes.*));
-            }
+        // Return first address (IPv4 or IPv6)
+        if (addrs.addrs.len > 0) {
+            return addrs.addrs[0];
         }
 
         return ClientError.DnsResolutionFailed;
@@ -648,9 +650,13 @@ pub const VpnClient = struct {
         }
 
         if (self.config.routing.default_route and self.gateway_ip != 0) {
-            // Convert server_ip from little-endian (Pack protocol) to big-endian (network byte order)
-            const server_ip_be = @byteSwap(self.server_ip);
-            ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
+            if (self.server_ip) |srv| {
+                if (srv.any.family == std.posix.AF.INET) {
+                    // Convert from host byte order (LE on macOS) to network byte order
+                    const server_ip_be = @byteSwap(srv.in.sa.addr);
+                    ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
+                }
+            }
         }
     }
 
@@ -790,8 +796,12 @@ pub const VpnClient = struct {
                     if (self.config.routing.default_route and loop_state.our_gateway != 0) {
                         const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                         std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
-                        const server_ip_be = @byteSwap(self.server_ip);
-                        adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
+                        if (self.server_ip) |srv| {
+                            if (srv.any.family == std.posix.AF.INET) {
+                                const server_ip_be = @byteSwap(srv.in.sa.addr);
+                                adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
+                            }
+                        }
                     }
 
                     // Restore half-connection directions after DHCP completes

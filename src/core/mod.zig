@@ -11,6 +11,8 @@ pub const parseIpv4 = ip.parseIpv4;
 pub const formatIpv4 = ip.formatIpv4;
 pub const ipToBytes = ip.ipToBytes;
 pub const bytesToIp = ip.bytesToIp;
+pub const formatAddress = ip.formatAddress;
+pub const formatAddressForHost = ip.formatAddressForHost;
 
 // Re-export common types
 pub const IpAddress = types.IpAddress;

@@ -309,3 +309,32 @@ test "resolveToIpv4 parses IP string" {
 test "resolveToIpv4 returns error for hostname" {
     try testing.expectError(SocksError.HostUnreachable, resolveToIpv4("example.com"));
 }
+
+test "SOCKS5 IPv6 address type encoding" {
+    var req_buf: [262]u8 = undefined;
+    var off: usize = 0;
+
+    req_buf[off] = 5; off += 1;
+    req_buf[off] = 1; off += 1;
+    req_buf[off] = 0; off += 1;
+    req_buf[off] = @intFromEnum(AddressType.ipv6); off += 1;
+
+    const ipv6_bytes = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    for (&ipv6_bytes, 0..) |b, i| req_buf[off + i] = b;
+    off += 16;
+
+    const port: u16 = 443;
+    req_buf[off] = @as(u8, @intCast(port >> 8)); off += 1;
+    req_buf[off] = @as(u8, @intCast(port & 0xFF)); off += 1;
+
+    try testing.expectEqual(@as(u8, 5), req_buf[0]);
+    try testing.expectEqual(@as(u8, 1), req_buf[1]);
+    try testing.expectEqual(@as(u8, 0x04), req_buf[3]);
+    try testing.expectEqual(@as(u8, 0x20), req_buf[4]);
+    try testing.expectEqual(@as(u8, 0x01), req_buf[5]);
+    try testing.expectEqual(@as(u8, 0x0d), req_buf[6]);
+    try testing.expectEqual(@as(u8, 0xb8), req_buf[7]);
+    try testing.expectEqual(@as(u8, 0x01), req_buf[19]);
+    try testing.expectEqual(@as(u8, 0x01), req_buf[20]);
+    try testing.expectEqual(@as(u8, 0xBB), req_buf[21]);
+}

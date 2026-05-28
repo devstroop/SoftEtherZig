@@ -205,6 +205,28 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--static-ipv4-gateway")) {
                 i += 1;
                 self.args.static_ipv4_gateway = try self.requireValue(argv, i, "--static-ipv4-gateway");
+            } else if (std.mem.eql(u8, arg, "--static-ipv6")) {
+                i += 1;
+                self.args.static_ipv6 = try self.requireValue(argv, i, "--static-ipv6");
+            } else if (std.mem.eql(u8, arg, "--static-ipv6-prefix")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--static-ipv6-prefix");
+                self.args.static_ipv6_prefix = std.fmt.parseInt(u8, val, 10) catch return ParseError.InvalidNumber;
+            } else if (std.mem.eql(u8, arg, "--static-ipv6-gateway")) {
+                i += 1;
+                self.args.static_ipv6_gateway = try self.requireValue(argv, i, "--static-ipv6-gateway");
+            } else if (std.mem.eql(u8, arg, "--ipv4-include")) {
+                i += 1;
+                self.args.ipv4_include = &.{try self.requireValue(argv, i, "--ipv4-include")};
+            } else if (std.mem.eql(u8, arg, "--ipv4-exclude")) {
+                i += 1;
+                self.args.ipv4_exclude = &.{try self.requireValue(argv, i, "--ipv4-exclude")};
+            } else if (std.mem.eql(u8, arg, "--ipv6-include")) {
+                i += 1;
+                self.args.ipv6_include = &.{try self.requireValue(argv, i, "--ipv6-include")};
+            } else if (std.mem.eql(u8, arg, "--ipv6-exclude")) {
+                i += 1;
+                self.args.ipv6_exclude = &.{try self.requireValue(argv, i, "--ipv6-exclude")};
             } else if (std.mem.eql(u8, arg, "--dns-server")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--dns-server");
