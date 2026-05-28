@@ -586,6 +586,53 @@ export fn softether_set_qos(client: ?*VpnClient, enabled: bool) void {
     c.config.qos = enabled;
 }
 
+/// Set proxy configuration. Must be called before connect().
+/// proxy_type: 0=none (clears), 1=HTTP, 2=SOCKS5.
+/// host/port/username/password are ignored when proxy_type is 0.
+/// Strings are duped into FFI-owned memory (see softether_create for rationale).
+export fn softether_set_proxy(
+    client: ?*VpnClient,
+    proxy_type: c_int,
+    host: [*:0]const u8,
+    port: u16,
+    username: [*:0]const u8,
+    password: [*:0]const u8,
+) void {
+    const c = client orelse return;
+    if (proxy_type == 0) {
+        c.config.proxy = null;
+        return;
+    }
+    const host_in = std.mem.span(host);
+    if (host_in.len == 0) {
+        c.config.proxy = null;
+        return;
+    }
+    const proxy_type_enum: tls_mod.ProxyConfig.ProxyType = switch (proxy_type) {
+        1 => .http,
+        2 => .socks5,
+        else => return,
+    };
+    const host_slice = ffi_allocator.dupe(u8, host_in) catch return;
+    var username_slice: ?[]const u8 = null;
+    var password_slice: ?[]const u8 = null;
+    const username_str = std.mem.span(username);
+    const password_str = std.mem.span(password);
+    if (username_str.len > 0) {
+        username_slice = ffi_allocator.dupe(u8, username_str) catch return;
+    }
+    if (password_str.len > 0) {
+        password_slice = ffi_allocator.dupe(u8, password_str) catch return;
+    }
+    c.config.proxy = .{
+        .host = host_slice,
+        .port = port,
+        .username = username_slice,
+        .password = password_slice,
+        .proxy_type = proxy_type_enum,
+    };
+}
+
 /// Set an external tunnel file descriptor (for iOS/Android).
 /// On mobile, the OS creates the TUN device and provides an fd.
 /// Must be called before connect().

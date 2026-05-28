@@ -229,6 +229,14 @@ void softether_set_event_callback(
     void* user_data
 );
 
+/**
+ * Set proxy configuration. Must be called before connect().
+ * proxy_type: 0=none (clears), 1=HTTP, 2=SOCKS5.
+ * host/port/username/password are ignored when proxy_type is 0.
+ * Pass empty strings for username/password when the proxy doesn't require auth.
+ */
+void softether_set_proxy(softether_client_t client, int proxy_type, const char* host, uint16_t port, const char* username, const char* password);
+
 /* ========================================================================== */
 /* Diagnostics                                                                */
 /* ========================================================================== */
