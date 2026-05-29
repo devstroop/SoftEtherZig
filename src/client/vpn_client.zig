@@ -1041,6 +1041,26 @@ pub const VpnClient = struct {
                 }.write,
             );
             single_tunnel.use_compression = self.config.use_compression;
+        } else {
+            // Multi-connection mode: initialize with error-returning callbacks.
+            // This path is never used during normal operation (send_helper.get()
+            // returns connection-manager connections instead), but provides a safe
+            // fallback should get() ever fall through to single_ptr.
+            var noop_ctx: u8 = 0;
+            single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
+                self.allocator,
+                &noop_ctx,
+                struct {
+                    fn read(_: *anyopaque, _: []u8) anyerror!usize {
+                        return error.ConnectionClosed;
+                    }
+                }.read,
+                struct {
+                    fn write(_: *anyopaque, _: []const u8) anyerror!usize {
+                        return error.ConnectionClosed;
+                    }
+                }.write,
+            );
         }
 
         // Get MAC address
