@@ -505,14 +505,14 @@ pub fn buildPasswordAuth(
     const password_hash = auth_mod.hashPassword(password, username);
 
     // Debug: Print password hash
-    std.log.info("Password hash: {x}", .{password_hash});
+    std.log.debug("Password hash: {x}", .{password_hash});
 
     // Then compute secure password with server random
     const secure_pass = auth_mod.computeSecurePassword(&password_hash, server_random);
 
     // Debug: Print secure password and server random
-    std.log.info("Server random: {x}", .{server_random.*});
-    std.log.info("Secure password: {x}", .{secure_pass});
+    std.log.debug("Server random: {x}", .{server_random.*});
+    std.log.debug("Secure password: {x}", .{secure_pass});
 
     try auth_pack.addData("secure_password", &secure_pass);
 
@@ -644,8 +644,8 @@ pub fn buildPasswordAuthWithHash(
     const secure_pass = auth_mod.computeSecurePassword(&password_hash, server_random);
 
     // Debug: Print secure password and server random
-    std.log.info("Server random: {x}", .{server_random.*});
-    std.log.info("Secure password: {x}", .{secure_pass});
+    std.log.debug("Server random: {x}", .{server_random.*});
+    std.log.debug("Secure password: {x}", .{secure_pass});
 
     try auth_pack.addData("secure_password", &secure_pass);
 
@@ -1068,7 +1068,7 @@ pub fn uploadAuth(
         };
         defer debug_pack.deinit();
 
-        std.log.info("=== AUTH PACK ({d} bytes, {d} elements) ===", .{ auth_pack_data.len, debug_pack.elements.items.len });
+        std.log.debug("=== AUTH PACK ({d} bytes, {d} elements) ===", .{ auth_pack_data.len, debug_pack.elements.items.len });
         for (debug_pack.elements.items) |elem| {
             const type_str = switch (elem.value_type) {
                 .int => "int",
@@ -1079,14 +1079,14 @@ pub fn uploadAuth(
             };
             if (elem.values.items.len > 0) {
                 switch (elem.values.items[0]) {
-                    .int => |v| std.log.info("  {s} ({s}) = {d}", .{ elem.name, type_str, v }),
-                    .str => |v| std.log.info("  {s} ({s}) = '{s}'", .{ elem.name, type_str, v }),
-                    .data => |v| std.log.info("  {s} ({s}) = [{d} bytes]", .{ elem.name, type_str, v.len }),
-                    else => std.log.info("  {s} ({s})", .{ elem.name, type_str }),
+                    .int => |v| std.log.debug("  {s} ({s}) = {d}", .{ elem.name, type_str, v }),
+                    .str => |v| std.log.debug("  {s} ({s}) = '{s}'", .{ elem.name, type_str, v }),
+                    .data => |v| std.log.debug("  {s} ({s}) = [{d} bytes]", .{ elem.name, type_str, v.len }),
+                    else => std.log.debug("  {s} ({s})", .{ elem.name, type_str }),
                 }
             }
         }
-        std.log.info("=== END ===", .{});
+        std.log.debug("=== END ===", .{});
     }
 
     // Send header and body
@@ -1183,18 +1183,16 @@ pub fn uploadAuth(
 
         var ticket: [Protocol.sha1_size]u8 = .{0} ** Protocol.sha1_size;
         if (resp_pack.getData("Ticket")) |ticket_data| {
-            std.log.info("Ticket data length: {d}", .{ticket_data.len});
+            std.log.debug("Ticket data length: {d}", .{ticket_data.len});
             if (ticket_data.len == Protocol.sha1_size) {
                 @memcpy(&ticket, ticket_data);
             } else if (ticket_data.len > 0) {
-                // Copy what we can
                 const copy_len = @min(ticket_data.len, Protocol.sha1_size);
                 @memcpy(ticket[0..copy_len], ticket_data[0..copy_len]);
             }
         }
 
-        // Debug: print ticket bytes
-        std.log.info("Ticket bytes: {x}", .{ticket});
+        std.log.debug("Ticket bytes: {x}", .{ticket});
 
         // Convert IP to string for logging (SoftEther uses host byte order)
         const ip_bytes: [4]u8 = @bitCast(redirect_ip);
@@ -1226,7 +1224,7 @@ pub fn uploadAuth(
     var session_key: ?[Protocol.sha1_size]u8 = null;
     const sk_pascal = resp_pack.getData("SessionKey");
     const sk_snake = resp_pack.getData("session_key");
-    std.log.info("LIBSE-95 session_key probe: SessionKey={?d}B session_key={?d}B", .{
+    std.log.debug("LIBSE-95 session_key probe: SessionKey={?d}B session_key={?d}B", .{
         if (sk_pascal) |d| d.len else null,
         if (sk_snake) |d| d.len else null,
     });
@@ -1239,7 +1237,7 @@ pub fn uploadAuth(
             var buf: [Protocol.sha1_size]u8 = undefined;
             @memcpy(&buf, key_data);
             session_key = buf;
-            std.log.info("LIBSE-95 session_key OK ({d} bytes), opt_set={}", .{ key_data.len, session_key != null });
+            std.log.debug("LIBSE-95 session_key OK ({d} bytes), opt_set={}", .{ key_data.len, session_key != null });
         } else {
             std.log.err("LIBSE-95 session_key wrong size: {d} (expected {d})", .{ key_data.len, Protocol.sha1_size });
         }
@@ -1262,7 +1260,7 @@ pub fn uploadAuth(
     const srv_qos = (resp_pack.getInt("qos") orelse 0) != 0;
     const srv_timeout = resp_pack.getInt("timeout") orelse 0;
 
-    std.log.info("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, qos={}, timeout={d}", .{
+    std.log.debug("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, qos={}, timeout={d}", .{
         srv_max_conn, srv_half_conn, srv_use_compress, srv_use_encrypt, srv_qos, srv_timeout,
     });
 

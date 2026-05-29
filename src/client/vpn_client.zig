@@ -805,8 +805,19 @@ pub const VpnClient = struct {
             const maybe_response = adapter_mod.parseDhcpResponse(block_data, dhcp_xid.*) catch null;
             if (maybe_response) |response| {
                 if (response.msg_type == .offer and loop_state.dhcp.state == .discover_sent) {
-                    const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
-                    std.log.info("DHCP OFFER received: IP={d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                    std.log.info("Received DHCP Offer", .{});
+                    {const ip = tunnel_mod.formatIpForLog(response.config.ip_address); std.log.info("DHCP: Your IP {d}.{d}.{d}.{d}", .{ip.a,ip.b,ip.c,ip.d});}
+                    {const gw = tunnel_mod.formatIpForLog(response.config.gateway); std.log.info("DHCP: Router {d}.{d}.{d}.{d}", .{gw.a,gw.b,gw.c,gw.d});}
+                    {const m = tunnel_mod.formatIpForLog(response.config.subnet_mask); std.log.info("DHCP: Subnet mask {d}.{d}.{d}.{d}", .{m.a,m.b,m.c,m.d});}
+                    {const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
+                    if (response.config.dns2 != 0) {
+                        const d2 = tunnel_mod.formatIpForLog(response.config.dns2);
+                        std.log.info("DHCP: DNS {d}.{d}.{d}.{d}, {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d,d2.a,d2.b,d2.c,d2.d});
+                    } else {
+                        std.log.info("DHCP: DNS {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d});
+                    }}
+                    {const si = tunnel_mod.formatIpForLog(response.config.server_id); std.log.info("DHCP: Server ID {d}.{d}.{d}.{d}", .{si.a,si.b,si.c,si.d});}
+                    std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     var req_buf: [512]u8 = undefined;
                     const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid.*, response.config.ip_address, response.config.server_id, &req_buf) catch 0;
@@ -823,16 +834,22 @@ pub const VpnClient = struct {
                         loop_state.dhcp.config.server_id = response.config.server_id;
                         loop_state.dhcp.config.lease_time = response.config.lease_time;
                         loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
-                        std.log.info("Sent DHCP REQUEST", .{});
+                        std.log.info("Send DHCP Request", .{});
                     }
                 } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
-                    std.log.info("DHCP ACK received!", .{});
+                    std.log.info("Received DHCP Ack", .{});
                     loop_state.configure(response.config.ip_address, response.config.gateway);
                     loop_state.dhcp.state = .configured;
                     is_configured.* = true;
                     self.assigned_ip = loop_state.our_ip;
                     self.gateway_ip = loop_state.our_gateway;
                     self.assigned_mask = response.config.subnet_mask;
+
+                    {const m = tunnel_mod.formatIpForLog(response.config.subnet_mask); std.log.info("DHCP: Subnet mask {d}.{d}.{d}.{d}", .{m.a,m.b,m.c,m.d});}
+                    {const gw = tunnel_mod.formatIpForLog(response.config.gateway); std.log.info("DHCP: Router {d}.{d}.{d}.{d}", .{gw.a,gw.b,gw.c,gw.d});}
+                    {const d1 = tunnel_mod.formatIpForLog(response.config.dns1); std.log.info("DHCP: DNS {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d});}
+                    {const si = tunnel_mod.formatIpForLog(response.config.server_id); std.log.info("DHCP: Server ID {d}.{d}.{d}.{d}", .{si.a,si.b,si.c,si.d});}
+                    std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     if (adapter.real_adapter) |*real| {
                         if (real.device) |dev| {
@@ -842,12 +859,19 @@ pub const VpnClient = struct {
                         }
                     }
 
-                    const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
-                    std.log.info("Interface configured with IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                    {const ip = tunnel_mod.formatIpForLog(response.config.ip_address); std.log.info("IP Address {d}.{d}.{d}.{d}", .{ip.a,ip.b,ip.c,ip.d});}
+                    {const gw = tunnel_mod.formatIpForLog(response.config.gateway); std.log.info("Router {d}.{d}.{d}.{d}", .{gw.a,gw.b,gw.c,gw.d});}
+                    {const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
+                    if (response.config.dns2 != 0) {
+                        const d2 = tunnel_mod.formatIpForLog(response.config.dns2);
+                        std.log.info("DNS {d}.{d}.{d}.{d}, {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d,d2.a,d2.b,d2.c,d2.d});
+                    } else {
+                        std.log.info("DNS {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d});
+                    }}
 
                     if (self.config.routing.default_route and loop_state.our_gateway != 0) {
                         const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
-                        std.log.info("Configuring full-tunnel routing through VPN gateway {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
+                        std.log.info("Add IPv4 default route via {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
                         if (self.server_ip) |srv| {
                             if (srv.any.family == std.posix.AF.INET) {
                                 const server_ip_be = @byteSwap(srv.in.sa.addr);
@@ -1174,7 +1198,7 @@ pub const VpnClient = struct {
                         };
                         self.ipv6_dhcp_sent = true;
                         self.last_dhcpv6_time = std.time.milliTimestamp();
-                        std.log.debug("Sent DHCPv6 SOLICIT (xid=0x{x:0>8})", .{client.transaction_id});
+                        std.log.info("Send DHCPv6 Solicit", .{});
                     }
                 }
             }
@@ -1691,7 +1715,7 @@ pub const VpnClient = struct {
                                 send_helper.get().sendBlocks(&blocks) catch {};
                                 self.last_dhcpv6_time = now;
                                 self.ipv6_dhcp_retry_count += 1;
-                                std.log.debug("DHCPv6 SOLICIT retry #{d} (xid=0x{x:0>6})", .{ self.ipv6_dhcp_retry_count, client.transaction_id });
+                                std.log.debug("Send DHCPv6 Solicit (retry #{d})", .{self.ipv6_dhcp_retry_count});
                             }
                         }
                     }
@@ -1700,7 +1724,7 @@ pub const VpnClient = struct {
             // Give up on DHCPv6 after max retries — interface already has link-local
             if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count >= 3) {
                 if (now - self.last_dhcpv6_time >= 5000) {
-                    std.log.warn("DHCPv6: no Reply after {d} retries — server does not support IPv6 (check FilterIPv6 policy)", .{self.ipv6_dhcp_retry_count});
+                    std.log.warn("DHCPv6: no Reply — server does not support IPv6", .{});
                     self.ipv6_configured = true;
                 }
             }
