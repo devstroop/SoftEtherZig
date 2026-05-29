@@ -1022,6 +1022,7 @@ pub const VpnClient = struct {
         // Create single tunnel connection on heap (avoids stack overflow on Dart isolate threads)
         const single_tunnel = try self.allocator.create(protocol_tunnel_mod.TunnelConnection);
         defer self.allocator.destroy(single_tunnel);
+        var noop_ctx: u8 = 0; // hoisted: &noop_ctx stored in single_tunnel.context for multi-conn fallback
         if (single_sock) |ss| {
             single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
                 self.allocator,
@@ -1046,7 +1047,6 @@ pub const VpnClient = struct {
             // This path is never used during normal operation (send_helper.get()
             // returns connection-manager connections instead), but provides a safe
             // fallback should get() ever fall through to single_ptr.
-            var noop_ctx: u8 = 0;
             single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
                 self.allocator,
                 &noop_ctx,
