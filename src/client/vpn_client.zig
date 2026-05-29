@@ -588,7 +588,7 @@ pub const VpnClient = struct {
         }
     }
 
-    fn performDisconnect(self: *Self) void {
+    pub fn performDisconnect(self: *Self) void {
         const old_state = self.state;
         self.transitionState(.disconnecting);
 
@@ -1393,9 +1393,10 @@ pub const VpnClient = struct {
 
                 // Cleanup dead connections
                 if (cm.cleanupDead()) {
-                    // Primary died — break data loop to trigger reconnect
+                    // Primary died — exit data loop to trigger reconnect
                     std.log.err("Primary connection died, exiting data loop", .{});
-                    break;
+                    self.disconnect_reason = .network_error;
+                    return error.ConnectionLost;
                 }
             } else {
                 // Single-connection mode
@@ -1470,7 +1471,10 @@ pub const VpnClient = struct {
                         const nwr = ts.kernelSendQueue();
                         if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
                     }
-                    if (inbound_dead) break;
+                    if (inbound_dead) {
+                        self.disconnect_reason = .network_error;
+                        return error.ConnectionLost;
+                    }
                 }
             }
 
@@ -1577,7 +1581,8 @@ pub const VpnClient = struct {
                                 send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
                                     error.ConnectionClosed, error.BrokenPipe => {
                                         std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
-                                        return;
+                                        self.disconnect_reason = .network_error;
+                                        return error.ConnectionLost;
                                     },
                                     else => {
                                         // Non-fatal: likely WANT_WRITE (TLS sndbuf full).

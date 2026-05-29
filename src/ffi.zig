@@ -414,7 +414,17 @@ export fn softether_disconnect(client: ?*VpnClient) c_int {
 /// Run the data loop (blocks until disconnect). Call from a dedicated thread.
 export fn softether_run_data_loop(client: ?*VpnClient) c_int {
     const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
-    c.runDataLoop() catch {
+    c.runDataLoop() catch |err| {
+        if (err == error.ConnectionLost) {
+            // Data loop exited due to connection loss (BrokenPipe).
+            // Trigger proper cleanup and schedule reconnect.
+            c.mutex.lock();
+            defer c.mutex.unlock();
+            if (c.state != .disconnected) {
+                c.performDisconnect();
+            }
+            return 0;
+        }
         return @intFromEnum(SoftetherError.internal_error);
     };
     return 0;
