@@ -411,14 +411,11 @@ export fn softether_disconnect(client: ?*VpnClient) c_int {
     return 0;
 }
 
-/// Wait for the data loop (spawned as a native pthread by `softether_connect`)
-/// to finish. Blocks until the data loop exits or the client is destroyed.
+/// Poll until the native data-loop thread (spawned by `softether_connect`)
+/// exits. Blocking — call from a background worker.
 ///
-/// This function does NOT run the data loop itself — it just waits for the
-/// native thread that `connect()` spawned. This avoids running heavy native
-/// code inside a Dart isolate (which has a constrained stack on ARM 32-bit
-/// and triggers a Dart VM FFI trampoline corruption on a second
-/// `Isolate.run()` call).
+/// The actual data loop runs on a dedicated native pthread with its own
+/// stack. This function only waits for it to finish, then returns.
 export fn softether_run_data_loop(client: ?*VpnClient) c_int {
     const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
     // Quick check: was the data loop thread ever spawned?

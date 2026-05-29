@@ -36,25 +36,23 @@ pub const EventCallback = events_mod.EventCallback;
 
 // Import real networking modules
 const net_mod = @import("../net/net.zig");
-const socket = net_mod.socket;
+
 const tls = net_mod.tls;
 
 // Import session module
 const session_mod = @import("../session/mod.zig");
-const RealSession = session_mod.Session;
+
 pub const SessionOptions = session_mod.SessionOptions;
 pub const SessionWrapper = session_mod.SessionWrapper;
 
 // Import adapter module
 const adapter_mod = @import("../adapter/mod.zig");
-const VirtualAdapter = adapter_mod.VirtualAdapter;
+
 const AdapterWrapper = adapter_mod.AdapterWrapper;
 
 // Import protocol modules
 const auth_mod = @import("../protocol/auth.zig");
-const rpc = @import("../protocol/rpc.zig");
 const softether_proto = @import("../protocol/softether_protocol.zig");
-const pack_mod = @import("../protocol/pack.zig");
 const protocol_tunnel_mod = @import("../protocol/tunnel.zig");
 
 // Import UDP acceleration
@@ -62,9 +60,6 @@ const udp_accel_mod = @import("../net/udp_accel.zig");
 
 // Import tunnel module (data loop helpers)
 const tunnel_mod = @import("../tunnel/mod.zig");
-
-// Import DHCP parsing
-const dhcp_mod = @import("../adapter/dhcp.zig");
 
 // Import route healing (#9, #10)
 const route_heal = @import("../adapter/route_heal.zig");
@@ -258,7 +253,6 @@ pub const VpnClient = struct {
     bulk_keys: ?softether_proto.UdpBulkKeys,
 
     mutex: Mutex,
-    worker_thread: ?Thread,
     data_loop_thread: ?Thread = null,
     should_stop: bool,
     data_loop_running: bool,
@@ -312,7 +306,6 @@ pub const VpnClient = struct {
             .udp_accel = null,
             .bulk_keys = null,
             .mutex = .{},
-            .worker_thread = null,
             .should_stop = false,
             .data_loop_running = false,
             .event_callback = null,
