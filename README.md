@@ -112,13 +112,13 @@ zig build static-lib -Dtarget=aarch64-ios
 # arm64-v8a
 zig build shared-lib \
   -Dtarget=aarch64-linux-android \
-  --libc android-libc.conf
+  --libc android-libc-aarch64-linux-android.conf
 # zig-out/lib/libsoftether.so
 
 # armeabi-v7a
 zig build shared-lib \
   -Dtarget=arm-linux-androideabi \
-  --libc android-libc.conf
+  --libc android-libc-arm-linux-androideabi.conf
 # zig-out/lib/libsoftether.so
 ```
 
@@ -305,7 +305,7 @@ zig build                                              # CLI (debug)
 zig build --release=fast                                # CLI (release)
 zig build shared-lib                                    # Shared lib
 zig build static-lib -Dtarget=aarch64-ios               # iOS static lib
-zig build shared-lib -Dtarget=aarch64-linux-android --libc android-libc.conf  # Android
+zig build shared-lib -Dtarget=aarch64-linux-android --libc android-libc-aarch64-linux-android.conf  # Android
 zig build shared-lib -Dtarget=x86_64-windows            # Windows DLL
 zig build utun-helper --release=fast                    # macOS privilege helper
 zig build test                                          # Run tests

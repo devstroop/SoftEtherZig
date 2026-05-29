@@ -103,7 +103,7 @@ zig build                                        # CLI (debug)
 zig build --release=fast                         # CLI (release)
 zig build shared-lib                             # libsoftether.dylib/.so
 zig build static-lib -Dtarget=aarch64-ios        # iOS static lib
-zig build shared-lib -Dtarget=aarch64-linux-android --libc android-libc.conf
+zig build shared-lib -Dtarget=aarch64-linux-android --libc android-libc-aarch64-linux-android.conf
 ```
 
 ### Tests

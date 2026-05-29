@@ -57,7 +57,7 @@ OpenSSL is pre-built in `deps/openssl-android/`.
 ```bash
 zig build shared-lib \
   -Dtarget=aarch64-linux-android \
-  --libc android-libc.conf
+  --libc android-libc-aarch64-linux-android.conf
 # Output: zig-out/lib/libsoftether.so (~11MB debug, ~3MB release)
 ```
 

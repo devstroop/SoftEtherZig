@@ -411,22 +411,29 @@ export fn softether_disconnect(client: ?*VpnClient) c_int {
     return 0;
 }
 
-/// Run the data loop (blocks until disconnect). Call from a dedicated thread.
+/// Wait for the data loop (spawned as a native pthread by `softether_connect`)
+/// to finish. Blocks until the data loop exits or the client is destroyed.
+///
+/// This function does NOT run the data loop itself — it just waits for the
+/// native thread that `connect()` spawned. This avoids running heavy native
+/// code inside a Dart isolate (which has a constrained stack on ARM 32-bit
+/// and triggers a Dart VM FFI trampoline corruption on a second
+/// `Isolate.run()` call).
 export fn softether_run_data_loop(client: ?*VpnClient) c_int {
     const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
-    c.runDataLoop() catch |err| {
-        if (err == error.ConnectionLost) {
-            // Data loop exited due to connection loss (BrokenPipe).
-            // Trigger proper cleanup and schedule reconnect.
-            c.mutex.lock();
-            defer c.mutex.unlock();
-            if (c.state != .disconnected) {
-                c.performDisconnect();
-            }
-            return 0;
+    // Quick check: was the data loop thread ever spawned?
+    {
+        c.mutex.lock();
+        defer c.mutex.unlock();
+        if (c.data_loop_thread == null) {
+            return @intFromEnum(SoftetherError.not_connected);
         }
-        return @intFromEnum(SoftetherError.internal_error);
-    };
+    }
+    // Poll data_loop_running without holding the mutex (performDisconnect
+    // needs the mutex to join the thread and close resources).
+    while (@atomicLoad(bool, &c.data_loop_running, .acquire)) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
     return 0;
 }
 

@@ -259,6 +259,7 @@ pub const VpnClient = struct {
 
     mutex: Mutex,
     worker_thread: ?Thread,
+    data_loop_thread: ?Thread = null,
     should_stop: bool,
     data_loop_running: bool,
 
@@ -342,6 +343,13 @@ pub const VpnClient = struct {
 
     pub fn deinit(self: *Self) void {
         self.disconnect() catch {};
+        // Ensure the data loop thread is joined (should already be done by
+        // performDisconnect, but be safe in case connect spawned it without
+        // a subsequent disconnect).
+        if (self.data_loop_thread) |thread| {
+            thread.join();
+            self.data_loop_thread = null;
+        }
         if (self.adapter_ctx) |*ctx| {
             ctx.deinit();
             self.adapter_ctx = null;
@@ -434,6 +442,27 @@ pub const VpnClient = struct {
             self.last_error = err;
             self.transitionState(.error_state);
             return err;
+        };
+
+        // Mark data_loop_running BEFORE spawning the thread so that
+        // softether_run_data_loop (which polls this flag) doesn't race
+        // with thread startup and incorrectly return immediately.
+        @atomicStore(bool, &self.data_loop_running, true, .release);
+
+        // Spawn the data loop on a native pthread with its own stack.
+        // The data loop runs decoupled from any Dart Isolate.run() thread,
+        // avoiding the ARM 32-bit FFI trampoline corruption bug that
+        // occurs when calling native functions from a second temp isolate.
+        self.data_loop_thread = std.Thread.spawn(.{}, runDataLoopThread, .{self}) catch |err| blk: {
+            std.log.err("Failed to spawn data loop thread: {}", .{err});
+            @atomicStore(bool, &self.data_loop_running, false, .release);
+            break :blk null;
+        };
+    }
+
+    fn runDataLoopThread(self: *Self) void {
+        self.runDataLoop() catch |err| {
+            std.log.err("Data loop thread exited with error: {}", .{err});
         };
     }
 
@@ -597,6 +626,12 @@ pub const VpnClient = struct {
         var wait_count: u32 = 0;
         while (@atomicLoad(bool, &self.data_loop_running, .acquire) and wait_count < 200) : (wait_count += 1) {
             std.Thread.sleep(10 * std.time.ns_per_ms); // 10ms per check, max 2s
+        }
+
+        // Join the native data loop thread (if any) — this releases its resources
+        if (self.data_loop_thread) |thread| {
+            thread.join();
+            self.data_loop_thread = null;
         }
 
         // Stop UDP acceleration
