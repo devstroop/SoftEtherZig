@@ -52,6 +52,11 @@ pub const TunnelConnection = struct {
     // Compression
     use_compression: bool = false,
 
+    // Streaming zlib state (persistent across blocks, avoids alloc/free per call)
+    deflate_stream: c.z_stream = undefined,
+    inflate_stream: c.z_stream = undefined,
+    compression_initialized: bool = false,
+
     // Receive state machine (resumable across read_fn returning error.WouldBlock)
     recv_state: RecvState = .read_num_blocks,
     num_blocks: u32 = 0,
@@ -101,6 +106,41 @@ pub const TunnelConnection = struct {
             .read_fn = read_fn,
             .write_fn = write_fn,
         };
+    }
+
+    /// Initialize streaming zlib compression state.
+    /// Must be called after use_compression=true.
+    /// Safe to call multiple times (no-op if already initialized).
+    pub fn initCompression(self: *TunnelConnection) void {
+        if (self.compression_initialized) return;
+        if (!self.use_compression) return;
+
+        var stream = std.mem.zeroes(c.z_stream);
+        if (c.deflateInit(&stream, c.Z_DEFAULT_COMPRESSION) != c.Z_OK) {
+            std.log.err("zlib deflateInit failed", .{});
+            self.use_compression = false;
+            return;
+        }
+        self.deflate_stream = stream;
+
+        stream = std.mem.zeroes(c.z_stream);
+        if (c.inflateInit(&stream) != c.Z_OK) {
+            std.log.err("zlib inflateInit failed", .{});
+            _ = c.deflateEnd(&self.deflate_stream);
+            self.use_compression = false;
+            return;
+        }
+        self.inflate_stream = stream;
+        self.compression_initialized = true;
+    }
+
+    /// Clean up zlib compression state.
+    pub fn deinit(self: *TunnelConnection) void {
+        if (self.compression_initialized) {
+            _ = c.deflateEnd(&self.deflate_stream);
+            _ = c.inflateEnd(&self.inflate_stream);
+            self.compression_initialized = false;
+        }
     }
 
     /// Try to read a u32 (big-endian). Returns null if read_fn returned
@@ -369,7 +409,7 @@ pub const TunnelConnection = struct {
         // Write each block
         for (blocks) |block| {
             if (self.use_compression) {
-                const compressed = compressBlock(&compress_buf, block) catch block;
+                const compressed = self.compressBlock(&compress_buf, block) catch block;
                 mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(compressed.len), .big);
                 offset += 4;
                 @memcpy(send_buffer[offset..][0..compressed.len], compressed);
@@ -443,7 +483,7 @@ pub const TunnelConnection = struct {
         var actual_len: usize = undefined;
 
         if (self.use_compression) {
-            const compressed = compressBlock(&compress_buf, eth_frame) catch eth_frame;
+            const compressed = self.compressBlock(&compress_buf, eth_frame) catch eth_frame;
             mem.writeInt(u32, send_buffer[0..4], 1, .big);
             mem.writeInt(u32, send_buffer[4..8], @intCast(compressed.len), .big);
             @memcpy(send_buffer[8..][0..compressed.len], compressed);
@@ -497,7 +537,7 @@ pub const TunnelConnection = struct {
         // Write each block
         for (blocks) |block| {
             if (self.use_compression) {
-                if (compressBlock(&compress_buf, block) catch null) |compressed| {
+                if (self.compressBlock(&compress_buf, block) catch null) |compressed| {
                     if (compressed.len < block.len) {
                         mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed.len), .big);
                         offset += 4;
@@ -546,20 +586,31 @@ pub const TunnelConnection = struct {
         self.total_send += packet.len;
     }
 
-    /// Decompress a zlib-compressed block using C zlib uncompress()
-    fn decompressBlock(_: *TunnelConnection, compressed: []const u8, out_buf: []u8) ![]u8 {
-        var dest_len: c.uLong = @intCast(out_buf.len);
-        const ret = c.uncompress(out_buf.ptr, &dest_len, compressed.ptr, @intCast(compressed.len));
-        if (ret != c.Z_OK) return error.DecompressionFailed;
-        return out_buf[0..@intCast(dest_len)];
+    /// Decompress a zlib-compressed block using persistent inflate stream.
+    /// deflateReset reuses internal alloc buffers instead of free+alloc each call.
+    fn decompressBlock(self: *TunnelConnection, compressed: []const u8, out_buf: []u8) ![]u8 {
+        const stream = &self.inflate_stream;
+        _ = c.inflateReset(stream);
+        stream.next_in = @ptrCast(@constCast(compressed.ptr));
+        stream.avail_in = @intCast(compressed.len);
+        stream.next_out = @ptrCast(out_buf.ptr);
+        stream.avail_out = @intCast(out_buf.len);
+        const ret = c.inflate(stream, c.Z_FINISH);
+        if (ret != c.Z_STREAM_END) return error.DecompressionFailed;
+        return out_buf[0..(out_buf.len - stream.avail_out)];
     }
 
-    /// Compress a block using C zlib compress2() with Z_DEFAULT_COMPRESSION
-    fn compressBlock(compressed_buf: []u8, data: []const u8) ![]const u8 {
-        var dest_len: c.uLong = @intCast(compressed_buf.len);
-        const ret = c.compress2(compressed_buf.ptr, &dest_len, data.ptr, @intCast(data.len), c.Z_DEFAULT_COMPRESSION);
-        if (ret != c.Z_OK) return error.CompressionFailed;
-        return compressed_buf[0..@intCast(dest_len)];
+    /// Compress a block using persistent deflate stream.
+    fn compressBlock(self: *TunnelConnection, compressed_buf: []u8, data: []const u8) ![]const u8 {
+        const stream = &self.deflate_stream;
+        _ = c.deflateReset(stream);
+        stream.next_in = @ptrCast(@constCast(data.ptr));
+        stream.avail_in = @intCast(data.len);
+        stream.next_out = @ptrCast(compressed_buf.ptr);
+        stream.avail_out = @intCast(compressed_buf.len);
+        const ret = c.deflate(stream, c.Z_FINISH);
+        if (ret != c.Z_STREAM_END) return error.CompressionFailed;
+        return compressed_buf[0..(compressed_buf.len - stream.avail_out)];
     }
 };
 

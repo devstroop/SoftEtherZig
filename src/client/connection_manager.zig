@@ -79,6 +79,7 @@ pub const ConnectionManager = struct {
     pub fn deinit(self: *ConnectionManager) void {
         for (&self.connections) |*slot| {
             if (slot.*) |*conn| {
+                conn.tunnel.deinit();
                 conn.tls_socket.close();
                 slot.* = null;
             }
@@ -138,6 +139,7 @@ pub const ConnectionManager = struct {
                     }.write,
                 );
                 conn_ptr.tunnel.use_compression = self.use_compression;
+                conn_ptr.tunnel.initCompression();
 
                 // Switch socket to non-blocking now that the TLS handshake
                 // and any per-connection RPC has completed. The tunnel state
@@ -165,6 +167,7 @@ pub const ConnectionManager = struct {
             std.log.warn("Removing connection {d} (primary={}, remaining={d})", .{
                 index, conn.is_primary, self.count -| 1,
             });
+            conn.tunnel.deinit();
             conn.tls_socket.close();
             self.connections[index] = null;
             self.count -|= 1;
