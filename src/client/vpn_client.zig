@@ -195,6 +195,12 @@ pub const ClientConfig = struct {
     tunnel_fd: ?i32 = null,
 };
 
+/// IP version preference: null = try both, v4 = IPv4 only, v6 = IPv6 only
+pub const IpVersion = enum(u8) {
+    v4 = 4,
+    v6 = 6,
+};
+
 // ============================================================================
 // Transport helpers
 // ============================================================================
@@ -1218,12 +1224,13 @@ pub const VpnClient = struct {
             const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
             if (dhcp_size > 0) {
                 const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                send_helper.get().sendBlocks(&blocks) catch |err| {
+                if (send_helper.get().sendBlocks(&blocks)) |_| {
+                    loop_state.dhcp.state = .discover_sent;
+                    loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
+                    std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
+                } else |err| {
                     std.log.err("Failed to send DHCP discover: {}", .{err});
-                };
-                loop_state.dhcp.state = .discover_sent;
-                loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
-                std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
+                }
             }
         }
 
@@ -1245,12 +1252,13 @@ pub const VpnClient = struct {
                     const frame_len = adapter_mod.buildDhcpv6Frame(mac, dhcpv6_raw[0..dv6_len], &dv6_frame) catch 0;
                     if (frame_len > 0) {
                         const blocks = [_][]const u8{dv6_frame[0..frame_len]};
-                        send_helper.get().sendBlocks(&blocks) catch |err| {
+                        if (send_helper.get().sendBlocks(&blocks)) |_| {
+                            self.ipv6_dhcp_sent = true;
+                            self.last_dhcpv6_time = std.time.milliTimestamp();
+                            std.log.info("Send DHCPv6 Solicit", .{});
+                        } else |err| {
                             std.log.err("Failed to send DHCPv6 Solicit: {}", .{err});
-                        };
-                        self.ipv6_dhcp_sent = true;
-                        self.last_dhcpv6_time = std.time.milliTimestamp();
-                        std.log.info("Send DHCPv6 Solicit", .{});
+                        }
                     }
                 }
             }
@@ -1388,13 +1396,13 @@ pub const VpnClient = struct {
             var skip_poll = false;
             if (!multi_conn) {
                 if (single_sock) |ss| {
-                    if (ss.hasPending()) skip_poll = true;
+                    if (ss.hasPending() or ss.kernelRecvQueue() > 0) skip_poll = true;
                 }
             } else {
                 if (self.conn_manager) |*cm| {
                     for (cm.connections[0..cm.count]) |*slot| {
                         if (slot.*) |*conn| {
-                            if (conn.established and conn.tls_socket.hasPending()) {
+                            if (conn.established and (conn.tls_socket.hasPending() or conn.tls_socket.kernelRecvQueue() > 0)) {
                                 skip_poll = true;
                                 break;
                             }
@@ -1459,9 +1467,12 @@ pub const VpnClient = struct {
                             }
                         }
 
-                        // Stop draining when SSL has no more buffered data.
-                        // Continuing would block on readU32() for up to RTT.
-                        if (!conn.tls_socket.hasPending()) break;
+                        // Stop draining when SSL has no more buffered data
+                        // AND kernel has nothing queued. Without the kernel
+                        // check, data that arrived in the TCP recv buffer but
+                        // hasn't been SSL_read() yet causes us to stop draining
+                        // prematurely → back to poll → macOS 10ms stall.
+                        if (!conn.tls_socket.hasPending() and conn.tls_socket.kernelRecvQueue() == 0) break;
                     }
                     // DIAG: drain stats per connection (sum across conns this iter)
                     diag.drain_total += drain_iter;
@@ -1502,7 +1513,7 @@ pub const VpnClient = struct {
                 // as more TLS data is pending. Cap prevents complete outbound
                 // starvation: even on heavy DL, after 8 drained packets we
                 // yield to the outbound path so ACKs flow and TUN drains.
-                const tls_readable = tls_fd_count > 0 and ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or (self.tls_socket != null and self.tls_socket.?.hasPending()));
+                const tls_readable = tls_fd_count > 0 and ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or (self.tls_socket != null and (self.tls_socket.?.hasPending() or self.tls_socket.?.kernelRecvQueue() > 0)));
                 if (tls_readable) {
                     // Cycle 6 adaptive poll: signal work to outer loop
                     last_iter_had_work = true;
@@ -1539,11 +1550,12 @@ pub const VpnClient = struct {
                             self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
                         }
 
-                        // Stop draining if TLS has no more buffered/decrypted data.
-                        // Without this we'd block on the next readU32() waiting for
-                        // bytes that haven't arrived yet → starves outbound for the
-                        // RTT (~200ms) of waiting for the next packet.
-                        if (self.tls_socket == null or !self.tls_socket.?.hasPending()) break;
+                        // Stop draining if TLS has no more buffered/decrypted data
+                        // AND kernel has nothing queued. Without the kernel check,
+                        // data sitting in the TCP recv buffer (before SSL_read()
+                        // pulls it in) causes us to stop draining early → back to
+                        // poll → macOS 10ms stall.
+                        if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
                     }
                     // DIAG: capture drain metrics + queue depths
                     diag.drain_total += drain_iter;

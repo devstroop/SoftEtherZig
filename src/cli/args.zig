@@ -36,6 +36,7 @@ pub const CliArgs = struct {
     udp_accel: bool = false,
     max_connections: u8 = 1,
     mtu: u16 = 1400,
+    ip_version: ?IpVersion = null,
 
     // Reconnection
     reconnect: bool = true,
@@ -99,6 +100,18 @@ pub const LogLevel = enum {
         if (std.mem.eql(u8, s, "info")) return .info;
         if (std.mem.eql(u8, s, "debug")) return .debug;
         if (std.mem.eql(u8, s, "trace")) return .trace;
+        return null;
+    }
+};
+
+/// IP version preference: null = try both, v4 = IPv4-only, v6 = IPv6-only
+pub const IpVersion = enum(u8) {
+    v4 = 4,
+    v6 = 6,
+
+    pub fn fromString(s: []const u8) ?IpVersion {
+        if (std.mem.eql(u8, s, "4")) return .v4;
+        if (std.mem.eql(u8, s, "6")) return .v6;
         return null;
     }
 };
@@ -191,6 +204,10 @@ pub const ArgParser = struct {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--mtu");
                 self.args.mtu = std.fmt.parseInt(u16, val, 10) catch return ParseError.InvalidNumber;
+            } else if (std.mem.eql(u8, arg, "--ip-version")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--ip-version");
+                self.args.ip_version = IpVersion.fromString(val) orelse return ParseError.InvalidValue;
             } else if (std.mem.eql(u8, arg, "--reconnect")) {
                 self.args.reconnect = true;
             } else if (std.mem.eql(u8, arg, "--no-reconnect")) {
