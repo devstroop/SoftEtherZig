@@ -425,22 +425,15 @@ fn runRedirect(
     std.log.debug("Ticket authentication successful!", .{});
 }
 
-/// Apply server-overridden session parameters (C: Protocol.c:4720-4741).
-/// The server is authoritative and may cap or change what the client
-/// requested. QoS requires a minimum number of connections.
+/// Apply server-overridden session parameters.
+/// Client's requested value is the upper bound — server cannot override higher.
 fn applyServerOverrides(client: *VpnClient, result: softether_proto.AuthResult) void {
     var effective_max = result.server_max_connection;
     effective_max = @min(effective_max, client.config.max_connections);
-    effective_max = @min(effective_max, 32); // MAX_TCP_CONNECTION
+    effective_max = @min(effective_max, 32);
     effective_max = @max(effective_max, 1);
 
     const effective_half = result.server_half_connection;
-
-    // QoS requires minimum connections (C: Protocol.c:4737-4740)
-    if (result.server_qos) {
-        const qos_min: u32 = if (effective_half) 4 else 2;
-        effective_max = @max(effective_max, qos_min);
-    }
 
     if (effective_max != client.config.max_connections) {
         std.log.info("Server overrode max_connections: {d} -> {d}", .{ client.config.max_connections, effective_max });

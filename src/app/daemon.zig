@@ -205,18 +205,11 @@ pub fn run(state: *AppState) !void {
         return;
     }
 
-    // Run the data channel loop in a separate thread
-    const data_thread = std.Thread.spawn(.{}, struct {
-        fn dataLoop(v: *client.VpnClient) void {
-            v.runDataLoop() catch |err| {
-                std.log.err("Data loop error: {}", .{err});
-            };
-        }
-    }.dataLoop, .{vpn}) catch |err| {
-        cli.display.failure(&state.display, "Failed to start data thread: {s}", .{@errorName(err)});
-        state.setExitCode(1);
-        return;
-    };
+    // NOTE: do NOT spawn a data loop here. connect() already runs the data loop
+    // on its own thread (VpnClient.connect → runDataLoopThread). Spawning a
+    // second runDataLoop ran TWO loops on the SAME TLS sockets → concurrent
+    // SSL_write → "bad write retry" → BrokenPipe → the session died in seconds.
+    // disconnect() (in cleanup below) joins the connect-spawned loop thread.
 
     // Main loop - wait for signals
     while (state.isRunning()) {
@@ -252,9 +245,6 @@ pub fn run(state: *AppState) !void {
     // Signal stop first (doesn't free resources yet)
     vpn.requestStop();
 
-    // Wait for data thread to exit cleanly (it will see should_stop flag)
-    data_thread.join();
-
-    // Now safe to disconnect and free resources
+    // disconnect() joins the connect-spawned data loop thread and frees resources.
     vpn.disconnect() catch {};
 }

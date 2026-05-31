@@ -32,6 +32,7 @@ pub const CliArgs = struct {
     // Connection options
     skip_tls_verify: bool = false,
     use_compress: bool = true,
+    qos: bool = true,
     udp_accel: bool = false,
     max_connections: u8 = 1,
     mtu: u16 = 1400,
@@ -182,6 +183,8 @@ pub const ArgParser = struct {
                 self.args.skip_tls_verify = true;
             } else if (std.mem.eql(u8, arg, "--no-compress")) {
                 self.args.use_compress = false;
+            } else if (std.mem.eql(u8, arg, "--no-qos")) {
+                self.args.qos = false;
             } else if (std.mem.eql(u8, arg, "--udp-accel")) {
                 self.args.udp_accel = true;
             } else if (std.mem.eql(u8, arg, "--mtu")) {

@@ -82,6 +82,7 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .max_connections = @intCast(args.max_connections),
         .use_compression = args.use_compress,
         .use_encryption = true,
+        .qos = args.qos,
         .udp_acceleration = args.udp_accel,
         .verify_certificate = !args.skip_tls_verify,
         .mtu = args.mtu,
