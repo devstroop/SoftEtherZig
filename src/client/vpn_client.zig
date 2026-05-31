@@ -1374,8 +1374,42 @@ pub const VpnClient = struct {
             // again if they observe real work (any_conn_had_data, tls_readable,
             // or tun_readable at end-of-iter).
             last_iter_had_work = false;
+
+            // macOS poll(timeout=0) can sleep for 1 scheduler tick (~10ms)
+            // unpredictably even with a zero timeout. During those 10ms the
+            // kernel TCP recv buffer fills, the server's congestion window
+            // collapses, and it takes seconds to recover — causing the
+            // progressive DL/UL degradation we've been chasing.
+            //
+            // Fix: check if OpenSSL already has decrypted data buffered. If
+            // yes, skip poll() entirely this iteration — drain the buffered
+            // data immediately. Only fall through to poll() when genuinely
+            // idle (no pending data), where the 10ms sleep is acceptable.
+            var skip_poll = false;
+            if (!multi_conn) {
+                if (single_sock) |ss| {
+                    if (ss.hasPending()) skip_poll = true;
+                }
+            } else {
+                if (self.conn_manager) |*cm| {
+                    for (cm.connections[0..cm.count]) |*slot| {
+                        if (slot.*) |*conn| {
+                            if (conn.established and conn.tls_socket.hasPending()) {
+                                skip_poll = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             const poll_t0 = std.time.microTimestamp();
-            _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
+            if (!skip_poll) {
+                _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
+            } else {
+                // Keep poll timeout=0 next iter — more data likely follows
+                last_iter_had_work = true;
+            }
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
             if (poll_us > diag.poll_us_max) diag.poll_us_max = poll_us;
             diag.poll_us_total += poll_us;
