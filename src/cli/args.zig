@@ -31,8 +31,8 @@ pub const CliArgs = struct {
 
     // Connection options
     skip_tls_verify: bool = false,
-    use_compress: bool = true,
-    qos: bool = true,
+    use_compress: bool = false,
+    qos: bool = false,
     udp_accel: bool = false,
     max_connections: u8 = 1,
     mtu: u16 = 1400,
@@ -181,10 +181,10 @@ pub const ArgParser = struct {
                 self.args.password_hash = try self.requireValue(argv, i, "--password-hash");
             } else if (std.mem.eql(u8, arg, "--skip-tls-verify") or std.mem.eql(u8, arg, "-k")) {
                 self.args.skip_tls_verify = true;
-            } else if (std.mem.eql(u8, arg, "--no-compress")) {
-                self.args.use_compress = false;
-            } else if (std.mem.eql(u8, arg, "--no-qos")) {
-                self.args.qos = false;
+            } else if (std.mem.eql(u8, arg, "--compress")) {
+                self.args.use_compress = true;
+            } else if (std.mem.eql(u8, arg, "--qos")) {
+                self.args.qos = true;
             } else if (std.mem.eql(u8, arg, "--udp-accel")) {
                 self.args.udp_accel = true;
             } else if (std.mem.eql(u8, arg, "--mtu")) {

@@ -186,7 +186,7 @@ pub const ConfigManager = struct {
             cli_args.skip_tls_verify = stv;
         }
         if (self.config.use_compress) |comp| {
-            if (cli_args.use_compress) cli_args.use_compress = comp;
+            cli_args.use_compress = comp;
         }
         if (self.config.udp_accel) |accel| {
             cli_args.udp_accel = accel;
