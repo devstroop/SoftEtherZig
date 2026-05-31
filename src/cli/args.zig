@@ -181,7 +181,7 @@ pub const ArgParser = struct {
                 self.args.password_hash = try self.requireValue(argv, i, "--password-hash");
             } else if (std.mem.eql(u8, arg, "--skip-tls-verify") or std.mem.eql(u8, arg, "-k")) {
                 self.args.skip_tls_verify = true;
-            } else if (std.mem.eql(u8, arg, "--compress")) {
+            } else if (std.mem.eql(u8, arg, "--use-compress")) {
                 self.args.use_compress = true;
             } else if (std.mem.eql(u8, arg, "--qos")) {
                 self.args.qos = true;

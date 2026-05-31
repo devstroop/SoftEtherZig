@@ -409,7 +409,7 @@ pub const TunnelConnection = struct {
         // Write each block
         for (blocks) |block| {
             if (self.use_compression) {
-                const compressed = self.compressBlock(&compress_buf, block) catch block;
+                const compressed = try self.compressBlock(&compress_buf, block);
                 mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(compressed.len), .big);
                 offset += 4;
                 @memcpy(send_buffer[offset..][0..compressed.len], compressed);
@@ -483,7 +483,7 @@ pub const TunnelConnection = struct {
         var actual_len: usize = undefined;
 
         if (self.use_compression) {
-            const compressed = self.compressBlock(&compress_buf, eth_frame) catch eth_frame;
+            const compressed = try self.compressBlock(&compress_buf, eth_frame);
             mem.writeInt(u32, send_buffer[0..4], 1, .big);
             mem.writeInt(u32, send_buffer[4..8], @intCast(compressed.len), .big);
             @memcpy(send_buffer[8..][0..compressed.len], compressed);
@@ -537,20 +537,17 @@ pub const TunnelConnection = struct {
         // Write each block
         for (blocks) |block| {
             if (self.use_compression) {
-                if (self.compressBlock(&compress_buf, block) catch null) |compressed| {
-                    if (compressed.len < block.len) {
-                        mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed.len), .big);
-                        offset += 4;
-                        @memcpy(packet[offset..][0..compressed.len], compressed);
-                        offset += compressed.len;
-                        continue;
-                    }
-                }
+                const compressed = try self.compressBlock(&compress_buf, block);
+                mem.writeInt(u32, packet[offset..][0..4], @intCast(compressed.len), .big);
+                offset += 4;
+                @memcpy(packet[offset..][0..compressed.len], compressed);
+                offset += compressed.len;
+            } else {
+                mem.writeInt(u32, packet[offset..][0..4], @intCast(block.len), .big);
+                offset += 4;
+                @memcpy(packet[offset..][0..block.len], block);
+                offset += block.len;
             }
-            mem.writeInt(u32, packet[offset..][0..4], @intCast(block.len), .big);
-            offset += 4;
-            @memcpy(packet[offset..][0..block.len], block);
-            offset += block.len;
         }
 
         // Send all at once (may be smaller than allocated due to compression)
