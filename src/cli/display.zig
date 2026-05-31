@@ -359,20 +359,43 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.newline();
 
     ctx.printColored(.bold, "USAGE:\n", .{});
-    ctx.print("    vpnclient [OPTIONS]\n", .{});
-    ctx.print("    vpnclient --gen-hash <USERNAME> <PASSWORD>\n", .{});
+    ctx.print("    vpnclient help\n", .{});
+    ctx.print("    vpnclient version\n", .{});
+    ctx.print("    vpnclient passhash --user <USERNAME> --password <PASSWORD>\n", .{});
+    ctx.print("    vpnclient connect [OPTIONS]\n", .{});
     ctx.newline();
 
-    ctx.printColored(.bold, "OPTIONS:\n", .{});
-    ctx.print("    -h, --help              Show this help message\n", .{});
-    ctx.print("    -v, --version           Show version information\n", .{});
+    ctx.printColored(.bold, "SUBCOMMANDS:\n", .{});
+    ctx.print("    help                    Show this help message\n", .{});
+    ctx.print("    version                 Show version information\n", .{});
+    ctx.print("    passhash                Generate a SoftEther password hash\n", .{});
+    ctx.print("    connect                 Connect to a VPN server\n", .{});
+    ctx.newline();
+
+    ctx.printColored(.bold, "CONNECT OPTIONS:\n", .{});
     ctx.print("    -c, --config <FILE>     Load configuration from JSON file\n", .{});
-    ctx.print("    -s, --server <HOST>     VPN server hostname (required)\n", .{});
+    ctx.print("    -s, --server <HOST>     VPN server hostname\n", .{});
     ctx.print("    -p, --port <PORT>       VPN server port (default: 443)\n", .{});
-    ctx.print("    -H, --hub <HUB>         Virtual hub name (required)\n", .{});
+    ctx.print("    -H, --hub <HUB>         Virtual hub name\n", .{});
     ctx.print("    -u, --user <USERNAME>   Username for authentication\n", .{});
     ctx.print("    -P, --password <PASS>   Password for authentication\n", .{});
     ctx.print("    --password-hash <HASH>  Pre-hashed password (base64)\n", .{});
+    ctx.print("    --use-compress          Enable compression (default)\n", .{});
+    ctx.print("    --no-compress           Disable compression\n", .{});
+    ctx.print("    --use-encrypt           Enable encryption (default)\n", .{});
+    ctx.print("    --no-encrypt            Disable encryption\n", .{});
+    ctx.print("    --half-connection       Split TX/RX onto separate connections\n", .{});
+    ctx.print("    --qos                   Enable QoS (default)\n", .{});
+    ctx.print("    --no-qos                Disable QoS\n", .{});
+    ctx.print("    --udp-accel             Enable UDP acceleration\n", .{});
+    ctx.print("    --max-connections <N>   Parallel connections 1-32 (default: 1)\n", .{});
+    ctx.print("    --mtu <BYTES>           MTU size (default: 1400)\n", .{});
+    ctx.print("    --ip-version <4|6>      IP protocol version preference\n", .{});
+    ctx.print("    --skip-tls-verify       Skip TLS certificate verification\n", .{});
+    ctx.print("    --proxy <URL>           HTTP/SOCKS proxy URL\n", .{});
+    ctx.print("    --connect-timeout <MS>  Connection timeout (default: 30000)\n", .{});
+    ctx.print("    --read-timeout <MS>     Read timeout (default: 60000)\n", .{});
+    ctx.print("    --keepalive-interval <MS>  Keepalive interval (default: 10000)\n", .{});
     ctx.print("    -i, --interactive       Run in interactive shell mode\n", .{});
     ctx.print("    -d, --daemon            Run as daemon (background)\n", .{});
     ctx.print("    --log-level <LEVEL>     Log level: silent, error, warn, info, debug, trace\n", .{});
@@ -386,10 +409,17 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --max-backoff <SEC>     Maximum backoff delay (default: 300)\n", .{});
     ctx.newline();
 
+    ctx.printColored(.bold, "PASSHASH OPTIONS:\n", .{});
+    ctx.print("    -u, --user <USERNAME>   Username (required)\n", .{});
+    ctx.print("    -p, --password <PASS>   Password (required)\n", .{});
+    ctx.newline();
+
     ctx.printColored(.bold, "EXAMPLES:\n", .{});
-    ctx.print("    vpnclient --config config.json\n", .{});
-    ctx.print("    vpnclient -s vpn.example.com -H VPN -u user -P pass\n", .{});
-    ctx.print("    vpnclient --gen-hash myuser mypassword\n", .{});
+    ctx.print("    vpnclient help\n", .{});
+    ctx.print("    vpnclient version\n", .{});
+    ctx.print("    vpnclient passhash -u myuser -p mypassword\n", .{});
+    ctx.print("    vpnclient connect --config config.json\n", .{});
+    ctx.print("    vpnclient connect -s vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.newline();
 }
 

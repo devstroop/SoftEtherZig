@@ -307,6 +307,8 @@ pub fn runPrivilegedCommand(cmd: []const u8) bool {
 /// via a one-time osascript admin prompt before connecting.
 pub fn ensurePrivilegedChannel(allocator: std.mem.Allocator) void {
     if (privileged_cmd_fd >= 0) return;
+    // Already root — no helper needed; direct /bin/sh fallback works.
+    if (std.c.getuid() == 0) return;
 
     var helper_path_buf: [1024]u8 = undefined;
     const bundled_helper = findHelperPath(&helper_path_buf);

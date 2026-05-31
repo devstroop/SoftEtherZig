@@ -17,17 +17,17 @@ pub const SessionWrapper = struct {
     allocator: Allocator,
     real_session: ?RealSession,
     connected: bool,
-    use_encryption: bool,
+    use_encrypt: bool,
 
     const Self = @This();
 
     /// Initialize with default options
-    pub fn init(allocator: Allocator, use_encryption: bool) Self {
+    pub fn init(allocator: Allocator, use_encrypt: bool) Self {
         return .{
             .allocator = allocator,
             .real_session = null,
             .connected = false,
-            .use_encryption = use_encryption,
+            .use_encrypt = use_encrypt,
         };
     }
 
@@ -37,7 +37,7 @@ pub const SessionWrapper = struct {
             .allocator = allocator,
             .real_session = RealSession.init(allocator, options),
             .connected = false,
-            .use_encryption = options.use_encryption,
+            .use_encrypt = options.use_encrypt,
         };
     }
 
@@ -77,7 +77,7 @@ pub const SessionWrapper = struct {
     pub fn encrypt(self: *Self, allocator: Allocator, data: []const u8) ![]u8 {
         _ = allocator; // Session uses its own allocator
         if (self.real_session) |*sess| {
-            if (self.use_encryption) {
+            if (self.use_encrypt) {
                 return sess.encryptPacket(data);
             }
         }
@@ -89,7 +89,7 @@ pub const SessionWrapper = struct {
     pub fn decrypt(self: *Self, allocator: Allocator, data: []const u8) ![]u8 {
         _ = allocator; // Session uses its own allocator
         if (self.real_session) |*sess| {
-            if (self.use_encryption) {
+            if (self.use_encrypt) {
                 return sess.decryptPacket(data);
             }
         }
@@ -122,7 +122,7 @@ test "SessionWrapper init" {
     defer wrapper.deinit();
 
     try std.testing.expect(!wrapper.isConnected());
-    try std.testing.expect(wrapper.use_encryption);
+    try std.testing.expect(wrapper.use_encrypt);
 }
 
 test "SessionWrapper connect/disconnect" {

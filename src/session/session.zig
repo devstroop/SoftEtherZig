@@ -283,7 +283,7 @@ pub const SessionKeys = struct {
     udp_recv_key: [16]u8,
 
     /// Whether encryption is enabled
-    use_encryption: bool,
+    use_encrypt: bool,
 
     /// Whether to use fast RC4 (legacy)
     use_fast_rc4: bool,
@@ -306,7 +306,7 @@ pub const SessionKeys = struct {
         randomBytes(&keys.udp_send_key);
         randomBytes(&keys.udp_recv_key);
 
-        keys.use_encryption = true;
+        keys.use_encrypt = true;
         keys.use_fast_rc4 = false;
 
         return keys;
@@ -340,7 +340,7 @@ pub const SessionKeys = struct {
         @memcpy(&keys.udp_send_key, keys.send_key[0..16]);
         @memcpy(&keys.udp_recv_key, keys.recv_key[0..16]);
 
-        keys.use_encryption = true;
+        keys.use_encrypt = true;
         keys.use_fast_rc4 = false;
 
         return keys;
@@ -655,8 +655,8 @@ pub const Session = struct {
     retry_interval_ms: u64,
 
     /// Flags
-    use_encryption: bool,
-    use_compression: bool,
+    use_encrypt: bool,
+    use_compress: bool,
     half_connection: bool,
     qos_enabled: bool,
     bridge_mode: bool,
@@ -696,8 +696,8 @@ pub const Session = struct {
             .retry_count = 0,
             .max_retry_count = options.max_retry_count orelse Config.default_retry_count,
             .retry_interval_ms = options.retry_interval_ms orelse Config.retry_interval_ms,
-            .use_encryption = options.use_encryption,
-            .use_compression = options.use_compression,
+            .use_encrypt = options.use_encrypt,
+            .use_compress = options.use_compress,
             .half_connection = options.half_connection,
             .qos_enabled = options.qos_enabled,
             .bridge_mode = false,
@@ -816,12 +816,12 @@ pub const Session = struct {
         self.send_cipher = Aes256Cbc.init(&self.keys.send_key, &iv);
         self.recv_cipher = Aes256Cbc.init(&self.keys.recv_key, &iv);
 
-        self.use_encryption = true;
+        self.use_encrypt = true;
     }
 
     /// Encrypt a packet for sending
     pub fn encryptPacket(self: *Session, plaintext: []const u8) ![]u8 {
-        if (!self.use_encryption or self.send_cipher == null) {
+        if (!self.use_encrypt or self.send_cipher == null) {
             // No encryption, return copy
             return try self.allocator.dupe(u8, plaintext);
         }
@@ -848,7 +848,7 @@ pub const Session = struct {
 
     /// Decrypt a received packet
     pub fn decryptPacket(self: *Session, ciphertext: []const u8) ![]u8 {
-        if (!self.use_encryption or self.recv_cipher == null) {
+        if (!self.use_encrypt or self.recv_cipher == null) {
             // No encryption
             return try self.allocator.dupe(u8, ciphertext);
         }
@@ -887,7 +887,7 @@ pub const Session = struct {
         if (self.send_queue.dequeue()) |packet| {
             defer self.allocator.free(packet.data);
 
-            if (self.use_encryption) {
+            if (self.use_encrypt) {
                 return try self.encryptPacket(packet.data);
             } else {
                 return try self.allocator.dupe(u8, packet.data);
@@ -905,7 +905,7 @@ pub const Session = struct {
         self.updateCommTime();
 
         // Decrypt if needed
-        const plaintext = if (self.use_encryption)
+        const plaintext = if (self.use_encrypt)
             try self.decryptPacket(data)
         else
             try self.allocator.dupe(u8, data);
@@ -946,8 +946,8 @@ pub const SessionOptions = struct {
     port: u16 = 443,
     hub: []const u8,
     username: []const u8,
-    use_encryption: bool = true,
-    use_compression: bool = false,
+    use_encrypt: bool = true,
+    use_compress: bool = false,
     half_connection: bool = false,
     qos_enabled: bool = true,
     timeout_ms: ?u64 = null,
@@ -989,7 +989,7 @@ test "SessionKeys generation" {
         }
     }
     try testing.expect(!all_zero);
-    try testing.expect(keys.use_encryption);
+    try testing.expect(keys.use_encrypt);
 }
 
 test "SessionKeys derivation" {
@@ -1045,7 +1045,7 @@ test "Session creation" {
 
     try testing.expectEqual(SessionState.idle, sess.state);
     try testing.expectEqual(ClientStatus.idle, sess.client_status);
-    try testing.expect(sess.use_encryption);
+    try testing.expect(sess.use_encrypt);
 }
 
 test "Session state transitions" {

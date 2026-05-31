@@ -23,7 +23,7 @@ pub fn run(client: *VpnClient) void {
 }
 
 fn createSession(client: *VpnClient) void {
-    if (client.config.use_encryption and client.auth_session_key != null and client.auth_hello_random != null) {
+    if (client.config.use_encrypt and client.auth_session_key != null and client.auth_hello_random != null) {
         const username = switch (client.config.auth) {
             .password => |p| p.username,
             .anonymous => "anonymous",
@@ -34,8 +34,8 @@ fn createSession(client: *VpnClient) void {
             .port = client.config.server_port,
             .hub = client.config.hub_name,
             .username = username,
-            .use_encryption = true,
-            .use_compression = client.config.use_compression,
+            .use_encrypt = true,
+            .use_compress = client.config.use_compress,
         };
         client.session = SessionWrapper.initWithOptions(client.allocator, options);
 
@@ -61,7 +61,7 @@ fn establishAdditionalConnections(client: *VpnClient) void {
         client.allocator,
         client.config.max_connections,
         client.config.half_connection,
-        client.config.use_compression,
+        client.config.use_compress,
     );
 
     const primary_sock = client.tls_socket orelse {
@@ -70,10 +70,7 @@ fn establishAdditionalConnections(client: *VpnClient) void {
         return;
     };
 
-    const primary_direction: TcpDirection = if (client.config.half_connection)
-        .client_to_server
-    else
-        .bidirectional;
+    const primary_direction: TcpDirection = .bidirectional;
 
     _ = client.conn_manager.?.addConnection(primary_sock, primary_direction, true) catch |err| {
         std.log.err("Failed to add primary connection to manager: {}", .{err});

@@ -77,7 +77,7 @@ pub const UdpAccelConfig = struct {
     /// Server's UDP acceleration port (from auth response)
     server_port: u16,
     /// Whether to encrypt UDP data channel
-    use_encryption: bool = true,
+    use_encrypt: bool = true,
     /// Client's bulk send key (128-bit AES key for encrypting outbound)
     send_key: [16]u8,
     /// Client's bulk recv key (128-bit AES key for decrypting inbound)
@@ -248,7 +248,7 @@ pub const UdpAccelEngine = struct {
 
         self.send_seq +%= 1;
 
-        if (self.config.use_encryption) {
+        if (self.config.use_encrypt) {
             const pkt = try self.encryptPacket(data, FLAG_DATA);
             _ = try sock.sendTo(pkt, server);
         } else {
@@ -293,7 +293,7 @@ pub const UdpAccelEngine = struct {
 
         // Data packet
         if (flags & FLAG_DATA != 0) {
-            if (self.config.use_encryption) {
+            if (self.config.use_encrypt) {
                 return self.decryptPacket(pkt);
             } else {
                 if (pkt.len < 5) return null;
@@ -520,7 +520,7 @@ test "UdpAccelConfig defaults" {
         .recv_hmac_key = [_]u8{0} ** 20,
     };
 
-    try std.testing.expect(config.use_encryption);
+    try std.testing.expect(config.use_encrypt);
 }
 
 test "Sequence number check - first packet" {

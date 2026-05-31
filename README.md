@@ -178,9 +178,9 @@ Priority: CLI args > env vars > config file.
   "username": "myuser",
   "password": "mypassword",
   "default_route": true,
-  "encryption": true,
-  "compression": false,
-  "mtu": 1486,
+  "use_encrypt": true,
+  "use_compress": false,
+  "mtu": 1400,
   "reconnect": { "enabled": true, "max_attempts": 10 }
 }
 ```

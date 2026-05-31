@@ -127,11 +127,12 @@ pub const AuthResult = struct {
     server_use_encrypt: bool = true,
     server_qos: bool = false,
     server_timeout: u32 = 0,
+    server_no_routing: bool = false,
 
     // UDP acceleration fields (from server response)
     udp_accel_enabled: bool = false,
     udp_accel_port: u16 = 0,
-    udp_accel_use_encryption: bool = true,
+    udp_accel_use_encrypt: bool = true,
     rudp_bulk_version: u32 = 0,
     server_bulk_send_key: ?[16]u8 = null,
     server_bulk_recv_key: ?[16]u8 = null,
@@ -147,8 +148,8 @@ pub const SessionOptions = struct {
     max_connection: u32 = 1,
     half_connection: bool = false,
     qos: bool = true,
-    use_encryption: bool = true,
-    use_compression: bool = false,
+    use_encrypt: bool = true,
+    use_compress: bool = false,
 };
 
 /// Authentication type enum
@@ -532,8 +533,8 @@ pub fn buildPasswordAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
-    try auth_pack.addBool("use_encrypt", opts.use_encryption);
-    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
@@ -665,8 +666,8 @@ pub fn buildPasswordAuthWithHash(
 
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
-    try auth_pack.addBool("use_encrypt", opts.use_encryption);
-    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
@@ -775,8 +776,8 @@ pub fn buildAnonymousAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
-    try auth_pack.addBool("use_encrypt", opts.use_encryption);
-    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
@@ -864,8 +865,8 @@ pub fn buildCertificateAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
-    try auth_pack.addBool("use_encrypt", opts.use_encryption);
-    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Mode flags
@@ -971,8 +972,8 @@ pub fn buildTicketAuth(
 
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
-    try auth_pack.addBool("use_encrypt", opts.use_encryption);
-    try auth_pack.addBool("use_compress", opts.use_compression);
+    try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     // Bridge/monitor mode flags
@@ -1259,9 +1260,10 @@ pub fn uploadAuth(
     const srv_use_encrypt = (resp_pack.getInt("use_encrypt") orelse 1) != 0;
     const srv_qos = (resp_pack.getInt("qos") orelse 0) != 0;
     const srv_timeout = resp_pack.getInt("timeout") orelse 0;
+    const srv_no_routing = (resp_pack.getInt("policy:NoRouting") orelse 0) != 0;
 
-    std.log.debug("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, qos={}, timeout={d}", .{
-        srv_max_conn, srv_half_conn, srv_use_compress, srv_use_encrypt, srv_qos, srv_timeout,
+    std.log.debug("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, qos={}, timeout={d}, no_routing={}", .{
+        srv_max_conn, srv_half_conn, srv_use_compress, srv_use_encrypt, srv_qos, srv_timeout, srv_no_routing,
     });
 
     // Extract UDP acceleration fields
@@ -1306,9 +1308,10 @@ pub fn uploadAuth(
         .server_use_encrypt = srv_use_encrypt,
         .server_qos = srv_qos,
         .server_timeout = srv_timeout,
+        .server_no_routing = srv_no_routing,
         .udp_accel_enabled = udp_enabled,
         .udp_accel_port = udp_port,
-        .udp_accel_use_encryption = udp_enc,
+        .udp_accel_use_encrypt = udp_enc,
         .rudp_bulk_version = rudp_ver,
         .server_bulk_send_key = server_send_key,
         .server_bulk_recv_key = server_recv_key,

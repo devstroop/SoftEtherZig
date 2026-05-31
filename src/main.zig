@@ -52,8 +52,61 @@ pub fn main() !void {
     };
     defer std.process.argsFree(allocator, args);
 
+    // Check for subcommand (argv[1] without leading dash)
+    var connect_mode = false;
+    var effective_args: []const []const u8 = args;
+    if (args.len >= 2 and args[1][0] != '-') {
+        if (std.mem.eql(u8, args[1], "connect")) {
+            connect_mode = true;
+            const tmp = try allocator.alloc([]const u8, args.len - 1);
+            tmp[0] = args[0];
+            for (args[2..], 0..) |a, j| tmp[j + 1] = a;
+            effective_args = tmp;
+        } else if (std.mem.eql(u8, args[1], "help")) {
+            cli.showUsage(version);
+            return;
+        } else if (std.mem.eql(u8, args[1], "version")) {
+            cli.showVersion(version);
+            return;
+        } else if (std.mem.eql(u8, args[1], "passhash")) {
+            var hash_user: ?[]const u8 = null;
+            var hash_pass: ?[]const u8 = null;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "-u") or std.mem.eql(u8, a, "--user")) {
+                    i += 1;
+                    if (i >= args.len) {
+                        cli.display.failure(&state.display, "Missing value for {s}", .{a});
+                        std.process.exit(1);
+                    }
+                    hash_user = args[i];
+                } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--password")) {
+                    i += 1;
+                    if (i >= args.len) {
+                        cli.display.failure(&state.display, "Missing value for {s}", .{a});
+                        std.process.exit(1);
+                    }
+                    hash_pass = args[i];
+                } else {
+                    cli.display.failure(&state.display, "Unknown passhash option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            if (hash_user == null or hash_pass == null) {
+                cli.display.failure(&state.display, "Usage: vpnclient passhash --user <username> --password <password>", .{});
+                std.process.exit(1);
+            }
+            app.password_hash.generate(hash_user.?, hash_pass.?);
+            return;
+        } else {
+            cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient connect --help' or 'vpnclient --help'.", .{args[1]});
+            std.process.exit(1);
+        }
+    }
+
     // Parse using CLI module
-    state.cli_args = cli.parseArgs(allocator, args) catch |err| {
+    state.cli_args = cli.parseArgs(allocator, effective_args) catch |err| {
         cli.display.failure(&state.display, "Argument parsing error: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -61,7 +114,7 @@ pub fn main() !void {
     // Load config file if specified
     cli.loadConfig(allocator, &state.cli_args) catch {};
 
-    // Handle special modes
+    // Handle special modes (no subcommand needed)
     if (state.cli_args.help) {
         cli.showUsage(version);
         return;
@@ -72,9 +125,10 @@ pub fn main() !void {
         return;
     }
 
-    if (state.cli_args.gen_hash_user) |user| {
-        app.password_hash.generate(user, state.cli_args.gen_hash_pass orelse "");
-        return;
+    // Everything else requires 'connect' subcommand
+    if (!connect_mode) {
+        cli.display.failure(&state.display, "No subcommand. Use 'vpnclient connect <options>' to connect, or 'vpnclient --help' for usage.", .{});
+        std.process.exit(1);
     }
 
     // Validate required fields

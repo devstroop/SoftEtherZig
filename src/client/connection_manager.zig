@@ -50,7 +50,7 @@ pub const ConnectionManager = struct {
     count: u8,
     max_connections: u8,
     half_connection: bool,
-    use_compression: bool,
+    use_compress: bool,
     dhcp_override_active: bool,
 
     /// Maps poll fd index → connection index (for reverse lookup after poll)
@@ -61,7 +61,7 @@ pub const ConnectionManager = struct {
         allocator: Allocator,
         max_connections: u8,
         half_connection: bool,
-        use_compression: bool,
+        use_compress: bool,
     ) ConnectionManager {
         return .{
             .allocator = allocator,
@@ -69,7 +69,7 @@ pub const ConnectionManager = struct {
             .count = 0,
             .max_connections = max_connections,
             .half_connection = half_connection,
-            .use_compression = use_compression,
+            .use_compress = use_compress,
             .dhcp_override_active = false,
             .poll_conn_map = undefined,
             .poll_conn_count = 0,
@@ -138,7 +138,7 @@ pub const ConnectionManager = struct {
                         }
                     }.write,
                 );
-                conn_ptr.tunnel.use_compression = self.use_compression;
+                conn_ptr.tunnel.use_compress = self.use_compress;
                 conn_ptr.tunnel.initCompression();
 
                 // Switch socket to non-blocking now that the TLS handshake

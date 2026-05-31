@@ -25,9 +25,13 @@ pub const ConfigFile = struct {
     // Connection options
     skip_tls_verify: ?bool = null,
     use_compress: ?bool = null,
+    use_encrypt: ?bool = null,
+    half_connection: ?bool = null,
+    qos: ?bool = null,
     udp_accel: ?bool = null,
     max_connections: ?u8 = null,
-    mtu: ?u16 = null, // Parsed from JSON, defaults applied later
+    mtu: ?u16 = null,
+    ip_version: ?[]const u8 = null,
 
     // Reconnection
     reconnect: ?ReconnectConfig = null,
@@ -37,6 +41,14 @@ pub const ConfigFile = struct {
 
     // Routing
     routing: ?RoutingConfig = null,
+
+    // Proxy
+    proxy: ?[]const u8 = null,
+
+    // Timeouts (milliseconds)
+    connect_timeout_ms: ?u32 = null,
+    read_timeout_ms: ?u32 = null,
+    keepalive_interval_ms: ?u32 = null,
 
     // Logging
     log_level: ?[]const u8 = null,
@@ -188,11 +200,25 @@ pub const ConfigManager = struct {
         if (self.config.use_compress) |comp| {
             cli_args.use_compress = comp;
         }
+        if (self.config.use_encrypt) |v| {
+            cli_args.use_encrypt = v;
+        }
+        if (self.config.half_connection) |v| {
+            cli_args.half_connection = v;
+        }
+        if (self.config.qos) |v| {
+            cli_args.qos = v;
+        }
         if (self.config.udp_accel) |accel| {
             cli_args.udp_accel = accel;
         }
         if (self.config.max_connections) |max| cli_args.max_connections = max;
         if (self.config.mtu) |m| cli_args.mtu = m;
+        if (self.config.ip_version) |v| {
+            if (cli_args.ip_version == null) {
+                if (args_mod.IpVersion.fromString(v)) |iv| cli_args.ip_version = iv;
+            }
+        }
 
         // Reconnection
         if (self.config.reconnect) |rc| {
@@ -224,6 +250,16 @@ pub const ConfigManager = struct {
             if (rt.ipv6_exclude) |exc| cli_args.ipv6_exclude = exc;
         }
 
+        // Proxy
+        if (self.config.proxy) |p| {
+            if (cli_args.proxy == null) cli_args.proxy = p;
+        }
+
+        // Timeouts
+        if (self.config.connect_timeout_ms) |v| cli_args.connect_timeout_ms = v;
+        if (self.config.read_timeout_ms) |v| cli_args.read_timeout_ms = v;
+        if (self.config.keepalive_interval_ms) |v| cli_args.keepalive_interval_ms = v;
+
         // Log level
         if (self.config.log_level) |ll| {
             if (args_mod.LogLevel.fromString(ll)) |l| {
@@ -253,15 +289,23 @@ pub const ConfigManager = struct {
         cfg.password_hash = cli_args.password_hash;
         cfg.skip_tls_verify = cli_args.skip_tls_verify;
         cfg.use_compress = cli_args.use_compress;
+        cfg.use_encrypt = cli_args.use_encrypt;
+        cfg.half_connection = cli_args.half_connection;
+        cfg.qos = cli_args.qos;
+        cfg.udp_accel = cli_args.udp_accel;
         cfg.max_connections = cli_args.max_connections;
         cfg.mtu = cli_args.mtu;
+        cfg.proxy = cli_args.proxy;
+        cfg.connect_timeout_ms = cli_args.connect_timeout_ms;
+        cfg.read_timeout_ms = cli_args.read_timeout_ms;
+        cfg.keepalive_interval_ms = cli_args.keepalive_interval_ms;
 
         cfg.reconnect = .{
             .enabled = cli_args.reconnect,
             .max_attempts = cli_args.max_retries,
         };
 
-        if (cli_args.static_ipv4 != null or cli_args.static_ipv6 != null) {
+        if (cli_args.static_ipv4 != null or cli_args.static_ipv6 != null or cli_args.dns_servers.len > 0) {
             cfg.static_ip = .{
                 .ipv4_address = cli_args.static_ipv4,
                 .ipv4_netmask = cli_args.static_ipv4_netmask,
@@ -269,8 +313,19 @@ pub const ConfigManager = struct {
                 .ipv6_address = cli_args.static_ipv6,
                 .ipv6_prefix = cli_args.static_ipv6_prefix,
                 .ipv6_gateway = cli_args.static_ipv6_gateway,
+                .dns_servers = if (cli_args.dns_servers.len > 0) cli_args.dns_servers else null,
             };
         }
+
+        cfg.routing = .{
+            .default_route = cli_args.default_route,
+            .accept_pushed_routes = cli_args.accept_pushed_routes,
+            .enable_custom_routes = cli_args.enable_custom_routes,
+            .ipv4_include = cli_args.ipv4_include,
+            .ipv4_exclude = cli_args.ipv4_exclude,
+            .ipv6_include = cli_args.ipv6_include,
+            .ipv6_exclude = cli_args.ipv6_exclude,
+        };
 
         return cfg;
     }

@@ -103,14 +103,20 @@ pub const DataLoopConfig = struct {
 /// Timing state for the data loop
 pub const TimingState = struct {
     last_keepalive: i64,
-    last_garp_time: i64,
+
+    /// Timestamp (ms) of last DHCP DISCOVER/REQUEST send
     last_dhcp_time: i64,
+
+    /// Timestamp (ms) of last DHCP warning (rate-limited)
+    last_dhcp_warn: i64 = 0,
+
+    /// Timestamp (ms) of last Gratuitous ARP send
+    last_garp_time: i64 = 0,
 
     pub fn init() TimingState {
         const now = std.time.milliTimestamp();
         return .{
             .last_keepalive = now,
-            .last_garp_time = 0,
             .last_dhcp_time = 0,
         };
     }

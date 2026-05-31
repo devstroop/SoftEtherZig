@@ -162,9 +162,9 @@ pub const ClientConfig = struct {
     // (delayed ACKs during heavy UL bursts). 8 connections + half-connection mode
     // splits TX and RX onto separate sockets, eliminating the choke completely.
     // Server can override via applyServerOverrides() if it caps lower.
-    max_connections: u8 = 8,
-    use_compression: bool = false,
-    use_encryption: bool = true,
+    max_connections: u8 = 1,
+    use_compress: bool = false,
+    use_encrypt: bool = true,
     udp_acceleration: bool = false,
     half_connection: bool = false,
     qos: bool = true,
@@ -181,6 +181,9 @@ pub const ClientConfig = struct {
 
     // Static IP (optional)
     static_ip: ?StaticIpConfig = null,
+
+    // IP version preference
+    ip_version: ?IpVersion = null,
 
     // Timeouts (milliseconds)
     connect_timeout_ms: u32 = 30000,
@@ -769,7 +772,7 @@ pub const VpnClient = struct {
 
         var sess = &(self.session orelse return ClientError.NotConnected);
 
-        if (self.config.use_encryption) {
+        if (self.config.use_encrypt) {
             const encrypted = sess.encrypt(self.allocator, data) catch return ClientError.OperationCancelled;
             defer self.allocator.free(encrypted);
         }
@@ -783,7 +786,7 @@ pub const VpnClient = struct {
         var sess = &(self.session orelse return ClientError.NotConnected);
 
         var decrypted: []u8 = undefined;
-        if (self.config.use_encryption) {
+        if (self.config.use_encrypt) {
             decrypted = sess.decrypt(self.allocator, data) catch return ClientError.OperationCancelled;
         } else {
             decrypted = self.allocator.dupe(u8, data) catch return ClientError.OutOfMemory;
@@ -1078,7 +1081,7 @@ pub const VpnClient = struct {
                     }
                 }.write,
             );
-            single_tunnel.use_compression = self.config.use_compression;
+            single_tunnel.use_compress = self.config.use_compress;
             single_tunnel.initCompression();
         } else {
             // Multi-connection mode: initialize with error-returning callbacks.
@@ -1597,52 +1600,31 @@ pub const VpnClient = struct {
             }
 
             // OUTBOUND: Read from TUN and send to VPN (batched for throughput)
-            // Prefer UDP if established, fall back to TCP
+            // Prefer UDP if established, fall back to TCP.
             //
-            // BACKPRESSURE PROBE: Check whether the TLS socket can accept a
-            // write (POLLOUT with 0 timeout). If kernel sndbuf is full,
-            // blocking SSL_write would HANG indefinitely because the data
-            // loop is single-threaded — and inbound ACKs (which would drain
-            // sndbuf) are processed in the same loop. Result: deadlock,
-            // upload stuck at 0 Mbps. Symptom: T1 great, T2/T3 upload=0.
+            // BACKPRESSURE: Sample kernel send queue depth and throttle the
+            // outbound batch size. When sendq >= 512KB, read only 1 packet
+            // per iteration instead of 64. This allows small packets (TCP
+            // ACKs for download, DNS, etc.) to flow through while limiting
+            // bulk upload data entering the kernel buffer. writeAllNonBlocking
+            // handles WouldBlock gracefully when the kernel buffer is full.
             //
-            // CRITICAL: We must STILL drain TUN even when tls_can_send=false.
-            // If we skip the TUN read, packets pile up in the kernel TUN
-            // queue, eventually overflow, and user-space TCP sockets see
-            // EAGAIN/socket errors (e.g. "UPLOAD TEST ERROR" in speedtest).
-            //
-            // Behavior when sndbuf is full:
-            //   - UDP path: send via UDP (its own buffer)
-            //   - TCP path: DROP the batch. TCP-layer retransmit at the
-            //     user app handles recovery. Better to drop than to block.
-            //
-            // Skip the probe in multi-connection mode (each conn has its own
-            // sndbuf and we'd need to probe all; deferred).
-            // CYCLE 11 (TURN 16c): Probe + drop logic REMOVED.
-            // Was: poll(POLLOUT, timeout=0) on tls socket; drop batch if !writable.
-            // Real-world result: 100% silent outbound drops (0 bytes sent in 2m41s).
-            // Root cause: poll(timeout=0) returns POLL.OUT only when an EDGE event
-            // happened, not when the socket is currently writable. So even with
-            // NOTSENT_LOWAT removed, the probe returned false on idle/normal sockets,
-            // and 100% of TCP outbound was dropped. Bufferbloat fix is provided by
-            // SO_SNDBUF=512KB cap in tls.zig::clearTimeouts().
-            const tls_can_send: bool = true;
-
-            // CYCLE 11 REVERT (TURN 16b): The previous "gate TUN read on tls_can_send"
-            // attempt killed throughput entirely (0 bytes sent). poll(POLLOUT,timeout=0)
-            // returns false too aggressively at high RTT with NOTSENT_LOWAT=16384, so
-            // we'd never drain TUN. NOTSENT_LOWAT is also being removed in tls.zig —
-            // the SO_SNDBUF=512KB cap alone bounds bufferbloat. Without NOTSENT_LOWAT,
-            // POLLOUT only goes false when kernel sndbuf actually fills, which is rare.
+            // We MUST NOT gate TUN reads entirely (as was tried with poll-level
+            // gating) because in a VPN tunnel, outbound carries download ACKs
+            // — blocking them causes the content server to stall, collapsing
+            // download from 100+ Mbps to <1 Mbps.
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        // Read up to OUTBOUND_BATCH packets from TUN in one batch
+                        const sendq: u32 = if (single_sock) |ss| @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32))) else 0;
+                        const batch_limit: usize = if (sendq >= 512 * 1024) 1 else OUTBOUND_BATCH;
+                        if (sendq >= 512 * 1024) diag.pollout_skipped += 1;
+
                         var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
                         var outbound_bytes: usize = 0;
 
-                        while (outbound_count < OUTBOUND_BATCH) {
+                        while (outbound_count < batch_limit) {
                             if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                 if (maybe_len) |ip_len| {
                                     if (ip_len > 0 and ip_len <= 1500) {
@@ -1666,15 +1648,9 @@ pub const VpnClient = struct {
                                 }
                             }
                             // Send remaining packets (not sent via UDP) over TCP.
-                            // If the TCP path is dead (BrokenPipe / ConnectionClosed) we
-                            // MUST exit the data loop — otherwise upload silently stalls
-                            // at 0 Mbps while the loop spins forever swallowing errors.
-                            //
-                            // Also gated on tls_can_send: if sndbuf is full, drop the
-                            // remaining batch this iteration (TUN buffers them, we'll
-                            // retry next iteration after ACKs drain sndbuf). This is
-                            // what prevents the SSL_write deadlock.
-                            if (udp_sent_count < outbound_count and tls_can_send) {
+                            // Safety net: if send fails (WouldBlock), count as dropped.
+                            // The sendq-based throttle should prevent this edge case.
+                            if (udp_sent_count < outbound_count) {
                                 var tls_send_ok = true;
                                 send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
                                     error.ConnectionClosed, error.BrokenPipe => {
@@ -1683,22 +1659,15 @@ pub const VpnClient = struct {
                                         return error.ConnectionLost;
                                     },
                                     else => {
-                                        // Non-fatal: likely WANT_WRITE (TLS sndbuf full).
                                         tls_send_ok = false;
                                     },
                                 };
                                 if (tls_send_ok) {
-                                    // DIAG: count what we actually sent over TCP
                                     diag.pkts_out += outbound_count - udp_sent_count;
                                     for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
                                 } else {
-                                    // DIAG: send failed — count as dropped
                                     diag.tcp_drops_pkts += outbound_count - udp_sent_count;
                                 }
-                            } else if (udp_sent_count < outbound_count and !tls_can_send) {
-                                // DIAG: TCP path was blocked, batch dropped (TCP layer will retransmit)
-                                diag.pollout_skipped += 1;
-                                diag.tcp_drops_pkts += outbound_count - udp_sent_count;
                             }
                             // DIAG: count UDP-sent too
                             if (udp_sent_count > 0) {
@@ -1789,7 +1758,6 @@ pub const VpnClient = struct {
                         send_helper.get().sendBlocks(&blocks) catch {};
                         loop_state.timing.last_dhcp_time = now;
                         loop_state.dhcp_retry_count += 1;
-                        std.log.debug("DHCP DISCOVER retry #{d}", .{loop_state.dhcp_retry_count});
                     }
                 } else if (loop_state.dhcp.state == .request_sent and loop_state.dhcp.config.ip_address != 0) {
                     var req_buf: [512]u8 = undefined;
@@ -1801,6 +1769,14 @@ pub const VpnClient = struct {
                         loop_state.dhcp_retry_count += 1;
                         std.log.info("DHCP REQUEST retry #{d}", .{loop_state.dhcp_retry_count});
                     }
+                }
+            }
+
+            // DHCPv4: give up after max retries with no OFFER
+            if (loop_state.dhcp_retry_count >= 5 and loop_state.dhcp.state == .discover_sent) {
+                if (loop_state.timing.last_dhcp_warn == 0 or now - loop_state.timing.last_dhcp_warn >= 5000) {
+                    std.log.warn("DHCP: no OFFER after {d} retries — server does not respond", .{loop_state.dhcp_retry_count});
+                    loop_state.timing.last_dhcp_warn = now;
                 }
             }
 
@@ -1816,9 +1792,8 @@ pub const VpnClient = struct {
                             if (frame_len > 0) {
                                 const blocks = [_][]const u8{dv6_frame[0..frame_len]};
                                 send_helper.get().sendBlocks(&blocks) catch {};
-                                self.last_dhcpv6_time = now;
-                                self.ipv6_dhcp_retry_count += 1;
-                                std.log.debug("Send DHCPv6 Solicit (retry #{d})", .{self.ipv6_dhcp_retry_count});
+                        self.last_dhcpv6_time = now;
+                        self.ipv6_dhcp_retry_count += 1;
                             }
                         }
                     }
@@ -1959,7 +1934,7 @@ pub const ClientConfigBuilder = struct {
     }
 
     pub fn setEncryption(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
-        self.config.use_encryption = enabled;
+        self.config.use_encrypt = enabled;
         return self;
     }
 
@@ -1991,7 +1966,7 @@ test "ClientConfig defaults" {
     };
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
     try std.testing.expect(config.routing.default_route);
-    try std.testing.expect(config.use_encryption);
+    try std.testing.expect(config.use_encrypt);
     try std.testing.expect(config.reconnect.enabled);
 }
 

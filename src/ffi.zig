@@ -275,13 +275,14 @@ export fn softether_create(
         } },
         // Explicit defaults — don't rely on struct defaults (ReleaseFast may not apply them)
         .max_connections = 1,
-        .use_compression = false,
-        .use_encryption = true,
+        .use_compress = false,
+        .use_encrypt = true,
         .udp_acceleration = false,
         .half_connection = false,
         .qos = true,
         .mtu = 1400,
         .verify_certificate = true,
+        .ip_version = null,
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
@@ -312,13 +313,14 @@ export fn softether_create_anonymous(
         .hub_name = hub_slice,
         .auth = .{ .anonymous = {} },
         .max_connections = 1,
-        .use_compression = false,
-        .use_encryption = true,
+        .use_compress = false,
+        .use_encrypt = true,
         .udp_acceleration = false,
         .half_connection = false,
         .qos = true,
         .mtu = 1400,
         .verify_certificate = true,
+        .ip_version = null,
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
@@ -359,13 +361,14 @@ export fn softether_create_certificate(
             .key_data = key_slice,
         } },
         .max_connections = 1,
-        .use_compression = false,
-        .use_encryption = true,
+        .use_compress = false,
+        .use_encrypt = true,
         .udp_acceleration = false,
         .half_connection = false,
         .qos = true,
         .mtu = 1400,
         .verify_certificate = true,
+        .ip_version = null,
     };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
@@ -511,13 +514,13 @@ export fn softether_get_effective_server_ip(client: ?*const VpnClient) u32 {
 /// Set encryption on/off. Must be called before connect().
 export fn softether_set_encryption(client: ?*VpnClient, enabled: bool) void {
     const c = client orelse return;
-    c.config.use_encryption = enabled;
+    c.config.use_encrypt = enabled;
 }
 
 /// Set compression on/off. Must be called before connect().
 export fn softether_set_compression(client: ?*VpnClient, enabled: bool) void {
     const c = client orelse return;
-    c.config.use_compression = enabled;
+    c.config.use_compress = enabled;
 }
 
 /// Set TLS certificate verification. Must be called before connect().
@@ -612,6 +615,41 @@ export fn softether_set_half_connection(client: ?*VpnClient, enabled: bool) void
 export fn softether_set_qos(client: ?*VpnClient, enabled: bool) void {
     const c = client orelse return;
     c.config.qos = enabled;
+}
+
+/// Set UDP acceleration on/off. Must be called before connect().
+export fn softether_set_udp_acceleration(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.udp_acceleration = enabled;
+}
+
+/// Set connection timeout in milliseconds. Must be called before connect().
+export fn softether_set_connect_timeout(client: ?*VpnClient, ms: u32) void {
+    const c = client orelse return;
+    c.config.connect_timeout_ms = ms;
+}
+
+/// Set read timeout in milliseconds. Must be called before connect().
+export fn softether_set_read_timeout(client: ?*VpnClient, ms: u32) void {
+    const c = client orelse return;
+    c.config.read_timeout_ms = ms;
+}
+
+/// Set keepalive interval in milliseconds. Must be called before connect().
+export fn softether_set_keepalive_interval(client: ?*VpnClient, ms: u32) void {
+    const c = client orelse return;
+    c.config.keepalive_interval_ms = ms;
+}
+
+/// Set IP version preference. Must be called before connect().
+/// version: 0=try both, 4=IPv4 only, 6=IPv6 only.
+export fn softether_set_ip_version(client: ?*VpnClient, version: c_int) void {
+    const c = client orelse return;
+    c.config.ip_version = switch (version) {
+        4 => .v4,
+        6 => .v6,
+        else => null,
+    };
 }
 
 /// Set proxy configuration. Must be called before connect().

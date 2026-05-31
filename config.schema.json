@@ -43,6 +43,27 @@
       "description": "Enable data compression",
       "default": true
     },
+    "use_encrypt": {
+      "type": "boolean",
+      "description": "Enable payload encryption (AES-256-CBC)",
+      "default": true
+    },
+    "half_connection": {
+      "type": "boolean",
+      "description": "Split TX and RX onto separate TCP connections. When enabled and max_connections >= 2, odd connections handle upload and even connections handle download, eliminating bidirectional head-of-line blocking.",
+      "default": false
+    },
+    "qos": {
+      "type": "boolean",
+      "description": "Enable QoS traffic shaping",
+      "default": true
+    },
+    "ip_version": {
+      "type": "string",
+      "description": "IP protocol version preference: '4' for IPv4-only, '6' for IPv6-only (default: try both)",
+      "enum": ["4", "6"],
+      "default": null
+    },
     "max_connections": {
       "type": "integer",
       "description": "Number of parallel TCP connections for the VPN tunnel (1-32)",
@@ -55,13 +76,36 @@
       "description": "Enable UDP acceleration (may improve performance on high-latency links)",
       "default": false
     },
+    "proxy": {
+      "type": ["string", "null"],
+      "description": "Proxy URL for tunneling through HTTP/SOCKS proxy. Formats: http://user:pass@host:port, socks5://host:1080, socks4://host:1080",
+      "examples": ["http://proxy.example.com:3128", "socks5://127.0.0.1:1080"]
+    },
+    "connect_timeout_ms": {
+      "type": "integer",
+      "description": "Connection timeout in milliseconds",
+      "default": 30000,
+      "minimum": 1000
+    },
+    "read_timeout_ms": {
+      "type": "integer",
+      "description": "Read timeout in milliseconds",
+      "default": 60000,
+      "minimum": 1000
+    },
+    "keepalive_interval_ms": {
+      "type": "integer",
+      "description": "Keepalive interval in milliseconds",
+      "default": 10000,
+      "minimum": 1000
+    },
     "mtu": {
       "type": ["integer", "null"],
-      "description": "Maximum Transmission Unit size in bytes. Default is 1486 (1500 minus 14-byte L2 frame header). Suggested to keep lower than uplink MTU.",
+      "description": "Maximum Transmission Unit size in bytes.",
       "minimum": 576,
       "maximum": 9000,
-      "default": 1486,
-      "examples": [1486, 1400, 1280]
+      "default": 1400,
+      "examples": [1400, 1486, 1280]
     },
     "static_ip": {
       "type": "object",
@@ -133,6 +177,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "log_level": {
+      "type": "string",
+      "description": "Logging verbosity level",
+      "enum": ["silent", "error", "warn", "info", "debug", "trace"],
+      "default": "info"
     },
     "routing": {
       "type": "object",

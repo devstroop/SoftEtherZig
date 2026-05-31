@@ -814,31 +814,6 @@ pub const TlsSocket = struct {
             };
             if (n == 0) return error.BrokenPipe;
             index += n;
-
-            // Active backpressure: if the kernel send queue exceeds BDP,
-            // add a brief poll to let it drain. Without this, the 4MB
-            // SO_SNDBUF buffer fills with unsent data on slow links,
-            // adding seconds of latency without improving throughput.
-            // macOS: SO_NWRITE reports bytes in the send buffer.
-            // Other platforms: skipped (rely on WouldBlock from smaller
-            // effective buffer).
-            if (builtin.os.tag == .macos) {
-                const sq = self.kernelSendQueue();
-                // BDP threshold for ~8Mbps at 200ms RTT = ~200KB.
-                // When send queue exceeds this, the bottleneck is the
-                // physical link, not our buffer. Throttle writes.
-                if (sq > 192 * 1024) {
-                    var pfd = [_]std.posix.pollfd{.{
-                        .fd = self.tcp_fd,
-                        .events = std.posix.POLL.OUT,
-                        .revents = 0,
-                    }};
-                    // Cap poll to 5ms — brief enough to avoid ACK starvation.
-                    const excess = sq - 192 * 1024;
-                    const poll_ms = @min(@as(i32, @intCast(excess >> 18)), 5);
-                    _ = std.posix.poll(&pfd, poll_ms) catch {};
-                }
-            }
         }
     }
 

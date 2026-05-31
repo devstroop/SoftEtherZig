@@ -81,8 +81,8 @@ pub fn run(client: *VpnClient) !void {
         .max_connection = client.config.max_connections,
         .half_connection = client.config.half_connection,
         .qos = client.config.qos,
-        .use_encryption = client.config.use_encryption,
-        .use_compression = client.config.use_compression,
+        .use_encrypt = client.config.use_encrypt,
+        .use_compress = client.config.use_compress,
     };
 
     const auth_data = switch (client.config.auth) {
@@ -444,8 +444,16 @@ fn applyServerOverrides(client: *VpnClient, result: softether_proto.AuthResult) 
 
     client.config.max_connections = @intCast(effective_max);
     client.config.half_connection = effective_half;
-    client.config.use_compression = result.server_use_compress;
-    client.config.use_encryption = result.server_use_encrypt;
+    client.config.use_compress = result.server_use_compress;
+    client.config.use_encrypt = result.server_use_encrypt;
+
+    // If server prohibits routing, disable full-tunnel regardless of config
+    if (result.server_no_routing) {
+        if (client.config.routing.default_route) {
+            std.log.info("Server policy prohibits routing — disabling full-tunnel", .{});
+            client.config.routing.default_route = false;
+        }
+    }
 }
 
 /// Initialize UDP acceleration after a successful auth that the server
@@ -471,7 +479,7 @@ fn startUdpAcceleration(client: *VpnClient, auth_result: softether_proto.AuthRes
     const udp_config = udp_accel_mod.UdpAccelConfig{
         .server_ip = server_ip_str,
         .server_port = auth_result.udp_accel_port,
-        .use_encryption = auth_result.udp_accel_use_encryption,
+        .use_encrypt = auth_result.udp_accel_use_encrypt,
         .send_key = send_key,
         .recv_key = recv_key,
         .send_hmac_key = send_hmac,

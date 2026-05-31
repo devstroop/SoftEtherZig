@@ -10,9 +10,13 @@
   
   "skip_tls_verify": false,
   "use_compress": true,
+  "use_encrypt": true,
+  "half_connection": false,
+  "qos": true,
   "udp_accel": false,
   "max_connections": 1,
-  "mtu": 1486,
+  "mtu": 1400,
+  "ip_version": null,
   
   "static_ip": {
     "ipv4_address": null,

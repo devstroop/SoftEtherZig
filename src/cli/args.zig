@@ -31,8 +31,10 @@ pub const CliArgs = struct {
 
     // Connection options
     skip_tls_verify: bool = false,
-    use_compress: bool = false,
-    qos: bool = false,
+    use_compress: bool = true,
+    use_encrypt: bool = true,
+    half_connection: bool = false,
+    qos: bool = true,
     udp_accel: bool = false,
     max_connections: u8 = 1,
     mtu: u16 = 1400,
@@ -69,6 +71,11 @@ pub const CliArgs = struct {
     // Special modes
     gen_hash_user: ?[]const u8 = null,
     gen_hash_pass: ?[]const u8 = null,
+
+    // Timeouts (milliseconds)
+    connect_timeout_ms: u32 = 30000,
+    read_timeout_ms: u32 = 60000,
+    keepalive_interval_ms: u32 = 10000,
 
     // Proxy
     proxy: ?[]const u8 = null,
@@ -186,7 +193,7 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
                 i += 1;
                 self.args.username = try self.requireValue(argv, i, "--user");
-            } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--password")) {
+            } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
                 i += 1;
                 self.args.password = try self.requireValue(argv, i, "--password");
             } else if (std.mem.eql(u8, arg, "--password-hash")) {
@@ -196,8 +203,20 @@ pub const ArgParser = struct {
                 self.args.skip_tls_verify = true;
             } else if (std.mem.eql(u8, arg, "--use-compress")) {
                 self.args.use_compress = true;
+            } else if (std.mem.eql(u8, arg, "--no-compress")) {
+                self.args.use_compress = false;
+            } else if (std.mem.eql(u8, arg, "--use-encrypt")) {
+                self.args.use_encrypt = true;
+            } else if (std.mem.eql(u8, arg, "--no-encrypt")) {
+                self.args.use_encrypt = false;
+            } else if (std.mem.eql(u8, arg, "--half-connection")) {
+                self.args.half_connection = true;
+            } else if (std.mem.eql(u8, arg, "--no-half-connection")) {
+                self.args.half_connection = false;
             } else if (std.mem.eql(u8, arg, "--qos")) {
                 self.args.qos = true;
+            } else if (std.mem.eql(u8, arg, "--no-qos")) {
+                self.args.qos = false;
             } else if (std.mem.eql(u8, arg, "--udp-accel")) {
                 self.args.udp_accel = true;
             } else if (std.mem.eql(u8, arg, "--mtu")) {
@@ -266,6 +285,18 @@ pub const ArgParser = struct {
                 self.args.gen_hash_user = try self.requireValue(argv, i, "--gen-hash username");
                 i += 1;
                 self.args.gen_hash_pass = try self.requireValue(argv, i, "--gen-hash password");
+            } else if (std.mem.eql(u8, arg, "--connect-timeout")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--connect-timeout");
+                self.args.connect_timeout_ms = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
+            } else if (std.mem.eql(u8, arg, "--read-timeout")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--read-timeout");
+                self.args.read_timeout_ms = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
+            } else if (std.mem.eql(u8, arg, "--keepalive-interval")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--keepalive-interval");
+                self.args.keepalive_interval_ms = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--proxy")) {
                 i += 1;
                 self.args.proxy = try self.requireValue(argv, i, "--proxy");
@@ -297,6 +328,11 @@ pub const ArgParser = struct {
     /// Load from environment variables
     pub fn loadFromEnv(self: *Self) void {
         const allocator = std.heap.page_allocator;
+        const isTrue = struct {
+            fn check(v: []const u8) bool {
+                return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "yes");
+            }
+        }.check;
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_SERVER")) |v| {
             if (self.args.server == null) self.args.server = v;
         } else |_| {}
@@ -319,6 +355,48 @@ pub const ArgParser = struct {
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONFIG")) |v| {
             if (self.args.config_file == null) self.args.config_file = v;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_COMPRESS")) |v| {
+            self.args.use_compress = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ENCRYPT")) |v| {
+            self.args.use_encrypt = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_HALF_CONNECTION")) |v| {
+            self.args.half_connection = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_QOS")) |v| {
+            self.args.qos = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_IP_VERSION")) |v| {
+            self.args.ip_version = IpVersion.fromString(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_SKIP_TLS_VERIFY")) |v| {
+            self.args.skip_tls_verify = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_UDP_ACCEL")) |v| {
+            self.args.udp_accel = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_MAX_CONNECTIONS")) |v| {
+            self.args.max_connections = std.fmt.parseInt(u8, v, 10) catch self.args.max_connections;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_MTU")) |v| {
+            self.args.mtu = std.fmt.parseInt(u16, v, 10) catch self.args.mtu;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_LOG_LEVEL")) |v| {
+            if (LogLevel.fromString(v)) |l| self.args.log_level = l;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONNECT_TIMEOUT")) |v| {
+            self.args.connect_timeout_ms = std.fmt.parseInt(u32, v, 10) catch self.args.connect_timeout_ms;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_READ_TIMEOUT")) |v| {
+            self.args.read_timeout_ms = std.fmt.parseInt(u32, v, 10) catch self.args.read_timeout_ms;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_KEEPALIVE_INTERVAL")) |v| {
+            self.args.keepalive_interval_ms = std.fmt.parseInt(u32, v, 10) catch self.args.keepalive_interval_ms;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PROXY")) |v| {
+            if (self.args.proxy == null) self.args.proxy = v;
         } else |_| {}
     }
 };
