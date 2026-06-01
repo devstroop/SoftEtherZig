@@ -550,7 +550,7 @@ pub fn build(b: *std.Build) void {
     // messages against RFC 8415. No sockets, no live server, CI-friendly.
     {
         const dhcpv6_mod = b.createModule(.{
-            .root_source_file = b.path("src/net/dhcpv6.zig"),
+            .root_source_file = b.path("src/tunnel/dhcpv6.zig"),
             .target = target,
             .optimize = optimize,
         });

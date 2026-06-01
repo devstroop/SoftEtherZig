@@ -65,7 +65,7 @@ const tunnel_mod = @import("../tunnel/mod.zig");
 const route_heal = @import("../adapter/route_heal.zig");
 
 // Import DHCPv6
-const dhcpv6_mod = @import("../net/dhcpv6.zig");
+const dhcpv6_mod = @import("../tunnel/dhcpv6.zig");
 const Dhcpv6Client = dhcpv6_mod.Dhcpv6Client;
 
 // Import connection manager for multi-TCP
@@ -741,6 +741,11 @@ pub const VpnClient = struct {
                 if (static.ipv4_gateway) |gw_str| {
                     self.gateway_ip = if (parseIpv4(gw_str)) |v| @byteSwap(v) else 0;
                 }
+                const netmask: u32 = if (static.ipv4_netmask) |nm_str|
+                    if (parseIpv4(nm_str)) |v| @byteSwap(v) else 0xFFFFFF00
+                else
+                    0xFFFFFF00;
+                ctx.configure(self.assigned_ip, netmask, self.gateway_ip);
             }
             if (static.ipv6_address) |ip6_str| {
                 var addr: [16]u8 = undefined;
@@ -1307,8 +1312,10 @@ pub const VpnClient = struct {
         self.ipv6_dhcp_retry_count = 0;
         self.last_dhcpv6_time = 0;
 
-        // Send DHCPv6 Solicit (regardless of IPv4 DHCP — server may handle v6 independently)
-        {
+        // Send DHCPv6 Solicit. Skip if static IPv6 is configured in the config
+        // (user-supplied IPv6 is authoritative, no need to solicit from server).
+        const has_static_ipv6 = if (self.config.static_ip) |s| s.ipv6_address != null else false;
+        if (!has_static_ipv6) {
             self.dhcpv6_client = Dhcpv6Client.init(self.allocator, mac);
             var dhcpv6_raw: [256]u8 = undefined;
             if (self.dhcpv6_client) |*client| {
@@ -1328,6 +1335,9 @@ pub const VpnClient = struct {
                     }
                 }
             }
+        } else {
+            self.ipv6_configured = true;
+            std.log.info("Static IPv6 configured — skipping DHCPv6", .{});
         }
 
         // Set up poll structures — all socket fds use socket_t for Windows compatibility

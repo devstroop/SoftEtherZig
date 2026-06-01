@@ -120,6 +120,18 @@ pub const AdapterWrapper = struct {
         self.ip_address = ip;
         self.netmask = mask;
         self.gateway_ip = gateway;
+        if (self.real_adapter) |*real| {
+            if (real.device) |dev| {
+                std.log.info("AdapterWrapper.configure: device present, calling dev.configure()", .{});
+                dev.configure(ip, mask, gateway) catch |err| {
+                    std.log.err("Failed to configure device: {}", .{err});
+                };
+            } else {
+                std.log.warn("AdapterWrapper.configure: real_adapter set but device is null", .{});
+            }
+        } else {
+            std.log.warn("AdapterWrapper.configure: real_adapter is null", .{});
+        }
     }
 
     /// Configure IPv6 on the adapter

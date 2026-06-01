@@ -8,7 +8,7 @@ pub const tls = @import("tls.zig");
 pub const http = @import("http.zig");
 pub const dns_cache = @import("dns_cache.zig");
 pub const socks = @import("socks.zig");
-pub const dhcpv6 = @import("dhcpv6.zig");
+pub const dhcpv6 = @import("../tunnel/dhcpv6.zig");
 
 // Re-export commonly used types
 pub const TcpSocket = socket.TcpSocket;

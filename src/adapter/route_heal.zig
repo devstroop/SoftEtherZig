@@ -51,6 +51,106 @@ fn liveUtunMask(allocator: std.mem.Allocator) [MAX_UTUN]bool {
     return mask;
 }
 
+/// Aggressive cleanup: for every dead utunN (one that exists in the routing
+/// table but no longer has a corresponding kernel interface — left over from
+/// a SIGKILL'd or crashed VPN run), remove every route through it AND
+/// restore a default route via the physical interface if one is missing.
+/// Returns the number of routes removed.
+pub fn purgeStaleUtunState(allocator: std.mem.Allocator) u32 {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return 0;
+
+    const live = liveUtunMask(allocator);
+    var removed: u32 = 0;
+
+    // 1. Remove ALL routes through dead utun interfaces
+    const route_output = runCommandCapture(allocator, switch (builtin.os.tag) {
+        .macos => "netstat -rn 2>/dev/null",
+        .linux => "ip route show 2>/dev/null",
+        else => return 0,
+    }) orelse return 0;
+    defer allocator.free(route_output);
+
+    var lines = std.mem.splitScalar(u8, route_output, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "Internet") or
+            std.mem.startsWith(u8, line, "Kernel") or
+            std.mem.startsWith(u8, line, "Destination"))
+        {
+            continue;
+        }
+
+        const utun_pos = std.mem.indexOf(u8, line, "utun") orelse continue;
+        if (utun_pos + 5 > line.len) continue;
+        const num_start = utun_pos + 4;
+        var num_end = num_start;
+        while (num_end < line.len and line[num_end] >= '0' and line[num_end] <= '9') {
+            num_end += 1;
+        }
+        if (num_end == num_start) continue;
+        const utun_num = std.fmt.parseInt(u8, line[num_start..num_end], 10) catch continue;
+        if (utun_num >= MAX_UTUN) continue;
+        if (live[utun_num]) continue;
+
+        // Dead utun — drop this route
+        std.log.warn("[ROUTE-HEAL] Purging route through dead utun{d}: {s}", .{ utun_num, line });
+        deleteRouteByLine(allocator, line);
+        removed += 1;
+    }
+
+    // 2. If the default route was pointing to a dead utun and got removed in
+    // step 1, restore a default via the physical interface. Without this, the
+    // host has no internet and the only way to recover is replug.
+    const default_output = runCommandCapture(allocator, switch (builtin.os.tag) {
+        .macos => "netstat -rn 2>/dev/null | grep '^default' | grep -v utun | head -1",
+        .linux => "ip route show default 2>/dev/null | grep -v utun | head -1",
+        else => "",
+    });
+    if (default_output) |out| {
+        defer allocator.free(out);
+        // If there's already a non-utun default, we're fine
+        if (out.len > 0) {
+            return removed;
+        }
+    }
+
+    // No non-utun default route — try to restore one via the physical NIC
+    if (builtin.os.tag == .macos) {
+        // Get the default interface
+        if (runCommandCapture(allocator, "route get 8.8.8.8 2>/dev/null | awk '/interface:/{print $2}' | head -1")) |iface_out| {
+            defer allocator.free(iface_out);
+            var iface_buf: [64]u8 = undefined;
+            const len = @min(iface_out.len, iface_buf.len);
+            @memcpy(iface_buf[0..len], iface_out[0..len]);
+            // Strip trailing whitespace
+            var trimmed_len: usize = 0;
+            while (trimmed_len < len and iface_buf[trimmed_len] != ' ' and iface_buf[trimmed_len] != '\n' and iface_buf[trimmed_len] != '\r' and iface_buf[trimmed_len] != '\t') : (trimmed_len += 1) {}
+            const iface = iface_buf[0..trimmed_len];
+            if (iface.len > 0 and !std.mem.eql(u8, iface, "utun")) {
+                // Get the gateway for this interface
+                if (runCommandCapture(allocator, "route get 8.8.8.8 2>/dev/null | awk '/gateway:/{print $2}' | head -1")) |gw_out| {
+                    defer allocator.free(gw_out);
+                    var gw_buf: [64]u8 = undefined;
+                    const gw_len = @min(gw_out.len, gw_buf.len);
+                    @memcpy(gw_buf[0..gw_len], gw_out[0..gw_len]);
+                    var gw_trimmed: usize = 0;
+                    while (gw_trimmed < gw_len and gw_buf[gw_trimmed] != ' ' and gw_buf[gw_trimmed] != '\n' and gw_buf[gw_trimmed] != '\r' and gw_buf[gw_trimmed] != '\t') : (gw_trimmed += 1) {}
+                    const gw = gw_buf[0..gw_trimmed];
+                    if (gw.len > 0) {
+                        var cmd_buf: [256]u8 = undefined;
+                        const cmd = std.fmt.bufPrint(&cmd_buf, "route add default {s} 2>/dev/null", .{gw}) catch return removed;
+                        if (runCommand(allocator, cmd)) {
+                            std.log.info("[ROUTE-HEAL] Restored default route via {s} gateway {s}", .{ iface, gw });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return removed;
+}
+
 /// #10: Startup self-check — remove all routes pointing through vanished utunN.
 /// Returns the number of stale routes removed.
 pub fn purgeStaleRoutes(allocator: std.mem.Allocator) u32 {

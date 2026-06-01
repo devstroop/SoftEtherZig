@@ -99,6 +99,22 @@ pub fn main() !void {
             }
             app.password_hash.generate(hash_user.?, hash_pass.?);
             return;
+        } else if (std.mem.eql(u8, args[1], "cleanup")) {
+            // Aggressively clean up stale VPN routing state left over from a
+            // previous killed/crashed run. Removes all routes pointing
+            // through dead utun interfaces, then restores a default route
+            // via the physical interface if the host was left with no
+            // internet. Safe to run at any time.
+            const route_heal = @import("adapter/route_heal.zig");
+            const n1 = route_heal.purgeStaleRoutes(allocator);
+            const n2 = route_heal.purgeStaleUtunState(allocator);
+            const total = n1 + n2;
+            if (total > 0) {
+                cli.display.success(&state.display, "Cleaned up {d} stale route(s) (purge={d}, utun-state={d})", .{ total, n1, n2 });
+            } else {
+                cli.display.debug(&state.display, "No stale routes to clean", .{});
+            }
+            return;
         } else {
             cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient connect --help' or 'vpnclient --help'.", .{args[1]});
             std.process.exit(1);

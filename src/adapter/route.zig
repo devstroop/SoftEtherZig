@@ -115,6 +115,15 @@ pub const RoutingState = struct {
         // Remove VPN routes
         try deleteDefaultRoute();
 
+        // Remove the /32 host route for the VPN server (added by addHostRoute
+        // to prevent a routing loop when connecting to the server). Without
+        // this, the host route leaks on every disconnect.
+        if (self.vpn_server_ip != 0) {
+            deleteHostRoute(self.vpn_server_ip) catch |err| {
+                std.log.warn("[ROUTING] Failed to delete host route: {}", .{err});
+            };
+        }
+
         // Restore original default route
         if (self.original_default_gateway != 0) {
             try addRoute(0, 0, self.original_default_gateway, null);
@@ -451,6 +460,19 @@ pub fn addHostRoute(host: u32, gateway: u32) !void {
             trimNull(&host_str), trimNull(&gw_str),
         }) catch return RouteError.CommandFailed;
         if (!runCommand(cmd)) return RouteError.CommandFailed;
+    }
+}
+
+/// Delete a host route (the /32 VPN-server bypass route added by addHostRoute)
+pub fn deleteHostRoute(host: u32) !void {
+    var cmd_buf: [256]u8 = undefined;
+    const host_str = formatIpv4(host);
+    if (builtin.os.tag == .linux) {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route del {s}/32 2>/dev/null", .{trimNull(&host_str)}) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
+    } else {
+        const cmd = std.fmt.bufPrint(&cmd_buf, "route delete -host {s} 2>/dev/null", .{trimNull(&host_str)}) catch return RouteError.CommandFailed;
+        _ = runCommand(cmd);
     }
 }
 
