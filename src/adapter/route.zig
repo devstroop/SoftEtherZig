@@ -149,6 +149,14 @@ pub const RouteManager = struct {
         vpn_server: u32,
         device_name: []const u8,
     ) !void {
+        // Skip if already configured (prevents duplicate setup from DHCP handler
+        // when static-ip config is used — DHCP ACK would otherwise trigger a
+        // second configureFullTunnel that fails with NoDefaultGateway).
+        if (self.state.routes_configured) {
+            std.log.debug("[ROUTING] Full-tunnel already configured, skipping", .{});
+            return;
+        }
+
         std.log.info("[ROUTING] Configuring full-tunnel (gateway {d}.{d}.{d}.{d})", .{
             @as(u8, @truncate(vpn_gateway >> 24)),
             @as(u8, @truncate(vpn_gateway >> 16)),

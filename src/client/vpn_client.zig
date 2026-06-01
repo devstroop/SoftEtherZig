@@ -1171,6 +1171,9 @@ pub const VpnClient = struct {
         const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
         const garp_interval: i64 = 10000; // 10 seconds - periodic GARP for bridge mode
 
+        // Cache the configured state check (must be before DHCP discover)
+        var is_configured = false;
+
         // Receive buffers — heap-allocated to avoid stack overflow
         // (Dart Isolate.run() threads have ~1MB stack; these buffers are 800KB+)
         const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
@@ -1274,18 +1277,25 @@ pub const VpnClient = struct {
         // Wait 300ms then send DHCP discover
         std.Thread.sleep(300 * std.time.ns_per_ms);
 
-        // Send initial DHCP discover
-        {
-            var dhcp_buf: [512]u8 = undefined;
-            const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
-            if (dhcp_size > 0) {
-                const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                if (send_helper.get().sendBlocks(&blocks)) |_| {
-                    loop_state.dhcp.state = .discover_sent;
-                    loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
-                    std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
-                } else |err| {
-                    std.log.err("Failed to send DHCP discover: {}", .{err});
+        if (self.config.static_ip != null) {
+            // Static IP: skip DHCP entirely, mark as configured immediately
+            loop_state.dhcp.state = .configured;
+            is_configured = true;
+            std.log.info("Static IP configured — skipping DHCP", .{});
+        } else {
+            // Send initial DHCP discover
+            {
+                var dhcp_buf: [512]u8 = undefined;
+                const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
+                if (dhcp_size > 0) {
+                    const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
+                    if (send_helper.get().sendBlocks(&blocks)) |_| {
+                        loop_state.dhcp.state = .discover_sent;
+                        loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
+                        std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
+                    } else |err| {
+                        std.log.err("Failed to send DHCP discover: {}", .{err});
+                    }
                 }
             }
         }
@@ -1333,9 +1343,6 @@ pub const VpnClient = struct {
         // Dynamic poll_fds: up to 32 TLS connections + TUN + UDP = 34
         var poll_fds: [34]std.posix.pollfd = undefined;
         var tls_fd_count: usize = 0;
-
-        // Cache the configured state check
-        var is_configured = false;
 
         // Main packet loop
         // On Windows, set timer resolution to 1ms for accurate poll() timeouts.
