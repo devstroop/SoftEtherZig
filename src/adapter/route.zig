@@ -149,18 +149,11 @@ pub const RouteManager = struct {
         vpn_server: u32,
         device_name: []const u8,
     ) !void {
-        std.log.info("[ROUTING] Configuring full-tunnel...", .{});
-        std.log.debug("[ROUTING] VPN gateway: {d}.{d}.{d}.{d}", .{
+        std.log.info("[ROUTING] Configuring full-tunnel (gateway {d}.{d}.{d}.{d})", .{
             @as(u8, @truncate(vpn_gateway >> 24)),
             @as(u8, @truncate(vpn_gateway >> 16)),
             @as(u8, @truncate(vpn_gateway >> 8)),
             @as(u8, @truncate(vpn_gateway)),
-        });
-        std.log.debug("[ROUTING] VPN server: {d}.{d}.{d}.{d}", .{
-            @as(u8, @truncate(vpn_server >> 24)),
-            @as(u8, @truncate(vpn_server >> 16)),
-            @as(u8, @truncate(vpn_server >> 8)),
-            @as(u8, @truncate(vpn_server)),
         });
 
         // Save original state
@@ -174,16 +167,8 @@ pub const RouteManager = struct {
         @memcpy(self.state.device_name[0..len], device_name[0..len]);
         self.state.device_name_len = len;
 
-        std.log.debug("[ROUTING] Original default gateway: {d}.{d}.{d}.{d}", .{
-            @as(u8, @truncate(self.state.original_default_gateway >> 24)),
-            @as(u8, @truncate(self.state.original_default_gateway >> 16)),
-            @as(u8, @truncate(self.state.original_default_gateway >> 8)),
-            @as(u8, @truncate(self.state.original_default_gateway)),
-        });
-
         // 1. Add route for local network through original gateway
         if (self.state.original_default_gateway != 0) {
-            std.log.debug("[ROUTING] Step 1: Adding local network route...", .{});
             addRoute(
                 self.state.local_network,
                 self.state.local_netmask,
@@ -197,7 +182,6 @@ pub const RouteManager = struct {
         // 2. Add host route for VPN server through original gateway
         // CRITICAL: Prevents routing loop
         if (vpn_server != 0 and self.state.original_default_gateway != 0) {
-            std.log.debug("[ROUTING] Step 2: Adding host route for VPN server...", .{});
             addHostRoute(vpn_server, self.state.original_default_gateway) catch |err| {
                 std.log.warn("[ROUTING] Host route failed (may already exist): {}", .{err});
             };
@@ -221,16 +205,9 @@ pub const RouteManager = struct {
         }
 
         // 3. Delete existing default route
-        std.log.debug("[ROUTING] Step 3: Deleting existing default route...", .{});
         _ = deleteDefaultRoute() catch {};
 
         // 4. Add default route through VPN gateway
-        std.log.debug("[ROUTING] Step 4: Adding VPN default route through {d}.{d}.{d}.{d}...", .{
-            @as(u8, @truncate(vpn_gateway >> 24)),
-            @as(u8, @truncate(vpn_gateway >> 16)),
-            @as(u8, @truncate(vpn_gateway >> 8)),
-            @as(u8, @truncate(vpn_gateway)),
-        });
         addRoute(0, 0, vpn_gateway, null) catch |err| {
             std.log.err("[ROUTING] Failed to add VPN default route: {}", .{err});
             return err;

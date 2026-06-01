@@ -391,6 +391,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --max-connections <N>   Parallel connections 1-32 (default: 1)\n", .{});
     ctx.print("    --mtu <BYTES>           MTU size (default: 1400)\n", .{});
     ctx.print("    --ip-version <4|6>      IP protocol version preference\n", .{});
+    ctx.print("    --verbose               Emit diagnostic logs (DIAG throughput/queue, per-conn RX)\n", .{});
     ctx.print("    --skip-tls-verify       Skip TLS certificate verification\n", .{});
     ctx.print("    --proxy <URL>           HTTP/SOCKS proxy URL\n", .{});
     ctx.print("    --connect-timeout <MS>  Connection timeout (default: 30000)\n", .{});

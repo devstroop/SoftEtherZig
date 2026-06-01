@@ -36,6 +36,10 @@ pub const CliArgs = struct {
     half_connection: bool = false,
     qos: bool = true,
     udp_accel: bool = false,
+    /// Emit non-standard diagnostic logs (per-second DIAG throughput/queue
+    /// stats, per-connection RX state). Off by default — these are a firehose
+    /// meant for debugging, not normal operation.
+    verbose: bool = false,
     max_connections: u8 = 1,
     mtu: u16 = 1400,
     ip_version: ?IpVersion = null,
@@ -219,6 +223,8 @@ pub const ArgParser = struct {
                 self.args.qos = false;
             } else if (std.mem.eql(u8, arg, "--udp-accel")) {
                 self.args.udp_accel = true;
+            } else if (std.mem.eql(u8, arg, "--verbose")) {
+                self.args.verbose = true;
             } else if (std.mem.eql(u8, arg, "--mtu")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--mtu");

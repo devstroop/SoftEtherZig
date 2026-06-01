@@ -52,6 +52,9 @@ pub const ConfigFile = struct {
 
     // Logging
     log_level: ?[]const u8 = null,
+    /// Emit non-standard diagnostic logs (DIAG throughput/queue stats,
+    /// per-connection RX state). Equivalent to the --verbose CLI flag.
+    verbose: ?bool = null,
 };
 
 pub const ReconnectConfig = struct {
@@ -266,6 +269,9 @@ pub const ConfigManager = struct {
                 cli_args.log_level = l;
             }
         }
+
+        // Verbose diagnostics
+        if (self.config.verbose) |v| cli_args.verbose = v;
     }
 
     /// Save current config to file

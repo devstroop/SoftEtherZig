@@ -170,6 +170,11 @@ pub const ClientConfig = struct {
     qos: bool = true,
     mtu: u16 = 1400,
 
+    /// Emit non-standard diagnostic logs (per-second DIAG throughput/queue
+    /// stats and per-connection RX state). Off by default; enabled via
+    /// --verbose or "verbose": true in the JSON config.
+    verbose: bool = false,
+
     // TLS settings
     verify_certificate: bool = true,
 
@@ -430,6 +435,20 @@ pub const VpnClient = struct {
 
         if (self.state.isConnected() or self.state.isConnecting()) {
             return ClientError.AlreadyConnected;
+        }
+
+        // use_encrypt=false is not supported: SoftEther drops TLS on the data
+        // channel and continues raw over the same TCP socket when encryption is
+        // disabled, but this client keeps doing SSL_read/SSL_write on the data
+        // path. The result is an immediate "bad record type" / record-layer
+        // failure right after auth (the server's first raw block isn't a valid
+        // TLS record), so the tunnel dies before DHCP. Until a raw data-channel
+        // mode is implemented, coerce to encrypted — we never silently downgrade
+        // security, and the transport is TLS regardless, so this is a no-op for
+        // confidentiality and simply keeps the tunnel working.
+        if (!self.config.use_encrypt) {
+            std.log.warn("use_encrypt=false is not supported (raw data channel unimplemented); forcing encryption ON to avoid a broken tunnel", .{});
+            self.config.use_encrypt = true;
         }
 
         self.should_stop = false;
@@ -718,9 +737,17 @@ pub const VpnClient = struct {
 
         if (self.config.static_ip) |static| {
             if (static.ipv4_address) |ip_str| {
-                self.assigned_ip = parseIpv4(ip_str) orelse 0;
+                // parseIpv4 returns HOST byte order, but assigned_ip/gateway_ip
+                // are stored in NETWORK byte order (big-endian) everywhere else
+                // — that's the convention the DHCP path uses and what
+                // configureFullTunnel and formatIpForLog (which reads >>24
+                // first) expect. Without the swap the octets come out reversed
+                // (10.21.0.155 -> 155.0.21.10, gw 10.21.0.1 -> 1.0.21.10),
+                // pointing the default route at a bogus gateway and breaking the
+                // host's internet.
+                self.assigned_ip = if (parseIpv4(ip_str)) |v| @byteSwap(v) else 0;
                 if (static.ipv4_gateway) |gw_str| {
-                    self.gateway_ip = parseIpv4(gw_str) orelse 0;
+                    self.gateway_ip = if (parseIpv4(gw_str)) |v| @byteSwap(v) else 0;
                 }
             }
             if (static.ipv6_address) |ip6_str| {
@@ -1859,7 +1886,10 @@ pub const VpnClient = struct {
             if (iter_us >= 100_000) diag.iter_slow_100ms += 1;
 
             if (now - diag_last_ms >= 1000) {
-                if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
+                // DIAG + per-connection RX are non-standard diagnostic logs:
+                // only emit them under --verbose. The stats reset below still
+                // runs unconditionally so timing/accumulators stay correct.
+                if (self.config.verbose and (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0)) {
                     const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;
                     const mbps_out = @as(f64, @floatFromInt(diag.bytes_out)) * 8.0 / 1_000_000.0;
                     const drain_avg: f64 = if (diag.poll_iters > 0)
@@ -1901,16 +1931,18 @@ pub const VpnClient = struct {
                 // is silent (the case we're chasing in half-connection mode).
                 // krecv>0 with no packets => server is sending, client read path
                 // broken. krecv==0 the whole run => server isn't sending on it.
-                if (self.conn_manager) |*cm| {
-                    for (cm.connections[0..cm.count]) |*slot| {
-                        if (slot.*) |*conn| {
-                            std.log.info("RX conn dir={s} primary={} estab={} krecv={d}B pending={}", .{
-                                @tagName(conn.direction),
-                                conn.is_primary,
-                                conn.established,
-                                conn.tls_socket.kernelRecvQueue(),
-                                conn.tls_socket.hasPending(),
-                            });
+                if (self.config.verbose) {
+                    if (self.conn_manager) |*cm| {
+                        for (cm.connections[0..cm.count]) |*slot| {
+                            if (slot.*) |*conn| {
+                                std.log.info("RX conn dir={s} primary={} estab={} krecv={d}B pending={}", .{
+                                    @tagName(conn.direction),
+                                    conn.is_primary,
+                                    conn.established,
+                                    conn.tls_socket.kernelRecvQueue(),
+                                    conn.tls_socket.hasPending(),
+                                });
+                            }
                         }
                     }
                 }

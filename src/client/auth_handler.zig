@@ -447,13 +447,14 @@ fn applyServerOverrides(client: *VpnClient, result: softether_proto.AuthResult) 
     client.config.use_compress = result.server_use_compress;
     client.config.use_encrypt = result.server_use_encrypt;
 
-    // If server prohibits routing, disable full-tunnel regardless of config
-    if (result.server_no_routing) {
-        if (client.config.routing.default_route) {
-            std.log.info("Server policy prohibits routing — disabling full-tunnel", .{});
-            client.config.routing.default_route = false;
-        }
-    }
+    // NOTE: policy:NoRouting must NOT disable full-tunnel. In SoftEther that
+    // policy forbids the SESSION from acting as an IPv4 router (forwarding
+    // packets for other hosts/subnets behind this client — site-to-site / LAN
+    // router use). It does not govern whether a single client points its own
+    // default route at the VPN gateway: a full-tunnel client originates its own
+    // traffic, which the server NATs upstream. Honor the user's configured
+    // default_route regardless of NoRouting. (server_no_routing is still parsed
+    // and surfaced in the "Server session params" debug line for diagnostics.)
 }
 
 /// Initialize UDP acceleration after a successful auth that the server

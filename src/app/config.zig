@@ -86,6 +86,7 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .half_connection = args.half_connection,
         .qos = args.qos,
         .udp_acceleration = args.udp_accel,
+        .verbose = args.verbose,
         .verify_certificate = !args.skip_tls_verify,
         .mtu = args.mtu,
         .routing = routing,
