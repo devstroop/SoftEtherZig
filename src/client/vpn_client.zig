@@ -1283,10 +1283,26 @@ pub const VpnClient = struct {
         std.Thread.sleep(300 * std.time.ns_per_ms);
 
         if (self.config.static_ip != null) {
-            // Static IP: skip DHCP entirely, mark as configured immediately
+            // Static IP: skip DHCP entirely, but still queue the ARP work the
+            // DHCP-ACK branch performs (loop_state.configure). Without it, no
+            // GARP is sent for the real IP, no ARP request goes out for the
+            // gateway, and the gateway MAC is never learned — so the kernel
+            // buffers outbound packets indefinitely and the tunnel appears dead
+            // (TUN_UP=0 / TUN_DOWN=0). See issue: static-IP config had no flow.
             loop_state.dhcp.state = .configured;
             is_configured = true;
-            std.log.info("Static IP configured — skipping DHCP", .{});
+            const static_ip_be = self.assigned_ip;
+            const static_gw_be = self.gateway_ip;
+            if (static_ip_be != 0 and static_gw_be != 0) {
+                loop_state.configure(static_ip_be, static_gw_be);
+                const ip = tunnel_mod.formatIpForLog(static_ip_be);
+                const gw = tunnel_mod.formatIpForLog(static_gw_be);
+                std.log.info("Static IP configured — skipping DHCP ({d}.{d}.{d}.{d} via {d}.{d}.{d}.{d})", .{
+                    ip.a, ip.b, ip.c, ip.d, gw.a, gw.b, gw.c, gw.d,
+                });
+            } else {
+                std.log.info("Static IP configured — skipping DHCP", .{});
+            }
         } else {
             // Send initial DHCP discover
             {
@@ -1383,6 +1399,23 @@ pub const VpnClient = struct {
                 }
             }
         }
+
+        // Persistent per-connection RX log state, used to suppress the
+        // per-second "RX conn dir=... primary=... estab=... krecv=..."
+        // log when nothing has changed since the last flush. Logged
+        // unconditionally, this fires N times per second where N =
+        // max_connections, ballooning the log and adding measurable CPU
+        // (kernelRecvQueue is a syscall on every call). With state-change
+        // gating, the log only fires when something actually changed.
+        const ConnRxLogState = struct {
+            dir: u8 = 255,
+            primary: bool = false,
+            estab: bool = false,
+            krecv_nonzero: bool = false,
+            pending: bool = false,
+        };
+        var conn_rx_log: [connection_manager.MAX_CONNECTIONS]ConnRxLogState = undefined;
+        for (&conn_rx_log) |*s| s.* = .{};
 
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             // Refresh TUN fd each iter so a runtime fd swap (replaceTunFd) is
@@ -1673,22 +1706,48 @@ pub const VpnClient = struct {
             // Prefer UDP if established, fall back to TCP.
             //
             // BACKPRESSURE: Sample kernel send queue depth and throttle the
-            // outbound batch size. When sendq >= 512KB, read only 1 packet
-            // per iteration instead of 64. This allows small packets (TCP
-            // ACKs for download, DNS, etc.) to flow through while limiting
-            // bulk upload data entering the kernel buffer. writeAllNonBlocking
-            // handles WouldBlock gracefully when the kernel buffer is full.
+            // outbound batch size. When sendq is high, halve the batch so the
+            // kernel has time to drain before we pile on more. We do NOT cap
+            // to a near-zero batch (1-4 packets) at any sendq level: the
+            // outbound path carries both UL data AND DL ACKs, and starving
+            // the ACKs at the 4 MB SO_SNDBUF ceiling collapses DL throughput
+            // to <10 Mbps. The kernel's SO_SNDBUF is the real backpressure
+            // — client-side we just smooth the slope.
+            //
+            // In multi-conn mode, sendq must be aggregated across every
+            // established connection — not just the primary. Otherwise 8 conns
+            // each at 1 MB queued = 8 MB of in-flight data with no throttle.
             //
             // We MUST NOT gate TUN reads entirely (as was tried with poll-level
             // gating) because in a VPN tunnel, outbound carries download ACKs
             // — blocking them causes the content server to stall, collapsing
             // download from 100+ Mbps to <1 Mbps.
+            const sendq_throttle_med: u32 = 256 * 1024; // 256 KB — gentle squeeze
             if (is_configured and tun_readable) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        const sendq: u32 = if (single_sock) |ss| @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32))) else 0;
-                        const batch_limit: usize = if (sendq >= 512 * 1024) 1 else OUTBOUND_BATCH;
-                        if (sendq >= 512 * 1024) diag.pollout_skipped += 1;
+                        var sendq: u32 = 0;
+                        if (single_sock) |ss| {
+                            sendq = @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32)));
+                        } else if (self.conn_manager) |*cm| {
+                            // Aggregate across all established connections. The
+                            // bottleneck is the slowest connection's cwnd, so
+                            // the MAX is the right aggregator — once any one
+                            // socket is bufferbloated, throttling helps that
+                            // socket's flow (and lets the others catch up).
+                            for (cm.connections[0..cm.count]) |*slot| {
+                                if (slot.*) |*conn| {
+                                    if (conn.established) {
+                                        const sq: u32 = @intCast(@min(conn.tls_socket.kernelSendQueue(), std.math.maxInt(u32)));
+                                        if (sq > sendq) sendq = sq;
+                                    }
+                                }
+                            }
+                        }
+                        const batch_limit: usize = if (sendq >= sendq_throttle_med)
+                            OUTBOUND_BATCH / 2
+                        else
+                            OUTBOUND_BATCH;
 
                         var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
@@ -1968,23 +2027,41 @@ pub const VpnClient = struct {
                     });
                 }
 
-                // Per-connection RX diagnostic (multi-conn only). Logged every
-                // second REGARDLESS of traffic — the DIAG line above is gated on
-                // bytes_in/out>0, which suppresses it exactly when a connection
-                // is silent (the case we're chasing in half-connection mode).
-                // krecv>0 with no packets => server is sending, client read path
-                // broken. krecv==0 the whole run => server isn't sending on it.
+                // Per-connection RX diagnostic (multi-conn only). Only fires
+                // on state change so a 16-conn stress test doesn't dump 16
+                // log lines/sec forever. The conditions worth flagging are:
+                //   - connection just became established (or dropped)
+                //   - krecv went 0 → non-zero (server started sending, our
+                //     read path will need to keep up)
+                //   - krecv went non-zero → 0 (the connection went silent,
+                //     common in half-connection mode and the smoking gun
+                //     for "the server is using a different direction")
+                //   - SSL pending cleared (FIFO fully drained)
                 if (self.config.verbose) {
                     if (self.conn_manager) |*cm| {
-                        for (cm.connections[0..cm.count]) |*slot| {
-                            if (slot.*) |*conn| {
-                                std.log.info("RX conn dir={s} primary={} estab={} krecv={d}B pending={}", .{
-                                    @tagName(conn.direction),
-                                    conn.is_primary,
-                                    conn.established,
-                                    conn.tls_socket.kernelRecvQueue(),
-                                    conn.tls_socket.hasPending(),
-                                });
+                        var idx: usize = 0;
+                        while (idx < cm.count) : (idx += 1) {
+                            if (cm.connections[idx]) |*conn| {
+                                const krecv: u32 = conn.tls_socket.kernelRecvQueue();
+                                const pending = conn.tls_socket.hasPending();
+                                const cur = ConnRxLogState{
+                                    .dir = @intFromEnum(conn.direction),
+                                    .primary = conn.is_primary,
+                                    .estab = conn.established,
+                                    .krecv_nonzero = krecv > 0,
+                                    .pending = pending,
+                                };
+                                if (!std.meta.eql(cur, conn_rx_log[idx])) {
+                                    std.log.info("RX conn[{d}] dir={s} primary={} estab={} krecv={d}B pending={}", .{
+                                        idx,
+                                        @tagName(conn.direction),
+                                        conn.is_primary,
+                                        conn.established,
+                                        krecv,
+                                        pending,
+                                    });
+                                    conn_rx_log[idx] = cur;
+                                }
                             }
                         }
                     }
