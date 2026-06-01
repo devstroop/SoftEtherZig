@@ -155,13 +155,6 @@ pub const ClientConfig = struct {
 
     // Authentication
     auth: AuthMethod,
-
-    // Connection options
-    // LIBSE-93: enable multi-connection by default to fix UL→DL choke.
-    // Single TCP socket carrying both directions causes server-side cwnd starvation
-    // (delayed ACKs during heavy UL bursts). 8 connections + half-connection mode
-    // splits TX and RX onto separate sockets, eliminating the choke completely.
-    // Server can override via applyServerOverrides() if it caps lower.
     max_connections: u8 = 1,
     use_compress: bool = false,
     use_encrypt: bool = true,
@@ -714,7 +707,6 @@ pub const VpnClient = struct {
         return ClientError.DnsResolutionFailed;
     }
 
-
     fn configureAdapter(self: *Self) !void {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
@@ -870,17 +862,31 @@ pub const VpnClient = struct {
             if (maybe_response) |response| {
                 if (response.msg_type == .offer and loop_state.dhcp.state == .discover_sent) {
                     std.log.info("Received DHCP Offer", .{});
-                    {const ip = tunnel_mod.formatIpForLog(response.config.ip_address); std.log.info("DHCP: Your IP {d}.{d}.{d}.{d}", .{ip.a,ip.b,ip.c,ip.d});}
-                    {const gw = tunnel_mod.formatIpForLog(response.config.gateway); std.log.info("DHCP: Router {d}.{d}.{d}.{d}", .{gw.a,gw.b,gw.c,gw.d});}
-                    {const m = tunnel_mod.formatIpForLog(response.config.subnet_mask); std.log.info("DHCP: Subnet mask {d}.{d}.{d}.{d}", .{m.a,m.b,m.c,m.d});}
-                    {const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
-                    if (response.config.dns2 != 0) {
-                        const d2 = tunnel_mod.formatIpForLog(response.config.dns2);
-                        std.log.info("DHCP: DNS {d}.{d}.{d}.{d}, {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d,d2.a,d2.b,d2.c,d2.d});
-                    } else {
-                        std.log.info("DHCP: DNS {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d});
-                    }}
-                    {const si = tunnel_mod.formatIpForLog(response.config.server_id); std.log.info("DHCP: Server ID {d}.{d}.{d}.{d}", .{si.a,si.b,si.c,si.d});}
+                    {
+                        const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
+                        std.log.info("DHCP: Your IP {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                    }
+                    {
+                        const gw = tunnel_mod.formatIpForLog(response.config.gateway);
+                        std.log.info("DHCP: Router {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
+                    }
+                    {
+                        const m = tunnel_mod.formatIpForLog(response.config.subnet_mask);
+                        std.log.info("DHCP: Subnet mask {d}.{d}.{d}.{d}", .{ m.a, m.b, m.c, m.d });
+                    }
+                    {
+                        const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
+                        if (response.config.dns2 != 0) {
+                            const d2 = tunnel_mod.formatIpForLog(response.config.dns2);
+                            std.log.info("DHCP: DNS {d}.{d}.{d}.{d}, {d}.{d}.{d}.{d}", .{ d1.a, d1.b, d1.c, d1.d, d2.a, d2.b, d2.c, d2.d });
+                        } else {
+                            std.log.info("DHCP: DNS {d}.{d}.{d}.{d}", .{ d1.a, d1.b, d1.c, d1.d });
+                        }
+                    }
+                    {
+                        const si = tunnel_mod.formatIpForLog(response.config.server_id);
+                        std.log.info("DHCP: Server ID {d}.{d}.{d}.{d}", .{ si.a, si.b, si.c, si.d });
+                    }
                     std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     var req_buf: [512]u8 = undefined;
@@ -909,10 +915,22 @@ pub const VpnClient = struct {
                     self.gateway_ip = loop_state.our_gateway;
                     self.assigned_mask = response.config.subnet_mask;
 
-                    {const m = tunnel_mod.formatIpForLog(response.config.subnet_mask); std.log.info("DHCP: Subnet mask {d}.{d}.{d}.{d}", .{m.a,m.b,m.c,m.d});}
-                    {const gw = tunnel_mod.formatIpForLog(response.config.gateway); std.log.info("DHCP: Router {d}.{d}.{d}.{d}", .{gw.a,gw.b,gw.c,gw.d});}
-                    {const d1 = tunnel_mod.formatIpForLog(response.config.dns1); std.log.info("DHCP: DNS {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d});}
-                    {const si = tunnel_mod.formatIpForLog(response.config.server_id); std.log.info("DHCP: Server ID {d}.{d}.{d}.{d}", .{si.a,si.b,si.c,si.d});}
+                    {
+                        const m = tunnel_mod.formatIpForLog(response.config.subnet_mask);
+                        std.log.info("DHCP: Subnet mask {d}.{d}.{d}.{d}", .{ m.a, m.b, m.c, m.d });
+                    }
+                    {
+                        const gw = tunnel_mod.formatIpForLog(response.config.gateway);
+                        std.log.info("DHCP: Router {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
+                    }
+                    {
+                        const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
+                        std.log.info("DHCP: DNS {d}.{d}.{d}.{d}", .{ d1.a, d1.b, d1.c, d1.d });
+                    }
+                    {
+                        const si = tunnel_mod.formatIpForLog(response.config.server_id);
+                        std.log.info("DHCP: Server ID {d}.{d}.{d}.{d}", .{ si.a, si.b, si.c, si.d });
+                    }
                     std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     if (adapter.real_adapter) |*real| {
@@ -923,15 +941,23 @@ pub const VpnClient = struct {
                         }
                     }
 
-                    {const ip = tunnel_mod.formatIpForLog(response.config.ip_address); std.log.info("IP Address {d}.{d}.{d}.{d}", .{ip.a,ip.b,ip.c,ip.d});}
-                    {const gw = tunnel_mod.formatIpForLog(response.config.gateway); std.log.info("Router {d}.{d}.{d}.{d}", .{gw.a,gw.b,gw.c,gw.d});}
-                    {const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
-                    if (response.config.dns2 != 0) {
-                        const d2 = tunnel_mod.formatIpForLog(response.config.dns2);
-                        std.log.info("DNS {d}.{d}.{d}.{d}, {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d,d2.a,d2.b,d2.c,d2.d});
-                    } else {
-                        std.log.info("DNS {d}.{d}.{d}.{d}", .{d1.a,d1.b,d1.c,d1.d});
-                    }}
+                    {
+                        const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
+                        std.log.info("IP Address {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
+                    }
+                    {
+                        const gw = tunnel_mod.formatIpForLog(response.config.gateway);
+                        std.log.info("Router {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
+                    }
+                    {
+                        const d1 = tunnel_mod.formatIpForLog(response.config.dns1);
+                        if (response.config.dns2 != 0) {
+                            const d2 = tunnel_mod.formatIpForLog(response.config.dns2);
+                            std.log.info("DNS {d}.{d}.{d}.{d}, {d}.{d}.{d}.{d}", .{ d1.a, d1.b, d1.c, d1.d, d2.a, d2.b, d2.c, d2.d });
+                        } else {
+                            std.log.info("DNS {d}.{d}.{d}.{d}", .{ d1.a, d1.b, d1.c, d1.d });
+                        }
+                    }
 
                     if (self.config.routing.default_route and loop_state.our_gateway != 0) {
                         const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
@@ -1200,8 +1226,8 @@ pub const VpnClient = struct {
             pollout_skipped: u64 = 0,
             tcp_drops_pkts: u64 = 0,
             tun_eagain: u64 = 0,
-            tx_drops_delta: u64 = 0,  // FdAdapter ring buffer drops (this second)
-            tx_drops_last: u64 = 0,   // cumulative tx_drops at last flush
+            tx_drops_delta: u64 = 0, // FdAdapter ring buffer drops (this second)
+            tx_drops_last: u64 = 0, // cumulative tx_drops at last flush
             poll_iters: u64 = 0,
             // Latency tracking (microseconds): per-iteration wall time.
             // iter_us_max captures the worst single-iter spike — useful to
@@ -1819,8 +1845,8 @@ pub const VpnClient = struct {
                             if (frame_len > 0) {
                                 const blocks = [_][]const u8{dv6_frame[0..frame_len]};
                                 send_helper.get().sendBlocks(&blocks) catch {};
-                        self.last_dhcpv6_time = now;
-                        self.ipv6_dhcp_retry_count += 1;
+                                self.last_dhcpv6_time = now;
+                                self.ipv6_dhcp_retry_count += 1;
                             }
                         }
                     }
@@ -1916,12 +1942,12 @@ pub const VpnClient = struct {
                     else
                         0.0;
                     std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p fda_drop={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
-                        mbps_in,             diag.pkts_in,         mbps_out,             diag.pkts_out,
-                        drain_avg,           diag.drain_max,       diag.drain_cap_hits,  diag.ssl_pending_max,
-                        diag.nread_max,      diag.nwrite_max,      diag.pollout_skipped, diag.tcp_drops_pkts,
-                        diag.tx_drops_delta, diag.poll_iters,      iter_avg_us,          diag.iter_us_max,
-                        diag.iter_slow_10ms, diag.iter_slow_50ms,  diag.iter_slow_100ms, diag.poll_us_max,
-                        diag.sendq_max,      sendq_avg,            diag.write_blocked,
+                        mbps_in,             diag.pkts_in,        mbps_out,             diag.pkts_out,
+                        drain_avg,           diag.drain_max,      diag.drain_cap_hits,  diag.ssl_pending_max,
+                        diag.nread_max,      diag.nwrite_max,     diag.pollout_skipped, diag.tcp_drops_pkts,
+                        diag.tx_drops_delta, diag.poll_iters,     iter_avg_us,          diag.iter_us_max,
+                        diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,
+                        diag.sendq_max,      sendq_avg,           diag.write_blocked,
                     });
                 }
 

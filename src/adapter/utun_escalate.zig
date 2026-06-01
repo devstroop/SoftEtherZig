@@ -42,7 +42,7 @@ pub const EscalatedUtun = struct {
 pub var privileged_cmd_fd: posix.fd_t = -1;
 
 /// Stable system-wide install path for the privileged helper.
-/// LIBSE-96: Once installed setuid-root here, subsequent connects spawn the
+/// Once installed setuid-root here, subsequent connects spawn the
 /// helper directly with no password prompt. The bundled helper inside the
 /// .app is copied here on first run (one-time prompt only).
 const INSTALLED_HELPER_PATH: [:0]const u8 = "/usr/local/libexec/softether-utun-helper";
@@ -80,7 +80,7 @@ fn installedHelperReady(bundled_helper: ?[]const u8) bool {
 
 /// Attempt to create a utun device via privilege escalation.
 ///
-/// LIBSE-96 fast-path: if the setuid helper is already installed at
+/// Fast-path: if the setuid helper is already installed at
 /// /usr/local/libexec/softether-utun-helper (from a previous connect), we
 /// spawn it directly — no osascript, no password prompt, ~instant.
 /// Otherwise we run a single-shot install script via osascript that copies

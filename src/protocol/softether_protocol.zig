@@ -1216,7 +1216,7 @@ pub fn uploadAuth(
     }
 
     // Extract session key.
-    // LIBSE-95: SoftEther server uses field name "SessionKey" (PascalCase) in
+    // SoftEther server uses field name "SessionKey" (PascalCase) in
     // the auth response, NOT "session_key". Older Zig client looked only for
     // lowercase, causing self.auth_session_key to remain null after redirect-
     // ticket auth → "Session established without encryption" + multi-conn
@@ -1225,7 +1225,7 @@ pub fn uploadAuth(
     var session_key: ?[Protocol.sha1_size]u8 = null;
     const sk_pascal = resp_pack.getData("SessionKey");
     const sk_snake = resp_pack.getData("session_key");
-    std.log.debug("LIBSE-95 session_key probe: SessionKey={?d}B session_key={?d}B", .{
+    std.log.debug("session_key probe: SessionKey={?d}B session_key={?d}B", .{
         if (sk_pascal) |d| d.len else null,
         if (sk_snake) |d| d.len else null,
     });
@@ -1238,14 +1238,14 @@ pub fn uploadAuth(
             var buf: [Protocol.sha1_size]u8 = undefined;
             @memcpy(&buf, key_data);
             session_key = buf;
-            std.log.debug("LIBSE-95 session_key OK ({d} bytes), opt_set={}", .{ key_data.len, session_key != null });
+            std.log.debug("session_key OK ({d} bytes), opt_set={}", .{ key_data.len, session_key != null });
         } else {
-            std.log.err("LIBSE-95 session_key wrong size: {d} (expected {d})", .{ key_data.len, Protocol.sha1_size });
+            std.log.err("session_key wrong size: {d} (expected {d})", .{ key_data.len, Protocol.sha1_size });
         }
     } else {
         // One-shot diagnostic: dump all field names so we can see what the
         // server actually sent if we still failed to find it.
-        std.log.err("LIBSE-95 NO session key field found. {d} fields in response:", .{resp_pack.elements.items.len});
+        std.log.err("NO session key field found. {d} fields in response:", .{resp_pack.elements.items.len});
         for (resp_pack.elements.items) |elem| {
             std.log.err("  field: '{s}'", .{elem.name});
         }
