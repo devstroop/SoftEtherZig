@@ -70,7 +70,15 @@ fn establishAdditionalConnections(client: *VpnClient) void {
         return;
     };
 
-    const primary_direction: TcpDirection = .bidirectional;
+    // In half-connection mode the server expects the primary (login) socket to
+    // be the client→server (upload) channel; the additional socket(s) carry
+    // server→client. The DHCP phase temporarily reopens the primary for recv
+    // via enableDhcpBidirectional(), then restoreDhcpDirections() closes it.
+    // Without half-connection the primary stays bidirectional as before.
+    const primary_direction: TcpDirection = if (client.config.half_connection)
+        .client_to_server
+    else
+        .bidirectional;
 
     _ = client.conn_manager.?.addConnection(primary_sock, primary_direction, true) catch |err| {
         std.log.err("Failed to add primary connection to manager: {}", .{err});

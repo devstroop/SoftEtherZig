@@ -254,14 +254,24 @@ pub const ConnectionManager = struct {
                 const conn_idx = self.manager.poll_conn_map[idx];
                 if (self.manager.connections[conn_idx]) |*conn| {
                     if (!conn.established) continue;
-                    // Check both kernel readability (poll POLLIN) AND OpenSSL
-                    // internal buffer (hasPending). SSL may have decrypted
-                    // application data that poll() can't see — without this
-                    // check, buffered packets are missed until the next kernel
-                    // event, throttling DL to ~1 batch per poll cycle.
+                    // A connection is readable if ANY of three sources has data:
+                    //   1. poll() flagged POLLIN (fresh kernel readability), OR
+                    //   2. OpenSSL has decrypted application data buffered that
+                    //      poll() can't see (hasPending), OR
+                    //   3. the kernel TCP recv buffer has undrained bytes
+                    //      (kernelRecvQueue) that SSL_read hasn't pulled in yet.
+                    //
+                    // (3) is essential: the data loop's skip_poll optimization
+                    // SKIPS poll() whenever any connection has kernelRecvQueue>0,
+                    // which leaves `revents` stale (0). Without checking the
+                    // kernel queue directly here, such a connection is never
+                    // selected for draining — its kernel buffer grows unbounded
+                    // and nothing is ever received (the half-connection S2C
+                    // deadlock). This mirrors the single-conn tls_readable check.
                     const poll_ready = (self.poll_fds[idx].revents & std.posix.POLL.IN) != 0;
                     const ssl_pending = conn.tls_socket.hasPending();
-                    if (!poll_ready and !ssl_pending) continue;
+                    const kernel_ready = conn.tls_socket.kernelRecvQueue() > 0;
+                    if (!poll_ready and !ssl_pending and !kernel_ready) continue;
                     return conn;
                 }
             }

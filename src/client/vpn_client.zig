@@ -1894,6 +1894,27 @@ pub const VpnClient = struct {
                         diag.sendq_max,      sendq_avg,            diag.write_blocked,
                     });
                 }
+
+                // Per-connection RX diagnostic (multi-conn only). Logged every
+                // second REGARDLESS of traffic — the DIAG line above is gated on
+                // bytes_in/out>0, which suppresses it exactly when a connection
+                // is silent (the case we're chasing in half-connection mode).
+                // krecv>0 with no packets => server is sending, client read path
+                // broken. krecv==0 the whole run => server isn't sending on it.
+                if (self.conn_manager) |*cm| {
+                    for (cm.connections[0..cm.count]) |*slot| {
+                        if (slot.*) |*conn| {
+                            std.log.info("RX conn dir={s} primary={} estab={} krecv={d}B pending={}", .{
+                                @tagName(conn.direction),
+                                conn.is_primary,
+                                conn.established,
+                                conn.tls_socket.kernelRecvQueue(),
+                                conn.tls_socket.hasPending(),
+                            });
+                        }
+                    }
+                }
+
                 diag = DiagStats{};
                 diag_last_ms = now;
             }
