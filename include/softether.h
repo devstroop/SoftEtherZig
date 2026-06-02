@@ -213,6 +213,24 @@ void softether_set_half_connection(softether_client_t client, bool enabled);
 /** Enable VoIP / QoS packet prioritization. */
 void softether_set_qos(softether_client_t client, bool enabled);
 
+/** Enable UDP acceleration (requires server-side `use_udp_acceleration`).
+ *  Out-of-range or unsupported values are ignored. */
+void softether_set_udp_acceleration(softether_client_t client, bool enabled);
+
+/** Set connection-establishment timeout in milliseconds (0 = use default). */
+void softether_set_connect_timeout(softether_client_t client, uint32_t ms);
+
+/** Set per-read timeout in milliseconds (0 = use default). */
+void softether_set_read_timeout(softether_client_t client, uint32_t ms);
+
+/** Set TCP keepalive interval in milliseconds (0 = disable). */
+void softether_set_keepalive_interval(softether_client_t client, uint32_t ms);
+
+/** Set IP version preference.
+ *  version: 0=try both, 4=IPv4 only, 6=IPv6 only.
+ *  Must be called before connect(). */
+void softether_set_ip_version(softether_client_t client, int version);
+
 /** Set tunnel file descriptor (utun fd) for packet I/O. Call after connect(). */
 void softether_set_tunnel_fd(softether_client_t client, int32_t fd);
 
