@@ -12,6 +12,8 @@ pub const DhcpState = enum {
     discover_sent,
     /// DHCP REQUEST sent, waiting for ACK
     request_sent,
+    /// DHCP INFORM sent (static IP), waiting for ACK
+    inform_sent,
     /// DHCP configuration complete
     configured,
 
@@ -22,7 +24,7 @@ pub const DhcpState = enum {
 
     /// Check if DHCP is in progress
     pub fn isInProgress(self: DhcpState) bool {
-        return self == .discover_sent or self == .request_sent;
+        return self == .discover_sent or self == .request_sent or self == .inform_sent;
     }
 };
 

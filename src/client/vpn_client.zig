@@ -762,10 +762,16 @@ pub const VpnClient = struct {
             }
         }
 
-        if (self.config.routing.default_route and self.gateway_ip != 0) {
+        // Defer routing configuration until AFTER DHCP completes, because
+        // routing set up now (with the static IP on the TUN) breaks when
+        // DHCP later reconfigures the TUN with a pool IP — the kernel's route
+        // cache invalidation during IP reassignment doesn't restore the
+        // default-route gateway resolution, leaving the route dead.
+        // The DHCP ACK handler (line 975) will call configureFullTunnel
+        // once the TUN has its final IP from the server's pool.
+        if (self.config.static_ip == null and self.config.routing.default_route and self.gateway_ip != 0) {
             if (self.server_ip) |srv| {
                 if (srv.any.family == std.posix.AF.INET) {
-                    // Convert from host byte order (LE on macOS) to network byte order
                     const server_ip_be = @byteSwap(srv.in.sa.addr);
                     ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
                 }
@@ -895,7 +901,15 @@ pub const VpnClient = struct {
                     std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     var req_buf: [512]u8 = undefined;
-                    const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid.*, response.config.ip_address, response.config.server_id, &req_buf) catch 0;
+                    // Request the offered IP — do NOT override with a static IP
+                    // via option 50. The server's DHCP server OFFERs an
+                    // available IP; if we ask for a different one the server
+                    // will NAK, breaking DHCP (no ACK ever arrives). This is
+                    // required because the server's DHCPForce=1 policy
+                    // discards packets from un-leased IPs — the DHCP ACK is
+                    // what sets DhcpAllocated=1 on the server side.
+                    const requested_ip = response.config.ip_address;
+                    const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid.*, requested_ip, response.config.server_id, &req_buf) catch 0;
                     if (req_size > 0) {
                         const blocks = [_][]const u8{req_buf[0..req_size]};
                         send_helper.get().sendBlocks(&blocks) catch {};
@@ -987,6 +1001,8 @@ pub const VpnClient = struct {
                             .gateway = response.config.gateway,
                         } }, self.event_user_data);
                     }
+                } else if (response.msg_type == .ack and loop_state.dhcp.state == .inform_sent) {
+                    std.log.debug("DHCP INFORM ACK received (gateway learned static IP via ciaddr)", .{});
                 }
             }
         }
@@ -1279,44 +1295,42 @@ pub const VpnClient = struct {
             }
         }
 
-        // Wait 300ms then send DHCP discover
+        // Wait 300ms then send DHCP discover/inform
         std.Thread.sleep(300 * std.time.ns_per_ms);
 
-        if (self.config.static_ip != null) {
-            // Static IP: skip DHCP entirely, but still queue the ARP work the
-            // DHCP-ACK branch performs (loop_state.configure). Without it, no
-            // GARP is sent for the real IP, no ARP request goes out for the
-            // gateway, and the gateway MAC is never learned — so the kernel
-            // buffers outbound packets indefinitely and the tunnel appears dead
-            // (TUN_UP=0 / TUN_DOWN=0). See issue: static-IP config had no flow.
-            loop_state.dhcp.state = .configured;
-            is_configured = true;
-            const static_ip_be = self.assigned_ip;
-            const static_gw_be = self.gateway_ip;
-            if (static_ip_be != 0 and static_gw_be != 0) {
-                loop_state.configure(static_ip_be, static_gw_be);
-                const ip = tunnel_mod.formatIpForLog(static_ip_be);
-                const gw = tunnel_mod.formatIpForLog(static_gw_be);
-                std.log.info("Static IP configured — skipping DHCP ({d}.{d}.{d}.{d} via {d}.{d}.{d}.{d})", .{
-                    ip.a, ip.b, ip.c, ip.d, gw.a, gw.b, gw.c, gw.d,
-                });
-            } else {
-                std.log.info("Static IP configured — skipping DHCP", .{});
+        var dhcp_buf_arr: [512]u8 = undefined;
+
+        if (self.config.static_ip) |sip| {
+            // Static IP: send DHCP INFORM so gateway learns our IP via ciaddr,
+            // then DISCOVER to get a pool IP with DhcpAllocated=1 from the ACK.
+            // The pool IP satisfies DHCPForce; gateway knows our static IP from
+            // the INFORM's ciaddr field.
+            const static_ip_be: u32 = if (sip.ipv4_address) |s|
+                if (parseIpv4(s)) |v| @byteSwap(v) else 0
+            else
+                0;
+            const dhcp_inform_size = adapter_mod.buildDhcpInform(mac, dhcp_xid, static_ip_be, &dhcp_buf_arr) catch 0;
+            if (dhcp_inform_size > 0) {
+                const blocks = [_][]const u8{dhcp_buf_arr[0..dhcp_inform_size]};
+                send_helper.get().sendBlocks(&blocks) catch {};
+                std.log.debug("Sent DHCP INFORM (xid=0x{x:0>8}) for static IP", .{dhcp_xid});
             }
-        } else {
-            // Send initial DHCP discover
-            {
-                var dhcp_buf: [512]u8 = undefined;
-                const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
-                if (dhcp_size > 0) {
-                    const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                    if (send_helper.get().sendBlocks(&blocks)) |_| {
-                        loop_state.dhcp.state = .discover_sent;
-                        loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
-                        std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
-                    } else |err| {
-                        std.log.err("Failed to send DHCP discover: {}", .{err});
-                    }
+            // Brief pause so INFORM is sent before DISCOVER
+            // (ensures proper ordering even on fast connections).
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+        }
+
+        // Always send DISCOVER for DhcpAllocated registration
+        {
+            const dhcp_disc_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf_arr) catch 0;
+            if (dhcp_disc_size > 0) {
+                const blocks = [_][]const u8{dhcp_buf_arr[0..dhcp_disc_size]};
+                if (send_helper.get().sendBlocks(&blocks)) |_| {
+                    loop_state.dhcp.state = .discover_sent;
+                    loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
+                    std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
+                } else |err| {
+                    std.log.err("Failed to send DHCP discover: {}", .{err});
                 }
             }
         }
@@ -1530,6 +1544,7 @@ pub const VpnClient = struct {
 
             const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[poll_tun_idx].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[poll_udp_idx].revents & std.posix.POLL.IN) != 0;
+            if (skip_poll) diag.pollout_skipped += 1;
 
             // Decay pending bytes for load balancing (multi-connection)
             if (self.conn_manager) |*cm| cm.decayPendingBytes();
@@ -1722,29 +1737,44 @@ pub const VpnClient = struct {
             // gating) because in a VPN tunnel, outbound carries download ACKs
             // — blocking them causes the content server to stall, collapsing
             // download from 100+ Mbps to <1 Mbps.
-            const sendq_throttle_med: u32 = 256 * 1024; // 256 KB — gentle squeeze
-            if (is_configured and tun_readable) {
+            //
+            // FIX: also try outbound when skip_poll = true. When TLS has
+            // pending data the poll_fds are rebuilt with revents=0 and poll()
+            // is skipped, so tun_readable is always false. Without this, the
+            // outbound path (ACKs, new upload conns) is completely starved
+            // during any continuous download burst. The TUN fd is non-blocking
+            // so a read with no data returns WouldBlock instantly.
+            const sendq_throttle_med: u32 = 256 * 1024;  // 256 KB — halve batch
+            const sendq_throttle_high: u32 = 512 * 1024; // 512 KB — minimum batch (single-conn only)
+            if (is_configured and (tun_readable or skip_poll)) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
                         var sendq: u32 = 0;
+                        const is_multi = self.conn_manager != null;
                         if (single_sock) |ss| {
                             sendq = @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32)));
                         } else if (self.conn_manager) |*cm| {
-                            // Aggregate across all established connections. The
-                            // bottleneck is the slowest connection's cwnd, so
-                            // the MAX is the right aggregator — once any one
-                            // socket is bufferbloated, throttling helps that
-                            // socket's flow (and lets the others catch up).
+                            // In multi-conn mode there's no head-of-line blocking
+                            // across connections — if one is slow, others can drain.
+                            // Use AVG to avoid throttling ALL connections because
+                            // ONE connection's buffer is full. Single-conn uses MAX
+                            // (the only connection IS the bottleneck).
+                            var sq_sum: u64 = 0;
+                            var sq_count: u32 = 0;
                             for (cm.connections[0..cm.count]) |*slot| {
                                 if (slot.*) |*conn| {
                                     if (conn.established) {
                                         const sq: u32 = @intCast(@min(conn.tls_socket.kernelSendQueue(), std.math.maxInt(u32)));
-                                        if (sq > sendq) sendq = sq;
+                                        sq_sum += sq;
+                                        sq_count += 1;
                                     }
                                 }
                             }
+                            if (sq_count > 0) sendq = @intCast(@min(sq_sum / sq_count, std.math.maxInt(u32)));
                         }
-                        const batch_limit: usize = if (sendq >= sendq_throttle_med)
+                        const batch_limit: usize = if (!is_multi and sendq >= sendq_throttle_high)
+                            @min(OUTBOUND_BATCH, 4)
+                        else if (sendq >= sendq_throttle_med)
                             OUTBOUND_BATCH / 2
                         else
                             OUTBOUND_BATCH;
@@ -1898,13 +1928,29 @@ pub const VpnClient = struct {
                         loop_state.dhcp_retry_count += 1;
                         std.log.info("DHCP REQUEST retry #{d}", .{loop_state.dhcp_retry_count});
                     }
+                } else if (loop_state.dhcp.state == .inform_sent) {
+                    if (self.config.static_ip) |sip| {
+                        const static_ip_be: u32 = if (sip.ipv4_address) |s|
+                            if (parseIpv4(s)) |v| @byteSwap(v) else 0
+                        else
+                            0;
+                        var inform_buf: [512]u8 = undefined;
+                        const inform_size = adapter_mod.buildDhcpInform(mac, dhcp_xid, static_ip_be, &inform_buf) catch 0;
+                        if (inform_size > 0) {
+                            const blocks = [_][]const u8{inform_buf[0..inform_size]};
+                            send_helper.get().sendBlocks(&blocks) catch {};
+                            loop_state.timing.last_dhcp_time = now;
+                            loop_state.dhcp_retry_count += 1;
+                            std.log.info("DHCP INFORM retry #{d}", .{loop_state.dhcp_retry_count});
+                        }
+                    }
                 }
             }
 
-            // DHCPv4: give up after max retries with no OFFER
-            if (loop_state.dhcp_retry_count >= 5 and loop_state.dhcp.state == .discover_sent) {
+            // DHCPv4: give up after max retries with no response
+            if (loop_state.dhcp_retry_count >= 5 and (loop_state.dhcp.state == .discover_sent or loop_state.dhcp.state == .inform_sent)) {
                 if (loop_state.timing.last_dhcp_warn == 0 or now - loop_state.timing.last_dhcp_warn >= 5000) {
-                    std.log.warn("DHCP: no OFFER after {d} retries — server does not respond", .{loop_state.dhcp_retry_count});
+                    std.log.warn("DHCP: no response after {d} retries — server does not respond", .{loop_state.dhcp_retry_count});
                     loop_state.timing.last_dhcp_warn = now;
                 }
             }
@@ -2025,6 +2071,13 @@ pub const VpnClient = struct {
                         diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,
                         diag.sendq_max,      sendq_avg,           diag.write_blocked,
                     });
+                    // Routing diagnostic: when download works but upload is stuck,
+                    // log the default route and TUN interface state.
+                    if (mbps_in > 1.0 and mbps_out < 0.5) {
+                        if (adapter.getName()) |ifname| {
+                            self.logRoutingDiag(ifname);
+                        }
+                    }
                 }
 
                 // Per-connection RX diagnostic (multi-conn only). Only fires
@@ -2073,6 +2126,64 @@ pub const VpnClient = struct {
         }
 
         std.log.info("Data channel loop ended", .{});
+    }
+
+    fn logRoutingDiag(self: *Self, ifname: []const u8) void {
+        var cmd_buf: [1024]u8 = undefined;
+
+        const cmd = std.fmt.bufPrint(&cmd_buf,
+            "netstat -rn -f inet 2>/dev/null | grep '^default' | head -5"
+        , .{}) catch unreachable;
+
+        var child = std.process.Child.init(
+            &[_][]const u8{ "/bin/sh", "-c", cmd },
+            self.allocator,
+        );
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Close;
+        child.spawn() catch |err| {
+            std.log.warn("[ROUTE-ROGUE] spawn failed: {}", .{err});
+            return;
+        };
+        var out_buf: [1024]u8 = undefined;
+        const bytes = child.stdout.?.read(&out_buf) catch |err| {
+            std.log.warn("[ROUTE-ROGUE] read failed: {}", .{err});
+            _ = child.wait() catch {};
+            return;
+        };
+        _ = child.wait() catch {};
+
+        const trimmed = std.mem.trim(u8, out_buf[0..bytes], " \n\r\t");
+        if (trimmed.len > 0) {
+            std.log.warn("[ROUTE-ROGUE] Default routes:\n{s}", .{trimmed});
+        } else {
+            std.log.warn("[ROUTE-ROGUE] NO default route found!", .{});
+        }
+
+        const ifcmd = std.fmt.bufPrint(&cmd_buf,
+            "ifconfig {s} 2>/dev/null | head -3", .{ifname}
+        ) catch unreachable;
+
+        var ifchild = std.process.Child.init(
+            &[_][]const u8{ "/bin/sh", "-c", ifcmd },
+            self.allocator,
+        );
+        ifchild.stdout_behavior = .Pipe;
+        ifchild.stderr_behavior = .Close;
+        ifchild.spawn() catch |err| {
+            std.log.warn("[ROUTE-ROGUE] ifconfig spawn failed: {}", .{err});
+            return;
+        };
+        var ifout: [1024]u8 = undefined;
+        const ifbytes = ifchild.stdout.?.read(&ifout) catch |err| {
+            std.log.warn("[ROUTE-ROGUE] ifconfig read failed: {}", .{err});
+            _ = ifchild.wait() catch {};
+            return;
+        };
+        _ = ifchild.wait() catch {};
+
+        const iftrimmed = std.mem.trim(u8, ifout[0..ifbytes], " \n\r\t");
+        std.log.warn("[ROUTE-ROGUE] TUN iface:\n{s}", .{iftrimmed});
     }
 };
 

@@ -78,6 +78,7 @@ pub const buildRouterSolicitation = utun.buildRouterSolicitation;
 pub const buildNeighborAdvertisement = utun.buildNeighborAdvertisement;
 pub const buildDhcpDiscover = dhcp.buildDhcpDiscover;
 pub const buildDhcpRequest = dhcp.buildDhcpRequest;
+pub const buildDhcpInform = dhcp.buildDhcpInform;
 pub const parseDhcpResponse = dhcp.parseDhcpResponse;
 pub const parseArpRequest = dhcp.parseArpRequest;
 pub const parseArpReply = dhcp.parseArpReply;

@@ -217,6 +217,162 @@ pub fn buildDhcpDiscover(
     return pos;
 }
 
+/// Build DHCP INFORM packet (for static IP — acquires config params from server
+/// without changing the IP, while satisfying DHCPForce server policy).
+pub fn buildDhcpInform(
+    mac: [6]u8,
+    xid: u32,
+    current_ip: u32,
+    buffer: []u8,
+) !usize {
+    if (buffer.len < 300) return error.BufferTooSmall;
+
+    var pos: usize = 0;
+
+    // === Ethernet Header (14 bytes) ===
+    @memset(buffer[pos..][0..6], 0xFF);
+    pos += 6;
+    @memcpy(buffer[pos..][0..6], &mac);
+    pos += 6;
+    buffer[pos] = 0x08;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+
+    const ip_header_start = pos;
+
+    // === IPv4 Header (20 bytes) ===
+    buffer[pos] = 0x45;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+
+    const ip_len_pos = pos;
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+
+    @memset(buffer[pos..][0..4], 0);
+    pos += 4;
+
+    buffer[pos] = 64; // TTL
+    buffer[pos + 1] = 17; // UDP
+    pos += 2;
+
+    const ip_checksum_pos = pos;
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+
+    // Source IP: our static IP
+    buffer[pos] = @intCast((current_ip >> 24) & 0xFF);
+    buffer[pos + 1] = @intCast((current_ip >> 16) & 0xFF);
+    buffer[pos + 2] = @intCast((current_ip >> 8) & 0xFF);
+    buffer[pos + 3] = @intCast(current_ip & 0xFF);
+    pos += 4;
+
+    // Dest IP: 255.255.255.255
+    @memset(buffer[pos..][0..4], 0xFF);
+    pos += 4;
+
+    const udp_header_start = pos;
+
+    // === UDP Header (8 bytes) ===
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = DHCP_CLIENT_PORT;
+    pos += 2;
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = DHCP_SERVER_PORT;
+    pos += 2;
+
+    const udp_len_pos = pos;
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = 0x00;
+    pos += 2;
+
+    // === DHCP Packet ===
+    buffer[pos] = 0x01; // op: BOOTREQUEST
+    buffer[pos + 1] = 0x01; // htype: Ethernet
+    buffer[pos + 2] = 0x06; // hlen: 6
+    buffer[pos + 3] = 0x00; // hops: 0
+    pos += 4;
+
+    // Transaction ID
+    buffer[pos] = @intCast((xid >> 24) & 0xFF);
+    buffer[pos + 1] = @intCast((xid >> 16) & 0xFF);
+    buffer[pos + 2] = @intCast((xid >> 8) & 0xFF);
+    buffer[pos + 3] = @intCast(xid & 0xFF);
+    pos += 4;
+
+    // secs: 0, flags: broadcast (0x8000)
+    buffer[pos] = 0x00;
+    buffer[pos + 1] = 0x00;
+    buffer[pos + 2] = 0x80;
+    buffer[pos + 3] = 0x00;
+    pos += 4;
+
+    // ciaddr: our static IP (current_ip is in network byte order)
+    buffer[pos] = @intCast((current_ip >> 24) & 0xFF);
+    buffer[pos + 1] = @intCast((current_ip >> 16) & 0xFF);
+    buffer[pos + 2] = @intCast((current_ip >> 8) & 0xFF);
+    buffer[pos + 3] = @intCast(current_ip & 0xFF);
+    // yiaddr, siaddr, giaddr: zeros
+    @memset(buffer[pos + 4 ..][0..12], 0);
+    pos += 16;
+
+    // chaddr
+    @memcpy(buffer[pos..][0..6], &mac);
+    @memset(buffer[pos + 6 ..][0..10], 0);
+    pos += 16;
+
+    // sname, file
+    @memset(buffer[pos..][0..192], 0);
+    pos += 192;
+
+    // DHCP magic cookie
+    buffer[pos] = 0x63;
+    buffer[pos + 1] = 0x82;
+    buffer[pos + 2] = 0x53;
+    buffer[pos + 3] = 0x63;
+    pos += 4;
+
+    // === DHCP Options ===
+    // Option 53: Message Type = INFORM
+    buffer[pos] = @intFromEnum(DhcpOption.message_type);
+    buffer[pos + 1] = 1;
+    buffer[pos + 2] = @intFromEnum(DhcpMessageType.inform);
+    pos += 3;
+
+    // Option 55: Parameter Request List
+    buffer[pos] = @intFromEnum(DhcpOption.parameter_request);
+    buffer[pos + 1] = 4;
+    buffer[pos + 2] = @intFromEnum(DhcpOption.subnet_mask);
+    buffer[pos + 3] = @intFromEnum(DhcpOption.router);
+    buffer[pos + 4] = @intFromEnum(DhcpOption.dns_server);
+    buffer[pos + 5] = @intFromEnum(DhcpOption.domain_name);
+    pos += 6;
+
+    // Option 255: End
+    buffer[pos] = @intFromEnum(DhcpOption.end_option);
+    pos += 1;
+
+    // Update lengths
+    const ip_total_len: u16 = @intCast(pos - ip_header_start);
+    buffer[ip_len_pos] = @intCast((ip_total_len >> 8) & 0xFF);
+    buffer[ip_len_pos + 1] = @intCast(ip_total_len & 0xFF);
+
+    const udp_len: u16 = @intCast(pos - udp_header_start);
+    buffer[udp_len_pos] = @intCast((udp_len >> 8) & 0xFF);
+    buffer[udp_len_pos + 1] = @intCast(udp_len & 0xFF);
+
+    const checksum = computeIpChecksum(buffer[ip_header_start..][0..20]);
+    buffer[ip_checksum_pos] = @intCast((checksum >> 8) & 0xFF);
+    buffer[ip_checksum_pos + 1] = @intCast(checksum & 0xFF);
+
+    return pos;
+}
+
 /// Build DHCP REQUEST packet
 pub fn buildDhcpRequest(
     mac: [6]u8,
