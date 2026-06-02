@@ -938,7 +938,7 @@ export fn softether_drain_logs(
         written += 1;
     }
 
-    bytes_used.* = @intCast(offset);
+    bytes_used[0] = @intCast(offset);
     return @intCast(written);
 }
 
