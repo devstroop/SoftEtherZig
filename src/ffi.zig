@@ -49,6 +49,52 @@ export fn softether_set_log_callback(cb: ?ExternalLogFn) void {
     external_log_fn = cb;
 }
 
+// ============================================================================
+// FFI log drain (Flutter / GUI hosts that can't read stderr synchronously)
+// ============================================================================
+//
+// `libsoftetherLogFn` is the single funnel for every `std.log.*` call in the
+// library, but on most GUI hosts (Flutter mobile, macOS .app bundle, iOS
+// NetworkExtension) the existing sinks (external callback, __android_log_print,
+// stderr) are either inaccessible or fire on a thread that can't safely touch
+// the Dart isolate. To let those hosts render native log output in their own
+// in-app log buffer, we additionally capture every line into a thread-safe
+// ring buffer. Hosts drain it via the three exports below on whatever cadence
+// suits their UI (Flutter polls every 200ms).
+//
+// The buffer holds FFI-owned copies of the message text; `softether_drain_logs`
+// copies each entry into a caller-supplied text buffer and frees the original
+// after the copy, so the host never has to call back to free anything and the
+// buffer never grows unbounded.
+
+const LogLine = struct {
+    level: u8, // 0=err, 1=warn, 2=info, 3=debug
+    text: []const u8, // FFI-owned UTF-8, no embedded NULs
+};
+
+var log_buffer: std.ArrayListUnmanaged(LogLine) = .empty;
+var log_buffer_mutex: std.Thread.Mutex = .{};
+
+/// Hard cap to prevent unbounded growth if the host never drains (e.g. a GUI
+/// that's been backgrounded). When the cap is hit, the oldest entry is
+/// dropped — recent activity is more useful than the start of a long trace.
+const log_buffer_cap: usize = 4096;
+
+fn captureLog(lvl: u8, text: []const u8) void {
+    if (text.len == 0) return;
+    const owned = ffi_allocator.dupe(u8, text) catch return;
+    log_buffer_mutex.lock();
+    defer log_buffer_mutex.unlock();
+    log_buffer.append(ffi_allocator, .{ .level = lvl, .text = owned }) catch {
+        ffi_allocator.free(owned);
+        return;
+    };
+    while (log_buffer.items.len > log_buffer_cap) {
+        const oldest = log_buffer.orderedRemove(0);
+        ffi_allocator.free(oldest.text);
+    }
+}
+
 fn libsoftetherLogFn(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -63,6 +109,12 @@ fn libsoftetherLogFn(
         .info => "INFO ",
         .debug => "DBG ",
     };
+    const lvl: u8 = switch (level) {
+        .err => 0,
+        .warn => 1,
+        .info => 2,
+        .debug => 3,
+    };
 
     // External callback first (host-controlled, e.g. iOS os_log direct).
     if (external_log_fn) |cb| {
@@ -70,13 +122,8 @@ fn libsoftetherLogFn(
             buf[buf.len - 1] = 0;
             break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
         };
-        const lvl: c_int = switch (level) {
-            .err => 0,
-            .warn => 1,
-            .info => 2,
-            .debug => 3,
-        };
-        cb(lvl, text.ptr);
+        cb(@intCast(lvl), text.ptr);
+        captureLog(lvl, text);
         return;
     }
 
@@ -92,6 +139,7 @@ fn libsoftetherLogFn(
             .debug => android_log.PRIO_DEBUG,
         };
         _ = android_log.__android_log_write(prio, "libsoftether", text.ptr);
+        captureLog(lvl, text);
         return;
     }
 
@@ -100,10 +148,26 @@ fn libsoftetherLogFn(
             break :blk buf[0 .. buf.len - 1];
         };
         iosWriteStderr(text);
+        // Strip the trailing newline before capturing — the host UI adds its own.
+        const text_no_nl = if (text.len > 0 and text[text.len - 1] == '\n')
+            text[0 .. text.len - 1]
+        else
+            text;
+        captureLog(lvl, text_no_nl);
         return;
     }
 
     std.log.defaultLog(level, scope, fmt, args);
+    // The default sink already wrote a fully-prefixed line to stderr; mirror
+    // that into the FFI buffer so the host can render it byte-for-byte.
+    const text = std.fmt.bufPrint(&buf, level_prefix ++ scope_prefix ++ fmt ++ "\n", args) catch blk: {
+        break :blk buf[0 .. buf.len - 1];
+    };
+    const text_no_nl = if (text.len > 0 and text[text.len - 1] == '\n')
+        text[0 .. text.len - 1]
+    else
+        text;
+    captureLog(lvl, text_no_nl);
 }
 
 pub const std_options: std.Options = .{
@@ -801,6 +865,92 @@ export fn softether_set_event_callback(
 /// Get library version string. Returns pointer to static string.
 export fn softether_version() [*:0]const u8 {
     return lib.version;
+}
+
+// ============================================================================
+// FFI Log Drain
+// ============================================================================
+//
+// Hosts that can't read the platform-native log sinks (stderr on a desktop
+// .app, __android_log_print on Android, the iOS NE pipe) poll this drain to
+// mirror native log output into their own UI. See the LogLine comment block
+// at the top of this file for the capture path and lifetime rules.
+
+/// One captured log line. `text_off`/`text_len` index into the caller's text
+/// buffer (see softether_drain_logs). Level matches the C enum below:
+/// 0=err, 1=warn, 2=info, 3=debug.
+pub const CLogEntry = extern struct {
+    level: u8,
+    _pad0: [3]u8 = .{ 0, 0, 0 },
+    text_off: u32,
+    text_len: u32,
+};
+
+/// Number of log entries currently buffered. Polled by the host to size the
+/// next drain call.
+export fn softether_drain_log_count() c_int {
+    log_buffer_mutex.lock();
+    defer log_buffer_mutex.unlock();
+    return @intCast(log_buffer.items.len);
+}
+
+/// Copy up to `max_entries` pending log entries into `out_entries` and their
+/// concatenated UTF-8 text into `out_text` (no NUL terminators; lengths come
+/// from each entry's `text_len`). Returns the number of entries actually
+/// written. `bytes_used` receives the number of bytes written to `out_text`.
+/// Entries that don't fit in `out_text` are still counted out of the buffer
+/// and dropped — the host should size `out_text` to comfortably exceed the
+/// expected message size (64 KiB is a reasonable default).
+export fn softether_drain_logs(
+    out_entries: [*]CLogEntry,
+    max_entries: c_int,
+    out_text: [*]u8,
+    out_text_size: c_int,
+    bytes_used: [*]c_int,
+) c_int {
+    log_buffer_mutex.lock();
+    defer log_buffer_mutex.unlock();
+
+    var written: usize = 0;
+    var offset: u32 = 0;
+    const cap = @as(usize, @intCast(@max(max_entries, 0)));
+    const text_cap = @as(usize, @intCast(@max(out_text_size, 0)));
+
+    while (written < cap and log_buffer.items.len > 0) {
+        const line = log_buffer.orderedRemove(0);
+        const fits = offset + @as(u32, @intCast(line.text.len)) <= text_cap;
+        if (!fits) {
+            // Out of text space — push the line back and stop so the host
+            // can grow the buffer on the next tick.
+            log_buffer.insert(ffi_allocator, 0, line) catch {
+                ffi_allocator.free(line.text);
+            };
+            break;
+        }
+        @memcpy(out_text[offset..][0..line.text.len], line.text);
+        out_entries[written] = .{
+            .level = line.level,
+            .text_off = offset,
+            .text_len = @intCast(line.text.len),
+        };
+        offset += @intCast(line.text.len);
+        ffi_allocator.free(line.text);
+        written += 1;
+    }
+
+    bytes_used.* = @intCast(offset);
+    return @intCast(written);
+}
+
+/// Drop every pending log entry without copying. Used when a host resets
+/// state and wants a clean slate.
+export fn softether_clear_logs() void {
+    log_buffer_mutex.lock();
+    defer log_buffer_mutex.unlock();
+    for (log_buffer.items) |line| {
+        ffi_allocator.free(line.text);
+    }
+    log_buffer.clearRetainingCapacity();
 }
 
 // ============================================================================

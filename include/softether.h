@@ -323,8 +323,55 @@ void softether_set_tcp_dial_callback(softether_tcp_dial_callback_t cb);
 /* Version                                                                    */
 /* ========================================================================== */
 
-/** Get library version string. Returns pointer to static string. */
+/**
+ * Get library version string. Returns pointer to static string.
+ */
 const char* softether_version(void);
+
+/* ========================================================================== */
+/* FFI Log Drain                                                              */
+/* ========================================================================== */
+
+/**
+ * One captured log entry. `text_off`/`text_len` index into the caller-supplied
+ * text buffer passed to softether_drain_logs().
+ *
+ * level: 0=err, 1=warn, 2=info, 3=debug
+ */
+typedef struct {
+    uint8_t  level;
+    uint8_t  _padding[3];
+    uint32_t text_off;
+    uint32_t text_len;
+} softether_log_entry_t;
+
+/**
+ * Return the number of log entries currently buffered (pending drain).
+ * Polled by the host to size the next drain call.
+ */
+int softether_drain_log_count(void);
+
+/**
+ * Copy up to `max_entries` pending log entries into `out_entries` and their
+ * UTF-8 text into `out_text` (no NUL terminators; lengths come from each
+ * entry's `text_len` field). Returns the number of entries actually written.
+ * `bytes_used` receives the number of bytes written to `out_text`. Drained
+ * entries are removed from the internal buffer and freed. Entries that
+ * don't fit in `out_text` are pushed back and the call returns early so the
+ * host can grow its buffer next tick.
+ */
+int softether_drain_logs(
+    softether_log_entry_t* out_entries,
+    int max_entries,
+    char* out_text,
+    int out_text_size,
+    int* bytes_used
+);
+
+/**
+ * Drop every pending log entry without copying. Use when resetting state.
+ */
+void softether_clear_logs(void);
 
 #ifdef __cplusplus
 }
