@@ -139,7 +139,11 @@ pub fn build(b: *std.Build) void {
         "deps/zlib/uncompr.c",
         "deps/zlib/zutil.c",
     };
-    const zlib_c_flags = [_][]const u8{"-std=c99"};
+    // Disable ubsan (Undefined Behavior Sanitizer) for zlib C sources.
+    // Zig 0.15.2's bundled Clang implicitly enables ubsan for C compilation,
+    // which inserts references to ___ubsan_handle_* symbols. The Xcode 26.5
+    // arm64 linker rejects unresolved ubsan handlers at archive link time.
+    const zlib_c_flags = [_][]const u8{"-std=c99", "-fno-sanitize=undefined"};
 
     // Helper to add bundled zlib to a compile step
     const addZlib = struct {
