@@ -76,10 +76,10 @@ pub const RoutingConfig = struct {
     default_route: ?bool = null,
     accept_pushed_routes: ?bool = null,
     enable_custom_routes: ?bool = null,
-    ipv4_include: ?[]const []const u8 = null,
-    ipv4_exclude: ?[]const []const u8 = null,
-    ipv6_include: ?[]const []const u8 = null,
-    ipv6_exclude: ?[]const []const u8 = null,
+    ipv4_include: ?[]const u8 = null,
+    ipv4_exclude: ?[]const u8 = null,
+    ipv6_include: ?[]const u8 = null,
+    ipv6_exclude: ?[]const u8 = null,
 };
 
 // ============================================================================

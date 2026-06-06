@@ -164,6 +164,43 @@ pub const AdapterWrapper = struct {
         }
     }
 
+    /// Configure split-tunnel VPN routing (only specified networks through VPN).
+    /// `routes_str` is a newline-separated list of CIDR notations.
+    pub fn configureSplitTunnel(self: *Self, gateway: u32, routes_str: []const u8) void {
+        self.gateway_ip = gateway;
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
+            std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
+            return;
+        }
+        if (builtin.os.tag == .ios or builtin.os.tag == .tvos or builtin.os.tag == .watchos) {
+            std.log.info("Routing managed by NEPacketTunnelProvider; skipping native route setup", .{});
+            return;
+        }
+        if (self.real_adapter) |*adapter| {
+            adapter.configureSplitTunnel(gateway, routes_str) catch |err| {
+                std.log.err("Failed to configure split-tunnel routing: {}", .{err});
+            };
+        }
+    }
+
+    /// Add custom IPv6 split-tunnel routes through a gateway.
+    /// `routes_str` is a newline-separated list of IPv6 CIDR notations.
+    pub fn addIpv6Routes(self: *Self, gateway: []const u8, routes_str: []const u8) void {
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
+            return;
+        }
+        if (builtin.os.tag == .ios or builtin.os.tag == .tvos or builtin.os.tag == .watchos) {
+            return;
+        }
+        if (self.real_adapter) |*adapter| {
+            adapter.addIpv6Routes(gateway, routes_str) catch |err| {
+                std.log.err("Failed to add custom IPv6 routes: {}", .{err});
+            };
+        }
+    }
+
     /// Process incoming packet from VPN
     pub fn processIncomingPacket(self: *Self, data: []const u8) ?[]u8 {
         if (self.real_adapter) |*adapter| {

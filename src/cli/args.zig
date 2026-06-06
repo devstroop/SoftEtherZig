@@ -61,10 +61,10 @@ pub const CliArgs = struct {
     default_route: bool = true,
     accept_pushed_routes: bool = true,
     enable_custom_routes: bool = false,
-    ipv4_include: ?[]const []const u8 = null,
-    ipv4_exclude: ?[]const []const u8 = null,
-    ipv6_include: ?[]const []const u8 = null,
-    ipv6_exclude: ?[]const []const u8 = null,
+    ipv4_include: ?[]const u8 = null,
+    ipv4_exclude: ?[]const u8 = null,
+    ipv6_include: ?[]const u8 = null,
+    ipv6_exclude: ?[]const u8 = null,
 
     // Runtime options
     daemon: bool = false,
@@ -262,16 +262,16 @@ pub const ArgParser = struct {
                 self.args.static_ipv6_gateway = try self.requireValue(argv, i, "--static-ipv6-gateway");
             } else if (std.mem.eql(u8, arg, "--ipv4-include")) {
                 i += 1;
-                self.args.ipv4_include = &.{try self.requireValue(argv, i, "--ipv4-include")};
+                self.args.ipv4_include = try self.requireValue(argv, i, "--ipv4-include");
             } else if (std.mem.eql(u8, arg, "--ipv4-exclude")) {
                 i += 1;
-                self.args.ipv4_exclude = &.{try self.requireValue(argv, i, "--ipv4-exclude")};
+                self.args.ipv4_exclude = try self.requireValue(argv, i, "--ipv4-exclude");
             } else if (std.mem.eql(u8, arg, "--ipv6-include")) {
                 i += 1;
-                self.args.ipv6_include = &.{try self.requireValue(argv, i, "--ipv6-include")};
+                self.args.ipv6_include = try self.requireValue(argv, i, "--ipv6-include");
             } else if (std.mem.eql(u8, arg, "--ipv6-exclude")) {
                 i += 1;
-                self.args.ipv6_exclude = &.{try self.requireValue(argv, i, "--ipv6-exclude")};
+                self.args.ipv6_exclude = try self.requireValue(argv, i, "--ipv6-exclude");
             } else if (std.mem.eql(u8, arg, "--dns-server")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--dns-server");

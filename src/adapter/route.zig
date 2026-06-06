@@ -244,16 +244,37 @@ pub const RouteManager = struct {
         }
     }
 
-    /// Configure split-tunnel VPN routing (only specified networks through VPN)
+    /// Configure split-tunnel VPN routing (only specified networks through VPN).
+    /// `routes_str` is a newline-separated list of CIDR notations.
     pub fn configureSplitTunnel(
         self: *RouteManager,
         vpn_gateway: u32,
-        networks: []const NetworkCidr,
+        routes_str: []const u8,
     ) !void {
-        for (networks) |net| {
+        var cidrs: std.ArrayList(NetworkCidr) = .{};
+        defer cidrs.deinit(self.allocator);
+
+        var iter = std.mem.splitScalar(u8, routes_str, '\n');
+        while (iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \r\t");
+            if (trimmed.len == 0) continue;
+            const cidr = NetworkCidr.fromString(trimmed) catch {
+                std.log.warn("[ROUTING] Skipping invalid CIDR: '{s}'", .{trimmed});
+                continue;
+            };
+            try cidrs.append(self.allocator, cidr);
+        }
+
+        if (cidrs.items.len == 0) {
+            std.log.warn("[ROUTING] No valid CIDRs in split-tunnel config, skipping", .{});
+            return;
+        }
+
+        for (cidrs.items) |net| {
             try addRoute(net.network, net.netmask, vpn_gateway, null);
         }
         self.state.routes_configured = true;
+        std.log.info("[ROUTING] Split-tunnel configured with {d} route(s)", .{cidrs.items.len});
     }
 
     /// Restore original routing configuration
@@ -546,6 +567,41 @@ pub fn deleteIpv6DefaultRoute() void {
         _ = runCommand("ip -6 route del default 2>/dev/null");
     } else if (builtin.os.tag == .macos) {
         _ = runCommand("route -A inet6 delete default 2>/dev/null");
+    }
+}
+
+/// Add multiple IPv6 routes through a gateway (split-tunnel).
+/// `routes_str` is a newline-separated list of IPv6 CIDR notations.
+pub fn addIpv6Routes(gateway: []const u8, routes_str: []const u8) !void {
+    var cmd_buf: [512]u8 = undefined;
+    var iter = std.mem.splitScalar(u8, routes_str, '\n');
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (trimmed.len == 0) continue;
+
+        // Validate it looks like an IPv6 CIDR (contains "::" or ends with /prefix)
+        if (std.mem.indexOfScalar(u8, trimmed, ':') == null) {
+            std.log.warn("[ROUTING] Skipping non-IPv6 route line: '{s}'", .{trimmed});
+            continue;
+        }
+
+        if (builtin.os.tag == .linux) {
+            const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route add {s} via {s}", .{ trimmed, gateway }) catch {
+                std.log.warn("[ROUTING] IPv6 route command too long: {s}", .{trimmed});
+                continue;
+            };
+            if (!runCommand(cmd)) {
+                std.log.warn("[ROUTING] Failed to add IPv6 route: {s}", .{trimmed});
+            }
+        } else if (builtin.os.tag == .macos) {
+            const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 add {s} {s}", .{ trimmed, gateway }) catch {
+                std.log.warn("[ROUTING] IPv6 route command too long: {s}", .{trimmed});
+                continue;
+            };
+            if (!runCommand(cmd)) {
+                std.log.warn("[ROUTING] Failed to add IPv6 route: {s}", .{trimmed});
+            }
+        }
     }
 }
 

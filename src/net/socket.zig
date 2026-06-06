@@ -314,18 +314,18 @@ pub const ResolvedAddress = struct {
 
 /// Resolve hostname to IP addresses
 pub fn resolve(allocator: Allocator, hostname: []const u8, port: u16) !ResolvedAddress {
-    var list = std.ArrayList(net.Address).init(allocator);
-    errdefer list.deinit();
+    var list: std.ArrayList(net.Address) = .{};
+    errdefer list.deinit(allocator);
 
     const addrs = try net.getAddressList(allocator, hostname, port);
     defer addrs.deinit();
 
     for (addrs.addrs) |addr| {
-        try list.append(addr);
+        try list.append(allocator, addr);
     }
 
     return .{
-        .addresses = try list.toOwnedSlice(),
+        .addresses = try list.toOwnedSlice(allocator),
         .allocator = allocator,
     };
 }

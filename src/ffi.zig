@@ -699,6 +699,78 @@ export fn softether_set_proxy(
     };
 }
 
+// ============================================================================
+// Routing configuration setters
+// ============================================================================
+
+/// Set whether to accept routes pushed by the VPN server (DHCP option 121/249).
+/// Must be called before connect().
+export fn softether_set_accept_pushed_routes(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.routing.accept_pushed_routes = enabled;
+}
+
+/// Set whether custom split-tunnel routes are enabled.
+/// When enabled, only the networks listed in ipv4_include/ipv6_include
+/// are routed through the VPN (instead of a full default-route tunnel).
+/// Must be called before connect().
+export fn softether_set_enable_custom_routes(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.routing.enable_custom_routes = enabled;
+}
+
+/// Set IPv4 routes to INCLUDE (newline-separated CIDR notations).
+/// Only used when enable_custom_routes is true. Pass NULL or "" to clear.
+/// String is duped into FFI-owned memory.
+export fn softether_set_ipv4_include(client: ?*VpnClient, routes: [*:0]const u8) void {
+    const c = client orelse return;
+    const routes_in = std.mem.span(routes);
+    if (routes_in.len == 0) {
+        c.config.routing.ipv4_include = null;
+        return;
+    }
+    c.config.routing.ipv4_include = ffi_allocator.dupe(u8, routes_in) catch return;
+}
+
+/// Set IPv4 routes to EXCLUDE (newline-separated CIDR notations).
+/// Only used when enable_custom_routes is true. Pass NULL or "" to clear.
+/// String is duped into FFI-owned memory.
+export fn softether_set_ipv4_exclude(client: ?*VpnClient, routes: [*:0]const u8) void {
+    const c = client orelse return;
+    const routes_in = std.mem.span(routes);
+    if (routes_in.len == 0) {
+        c.config.routing.ipv4_exclude = null;
+        return;
+    }
+    c.config.routing.ipv4_exclude = ffi_allocator.dupe(u8, routes_in) catch return;
+}
+
+/// Set IPv6 routes to INCLUDE (newline-separated CIDR notations).
+/// Only used when enable_custom_routes is true. Pass NULL or "" to clear.
+/// String is duped into FFI-owned memory.
+export fn softether_set_ipv6_include(client: ?*VpnClient, routes: [*:0]const u8) void {
+    const c = client orelse return;
+    const routes_in = std.mem.span(routes);
+    if (routes_in.len == 0) {
+        c.config.routing.ipv6_include = null;
+        return;
+    }
+    c.config.routing.ipv6_include = ffi_allocator.dupe(u8, routes_in) catch return;
+}
+
+/// Set IPv6 routes to EXCLUDE (newline-separated CIDR notations).
+/// Only used when enable_custom_routes is true. Pass NULL or "" to clear.
+/// String is duped into FFI-owned memory.
+export fn softether_set_ipv6_exclude(client: ?*VpnClient, routes: [*:0]const u8) void {
+    const c = client orelse return;
+    const routes_in = std.mem.span(routes);
+    if (routes_in.len == 0) {
+        c.config.routing.ipv6_exclude = null;
+        return;
+    }
+    c.config.routing.ipv6_exclude = ffi_allocator.dupe(u8, routes_in) catch return;
+}
+
 /// Set an external tunnel file descriptor (for iOS/Android).
 /// On mobile, the OS creates the TUN device and provides an fd.
 /// Must be called before connect().

@@ -26,14 +26,14 @@ pub const RoutingConfig = struct {
     accept_pushed_routes: bool = true,
     /// Enable custom route includes/excludes
     enable_custom_routes: bool = false,
-    /// IPv4 routes to include (CIDR notation) - only these routes through VPN
-    ipv4_include: ?[]const []const u8 = null,
-    /// IPv4 routes to exclude (CIDR notation) - these routes NOT through VPN
-    ipv4_exclude: ?[]const []const u8 = null,
-    /// IPv6 routes to include (CIDR notation)
-    ipv6_include: ?[]const []const u8 = null,
-    /// IPv6 routes to exclude (CIDR notation)
-    ipv6_exclude: ?[]const []const u8 = null,
+    /// IPv4 routes to include (newline-separated CIDR notation) - only these through VPN
+    ipv4_include: ?[]const u8 = null,
+    /// IPv4 routes to exclude (newline-separated CIDR notation) - these NOT through VPN
+    ipv4_exclude: ?[]const u8 = null,
+    /// IPv6 routes to include (newline-separated CIDR notation)
+    ipv6_include: ?[]const u8 = null,
+    /// IPv6 routes to exclude (newline-separated CIDR notation)
+    ipv6_exclude: ?[]const u8 = null,
 };
 
 /// Authentication method
@@ -218,10 +218,10 @@ pub const JsonConfig = struct {
         default_route: ?bool = null,
         accept_pushed_routes: ?bool = null,
         enable_custom_routes: ?bool = null,
-        ipv4_include: ?[]const []const u8 = null,
-        ipv4_exclude: ?[]const []const u8 = null,
-        ipv6_include: ?[]const []const u8 = null,
-        ipv6_exclude: ?[]const []const u8 = null,
+        ipv4_include: ?[]const u8 = null,
+        ipv4_exclude: ?[]const u8 = null,
+        ipv6_include: ?[]const u8 = null,
+        ipv6_exclude: ?[]const u8 = null,
     } = null,
 };
 
@@ -398,13 +398,13 @@ pub fn mergeConfigs(
 
         routing_config.enable_custom_routes = pickVal(bool, if (cli_routing) |r| r.enable_custom_routes else null, if (env_routing) |r| r.enable_custom_routes else null, if (file_routing) |r| r.enable_custom_routes else null, false);
 
-        routing_config.ipv4_include = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv4_include else null, if (env_routing) |r| r.ipv4_include else null, if (file_routing) |r| r.ipv4_include else null, null);
+        routing_config.ipv4_include = pickOpt([]const u8, if (cli_routing) |r| r.ipv4_include else null, if (env_routing) |r| r.ipv4_include else null, if (file_routing) |r| r.ipv4_include else null, null);
 
-        routing_config.ipv4_exclude = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv4_exclude else null, if (env_routing) |r| r.ipv4_exclude else null, if (file_routing) |r| r.ipv4_exclude else null, null);
+        routing_config.ipv4_exclude = pickOpt([]const u8, if (cli_routing) |r| r.ipv4_exclude else null, if (env_routing) |r| r.ipv4_exclude else null, if (file_routing) |r| r.ipv4_exclude else null, null);
 
-        routing_config.ipv6_include = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv6_include else null, if (env_routing) |r| r.ipv6_include else null, if (file_routing) |r| r.ipv6_include else null, null);
+        routing_config.ipv6_include = pickOpt([]const u8, if (cli_routing) |r| r.ipv6_include else null, if (env_routing) |r| r.ipv6_include else null, if (file_routing) |r| r.ipv6_include else null, null);
 
-        routing_config.ipv6_exclude = pickOpt([]const []const u8, if (cli_routing) |r| r.ipv6_exclude else null, if (env_routing) |r| r.ipv6_exclude else null, if (file_routing) |r| r.ipv6_exclude else null, null);
+        routing_config.ipv6_exclude = pickOpt([]const u8, if (cli_routing) |r| r.ipv6_exclude else null, if (env_routing) |r| r.ipv6_exclude else null, if (file_routing) |r| r.ipv6_exclude else null, null);
 
         builder.routing = routing_config;
     }

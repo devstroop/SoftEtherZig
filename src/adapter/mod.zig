@@ -101,9 +101,12 @@ pub fn buildDhcpv6Frame(mac: [6]u8, dhcpv6_payload: []const u8, buffer: []u8) !u
 
     // === Ethernet Header (14 bytes) ===
     // Destination: IPv6 multicast MAC for ff02::1:2
-    buffer[pos] = 0x33; buffer[pos + 1] = 0x33;
-    buffer[pos + 2] = 0x00; buffer[pos + 3] = 0x01;
-    buffer[pos + 4] = 0x00; buffer[pos + 5] = 0x02;
+    buffer[pos] = 0x33;
+    buffer[pos + 1] = 0x33;
+    buffer[pos + 2] = 0x00;
+    buffer[pos + 3] = 0x01;
+    buffer[pos + 4] = 0x00;
+    buffer[pos + 5] = 0x02;
     pos += 6;
     // Source: our MAC
     @memcpy(buffer[pos..][0..6], &mac);
@@ -140,8 +143,9 @@ pub fn buildDhcpv6Frame(mac: [6]u8, dhcpv6_payload: []const u8, buffer: []u8) !u
     pos += 16;
 
     // Destination Address: ff02::1:2 (All DHCPv6 Relay Agents and Servers)
-    buffer[pos] = 0xFF; buffer[pos + 1] = 0x02;
-    @memset(buffer[pos + 2..][0..13], 0);
+    buffer[pos] = 0xFF;
+    buffer[pos + 1] = 0x02;
+    @memset(buffer[pos + 2 ..][0..13], 0);
     buffer[pos + 15] = 0x02;
     pos += 16;
 
@@ -403,6 +407,36 @@ pub const VirtualAdapter = struct {
             }
         };
         try self.routes.configureFullTunnel(vpn_gateway, vpn_server, dev.getName());
+    }
+
+    /// Configure split-tunnel VPN routing (only specified networks through VPN).
+    /// `routes_str` is a newline-separated list of CIDR notations.
+    pub fn configureSplitTunnel(self: *VirtualAdapter, vpn_gateway: u32, routes_str: []const u8) !void {
+        _ = self.device orelse {
+            if (builtin.os.tag == .linux) {
+                return TunLinuxError.DeviceNotOpen;
+            } else if (builtin.os.tag == .windows) {
+                return TapWindowsError.DeviceNotOpen;
+            } else {
+                return UtunError.DeviceNotOpen;
+            }
+        };
+        try self.routes.configureSplitTunnel(vpn_gateway, routes_str);
+    }
+
+    /// Add custom IPv6 split-tunnel routes through a gateway.
+    /// `routes_str` is a newline-separated list of IPv6 CIDR notations.
+    pub fn addIpv6Routes(self: *VirtualAdapter, gateway: []const u8, routes_str: []const u8) !void {
+        _ = self.device orelse {
+            if (builtin.os.tag == .linux) {
+                return TunLinuxError.DeviceNotOpen;
+            } else if (builtin.os.tag == .windows) {
+                return TapWindowsError.DeviceNotOpen;
+            } else {
+                return UtunError.DeviceNotOpen;
+            }
+        };
+        try route.addIpv6Routes(gateway, routes_str);
     }
 
     /// Configure IPv6 on the tunnel interface and add IPv6 routes

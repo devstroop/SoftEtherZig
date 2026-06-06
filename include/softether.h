@@ -231,6 +231,36 @@ void softether_set_keepalive_interval(softether_client_t client, uint32_t ms);
  *  Must be called before connect(). */
 void softether_set_ip_version(softether_client_t client, int version);
 
+/* ========================================================================== */
+/* Routing Configuration                                                      */
+/* ========================================================================== */
+
+/** Set whether to accept routes pushed by the VPN server
+ *  (DHCP option 121/249). Default: true. */
+void softether_set_accept_pushed_routes(softether_client_t client, bool enabled);
+
+/** Set whether custom split-tunnel routes are enabled.
+ *  When enabled, only the networks listed in ipv4_include / ipv6_include
+ *  are routed through the VPN (instead of full default-route tunnel).
+ *  Default: false. */
+void softether_set_enable_custom_routes(softether_client_t client, bool enabled);
+
+/** Set IPv4 routes to INCLUDE (newline-separated CIDR notations).
+ *  Only used when enable_custom_routes is true. Pass NULL or "" to clear. */
+void softether_set_ipv4_include(softether_client_t client, const char* routes);
+
+/** Set IPv4 routes to EXCLUDE (newline-separated CIDR notations).
+ *  Only used when enable_custom_routes is true. Pass NULL or "" to clear. */
+void softether_set_ipv4_exclude(softether_client_t client, const char* routes);
+
+/** Set IPv6 routes to INCLUDE (newline-separated CIDR notations).
+ *  Only used when enable_custom_routes is true. Pass NULL or "" to clear. */
+void softether_set_ipv6_include(softether_client_t client, const char* routes);
+
+/** Set IPv6 routes to EXCLUDE (newline-separated CIDR notations).
+ *  Only used when enable_custom_routes is true. Pass NULL or "" to clear. */
+void softether_set_ipv6_exclude(softether_client_t client, const char* routes);
+
 /** Set tunnel file descriptor (utun fd) for packet I/O. Call after connect(). */
 void softether_set_tunnel_fd(softether_client_t client, int32_t fd);
 

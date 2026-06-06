@@ -136,14 +136,14 @@ pub const RoutingConfig = struct {
     accept_pushed_routes: bool = true,
     /// Enable custom route includes/excludes
     enable_custom_routes: bool = false,
-    /// IPv4 routes to include (CIDR notation) - only these routes through VPN
-    ipv4_include: ?[]const []const u8 = null,
-    /// IPv4 routes to exclude (CIDR notation) - these routes NOT through VPN
-    ipv4_exclude: ?[]const []const u8 = null,
-    /// IPv6 routes to include (CIDR notation)
-    ipv6_include: ?[]const []const u8 = null,
-    /// IPv6 routes to exclude (CIDR notation)
-    ipv6_exclude: ?[]const []const u8 = null,
+    /// IPv4 routes to include (newline-separated CIDR notation) — only these through VPN
+    ipv4_include: ?[]const u8 = null,
+    /// IPv4 routes to exclude (newline-separated CIDR notation) — these NOT through VPN
+    ipv4_exclude: ?[]const u8 = null,
+    /// IPv6 routes to include (newline-separated CIDR notation)
+    ipv6_include: ?[]const u8 = null,
+    /// IPv6 routes to exclude (newline-separated CIDR notation)
+    ipv6_exclude: ?[]const u8 = null,
 };
 
 /// VPN Client configuration
@@ -767,13 +767,22 @@ pub const VpnClient = struct {
         // DHCP later reconfigures the TUN with a pool IP — the kernel's route
         // cache invalidation during IP reassignment doesn't restore the
         // default-route gateway resolution, leaving the route dead.
-        // The DHCP ACK handler (line 975) will call configureFullTunnel
-        // once the TUN has its final IP from the server's pool.
-        if (self.config.static_ip == null and self.config.routing.default_route and self.gateway_ip != 0) {
+        // The DHCP ACK handler below will call configureFullTunnel or
+        // configureSplitTunnel once the TUN has its final IP from the pool.
+        if (self.config.static_ip == null and self.gateway_ip != 0) {
             if (self.server_ip) |srv| {
                 if (srv.any.family == std.posix.AF.INET) {
                     const server_ip_be = @byteSwap(srv.in.sa.addr);
-                    ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
+                    // Default Route (Full Tunnel) — base routing
+                    if (self.config.routing.default_route) {
+                        ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
+                    }
+                    // Advanced Routing — stacks on top
+                    if (self.config.routing.enable_custom_routes) {
+                        if (self.config.routing.ipv4_include) |routes| {
+                            ctx.configureSplitTunnel(self.gateway_ip, routes);
+                        }
+                    }
                 }
             }
         }
@@ -978,13 +987,24 @@ pub const VpnClient = struct {
                         }
                     }
 
-                    if (self.config.routing.default_route and loop_state.our_gateway != 0) {
-                        const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
-                        std.log.info("Add IPv4 default route via {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
-                        if (self.server_ip) |srv| {
-                            if (srv.any.family == std.posix.AF.INET) {
-                                const server_ip_be = @byteSwap(srv.in.sa.addr);
-                                adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
+                    if (self.gateway_ip != 0) {
+                        // Default Route (Full Tunnel) — only controls whether VPN
+                        // becomes the default gateway. Independent of Advanced Routing.
+                        if (self.config.routing.default_route) {
+                            const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
+                            std.log.info("Add IPv4 default route via {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
+                            if (self.server_ip) |srv| {
+                                if (srv.any.family == std.posix.AF.INET) {
+                                    const server_ip_be = @byteSwap(srv.in.sa.addr);
+                                    adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
+                                }
+                            }
+                        }
+                        // Advanced Routing — stacks on top of base routing
+                        if (self.config.routing.enable_custom_routes) {
+                            if (self.config.routing.ipv4_include) |routes| {
+                                std.log.info("Configuring split-tunnel with custom IPv4 routes", .{});
+                                adapter.configureSplitTunnel(loop_state.our_gateway, routes);
                             }
                         }
                     }
@@ -1035,6 +1055,12 @@ pub const VpnClient = struct {
                                         std.log.warn("Failed to add IPv6 default route: {}", .{err});
                                     };
                                 }
+                                // Layer custom IPv6 split-tunnel routes on top
+                                if (self.config.routing.enable_custom_routes) {
+                                    if (self.config.routing.ipv6_include) |routes| {
+                                        adapter.addIpv6Routes(gw, routes);
+                                    }
+                                }
                             } else {
                                 adapter.configureIpv6(
                                     client.config.address,
@@ -1045,6 +1071,11 @@ pub const VpnClient = struct {
                                     adapter_mod.route.addIpv6DefaultRoute("fe80::1%utun") catch |err| {
                                         std.log.warn("Failed to add IPv6 default route: {}", .{err});
                                     };
+                                }
+                                if (self.config.routing.enable_custom_routes) {
+                                    if (self.config.routing.ipv6_include) |routes| {
+                                        adapter.addIpv6Routes("fe80::1%utun", routes);
+                                    }
                                 }
                             }
 
@@ -1744,7 +1775,7 @@ pub const VpnClient = struct {
             // outbound path (ACKs, new upload conns) is completely starved
             // during any continuous download burst. The TUN fd is non-blocking
             // so a read with no data returns WouldBlock instantly.
-            const sendq_throttle_med: u32 = 256 * 1024;  // 256 KB — halve batch
+            const sendq_throttle_med: u32 = 256 * 1024; // 256 KB — halve batch
             const sendq_throttle_high: u32 = 512 * 1024; // 512 KB — minimum batch (single-conn only)
             if (is_configured and (tun_readable or skip_poll)) {
                 if (adapter.real_adapter) |*real| {
@@ -2131,9 +2162,7 @@ pub const VpnClient = struct {
     fn logRoutingDiag(self: *Self, ifname: []const u8) void {
         var cmd_buf: [1024]u8 = undefined;
 
-        const cmd = std.fmt.bufPrint(&cmd_buf,
-            "netstat -rn -f inet 2>/dev/null | grep '^default' | head -5"
-        , .{}) catch unreachable;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "netstat -rn -f inet 2>/dev/null | grep '^default' | head -5", .{}) catch unreachable;
 
         var child = std.process.Child.init(
             &[_][]const u8{ "/bin/sh", "-c", cmd },
@@ -2160,9 +2189,7 @@ pub const VpnClient = struct {
             std.log.warn("[ROUTE-ROGUE] NO default route found!", .{});
         }
 
-        const ifcmd = std.fmt.bufPrint(&cmd_buf,
-            "ifconfig {s} 2>/dev/null | head -3", .{ifname}
-        ) catch unreachable;
+        const ifcmd = std.fmt.bufPrint(&cmd_buf, "ifconfig {s} 2>/dev/null | head -3", .{ifname}) catch unreachable;
 
         var ifchild = std.process.Child.init(
             &[_][]const u8{ "/bin/sh", "-c", ifcmd },
