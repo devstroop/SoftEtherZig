@@ -234,7 +234,7 @@ sudo -E ./zig-out/bin/vpnclient
 | `softether_set_encryption()` | Enable/disable payload encryption |
 | `softether_set_compression()` | Enable/disable compression |
 | `softether_set_verify_certificate()` | TLS cert verification |
-| `softether_set_full_tunnel()` | Route all traffic through VPN |
+| `softether_set_default_route()` | Route all traffic through VPN |
 | `softether_set_mtu()` | Set MTU |
 | `softether_set_reconnect()` | Configure auto-reconnect |
 

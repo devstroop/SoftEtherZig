@@ -32,7 +32,7 @@ Every config property must be present in **all six layers** to be maintainable.
 | 13 | mtu | `--mtu` | `SOFTETHER_MTU` | `"mtu"` | ✅ | `softether_set_mtu` | `mtu` | — |
 | 14 | ip_version | `--ip-version` | — | `"ip_version"` | **❌ unused** | **❌ missing** | **❌ field doesn't exist** | — |
 | 15 | skip_tls_verify | `--skip-tls-verify` | `SOFTETHER_SKIP_TLS_VERIFY` | `"skip_tls_verify"` | ✅ (inverted) | `softether_set_verify_certificate` | `verify_certificate` | — |
-| 16 | default_route | `--full-tunnel` | — | `"routing.default_route"` | ✅ | `softether_set_full_tunnel` | `routing.default_route` | — |
+| 16 | default_route | `--full-tunnel` | — | `"routing.default_route"` | ✅ | `softether_set_default_route` | `routing.default_route` | — |
 | 17 | accept_pushed_routes | — | — | `"routing.accept_pushed_routes"` | ✅ | **❌ missing** | `routing.accept_pushed_routes` | — |
 | 18 | enable_custom_routes | — | — | `"routing.enable_custom_routes"` | ✅ | **❌ missing** | `routing.enable_custom_routes` | — |
 | 19 | ipv4_include | `--ipv4-include` | — | `"routing.ipv4_include"` | ✅ | **❌ missing** | `routing.ipv4_include` | — |

@@ -200,7 +200,7 @@ uint32_t softether_get_effective_server_ip(const softether_client_t client);
 void softether_set_encryption(softether_client_t client, bool enabled);
 void softether_set_compression(softether_client_t client, bool enabled);
 void softether_set_verify_certificate(softether_client_t client, bool verify);
-void softether_set_full_tunnel(softether_client_t client, bool enabled);
+void softether_set_default_route(softether_client_t client, bool enabled);
 void softether_set_mtu(softether_client_t client, uint16_t mtu);
 void softether_set_reconnect(softether_client_t client, bool enabled, uint32_t max_attempts);
 

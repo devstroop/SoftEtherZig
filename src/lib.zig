@@ -8,7 +8,7 @@
 //!
 //! // Create a simple config
 //! var builder = softether.ClientConfigBuilder.init("vpn.example.com", "VPN");
-//! _ = builder.setPasswordAuth("user", "pass").setFullTunnel(true);
+//! _ = builder.setPasswordAuth("user", "pass").setDefaultRoute(true);
 //! const config = builder.build();
 //!
 //! // Create and connect client

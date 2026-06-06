@@ -24,7 +24,7 @@
 //! const config = builder
 //!     .setPort(443)
 //!     .setPasswordAuth("user", "pass")
-//!     .setFullTunnel(true)
+//!     .setDefaultRoute(true)
 //!     .build();
 //!
 //! // Create and connect
@@ -130,7 +130,7 @@ pub fn createPasswordClient(
     var builder = ClientConfigBuilder.init(host, hub);
     const config = builder
         .setPasswordAuth(username, password)
-        .setFullTunnel(true)
+        .setDefaultRoute(true)
         .build();
 
     return VpnClient.init(allocator, config);

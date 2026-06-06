@@ -2239,7 +2239,7 @@ pub const ClientConfigBuilder = struct {
         return self;
     }
 
-    pub fn setFullTunnel(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
+    pub fn setDefaultRoute(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
         self.config.routing.default_route = enabled;
         return self;
     }
@@ -2283,7 +2283,7 @@ test "ClientConfig defaults" {
 
 test "ClientConfigBuilder" {
     var builder = ClientConfigBuilder.init("10.0.0.1", "VPN");
-    const config = builder.setPort(8443).setPasswordAuth("user", "pass").setFullTunnel(true).setEncryption(true).build();
+    const config = builder.setPort(8443).setPasswordAuth("user", "pass").setDefaultRoute(true).setEncryption(true).build();
     try std.testing.expectEqualStrings("10.0.0.1", config.server_host);
     try std.testing.expectEqualStrings("VPN", config.hub_name);
     try std.testing.expectEqual(@as(u16, 8443), config.server_port);

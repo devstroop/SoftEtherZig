@@ -577,7 +577,7 @@ export fn softether_set_tcp_dial_callback(cb: ?tls_mod.ExternalTcpDialFn) void {
 }
 
 /// Set full tunnel (route all traffic through VPN). Must be called before connect().
-export fn softether_set_full_tunnel(client: ?*VpnClient, enabled: bool) void {
+export fn softether_set_default_route(client: ?*VpnClient, enabled: bool) void {
     const c = client orelse return;
     c.config.routing.default_route = enabled;
 }
