@@ -86,6 +86,9 @@ pub const formatIpv4 = core.formatIpv4;
 /// Library version
     pub const version = "0.1.7";
 
+    /// Application version (synced with pubspec.yaml)
+    pub const app_version = "1.2.2";
+
 /// Get version string
 pub fn getVersion() []const u8 {
     return version;
