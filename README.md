@@ -46,7 +46,7 @@ A Go `c-shared` library is technically possible, but:
 - **Binary size.** `ReleaseSmall` produces a ~500 KB `libsoftether.so` for arm64-android — small enough that Flutter app bundles don't notice it.
 - **No runtime.** No GC pauses, no async scheduler, no surprise threads. Predictable enough to ship inside an iOS Network Extension where the kernel will SIGKILL the process if it crosses memory or CPU limits.
 
-The kicker: Zig is pre-1.0 and we still found it the *most* stable foundation for this particular problem shape. Andrew Kelley's [2026 interview on Zig's "worse is better" philosophy and no-AI policy](https://youtu.be/iqddnwKF8HQ) explains why that's not the contradiction it looks like.
+The kicker: Zig is pre-1.0 and we still found it the *most* stable foundation for this particular problem shape. Andrew Kelley's [2026 interview on Zig's "worse is better" philosophy](https://youtu.be/iqddnwKF8HQ) explains why that's not the contradiction it looks like.
 
 ## Platform Support
 
