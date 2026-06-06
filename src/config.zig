@@ -58,7 +58,7 @@ pub const ConnectionConfig = struct {
     hub_name: []const u8,
     auth: AuthMethod,
     use_encrypt: bool = true,
-    use_compress: bool = true,
+    use_compress: bool = false,
     udp_accel: bool = false,
     max_connections: u32 = 1, // Number of parallel TCP connections (1-32)
     mtu: u16 = 1400,
@@ -80,7 +80,7 @@ pub const ConfigBuilder = struct {
     hub_name: ?[]const u8 = null,
     auth: ?AuthMethod = null,
     use_encrypt: bool = true,
-    use_compress: bool = true,
+    use_compress: bool = false,
     udp_accel: bool = false,
     max_connections: u32 = 1, // Number of parallel TCP connections (1-32)
     mtu: u16 = 1400,
@@ -346,7 +346,7 @@ pub fn mergeConfigs(
 
     // Connection settings
     builder.use_encrypt = pickVal(bool, cli_config.use_encrypt, env_config.use_encrypt, file_config.use_encrypt, true);
-    builder.use_compress = pickVal(bool, cli_config.use_compress, env_config.use_compress, file_config.use_compress, true);
+    builder.use_compress = pickVal(bool, cli_config.use_compress, env_config.use_compress, file_config.use_compress, false);
     builder.udp_accel = pickVal(bool, cli_config.udp_accel, env_config.udp_accel, file_config.udp_accel, false);
     builder.max_connections = pickVal(u32, cli_config.max_connections, env_config.max_connections, file_config.max_connections, 0);
 

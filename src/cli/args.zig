@@ -31,7 +31,7 @@ pub const CliArgs = struct {
 
     // Connection options
     skip_tls_verify: bool = false,
-    use_compress: bool = true,
+    use_compress: bool = false,
     use_encrypt: bool = true,
     half_connection: bool = false,
     qos: bool = true,
