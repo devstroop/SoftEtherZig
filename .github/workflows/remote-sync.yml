@@ -25,7 +25,7 @@ jobs:
           REMOTE_SYNC_URL: ${{ secrets.REMOTE_SYNC_URL }}
           REMOTE_SYNC_TOKEN: ${{ secrets.REMOTE_SYNC_TOKEN }}
         run: |
-          git fetch origin main 2>/dev/null || {
+          git fetch origin master 2>/dev/null || {
             echo "action=noop" >> "$GITHUB_OUTPUT"
             exit 0
           }
@@ -38,7 +38,7 @@ jobs:
           fi
           git remote add sync "$AUTH_URL"
 
-          if git fetch sync main 2>/dev/null; then
+          if git fetch sync master 2>/dev/null; then
             SYNC_SHA=$(git rev-parse FETCH_HEAD)
             if [ "$ORIGIN_SHA" = "$SYNC_SHA" ]; then
               echo "action=noop" >> "$GITHUB_OUTPUT"
@@ -59,7 +59,7 @@ jobs:
       - name: Push to sync remote (origin ahead)
         if: steps.direction.outputs.action == 'push'
         run: |
-          git push sync main
+          git push sync master
 
       - name: Create PR from sync changes (sync ahead)
         if: steps.direction.outputs.action == 'pr'
@@ -70,11 +70,11 @@ jobs:
           git checkout -b "$SYNC_BRANCH" FETCH_HEAD
           git push origin "$SYNC_BRANCH"
           gh pr create \
-            --base main \
+            --base master \
             --head "$SYNC_BRANCH" \
             --title "Sync: incoming changes from sync remote" \
             --body "Changes detected from sync remote. Please review and merge."
-          git checkout main
+          git checkout master
 
       - name: Skip notification (diverged)
         if: steps.direction.outputs.action == 'skip'
