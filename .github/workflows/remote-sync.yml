@@ -1,0 +1,82 @@
+name: Remote Sync
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare remotes and determine direction
+        id: direction
+        env:
+          REMOTE_SYNC_URL: ${{ secrets.REMOTE_SYNC_URL }}
+          REMOTE_SYNC_TOKEN: ${{ secrets.REMOTE_SYNC_TOKEN }}
+        run: |
+          git fetch origin main 2>/dev/null || {
+            echo "action=noop" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          ORIGIN_SHA=$(git rev-parse FETCH_HEAD)
+
+          if [ -n "$REMOTE_SYNC_TOKEN" ]; then
+            AUTH_URL=$(echo "$REMOTE_SYNC_URL" | sed "s|://|://${REMOTE_SYNC_TOKEN}@|")
+          else
+            AUTH_URL="$REMOTE_SYNC_URL"
+          fi
+          git remote add sync "$AUTH_URL"
+
+          if git fetch sync main 2>/dev/null; then
+            SYNC_SHA=$(git rev-parse FETCH_HEAD)
+            if [ "$ORIGIN_SHA" = "$SYNC_SHA" ]; then
+              echo "action=noop" >> "$GITHUB_OUTPUT"
+            else
+              MERGE_BASE=$(git merge-base "$ORIGIN_SHA" "$SYNC_SHA")
+              if [ "$MERGE_BASE" = "$SYNC_SHA" ]; then
+                echo "action=push" >> "$GITHUB_OUTPUT"
+              elif [ "$MERGE_BASE" = "$ORIGIN_SHA" ]; then
+                echo "action=pr" >> "$GITHUB_OUTPUT"
+              else
+                echo "action=skip" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+          else
+            echo "action=push" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push to sync remote (origin ahead)
+        if: steps.direction.outputs.action == 'push'
+        run: |
+          git push sync main
+
+      - name: Create PR from sync changes (sync ahead)
+        if: steps.direction.outputs.action == 'pr'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SYNC_BRANCH="sync/incoming-$(date +%s)"
+          git checkout -b "$SYNC_BRANCH" FETCH_HEAD
+          git push origin "$SYNC_BRANCH"
+          gh pr create \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --title "Sync: incoming changes from sync remote" \
+            --body "Changes detected from sync remote. Please review and merge."
+          git checkout main
+
+      - name: Skip notification (diverged)
+        if: steps.direction.outputs.action == 'skip'
+        run: |
+          echo "::warning::Origin and sync remote have diverged. Manual merge required."
