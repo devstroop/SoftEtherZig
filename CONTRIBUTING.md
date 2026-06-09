@@ -86,6 +86,86 @@ Public disclosure: 90 days from initial report, or upon release of a fix, whiche
 
 **Contributor licensing:** By opening a PR you agree your contribution is licensed under Apache-2.0, per Section 5 of the license. No separate CLA is required.
 
+## Git Workflow and Branching Policy
+
+### Overview
+
+This project follows **GitHub Flow**. The `main` branch is always considered
+deployable. All work is performed on short-lived branches created from `main`
+and merged back through pull requests.
+
+```
+main → feat/something → PR (squash) → main
+```
+
+### Branch Rules
+
+- All branches must be created from the latest `main`
+- One logical change per branch
+- Rebase on the latest `main` before merge
+- Delete branches after merge
+
+### Branch Naming
+
+```
+<type>/<short-description>
+```
+
+Examples: `feat/udp-acceleration`, `fix/tls-reconnect`, `docs/ffi-guide`.
+
+| Type | Purpose |
+|------|---------|
+| `feat` | New functionality |
+| `fix` | Bug fixes |
+| `docs` | Documentation changes |
+| `refactor` | Internal restructuring without behaviour changes |
+| `test` | Test additions or corrections |
+| `perf` | Performance improvements |
+| `chore` | Tooling, dependencies, configuration |
+| `ci` | CI/CD workflow changes |
+
+### Commit Convention
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
+
+```
+feat(ffi): add certificate authentication export
+fix(client): handle reconnect after timeout
+docs(api): document FFI lifecycle
+refactor(protocol): simplify pack serialization
+test(crypto): add AES-256-CBC test vectors
+```
+
+### Standard Workflow
+
+```sh
+# Sync main
+git checkout main
+git pull
+
+# Create branch
+git checkout -b feat/my-feature
+
+# Develop
+zig build
+zig build test
+
+# Commit incrementally
+git commit -m "feat(module): description"
+
+# Push and open PR
+git push -u origin feat/my-feature
+gh pr create
+
+# Merge via squash
+gh pr merge --squash
+
+# Cleanup
+git checkout main
+git pull
+git branch -d feat/my-feature
+```
+
 ## Development
 
 ### Prerequisites
