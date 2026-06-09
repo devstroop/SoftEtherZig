@@ -875,11 +875,6 @@ export fn softether_version() [*:0]const u8 {
     return lib.version;
 }
 
-/// Get application version string. Returns pointer to static string.
-export fn softether_app_version() [*:0]const u8 {
-    return lib.app_version;
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
