@@ -1,0 +1,58 @@
+name: Mirror
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.MIRROR_AUTH_TOKEN }}" ]; then
+            echo "::error::MIRROR_AUTH_TOKEN secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.MIRROR_URL }}" ]; then
+            echo "::error::MIRROR_URL secret is not set"
+            exit 1
+          fi
+          echo "Secrets validated"
+
+      - name: Mirror to backup remote
+        env:
+          TOKEN: ${{ secrets.MIRROR_AUTH_TOKEN }}
+          DEST: ${{ secrets.MIRROR_URL }}
+        run: |
+          set -euo pipefail
+
+          # Strip protocol prefix (supports https://, http://, and bare host:path)
+          HOST="${DEST#https://}"
+          HOST="${HOST#http://}"
+
+          MIRROR_URL="https://${TOKEN}@${HOST}"
+
+          # Remove stale remote if it exists from a previous run
+          if git remote get-url mirror >/dev/null 2>&1; then
+            git remote remove mirror
+          fi
+
+          git remote add mirror "${MIRROR_URL}"
+          # --mirror implies --force and prunes deleted refs on the destination
+          git push --mirror mirror
