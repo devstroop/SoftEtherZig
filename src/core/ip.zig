@@ -4,40 +4,38 @@
 //! Used throughout the codebase for handling IPv4/IPv6 addresses.
 
 const std = @import("std");
-const net = std.net;
-const posix = std.posix;
+const net = std.Io.net;
 
-/// Format a `std.net.Address` (v4 or v6) as a string into the given buffer.
+/// Format a `std.Io.net.IpAddress` (v4 or v6) as a string into the given buffer.
 /// For IPv6 the result uses RFC 3986 notation (`::1` — no brackets, no port).
 /// Returns an empty slice on buffer overflow.
-pub fn formatAddress(addr: net.Address, buf: []u8) []const u8 {
-    switch (addr.any.family) {
-        posix.AF.INET => {
-            return formatIpv4Buf(addr, buf);
+pub fn formatAddress(addr: net.IpAddress, buf: []u8) []const u8 {
+    return switch (addr) {
+        .ip4 => |v4| {
+            return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+                v4.bytes[0], v4.bytes[1], v4.bytes[2], v4.bytes[3],
+            }) catch "";
         },
-        posix.AF.INET6 => {
-            // macOS sockaddr_in6 has addr: [16]u8
-            const bytes = &addr.in6.sa.addr;
+        .ip6 => |v6| {
             return std.fmt.bufPrint(
                 buf,
                 "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}",
                 .{
-                    bytes[0],  bytes[1],  bytes[2],  bytes[3],
-                    bytes[4],  bytes[5],  bytes[6],  bytes[7],
-                    bytes[8],  bytes[9],  bytes[10], bytes[11],
-                    bytes[12], bytes[13], bytes[14], bytes[15],
+                    v6.bytes[0],  v6.bytes[1],  v6.bytes[2],  v6.bytes[3],
+                    v6.bytes[4],  v6.bytes[5],  v6.bytes[6],  v6.bytes[7],
+                    v6.bytes[8],  v6.bytes[9],  v6.bytes[10], v6.bytes[11],
+                    v6.bytes[12], v6.bytes[13], v6.bytes[14], v6.bytes[15],
                 },
             ) catch "";
         },
-        else => return "",
-    }
+    };
 }
 
 /// Format Address as Host header value (bracket-notation for IPv6, plain for IPv4).
-pub fn formatAddressForHost(addr: net.Address, buf: []u8) []const u8 {
-    switch (addr.any.family) {
-        posix.AF.INET => return formatAddress(addr, buf),
-        posix.AF.INET6 => {
+pub fn formatAddressForHost(addr: net.IpAddress, buf: []u8) []const u8 {
+    return switch (addr) {
+        .ip4 => formatAddress(addr, buf),
+        .ip6 => {
             const raw = formatAddress(addr, buf);
             if (raw.len == 0) return "";
             if (buf.len < raw.len + 2) return "";
@@ -46,15 +44,18 @@ pub fn formatAddressForHost(addr: net.Address, buf: []u8) []const u8 {
             buf[raw.len + 1] = ']';
             return buf[0 .. raw.len + 2];
         },
-        else => return "",
-    }
+    };
 }
 
-fn formatIpv4Buf(addr: net.Address, buf: []u8) []const u8 {
-    const ip4 = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
-    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
-        ip4[0], ip4[1], ip4[2], ip4[3],
-    }) catch "";
+fn formatIpv4Buf(addr: net.IpAddress, buf: []u8) []const u8 {
+    return switch (addr) {
+        .ip4 => |v4| {
+            return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+                v4.bytes[0], v4.bytes[1], v4.bytes[2], v4.bytes[3],
+            }) catch "";
+        },
+        .ip6 => return "",
+    };
 }
 
 /// Parse IPv4 address string to u32 in host byte order (little-endian on x86/ARM)

@@ -6,7 +6,37 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const posix = std.posix;
+
+const c = struct {
+    extern "c" fn fork() std.c.pid_t;
+    extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+    extern "c" fn waitpid(pid: std.c.pid_t, status: ?*c_int, options: c_int) std.c.pid_t;
+    extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+    extern "c" fn pclose(stream: *anyopaque) c_int;
+    extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *anyopaque) usize;
+};
+
+fn _WIFEXITED(status: c_int) bool {
+    return (status & 0x7f) == 0;
+}
+fn _WEXITSTATUS(status: c_int) i32 {
+    return @intCast((status >> 8) & 0xff);
+}
+
+fn spawnShAndWait(cmd: [:0]const u8) i32 {
+    const pid = c.fork();
+    if (pid == 0) {
+        const argv: [4:null]?[*:0]const u8 = .{ "/bin/sh", "-c", cmd.ptr, null };
+        _ = c.execve("/bin/sh", &argv, @ptrCast(@alignCast(&std.c.environ)));
+        _ = std.c._exit(1);
+    } else if (pid > 0) {
+        var status: c_int = 0;
+        _ = c.waitpid(pid, &status, 0);
+        if (_WIFEXITED(status)) return _WEXITSTATUS(status);
+        return -1;
+    }
+    return -1;
+}
 
 /// Result of a stale-route scan
 pub const StaleRoute = struct {
@@ -27,18 +57,9 @@ const MAX_UTUN: u8 = 64;
 fn utunExists(allocator: std.mem.Allocator, utun_num: u8) bool {
     var cmd_buf: [64]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "ifconfig utun{d} 2>/dev/null", .{utun_num}) catch return false;
-
-    var child = std.process.Child.init(
-        &[_][]const u8{ "/bin/sh", "-c", cmd },
-        allocator,
-    );
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    const term = child.spawnAndWait() catch return false;
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return false;
+    defer allocator.free(cmd_z);
+    return spawnShAndWait(cmd_z) == 0;
 }
 
 /// Build a bitmask of which utun interfaces currently exist.
@@ -347,23 +368,15 @@ fn resolveToIp(allocator: std.mem.Allocator, hostname: []const u8) ?[]u8 {
         return allocator.dupe(u8, hostname) catch return null;
     }
 
-    // DNS lookup — just grab first result
-    const addrs = std.net.getAddressList(allocator, hostname, 0) catch return null;
-    defer addrs.deinit();
-
-    if (addrs.addrs.len == 0) return null;
-
-    const addr = addrs.addrs[0];
-    if (addr.any.family == posix.AF.INET) {
-        const a = addr.in.sa.addr;
-        return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{
-            @as(u8, @truncate(a >> 24)),
-            @as(u8, @truncate(a >> 16)),
-            @as(u8, @truncate(a >> 8)),
-            @as(u8, @truncate(a)),
-        }) catch return null;
-    }
-    return null;
+    // DNS lookup — use host command via popen
+    const cmd = std.fmt.allocPrint(allocator, "host {s} 2>/dev/null | grep 'has address' | head -1 | awk '{{print $4}}'", .{hostname}) catch return null;
+    defer allocator.free(cmd);
+    const line = runCommandCapture(allocator, cmd) orelse return null;
+    defer allocator.free(line);
+    if (line.len == 0) return null;
+    // Validate it's an IPv4 address
+    if (std.mem.indexOf(u8, line, ".") == null) return null;
+    return std.fmt.allocPrint(allocator, "{s}", .{line}) catch return null;
 }
 
 /// Clean up a stale /32 host route to a known VPN server IP.
@@ -428,43 +441,32 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) bool {
         if (escalate.runPrivilegedCommand(cmd)) return true;
     }
 
-    var child = std.process.Child.init(
-        &[_][]const u8{ "/bin/sh", "-c", cmd },
-        allocator,
-    );
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    const term = child.spawnAndWait() catch return false;
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return false;
+    defer allocator.free(cmd_z);
+    return spawnShAndWait(cmd_z) == 0;
 }
 
 /// Run a command and capture stdout.
 fn runCommandCapture(allocator: std.mem.Allocator, cmd: []const u8) ?[]u8 {
-    var child = std.process.Child.init(
-        &[_][]const u8{ "/bin/sh", "-c", cmd },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return null;
+    defer allocator.free(cmd_z);
+    const mode_z: [:0]const u8 = "r";
+    const stream = c.popen(cmd_z.ptr, mode_z.ptr) orelse return null;
+    defer _ = c.pclose(stream);
 
-    const stdout = child.stdout.?;
-
-    // Read into a fixed buffer, then dupe if needed
     var buf: [8192]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const n = stdout.read(buf[total..]) catch break;
+        const n = c.fread(buf[total..].ptr, 1, buf.len - total, stream);
         if (n == 0) break;
         total += n;
     }
-    _ = child.wait() catch {};
-
     if (total == 0) return null;
-    return allocator.dupe(u8, buf[0..total]) catch null;
+
+    // Trim trailing whitespace/newlines
+    while (total > 0 and (buf[total - 1] == '\n' or buf[total - 1] == '\r' or buf[total - 1] == ' ')) total -= 1;
+    if (total == 0) return null;
+    return allocator.dupe(u8, buf[0..total]) catch return null;
 }
 
 // ============================================================================

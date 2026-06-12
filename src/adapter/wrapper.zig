@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const compat_timestamp = @import("../compat/timestamp.zig");
 
 // Import adapter module
 const adapter_mod = @import("mod.zig");
@@ -29,7 +30,10 @@ pub const AdapterWrapper = struct {
     pub fn init(allocator: Allocator) Self {
         // Generate random locally-administered MAC
         var mac: [6]u8 = undefined;
-        std.crypto.random.bytes(&mac);
+        {
+            var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+            prng.random().bytes(&mac);
+        }
         mac[0] = 0x02; // Locally administered
         mac[1] = 0x00;
         mac[2] = 0x5E;

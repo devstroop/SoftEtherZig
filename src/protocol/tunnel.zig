@@ -17,6 +17,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const c = @cImport(@cInclude("zlib.h"));
+const random_mod = @import("../compat/random.zig");
 
 /// Magic number indicating keep-alive packet (same as SoftEther's KEEP_ALIVE_MAGIC)
 pub const KEEP_ALIVE_MAGIC: u32 = 0xFFFFFFFF;
@@ -546,7 +547,7 @@ pub const TunnelConnection = struct {
         // Keep-alive size
         mem.writeInt(u32, packet[4..8], 32, .big);
         // Random padding
-        std.crypto.random.bytes(packet[8..40]);
+        random_mod.bytes(packet[8..40]);
 
         var sent: usize = 0;
         while (sent < packet.len) {

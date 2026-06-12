@@ -14,6 +14,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;
+const compat_timestamp = @import("../compat/timestamp.zig");
 
 // ============================================================================
 // Local Crypto Helpers (self-contained for testing)
@@ -21,13 +22,15 @@ const testing = std.testing;
 
 /// Fill buffer with random bytes
 fn randomBytes(buf: []u8) void {
-    std.crypto.random.bytes(buf);
+    var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+    prng.random().bytes(buf);
 }
 
 /// Generate random u32
 fn randomU32() u32 {
     var buf: [4]u8 = undefined;
-    std.crypto.random.bytes(&buf);
+    var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+    prng.random().bytes(&buf);
     return mem.readInt(u32, &buf, .little);
 }
 
@@ -537,14 +540,14 @@ pub const VpnPacket = struct {
 /// Thread-safe packet queue
 pub const PacketQueue = struct {
     allocator: Allocator,
-    packets: std.ArrayListUnmanaged(VpnPacket),
-    mutex: std.Thread.Mutex,
+    packets: std.ArrayList(VpnPacket),
+    mutex: @import("../compat/mutex.zig").Mutex,
     max_size: usize,
 
     pub fn init(allocator: Allocator, max_size: usize) PacketQueue {
         return .{
             .allocator = allocator,
-            .packets = .{},
+            .packets = std.ArrayList(VpnPacket).empty,
             .mutex = .{},
             .max_size = max_size,
         };
@@ -578,7 +581,11 @@ pub const PacketQueue = struct {
             .size = data.len,
             .is_broadcast = VpnPacket.checkBroadcast(data),
             .priority = priority,
-            .timestamp = std.time.milliTimestamp(),
+            .timestamp = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            },
         });
     }
 
@@ -689,8 +696,16 @@ pub const Session = struct {
             .server_port = options.port,
             .hub_name = [_]u8{0} ** 256,
             .username = [_]u8{0} ** 256,
-            .created_time = std.time.milliTimestamp(),
-            .last_comm_time = std.time.milliTimestamp(),
+            .created_time = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            },
+            .last_comm_time = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            },
             .timeout_ms = options.timeout_ms orelse Config.default_timeout_ms,
             .keepalive_interval_ms = options.keepalive_interval_ms orelse Config.keepalive_interval_ms,
             .retry_count = 0,
@@ -745,21 +760,33 @@ pub const Session = struct {
 
     /// Check if session timed out
     pub fn isTimedOut(self: *const Session) bool {
-        const now = std.time.milliTimestamp();
+        const now = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         const elapsed: u64 = @intCast(now - self.last_comm_time);
         return elapsed > self.timeout_ms;
     }
 
     /// Check if keep-alive should be sent
     pub fn shouldSendKeepalive(self: *const Session) bool {
-        const now = std.time.milliTimestamp();
+        const now = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         const elapsed: u64 = @intCast(now - self.last_comm_time);
         return elapsed > self.keepalive_interval_ms;
     }
 
     /// Update last communication time
     pub fn updateCommTime(self: *Session) void {
-        self.last_comm_time = std.time.milliTimestamp();
+        self.last_comm_time = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
     }
 
     /// Transition to a new state

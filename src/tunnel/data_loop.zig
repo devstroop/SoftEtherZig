@@ -114,7 +114,7 @@ pub const TimingState = struct {
     last_garp_time: i64 = 0,
 
     pub fn init() TimingState {
-        const now = std.time.milliTimestamp();
+        const now = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); };
         return .{
             .last_keepalive = now,
             .last_dhcp_time = 0,

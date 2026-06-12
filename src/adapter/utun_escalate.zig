@@ -7,7 +7,95 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+
+// Zig 0.16 removed posix.socket/close/write/connect/bind/listen/accept/fcntl.
+const c = struct {
+    extern "c" fn socket(domain: c_int, type_: c_int, protocol: c_int) c_int;
+    extern "c" fn close(fd: c_int) c_int;
+    extern "c" fn write(fd: c_int, buf: [*]const u8, nbyte: usize) isize;
+    extern "c" fn connect(sockfd: c_int, sock_addr: *const std.c.sockaddr, addrlen: std.c.socklen_t) c_int;
+    extern "c" fn bind(sockfd: c_int, sock_addr: *const std.c.sockaddr, addrlen: std.c.socklen_t) c_int;
+    extern "c" fn listen(sockfd: c_int, backlog: c_int) c_int;
+    extern "c" fn accept(sockfd: c_int, addr: ?*std.c.sockaddr, addrlen: ?*std.c.socklen_t) c_int;
+    extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+    extern "c" fn fork() std.c.pid_t;
+    extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+    extern "c" fn waitpid(pid: std.c.pid_t, status: ?*c_int, options: c_int) std.c.pid_t;
+    extern "c" fn stat(path: [*:0]const u8, buf: *Stat) c_int;
+    extern "c" fn unlink(path: [*:0]const u8) c_int;
+    extern "c" fn _NSGetExecutablePath(buf: [*]u8, bufsize: *u32) c_int;
+    extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+};
 const posix = std.posix;
+const AF_UNIX: c_int = 1;
+const SOCK_STREAM: c_int = 1;
+const F_OK: c_int = 0;
+
+const sockaddr_un = extern struct {
+    sun_len: u8 = 0,
+    sun_family: std.c.sa_family_t = 0,
+    sun_path: [104]u8 = [_]u8{0} ** 104,
+};
+
+// Minimal stat struct for macOS. std.c.Stat is broken on macOS arm64 in Zig 0.16.
+const Stat = extern struct {
+    st_dev: i32,
+    st_mode: u16,
+    st_nlink: u16,
+    st_ino: u64,
+    st_uid: u32,
+    st_gid: u32,
+    st_rdev: i32,
+    st_atimespec: i64,
+    st_atimespec_nsec: i64,
+    st_mtimespec: i64,
+    st_mtimespec_nsec: i64,
+    st_ctimespec: i64,
+    st_ctimespec_nsec: i64,
+    st_birthtimespec: i64,
+    st_birthtimespec_nsec: i64,
+    st_size: i64,
+    st_blocks: i64,
+    st_blksize: i32,
+    st_flags: u32,
+    st_gen: u32,
+    st_lspare: i32,
+    st_qspare: [2]i64,
+};
+
+/// Spawn a shell command via fork+exec and wait.
+fn spawnShAndWait(cmd: [:0]const u8) i32 {
+    const pid = c.fork();
+    if (pid == 0) {
+        const argv: [4:null]?[*:0]const u8 = .{ "/bin/sh", "-c", cmd.ptr, null };
+        _ = c.execve("/bin/sh", &argv, @ptrCast(@alignCast(&std.c.environ)));
+        _ = std.c._exit(1);
+    } else if (pid > 0) {
+        var status: c_int = 0;
+        _ = c.waitpid(pid, &status, 0);
+        if (_WIFEXITED(status)) return _WEXITSTATUS(status);
+        return -1;
+    }
+    return -1;
+}
+
+fn _WIFEXITED(status: c_int) bool {
+    return (status & 0x7f) == 0;
+}
+fn _WEXITSTATUS(status: c_int) i32 {
+    return @intCast((status >> 8) & 0xff);
+}
+
+/// Spawn a shell command via fork+exec without waiting (detached child).
+fn spawnShDetach(cmd: [:0]const u8) i32 {
+    const pid = c.fork();
+    if (pid == 0) {
+        const argv: [4:null]?[*:0]const u8 = .{ "/bin/sh", "-c", cmd.ptr, null };
+        _ = c.execve("/bin/sh", &argv, @ptrCast(@alignCast(&std.c.environ)));
+        _ = std.c._exit(1);
+    }
+    return pid;
+}
 
 const SCM_RIGHTS: c_int = 0x01;
 const SOL_SOCKET: c_int = 0xFFFF;
@@ -58,21 +146,18 @@ const INSTALLED_HELPER_PATH: [:0]const u8 = "/usr/local/libexec/softether-utun-h
 /// is conservative: an update with the same byte count won't be detected,
 /// but in practice helper updates change the binary size enough to trigger.
 fn installedHelperReady(bundled_helper: ?[]const u8) bool {
-    var st: std.c.Stat = undefined;
-    if (std.c.stat(INSTALLED_HELPER_PATH.ptr, &st) != 0) return false;
-    // Must be owned by root (uid 0) and have setuid bit (S_ISUID = 0o4000).
-    if (st.uid != 0) return false;
-    if ((st.mode & 0o4000) == 0) return false;
-    // Compare by size to detect real upgrades without false positives from
-    // mtime churn during dev rebuilds.
+    var st: Stat = undefined;
+    if (c.stat(INSTALLED_HELPER_PATH.ptr, &st) != 0) return false;
+    if (st.st_uid != 0) return false;
+    if ((st.st_mode & 0o4000) == 0) return false;
     if (bundled_helper) |bp| {
-        var bst: std.c.Stat = undefined;
+        var bst: Stat = undefined;
         var path_buf: [1024]u8 = undefined;
         if (bp.len >= path_buf.len) return true;
         @memcpy(path_buf[0..bp.len], bp);
         path_buf[bp.len] = 0;
-        if (std.c.stat(@ptrCast(&path_buf), &bst) == 0) {
-            if (bst.size != st.size) return false;
+        if (c.stat(@ptrCast(&path_buf), &bst) == 0) {
+            if (bst.st_size != st.st_size) return false;
         }
     }
     return true;
@@ -104,8 +189,10 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
     // Create a temporary Unix domain socket
     var sock_path_buf: [108]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(@intFromPtr(&sock_path_buf));
+    const rand = prng.random();
     var rand_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    rand.bytes(&rand_bytes);
 
     const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/se-utun-{x}{x}{x}{x}{x}{x}{x}{x}.sock", .{
         rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
@@ -113,31 +200,28 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
     }) catch return EscalationError.PathTooLong;
 
     // Create and bind the listening socket
-    const listen_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
+    const listen_fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
         return EscalationError.SocketCreateFailed;
-    };
-    // errdefer ensures listen_fd is closed on ANY error return.
-    // Using errdefer instead of defer: if bind/listen below fails, this
-    // closes the socket before we return. Without this, a failed bind
-    // would leak listen_fd (defer only runs on normal exit).
-    errdefer posix.close(listen_fd);
+    }
+    errdefer _ = c.close(listen_fd);
 
-    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
-    @memset(&addr.path, 0);
-    @memcpy(addr.path[0..sock_path.len], sock_path);
+    var addr: sockaddr_un = .{ .sun_family = @intCast(AF_UNIX), .sun_path = undefined };
+    @memset(&addr.sun_path, 0);
+    @memcpy(addr.sun_path[0..sock_path.len], sock_path);
 
-    posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch {
+    if (c.bind(listen_fd, @ptrCast(&addr), @sizeOf(sockaddr_un)) < 0) {
         return EscalationError.BindFailed;
-    };
+    }
 
     // Clean up socket file on exit (listen_fd stays open for accept)
     defer {
-        _ = std.c.unlink(@ptrCast(&addr.path));
+        _ = c.unlink(@ptrCast(&addr.sun_path));
     }
 
-    posix.listen(listen_fd, 1) catch {
+    if (c.listen(listen_fd, 1) < 0) {
         return EscalationError.ListenFailed;
-    };
+    }
 
     // Build the command we'll run.
     //
@@ -166,13 +250,9 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
     };
 
     // Launch helper (fast path: direct setuid exec; slow path: osascript admin dialog)
-    var child = std.process.Child.init(
-        &[_][]const u8{ "sh", "-c", cmd },
-        allocator,
-    );
-    child.spawn() catch {
-        return EscalationError.HelperLaunchFailed;
-    };
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return EscalationError.HelperLaunchFailed;
+    defer allocator.free(cmd_z);
+    _ = spawnShDetach(cmd_z);
 
     // Accept connection from the helper. Fast path is near-instant (~50ms);
     // slow path needs up to 60s for user to type the admin password.
@@ -181,20 +261,18 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
         .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
     };
     const poll_result = std.posix.poll(&poll_fds, accept_timeout_ms) catch {
-        _ = child.wait() catch {};
         return EscalationError.AcceptFailed;
     };
 
     if (poll_result == 0) {
         std.log.err("utun_escalate: timeout waiting for helper (user cancelled?)", .{});
-        _ = child.wait() catch {};
         return EscalationError.HelperFailed;
     }
 
-    const client_fd = posix.accept(listen_fd, null, null, 0) catch {
-        _ = child.wait() catch {};
+    const client_fd = c.accept(listen_fd, null, null);
+    if (client_fd < 0) {
         return EscalationError.AcceptFailed;
-    };
+    }
     // NOTE: Do NOT close client_fd here — it becomes the persistent privileged command channel.
 
     // Receive the utun fd via SCM_RIGHTS
@@ -221,8 +299,7 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
     const received = std.c.recvmsg(client_fd, &msg, 0);
     if (received < 0) {
-        posix.close(client_fd);
-        _ = child.wait() catch {};
+        _ = c.close(client_fd);
         return EscalationError.RecvFailed;
     }
 
@@ -266,21 +343,19 @@ pub fn runPrivilegedCommand(cmd: []const u8) bool {
     if (privileged_cmd_fd < 0) return false;
     if (cmd.len == 0 or cmd.len > 2048) return false;
 
-    // Send length prefix (2 bytes, little-endian)
     const len: u16 = @intCast(cmd.len);
     const len_bytes = [2]u8{ @intCast(len & 0xFF), @intCast((len >> 8) & 0xFF) };
-    _ = posix.write(privileged_cmd_fd, &len_bytes) catch {
+    if (c.write(privileged_cmd_fd, &len_bytes, 2) < 0) {
         std.log.err("utun_escalate: privileged channel write failed (length)", .{});
         privileged_cmd_fd = -1;
         return false;
-    };
+    }
 
-    // Send command bytes
-    _ = posix.write(privileged_cmd_fd, cmd) catch {
+    if (c.write(privileged_cmd_fd, cmd.ptr, cmd.len) < 0) {
         std.log.err("utun_escalate: privileged channel write failed (command)", .{});
         privileged_cmd_fd = -1;
         return false;
-    };
+    }
 
     // Wait up to 5 seconds for the helper response. Route commands
     // (add/delete) should complete in <100ms; a 5s timeout is generous
@@ -345,92 +420,92 @@ pub fn ensurePrivilegedChannel(allocator: std.mem.Allocator) void {
             "osascript -e 'do shell script \"mkdir -p /usr/local/libexec && cp -f \\\"{s}\\\" \\\"{s}\\\" && chown root:wheel \\\"{s}\\\" && chmod 4755 \\\"{s}\\\"\" with administrator privileges' 2>&1",
             .{ bundled_helper.?, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH },
         ) catch return;
-        var install_child = std.process.Child.init(&[_][]const u8{ "sh", "-c", reinstall_cmd }, allocator);
-        const term = install_child.spawnAndWait() catch return;
-        switch (term) {
-            .Exited => |code| if (code != 0) {
-                std.log.err("utun_escalate: helper install failed (exit {d})", .{code});
-                return;
-            },
-            else => return,
+        const reinstall_child_cmd_z = allocator.dupeZ(u8, reinstall_cmd) catch return;
+        defer allocator.free(reinstall_child_cmd_z);
+        const code = spawnShAndWait(reinstall_child_cmd_z);
+        if (code != 0) {
+            std.log.err("utun_escalate: helper install failed (exit {d})", .{code});
+            return;
         }
         std.log.info("utun_escalate: helper installed to {s}", .{INSTALLED_HELPER_PATH});
     }
 
     // Create a temporary Unix socket for the helper to connect back on.
     var sock_path_buf: [108]u8 = undefined;
+    var prng2 = std.Random.DefaultPrng.init(@intFromPtr(&sock_path_buf));
+    const rand2 = prng2.random();
     var rand_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    rand2.bytes(&rand_bytes);
     const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/se-cmd-{x}{x}{x}{x}{x}{x}{x}{x}.sock", .{
         rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
         rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7],
     }) catch return;
 
-    const listen_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch return;
+    const listen_fd = c.socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) return;
 
-    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
-    @memset(&addr.path, 0);
-    if (sock_path.len >= addr.path.len) {
-        posix.close(listen_fd);
+    var addr: sockaddr_un = .{ .sun_family = @intCast(AF_UNIX), .sun_path = undefined };
+    @memset(&addr.sun_path, 0);
+    if (sock_path.len >= addr.sun_path.len) {
+        _ = c.close(listen_fd);
         return;
     }
-    @memcpy(addr.path[0..sock_path.len], sock_path);
+    @memcpy(addr.sun_path[0..sock_path.len], sock_path);
 
-    posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch {
-        posix.close(listen_fd);
+    if (c.bind(listen_fd, @ptrCast(&addr), @sizeOf(sockaddr_un)) < 0) {
+        _ = c.close(listen_fd);
         return;
-    };
-    defer _ = std.c.unlink(@ptrCast(&addr.path));
+    }
+    defer _ = c.unlink(@ptrCast(&addr.sun_path));
 
-    posix.listen(listen_fd, 1) catch {
-        posix.close(listen_fd);
+    if (c.listen(listen_fd, 1) < 0) {
+        _ = c.close(listen_fd);
         return;
-    };
+    }
 
     // Launch the setuid helper in cmd-only mode (no utun, no password prompt).
     var cmd_buf: [1200]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s} {s} --cmd-only", .{ INSTALLED_HELPER_PATH, sock_path }) catch {
-        posix.close(listen_fd);
+        _ = c.close(listen_fd);
         return;
     };
 
-    var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
-    child.spawn() catch {
-        posix.close(listen_fd);
+    const cmd_z = allocator.dupeZ(u8, cmd) catch {
+        _ = c.close(listen_fd);
         return;
     };
+    defer allocator.free(cmd_z);
+    _ = spawnShDetach(cmd_z);
 
     // Wait for helper to connect (5 s — setuid exec is near-instant).
     var poll_fds = [1]std.posix.pollfd{
         .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
     };
     const poll_result = std.posix.poll(&poll_fds, 5_000) catch {
-        _ = child.wait() catch {};
-        posix.close(listen_fd);
+        _ = c.close(listen_fd);
         return;
     };
     if (poll_result == 0) {
         std.log.err("utun_escalate: timeout waiting for cmd-only helper", .{});
-        _ = child.wait() catch {};
-        posix.close(listen_fd);
+        _ = c.close(listen_fd);
         return;
     }
 
-    const client_fd = posix.accept(listen_fd, null, null, 0) catch {
-        _ = child.wait() catch {};
-        posix.close(listen_fd);
+    const client_fd = c.accept(listen_fd, null, null);
+    if (client_fd < 0) {
+        _ = c.close(listen_fd);
         return;
-    };
-    posix.close(listen_fd);
+    }
+    _ = c.close(listen_fd);
 
     // Read the 1-byte ready signal from the helper.
     var ready: [1]u8 = undefined;
     const n = posix.read(client_fd, &ready) catch {
-        posix.close(client_fd);
+        _ = c.close(client_fd);
         return;
     };
     if (n == 0 or ready[0] != 0x00) {
-        posix.close(client_fd);
+        _ = c.close(client_fd);
         return;
     }
 
@@ -441,10 +516,9 @@ pub fn ensurePrivilegedChannel(allocator: std.mem.Allocator) void {
 /// Close the privileged command channel and signal the helper to exit.
 pub fn closePrivilegedChannel() void {
     if (privileged_cmd_fd >= 0) {
-        // Send EXIT signal (length = 0)
         const exit_signal = [2]u8{ 0, 0 };
-        _ = posix.write(privileged_cmd_fd, &exit_signal) catch {};
-        posix.close(privileged_cmd_fd);
+        _ = c.write(privileged_cmd_fd, &exit_signal, 2);
+        _ = c.close(privileged_cmd_fd);
         privileged_cmd_fd = -1;
         std.log.info("utun_escalate: privileged command channel closed", .{});
     }
@@ -453,17 +527,22 @@ pub fn closePrivilegedChannel() void {
 /// Search for the helper binary in likely locations.
 fn findHelperPath(buf: []u8) ?[]const u8 {
     // Try to find it relative to the current executable (app bundle)
-    if (std.fs.selfExeDirPath(buf[0 .. buf.len - 64])) |exe_dir| {
-        const helper_name = "/softether-utun-helper";
-        if (exe_dir.len + helper_name.len < buf.len) {
-            @memcpy(buf[exe_dir.len .. exe_dir.len + helper_name.len], helper_name);
-            const full_len = exe_dir.len + helper_name.len;
-            buf[full_len] = 0;
-            if (std.fs.cwd().access(buf[0..full_len], .{})) |_| {
-                return buf[0..full_len];
-            } else |_| {}
+    var exe_len: u32 = @intCast(buf.len);
+    if (c._NSGetExecutablePath(buf.ptr, &exe_len) == 0 and exe_len > 0) {
+        // Strip filename to get directory
+        if (std.mem.lastIndexOfScalar(u8, buf[0..exe_len], '/')) |slash_idx| {
+            const exe_dir = buf[0..slash_idx];
+            const helper_name = "/softether-utun-helper";
+            if (exe_dir.len + helper_name.len < buf.len) {
+                @memcpy(buf[exe_dir.len .. exe_dir.len + helper_name.len], helper_name);
+                const full_len = exe_dir.len + helper_name.len;
+                buf[full_len] = 0;
+                if (c.access(@ptrCast(buf), F_OK) == 0) {
+                    return buf[0..full_len];
+                }
+            }
         }
-    } else |_| {}
+    }
 
     // Fallback: well-known paths
     const search_paths = [_][]const u8{
@@ -472,28 +551,13 @@ fn findHelperPath(buf: []u8) ?[]const u8 {
     };
 
     for (search_paths) |path| {
-        if (std.fs.cwd().access(path, .{})) |_| {
+        if (c.access(@ptrCast(path), F_OK) == 0) {
             const len = @min(path.len, buf.len - 1);
             @memcpy(buf[0..len], path[0..len]);
             buf[len] = 0;
             return buf[0..len];
-        } else |_| {
-            continue;
         }
     }
-
-    // Try to find it relative to the current executable
-    if (std.fs.selfExeDirPath(buf[0 .. buf.len - 64])) |exe_dir| {
-        const helper_name = "/softether-utun-helper";
-        if (exe_dir.len + helper_name.len < buf.len) {
-            @memcpy(buf[exe_dir.len .. exe_dir.len + helper_name.len], helper_name);
-            const full_len = exe_dir.len + helper_name.len;
-            buf[full_len] = 0;
-            if (std.fs.cwd().access(buf[0..full_len], .{})) |_| {
-                return buf[0..full_len];
-            } else |_| {}
-        }
-    } else |_| {}
 
     return null;
 }

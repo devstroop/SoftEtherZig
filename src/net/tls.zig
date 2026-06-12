@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const net = std.net;
+const net = std.Io.net;
 const c = @cImport({
     @cInclude("openssl/ssl.h");
     @cInclude("openssl/err.h");
@@ -46,7 +46,7 @@ pub const ProxyConfig = http_mod.ProxyConfig;
 
 /// Global DNS cache instance for TLS connections
 var global_dns_cache: ?dns_cache_mod.DnsCache = null;
-var dns_cache_init_mutex: std.Thread.Mutex = .{};
+var dns_cache_init_mutex: @import("../compat/mutex.zig").Mutex = .{};
 
 /// Get or initialize the global DNS cache
 fn getDnsCache(allocator: Allocator) *dns_cache_mod.DnsCache {
@@ -117,13 +117,17 @@ pub const TlsConfig = struct {
 
 /// TCP connect with configurable timeout using non-blocking socket + poll.
 /// Avoids the OS default 75s SYN timeout that causes apparent freezes.
-fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socket_t {
-    const fd = try std.posix.socket(address.any.family, std.posix.SOCK.STREAM, 0);
+fn tcpConnectWithTimeout(address: net.IpAddress, timeout_ms: u32) !std.posix.socket_t {
+    const family: u32 = switch (address) {
+        .ip4 => 2, // AF_INET
+        .ip6 => 30, // AF_INET6 (Darwin)
+    };
+    const fd: std.posix.socket_t = @intCast(std.c.socket(family, @intCast(std.posix.SOCK.STREAM), 0));
     errdefer {
         if (builtin.os.tag == .windows) {
             _ = std.os.windows.ws2_32.closesocket(fd);
         } else {
-            std.posix.close(fd);
+            _ = std.c.close(fd);
         }
     }
 
@@ -133,7 +137,7 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
     // and we get instant ECONNREFUSED.
     if ((builtin.os.tag == .ios or builtin.os.tag == .macos) and bind_interface_index != 0) {
         const idx_bytes = std.mem.asBytes(&bind_interface_index);
-        if (address.any.family == std.posix.AF.INET6) {
+        if (address == .ip6) {
             std.posix.setsockopt(fd, DARWIN_IPPROTO_IPV6, DARWIN_IPV6_BOUND_IF, idx_bytes) catch |err| {
                 std.log.warn("TLS: IPV6_BOUND_IF(idx={d}) failed: {}", .{ bind_interface_index, err });
             };
@@ -144,6 +148,35 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
         }
     }
 
+    // Build sockaddr for connect()
+    var sa: std.c.sockaddr.storage = undefined;
+    var sa_len: std.c.socklen_t = undefined;
+    switch (address) {
+        .ip4 => |v4| {
+            const sin = std.c.sockaddr.in{
+                .len = @sizeOf(std.c.sockaddr.in),
+                .family = 2, // AF_INET
+                .port = std.mem.nativeToBig(u16, v4.port),
+                .addr = std.mem.readInt(u32, &v4.bytes, .big),
+                .zero = [_]u8{0} ** 8,
+            };
+            @memcpy(std.mem.asBytes(&sa)[0..@sizeOf(std.c.sockaddr.in)], std.mem.asBytes(&sin));
+            sa_len = @sizeOf(std.c.sockaddr.in);
+        },
+        .ip6 => |v6| {
+            const sin6 = std.c.sockaddr.in6{
+                .len = @sizeOf(std.c.sockaddr.in6),
+                .family = 30, // AF_INET6
+                .port = std.mem.nativeToBig(u16, v6.port),
+                .flowinfo = v6.flow,
+                .addr = v6.bytes,
+                .scope_id = v6.interface.index,
+            };
+            @memcpy(std.mem.asBytes(&sa)[0..@sizeOf(std.c.sockaddr.in6)], std.mem.asBytes(&sin6));
+            sa_len = @sizeOf(std.c.sockaddr.in6);
+        },
+    }
+
     if (builtin.os.tag == .windows) {
         // Windows: use ioctlsocket for non-blocking mode
         const ws2 = std.os.windows.ws2_32;
@@ -151,23 +184,23 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
         _ = ws2.ioctlsocket(fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking); // FIONBIO
 
         // Initiate connect
-        std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-            error.WouldBlock => {},
-            else => return err,
-        };
+        _ = ws2.connect(fd, @ptrCast(&sa), sa_len);
 
         // Poll for write-readiness
-        var poll_fds = [1]std.posix.pollfd{
-            .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
+        var poll_fds = [1]std.c.pollfd{
+            .{ .fd = fd, .events = std.c.POLL.OUT, .revents = 0 },
         };
         const effective_timeout: i32 = if (timeout_ms > 0) @intCast(timeout_ms) else 30000;
-        const poll_result = try std.posix.poll(&poll_fds, effective_timeout);
+        const poll_result = std.c.poll(&poll_fds, poll_fds.len, effective_timeout);
         if (poll_result == 0) {
             return error.ConnectionTimedOut;
         }
+        if (poll_result < 0) {
+            return error.ConnectionRefused;
+        }
 
         // Check for connect error via revents
-        if (poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
+        if (poll_fds[0].revents & (std.c.POLL.ERR | std.c.POLL.HUP) != 0) {
             std.log.err("TLS: TCP connect failed (poll revents={x})", .{poll_fds[0].revents});
             return error.ConnectionRefused;
         }
@@ -179,29 +212,35 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
         // POSIX: use fcntl for non-blocking mode
         // O_NONBLOCK differs per OS: macOS/BSD = 0x0004, Linux/Android = 0x0800
         const O_NONBLOCK: usize = if (builtin.os.tag == .linux) 0x0800 else 0x0004;
-        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+        const flags: usize = @intCast(std.c.fcntl(fd, std.c.F.GETFL, @as(i32, 0)));
+        _ = std.c.fcntl(fd, std.c.F.SETFL, @as(i32, @intCast(flags | O_NONBLOCK)));
 
         // Initiate connect — returns immediately with WouldBlock (EINPROGRESS)
-        std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-            error.WouldBlock => {},
-            else => return err,
-        };
+        const ret = std.c.connect(fd, @ptrCast(&sa), sa_len);
+        if (ret < 0) {
+            switch (std.c.errno(ret)) {
+                .INPROGRESS, .INTR => {},
+                else => return error.ConnectionRefused,
+            }
+        }
 
         // Poll for write-readiness (connection completion)
-        var poll_fds = [1]std.posix.pollfd{
-            .{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 },
+        var poll_fds = [1]std.c.pollfd{
+            .{ .fd = fd, .events = std.c.POLL.OUT, .revents = 0 },
         };
         const effective_timeout: i32 = if (timeout_ms > 0) @intCast(timeout_ms) else 30000;
-        const poll_result = try std.posix.poll(&poll_fds, effective_timeout);
+        const poll_result = std.c.poll(&poll_fds, poll_fds.len, effective_timeout);
         if (poll_result == 0) {
             return error.ConnectionTimedOut;
+        }
+        if (poll_result < 0) {
+            return error.ConnectionRefused;
         }
 
         // Check for connect error via SO_ERROR
         var so_error: c_int = 0;
-        var optlen: std.posix.socklen_t = @sizeOf(c_int);
-        const rc = std.c.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, @ptrCast(&so_error), &optlen);
+        var optlen: std.c.socklen_t = @sizeOf(c_int);
+        const rc = std.c.getsockopt(fd, std.c.SOL.SOCKET, std.c.SO.ERROR, @ptrCast(&so_error), &optlen);
         if (rc != 0) {
             return error.ConnectionRefused;
         }
@@ -210,7 +249,7 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
         }
 
         // Restore blocking mode
-        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags);
+        _ = std.c.fcntl(fd, std.c.F.SETFL, @as(i32, @intCast(flags)));
     }
 
     return fd;
@@ -289,12 +328,12 @@ pub const TlsSocket = struct {
             // SOCKS4, or SOCKS5). TLS is layered on top as usual.
             var proxy_sock = try http_mod.connectViaProxy(allocator, proxy, hostname, port);
             errdefer proxy_sock.close();
-            tcp_fd = proxy_sock.stream.handle;
+            tcp_fd = proxy_sock.stream.fd;
         } else
         // First try to parse as IP address
-        if (net.Address.resolveIp(hostname, port)) |address| {
+        if (socket_mod.Address.resolveIp(hostname, port)) |address| {
             std.log.debug("TLS: Resolved IP address directly: {s}:{d}", .{ hostname, port });
-            const connect_result = tcpConnectWithTimeout(address, config.timeout_ms);
+            const connect_result = tcpConnectWithTimeout(address.inner, config.timeout_ms);
             if (connect_result) |fd| {
                 tcp_fd = fd;
             } else |err| {
@@ -303,7 +342,7 @@ pub const TlsSocket = struct {
                     route_heal.repairStaleHostRoute(allocator, hostname, port))
                 {
                     std.log.info("TLS: Retrying {s}:{d} after stale-route repair", .{ hostname, port });
-                    tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms) catch |retry_err| {
+                    tcp_fd = tcpConnectWithTimeout(address.inner, config.timeout_ms) catch |retry_err| {
                         logConnectError(retry_err, hostname, port);
                         return TlsError.ConnectionFailed;
                     };
@@ -380,7 +419,7 @@ pub const TlsSocket = struct {
             if (builtin.os.tag == .windows) {
                 _ = std.os.windows.ws2_32.closesocket(tcp_fd);
             } else {
-                std.posix.close(tcp_fd);
+                _ = std.c.close(tcp_fd);
             }
         }
 
@@ -590,7 +629,7 @@ pub const TlsSocket = struct {
             if (builtin.os.tag == .windows) {
                 _ = std.os.windows.ws2_32.closesocket(self.tcp_fd);
             } else {
-                std.posix.close(self.tcp_fd);
+                _ = std.c.close(self.tcp_fd);
             }
             self.connected = false;
             self.ssl = null;
@@ -830,8 +869,8 @@ pub const TlsSocket = struct {
             _ = ws2.ioctlsocket(self.tcp_fd, @as(i32, @bitCast(@as(u32, 0x8004667e))), &nonblocking);
         } else {
             const O_NONBLOCK: usize = 0x0004;
-            const flags = try std.posix.fcntl(self.tcp_fd, std.posix.F.GETFL, 0);
-            _ = try std.posix.fcntl(self.tcp_fd, std.posix.F.SETFL, flags | O_NONBLOCK);
+            const flags: usize = @intCast(std.c.fcntl(self.tcp_fd, std.c.F.GETFL, @as(i32, 0)));
+            _ = std.c.fcntl(self.tcp_fd, std.c.F.SETFL, flags | O_NONBLOCK);
         }
     }
 
@@ -896,8 +935,14 @@ pub const TlsSocket = struct {
         //   any latency benefit from a smaller buffer.
         //   4MB → kernel doubles to ~8MB = 4× BDP at 86 Mbps/180ms RTT.
         //   Sndbuf never fills in steady state; no stalls, no cascade.
-        //   Memory cost: 4MB per TLS connection (negligible).
-        const snd_cap: u32 = 4 * 1024 * 1024;
+        //   Memory cost: 4MB per TLS connection (negligible on desktop).
+        //
+        // iOS: 2 MB. iOS Network Extension has a ~15 MB memory ceiling;
+        //   kernel-doubled 4MB SO_SNDBUF (plus 1MB SO_RCVBUF + TLS
+        //   overhead) can push the process past the limit at >40 Mbps,
+        //   triggering a jetsam SIGKILL. 2 MB → 4 MB kernel still covers
+        //   2× BDP at 86 Mbps / 180 ms RTT, saving ~4 MB.
+        const snd_cap: u32 = if (builtin.target.os.tag == .ios) 2 * 1024 * 1024 else 4 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the

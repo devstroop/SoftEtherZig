@@ -347,7 +347,7 @@ pub const ValidationError = struct {
 };
 
 pub fn validateConfig(cfg: *const ConfigFile, allocator: Allocator) ![]ValidationError {
-    var errors = std.ArrayListUnmanaged(ValidationError){};
+    var errors = std.ArrayListUnmanaged(ValidationError).empty;
     defer errors.deinit(allocator);
 
     // Port validation

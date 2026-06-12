@@ -35,7 +35,7 @@ const android_log = if (is_android_build) struct {
 // that forwards to os_log). std.log.defaultLog wraps in std.debug locks that may
 // drop output in release-fast extensions; we go straight to write(2).
 fn iosWriteStderr(text: []const u8) void {
-    _ = std.posix.write(2, text) catch {};
+    _ = std.c.write(2, text.ptr, text.len);
 }
 
 /// External log sink (set by hosts that can't easily read stderr — e.g. iOS NE
@@ -51,7 +51,7 @@ export fn softether_set_log_callback(cb: ?ExternalLogFn) void {
 
 fn libsoftetherLogFn(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime fmt: []const u8,
     args: anytype,
 ) void {
@@ -432,7 +432,10 @@ export fn softether_run_data_loop(client: ?*VpnClient) c_int {
     // Poll data_loop_running without holding the mutex (performDisconnect
     // needs the mutex to join the thread and close resources).
     while (@atomicLoad(bool, &c.data_loop_running, .acquire)) {
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        {
+            var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(10 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(10 * std.time.ns_per_ms, std.time.ns_per_s)) };
+            _ = std.c.nanosleep(&ts, null);
+        }
     }
     return 0;
 }
@@ -503,8 +506,10 @@ export fn softether_get_assigned_mask(client: ?*const VpnClient) u32 {
 export fn softether_get_effective_server_ip(client: ?*const VpnClient) u32 {
     const c = client orelse return 0;
     const addr = c.effective_server_ip orelse return 0;
-    if (addr.any.family != std.posix.AF.INET) return 0;
-    return addr.in.sa.addr;
+    return switch (addr) {
+        .ip4 => |ip4| @bitCast(ip4.bytes),
+        .ip6 => 0,
+    };
 }
 
 // ============================================================================

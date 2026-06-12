@@ -13,7 +13,7 @@ pub const dhcpv6 = @import("../tunnel/dhcpv6.zig");
 // Re-export commonly used types
 pub const TcpSocket = socket.TcpSocket;
 pub const TcpListener = socket.TcpListener;
-pub const Address = socket.Address;
+pub const Address = socket; 
 pub const ConnectionState = socket.ConnectionState;
 pub const ConnectionInfo = socket.ConnectionInfo;
 

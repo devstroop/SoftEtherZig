@@ -18,6 +18,7 @@ const Allocator = mem.Allocator;
 const posix = std.posix;
 const crypto = std.crypto;
 
+const random = @import("../compat/random.zig");
 const socket_mod = @import("socket.zig");
 const UdpSocket = socket_mod.UdpSocket;
 const Address = socket_mod.Address;
@@ -316,7 +317,7 @@ pub const UdpAccelEngine = struct {
 
         // NAT-T probe: flags(1) + random(15)
         var probe: [16]u8 = undefined;
-        crypto.random.bytes(probe[1..]);
+        random.bytes(probe[1..]);
         probe[0] = FLAG_NATT_PROBE;
 
         _ = try sock.sendTo(&probe, server);
@@ -327,7 +328,7 @@ pub const UdpAccelEngine = struct {
         const sock = &(self.sock orelse return);
 
         var ka: [16]u8 = undefined;
-        crypto.random.bytes(ka[1..]);
+        random.bytes(ka[1..]);
         ka[0] = FLAG_KEEPALIVE;
 
         _ = try sock.sendTo(&ka, server);
@@ -355,7 +356,7 @@ pub const UdpAccelEngine = struct {
 
         // 2) Generate random IV
         var iv: [IV_SIZE]u8 = undefined;
-        crypto.random.bytes(&iv);
+        random.bytes(&iv);
         @memcpy(buf[offset..][0..IV_SIZE], &iv);
         offset += IV_SIZE;
 
@@ -459,7 +460,11 @@ pub const UdpAccelEngine = struct {
 
     /// Current time in milliseconds.
     fn nowMs() i64 {
-        return std.time.milliTimestamp();
+        return blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
     }
 };
 

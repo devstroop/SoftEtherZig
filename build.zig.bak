@@ -1,18 +1,5 @@
 const std = @import("std");
 
-/// Embed build.zig.zon at comptime so we can extract the version
-/// without duplicating it across files.
-const build_zon = @embedFile("build.zig.zon");
-
-/// Extract the version string from build.zig.zon at comptime.
-/// Parses the `.version = "X.Y.Z"` field using simple string search.
-fn parseVersion(comptime zon: []const u8) []const u8 {
-    const marker = ".version = \"";
-    const start = std.mem.indexOf(u8, zon, marker).? + marker.len;
-    const end = std.mem.indexOfScalarPos(u8, zon, start, '"').?;
-    return zon[start..end];
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
@@ -24,27 +11,19 @@ pub fn build(b: *std.Build) void {
     const target_arch = target.result.cpu.arch;
     const is_android = target_os == .linux and (target_abi == .android or target_abi == .androideabi);
 
-    // Parse version from build.zig.zon (single source of truth)
-    const version = comptime parseVersion(build_zon);
-    const build_options = b.addOptions();
-    build_options.addOption([]const u8, "version", version);
-    const build_options_mod = build_options.createModule();
-
     // Detect Homebrew OpenSSL path (ARM vs Intel Mac)
     const openssl_lib: []const u8 = if (target_os == .macos) "/opt/homebrew/opt/openssl@3/lib" else "";
     const openssl_include: []const u8 = if (target_os == .macos) "/opt/homebrew/opt/openssl@3/include" else "";
 
     // Windows: detect OpenSSL installation path.
-    // Zig 0.16 note: std.fs.cwd().access() is removed. Use hardcoded
+    // Zig 0.16 note: std.fs.cwd()/accessAbsolute() are removed. Use hardcoded
     // paths; CI scripts should copy/symlink OpenSSL to these standard locations.
     const win_openssl_lib: []const u8 = if (target_os == .windows)
         "C:/OpenSSL-Win64/lib/VC/x64/MD"
-    else
-        "";
+    else "";
     const win_openssl_include: []const u8 = if (target_os == .windows)
         "C:/OpenSSL-Win64/include"
-    else
-        "";
+    else "";
 
     // Android: per-arch OpenSSL deps
     const android_ssl_lib: []const u8 = if (is_android) switch (target_arch) {
@@ -89,25 +68,112 @@ pub fn build(b: *std.Build) void {
     // Helper to add bundled zlib to a compile step
     const addZlib = struct {
         fn add(step: *std.Build.Step.Compile, builder: *std.Build) void {
-            step.root_module.addIncludePath(builder.path("deps/zlib"));
+            step.addIncludePath(builder.path("deps/zlib"));
             for (zlib_sources) |src| {
-                step.root_module.addCSourceFile(.{ .file = builder.path(src), .flags = &zlib_c_flags });
+                step.addCSourceFile(.{ .file = builder.path(src), .flags = &zlib_c_flags });
             }
         }
     }.add;
 
     // Helper to set up Android NDK sysroot include paths, library paths,
     // and generate a libc configuration file at build time.
-    // NOTE: Full NDK setup not yet ported to Zig 0.16; stub for now.
+    // Requires ANDROID_NDK_HOME env var. Optional ANDROID_API_LEVEL (default 21).
     const setupAndroidNdk = struct {
         fn setup(builder: *std.Build, step: *std.Build.Step.Compile, arch: std.Target.Cpu.Arch) void {
-            _ = arch;
-            _ = step;
-            if (builder.graph.environ_map.get("ANDROID_NDK_HOME") == null) {
+            const ndk_home = std.process.getEnvVarOwned(builder.allocator, "ANDROID_NDK_HOME") catch {
                 std.log.err("ANDROID_NDK_HOME must be set for Android builds", .{});
                 std.process.exit(1);
+            };
+            defer builder.allocator.free(ndk_home);
+
+            const host_triple = switch (@import("builtin").os.tag) {
+                .macos => blk: {
+                    // NDK prebuilts may be darwin-x86_64 even on ARM Macs
+                    const arch_triple = switch (@import("builtin").target.cpu.arch) {
+                        .aarch64 => "darwin-aarch64",
+                        else => "darwin-x86_64",
+                    };
+                    const prebuilt_dir = std.fs.path.join(builder.allocator, &[_][]const u8{
+                        ndk_home, "toolchains", "llvm", "prebuilt", arch_triple,
+                    }) catch break :blk "darwin-x86_64";
+                    defer builder.allocator.free(prebuilt_dir);
+                    if (std.fs.cwd().access(prebuilt_dir, .{})) |_| {
+                        break :blk arch_triple;
+                    } else |_| {
+                        break :blk "darwin-x86_64";
+                    }
+                },
+                .linux => "linux-x86_64",
+                .windows => "windows-x86_64",
+                else => {
+                    std.log.err("Unsupported host OS for Android cross-build", .{});
+                    std.process.exit(1);
+                },
+            };
+
+            const sysroot = std.fs.path.join(builder.allocator, &[_][]const u8{ ndk_home, "toolchains", "llvm", "prebuilt", host_triple, "sysroot" }) catch {
+                std.log.err("NDK sysroot not found at {s}/toolchains/llvm/prebuilt/{s}/sysroot", .{ ndk_home, host_triple });
+                std.process.exit(1);
+            };
+            defer builder.allocator.free(sysroot);
+
+            const usr_include = std.fs.path.join(builder.allocator, &[_][]const u8{ sysroot, "usr", "include" }) catch return;
+            defer builder.allocator.free(usr_include);
+            step.addSystemIncludePath(.{ .cwd_relative = usr_include });
+
+            const arch_triple = switch (arch) {
+                .aarch64 => "aarch64-linux-android",
+                .arm => "arm-linux-androideabi",
+                .x86_64 => "x86_64-linux-android",
+                else => {
+                    std.log.err("Unsupported Android arch", .{});
+                    std.process.exit(1);
+                },
+            };
+
+            const arch_include = std.fs.path.join(builder.allocator, &[_][]const u8{ usr_include, arch_triple }) catch return;
+            defer builder.allocator.free(arch_include);
+            step.addSystemIncludePath(.{ .cwd_relative = arch_include });
+
+            // Determine API level (default 21)
+            const api_level = if (std.process.getEnvVarOwned(builder.allocator, "ANDROID_API_LEVEL")) |level| blk: {
+                defer builder.allocator.free(level);
+                break :blk level;
+            } else |_| "21";
+
+            // Compute NDK lib dir for system libs (liblog, libc, libm, libdl)
+            const ndk_lib_dir = std.fs.path.join(builder.allocator, &[_][]const u8{ sysroot, "usr", "lib", arch_triple, api_level }) catch return;
+            defer builder.allocator.free(ndk_lib_dir);
+            step.addLibraryPath(.{ .cwd_relative = ndk_lib_dir });
+
+            // Generate libc config file for CRT objects (crtbegin_so.o, crtend_so.o)
+            const libc_config = std.fmt.allocPrint(builder.allocator,
+                \\include_dir={s}
+                \\sys_include_dir={s}
+                \\crt_dir={s}
+                \\msvc_lib_dir=
+                \\kernel32_lib_dir=
+                \\gcc_dir=
+            , .{ usr_include, arch_include, ndk_lib_dir }) catch return;
+            defer builder.allocator.free(libc_config);
+
+            const conf_name = std.fmt.allocPrint(builder.allocator, "android-libc-{s}.conf", .{@tagName(arch)}) catch return;
+            defer builder.allocator.free(conf_name);
+
+            const conf_path = std.fs.path.join(builder.allocator, &[_][]const u8{ ".zig-cache", conf_name }) catch return;
+            {
+                std.fs.cwd().makePath(".zig-cache") catch {};
+                const f = std.fs.cwd().createFile(conf_path, .{}) catch {
+                    std.log.err("Failed to write libc config to {s}", .{conf_path});
+                    std.process.exit(1);
+                };
+                defer f.close();
+                f.writeAll(libc_config) catch {
+                    std.log.err("Failed to write libc config to {s}", .{conf_path});
+                    std.process.exit(1);
+                };
             }
-            @panic("Android NDK setup not yet ported to Zig 0.16; use an older Zig for Android builds");
+            step.setLibCFile(.{ .cwd_relative = conf_path });
         }
     }.setup;
 
@@ -116,31 +182,31 @@ pub fn build(b: *std.Build) void {
         fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, arch: std.Target.Cpu.Arch, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8) void {
             if (android) {
                 setupAndroidNdk(builder, step, arch);
-                step.root_module.addLibraryPath(.{ .cwd_relative = and_lib });
-                step.root_module.addIncludePath(.{ .cwd_relative = and_inc });
-                step.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-                step.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-                step.root_module.linkSystemLibrary("log", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.addLibraryPath(.{ .cwd_relative = and_lib });
+                step.addIncludePath(.{ .cwd_relative = and_inc });
+                step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+                step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+                step.linkSystemLibrary2("log", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             } else if (os == .macos) {
-                step.root_module.addLibraryPath(.{ .cwd_relative = mac_lib });
-                step.root_module.addIncludePath(.{ .cwd_relative = mac_inc });
-                step.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-                step.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.addLibraryPath(.{ .cwd_relative = mac_lib });
+                step.addIncludePath(.{ .cwd_relative = mac_inc });
+                step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             } else if (os == .windows) {
-                step.root_module.addLibraryPath(.{ .cwd_relative = win_lib });
-                step.root_module.addIncludePath(.{ .cwd_relative = win_inc });
-                step.root_module.linkSystemLibrary("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-                step.root_module.linkSystemLibrary("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-                step.root_module.linkSystemLibrary("ws2_32", .{});
-                step.root_module.linkSystemLibrary("kernel32", .{});
-                step.root_module.linkSystemLibrary("advapi32", .{});
-                step.root_module.linkSystemLibrary("iphlpapi", .{});
-                step.root_module.linkSystemLibrary("winmm", .{});
+                step.addLibraryPath(.{ .cwd_relative = win_lib });
+                step.addIncludePath(.{ .cwd_relative = win_inc });
+                step.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary("ws2_32");
+                step.linkSystemLibrary("kernel32");
+                step.linkSystemLibrary("advapi32");
+                step.linkSystemLibrary("iphlpapi");
+                step.linkSystemLibrary("winmm");
             } else {
-                step.root_module.linkSystemLibrary("ssl", .{});
-                step.root_module.linkSystemLibrary("crypto", .{});
+                step.linkSystemLibrary("ssl");
+                step.linkSystemLibrary("crypto");
             }
-            step.root_module.link_libc = true;
+            step.linkLibC();
         }
     }.link;
 
@@ -153,9 +219,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "build_options", .module = build_options_mod },
-            },
         }),
     });
 
@@ -205,9 +268,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = optimize != .Debug and target_os != .macos,
-            .imports = &.{
-                .{ .name = "build_options", .module = build_options_mod },
-            },
         }),
     });
 
@@ -236,36 +296,33 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = optimize != .Debug,
-            .imports = &.{
-                .{ .name = "build_options", .module = build_options_mod },
-            },
         }),
     });
 
     // Static library links OpenSSL statically for mobile
     if (target_os == .ios) {
-        static_lib.root_module.addLibraryPath(.{ .cwd_relative = "deps/openssl-ios/lib" });
-        static_lib.root_module.addIncludePath(.{ .cwd_relative = "deps/openssl-ios/include" });
+        static_lib.addLibraryPath(.{ .cwd_relative = "deps/openssl-ios/lib" });
+        static_lib.addIncludePath(.{ .cwd_relative = "deps/openssl-ios/include" });
         // iOS SDK sysroot for system headers (sys/types.h etc.)
-        static_lib.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/usr/include" });
-        static_lib.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-        static_lib.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/usr/include" });
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (is_android) {
         setupAndroidNdk(b, static_lib, target_arch);
-        static_lib.root_module.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
-        static_lib.root_module.addIncludePath(.{ .cwd_relative = android_ssl_include });
-        static_lib.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-        static_lib.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.addLibraryPath(.{ .cwd_relative = android_ssl_lib });
+        static_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else if (target_os == .macos) {
-        static_lib.root_module.addLibraryPath(.{ .cwd_relative = openssl_lib });
-        static_lib.root_module.addIncludePath(.{ .cwd_relative = openssl_include });
-        static_lib.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-        static_lib.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
+        static_lib.addIncludePath(.{ .cwd_relative = openssl_include });
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else {
-        static_lib.root_module.linkSystemLibrary("ssl", .{});
-        static_lib.root_module.linkSystemLibrary("crypto", .{});
+        static_lib.linkSystemLibrary("ssl");
+        static_lib.linkSystemLibrary("crypto");
     }
-    static_lib.root_module.link_libc = true;
+    static_lib.linkLibC();
     addZlib(static_lib, b);
 
     const install_static_lib = b.addInstallArtifact(static_lib, .{});
@@ -285,7 +342,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        utun_helper.root_module.link_libc = true;
+        utun_helper.linkLibC();
 
         b.installArtifact(utun_helper);
 
@@ -335,21 +392,21 @@ pub fn build(b: *std.Build) void {
 
         // Tests may need OpenSSL (cipher.zig uses it)
         if (target_os == .macos) {
-            t.root_module.addLibraryPath(.{ .cwd_relative = openssl_lib });
-            t.root_module.addIncludePath(.{ .cwd_relative = openssl_include });
-            t.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-            t.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            t.addLibraryPath(.{ .cwd_relative = openssl_lib });
+            t.addIncludePath(.{ .cwd_relative = openssl_include });
+            t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else if (target_os == .windows) {
-            t.root_module.addLibraryPath(.{ .cwd_relative = win_openssl_lib });
-            t.root_module.addIncludePath(.{ .cwd_relative = win_openssl_include });
-            t.root_module.linkSystemLibrary("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-            t.root_module.linkSystemLibrary("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            t.addLibraryPath(.{ .cwd_relative = win_openssl_lib });
+            t.addIncludePath(.{ .cwd_relative = win_openssl_include });
+            t.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            t.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else {
-            t.root_module.linkSystemLibrary("ssl", .{});
-            t.root_module.linkSystemLibrary("crypto", .{});
+            t.linkSystemLibrary("ssl");
+            t.linkSystemLibrary("crypto");
         }
         if (is_android) setupAndroidNdk(b, t, target_arch);
-        t.root_module.link_libc = true;
+        t.linkLibC();
 
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
@@ -366,16 +423,13 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/ffi.zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "build_options", .module = build_options_mod },
-                },
             }),
             .filters = &.{"ffi"},
         });
         linkOpenSsl(b, ffi_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
         addZlib(ffi_test, b);
         if (is_android) setupAndroidNdk(b, ffi_test, target_arch);
-        ffi_test.root_module.link_libc = true;
+        ffi_test.linkLibC();
 
         const run_ffi_test = b.addRunArtifact(ffi_test);
         test_step.dependOn(&run_ffi_test.step);
@@ -410,7 +464,7 @@ pub fn build(b: *std.Build) void {
         linkOpenSsl(b, integration_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
         addZlib(integration_test, b);
         if (is_android) setupAndroidNdk(b, integration_test, target_arch);
-        integration_test.root_module.link_libc = true;
+        integration_test.linkLibC();
 
         const run_integration_test = b.addRunArtifact(integration_test);
         test_step.dependOn(&run_integration_test.step);
@@ -433,7 +487,7 @@ pub fn build(b: *std.Build) void {
 
         const dhcpv6_test = b.addTest(.{ .root_module = test_mod });
         if (target_os == .macos) {
-            dhcpv6_test.root_module.link_libc = true;
+            dhcpv6_test.linkLibC();
         }
         const run_dhcpv6_test = b.addRunArtifact(dhcpv6_test);
         test_step.dependOn(&run_dhcpv6_test.step);

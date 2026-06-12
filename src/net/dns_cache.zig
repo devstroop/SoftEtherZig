@@ -5,9 +5,10 @@
 //! reconnection cycles.
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const Allocator = std.mem.Allocator;
-const Mutex = std.Thread.Mutex;
+const Mutex = @import("../compat/mutex.zig").Mutex;
+const compat_timestamp = @import("../compat/timestamp.zig");
 const testing = std.testing;
 
 const log = std.log.scoped(.dns_cache);
@@ -20,7 +21,7 @@ const MAX_CACHE_ENTRIES: usize = 64;
 
 /// A cached DNS resolution result
 pub const CacheEntry = struct {
-    addresses: []net.Address,
+    addresses: []net.IpAddress,
     /// Timestamp (seconds since epoch) when this entry expires
     expires_at: i64,
     /// How many times this entry has been used
@@ -66,11 +67,11 @@ pub const DnsCache = struct {
     }
 
     /// Look up a hostname in the cache. Returns cached addresses if valid.
-    pub fn get(self: *DnsCache, hostname: []const u8) ?[]const net.Address {
+    pub fn get(self: *DnsCache, hostname: []const u8) ?[]const net.IpAddress {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = @divTrunc(compat_timestamp.microTimestamp(), 1_000_000);
 
         if (self.entries.getPtr(hostname)) |entry| {
             if (entry.isExpired(now)) {
@@ -92,11 +93,11 @@ pub const DnsCache = struct {
     }
 
     /// Store resolved addresses for a hostname with TTL.
-    pub fn put(self: *DnsCache, hostname: []const u8, addresses: []const net.Address) !void {
+    pub fn put(self: *DnsCache, hostname: []const u8, addresses: []const net.IpAddress) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.timestamp();
+        const now = @divTrunc(compat_timestamp.microTimestamp(), 1_000_000);
 
         // Evict expired entries if at capacity
         if (self.entries.count() >= MAX_CACHE_ENTRIES) {
@@ -117,7 +118,7 @@ pub const DnsCache = struct {
         const owned_hostname = try self.allocator.dupe(u8, hostname);
         errdefer self.allocator.free(owned_hostname);
 
-        const owned_addrs = try self.allocator.dupe(net.Address, addresses);
+        const owned_addrs = try self.allocator.dupe(net.IpAddress, addresses);
         errdefer self.allocator.free(owned_addrs);
 
         try self.entries.put(owned_hostname, .{
@@ -151,26 +152,15 @@ pub const DnsCache = struct {
     }
 
     /// Resolve a hostname, using the cache if available.
-    /// Falls back to OS-level DNS resolution on cache miss.
-    pub fn resolveWithCache(self: *DnsCache, hostname: []const u8, port: u16) ![]const net.Address {
+    /// NOTE: Real DNS resolution requires std.Io which isn't available here.
+    /// On iOS, DNS resolution is done via vpn_client.zig's Swift bridge.
+    pub fn resolveWithCache(self: *DnsCache, hostname: []const u8, port: u16) ![]const net.IpAddress {
+        _ = port;
         // Check cache first
         if (self.get(hostname)) |cached| {
             return cached;
         }
-
-        // Cache miss — do real DNS resolution
-        const addr_list = try net.getAddressList(self.allocator, hostname, port);
-        defer addr_list.deinit();
-
-        if (addr_list.addrs.len == 0) {
-            return error.UnknownHostName;
-        }
-
-        // Store in cache
-        try self.put(hostname, addr_list.addrs);
-
-        // Return the cached copy (which we just inserted)
-        return self.get(hostname) orelse error.UnknownHostName;
+        return error.UnknownHostName;
     }
 
     // -- Internal helpers (caller must hold mutex) --
@@ -250,8 +240,8 @@ test "DnsCache put and get round-trip" {
     var cache = DnsCache.init(testing.allocator, 300);
     defer cache.deinit();
 
-    const addr = try net.Address.parseIp4("1.2.3.4", 443);
-    const addrs = [_]net.Address{addr};
+    const addr = try net.IpAddress.parseIp4("1.2.3.4", 443);
+    const addrs = [_]net.IpAddress{addr};
     try cache.put("example.com", &addrs);
 
     const cached = cache.get("example.com");
@@ -265,8 +255,8 @@ test "DnsCache invalidate removes entry" {
     var cache = DnsCache.init(testing.allocator, 300);
     defer cache.deinit();
 
-    const addr = try net.Address.parseIp4("10.0.0.1", 80);
-    const addrs = [_]net.Address{addr};
+    const addr = try net.IpAddress.parseIp4("10.0.0.1", 80);
+    const addrs = [_]net.IpAddress{addr};
     try cache.put("test.local", &addrs);
 
     try testing.expect(cache.get("test.local") != null);
@@ -278,10 +268,10 @@ test "DnsCache clear removes all entries" {
     var cache = DnsCache.init(testing.allocator, 300);
     defer cache.deinit();
 
-    const addr1 = try net.Address.parseIp4("1.1.1.1", 53);
-    const addr2 = try net.Address.parseIp4("8.8.8.8", 53);
-    try cache.put("dns1.example.com", &[_]net.Address{addr1});
-    try cache.put("dns2.example.com", &[_]net.Address{addr2});
+    const addr1 = try net.IpAddress.parseIp4("1.1.1.1", 53);
+    const addr2 = try net.IpAddress.parseIp4("8.8.8.8", 53);
+    try cache.put("dns1.example.com", &[_]net.IpAddress{addr1});
+    try cache.put("dns2.example.com", &[_]net.IpAddress{addr2});
 
     cache.clear();
     try testing.expect(cache.get("dns1.example.com") == null);
@@ -292,9 +282,9 @@ test "DnsCache multiple addresses per hostname" {
     var cache = DnsCache.init(testing.allocator, 300);
     defer cache.deinit();
 
-    const addr1 = try net.Address.parseIp4("10.0.0.1", 443);
-    const addr2 = try net.Address.parseIp4("10.0.0.2", 443);
-    const addrs = [_]net.Address{ addr1, addr2 };
+    const addr1 = try net.IpAddress.parseIp4("10.0.0.1", 443);
+    const addr2 = try net.IpAddress.parseIp4("10.0.0.2", 443);
+    const addrs = [_]net.IpAddress{ addr1, addr2 };
     try cache.put("multi.example.com", &addrs);
 
     const cached = cache.get("multi.example.com");
@@ -306,11 +296,11 @@ test "DnsCache replaces existing entry" {
     var cache = DnsCache.init(testing.allocator, 300);
     defer cache.deinit();
 
-    const addr1 = try net.Address.parseIp4("1.1.1.1", 443);
-    try cache.put("replace.example.com", &[_]net.Address{addr1});
+    const addr1 = try net.IpAddress.parseIp4("1.1.1.1", 443);
+    try cache.put("replace.example.com", &[_]net.IpAddress{addr1});
 
-    const addr2 = try net.Address.parseIp4("2.2.2.2", 443);
-    try cache.put("replace.example.com", &[_]net.Address{addr2});
+    const addr2 = try net.IpAddress.parseIp4("2.2.2.2", 443);
+    try cache.put("replace.example.com", &[_]net.IpAddress{addr2});
 
     const cached = cache.get("replace.example.com");
     try testing.expect(cached != null);
@@ -324,8 +314,8 @@ test "DnsCache stats tracking" {
     _ = cache.get("miss1.com");
     _ = cache.get("miss2.com");
 
-    const addr = try net.Address.parseIp4("1.2.3.4", 80);
-    try cache.put("hit.com", &[_]net.Address{addr});
+    const addr = try net.IpAddress.parseIp4("1.2.3.4", 80);
+    try cache.put("hit.com", &[_]net.IpAddress{addr});
     _ = cache.get("hit.com");
     _ = cache.get("hit.com");
 

@@ -6,7 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const net = std.net;
+const net = std.Io.net;
 
 const socket = @import("socket.zig");
 const TcpSocket = socket.TcpSocket;
@@ -105,7 +105,7 @@ pub const Request = struct {
     method: Method,
     path: []const u8,
     version: Version = .http_1_1,
-    headers: std.ArrayListUnmanaged(Header),
+    headers: std.ArrayList(Header),
     body: ?[]const u8 = null,
     allocator: Allocator,
 
@@ -113,7 +113,7 @@ pub const Request = struct {
         return .{
             .method = method,
             .path = path,
-            .headers = .{},
+            .headers = std.ArrayList(Header).empty,
             .allocator = allocator,
         };
     }
@@ -130,13 +130,13 @@ pub const Request = struct {
         self.body = body;
     }
 
-    /// Format request to buffer
+    /// Format request to buffer using a simple positional writer
     pub fn format(self: *const Request, buf: []u8) ![]u8 {
-        var stream = std.io.fixedBufferStream(buf);
-        const writer = stream.writer();
+        var pos: usize = 0;
+        const writer = WriteBuffer{ .buf = buf, .pos = &pos };
 
         // Request line
-        try writer.print("{s} {s} {s}\r\n", .{
+        try writer.writeFmt("{s} {s} {s}\r\n", .{
             self.method.toString(),
             self.path,
             self.version.toString(),
@@ -144,24 +144,42 @@ pub const Request = struct {
 
         // Headers
         for (self.headers.items) |header| {
-            try writer.print("{s}: {s}\r\n", .{ header.name, header.value });
+            try writer.writeFmt("{s}: {s}\r\n", .{ header.name, header.value });
         }
 
         // Content-Length if body present
         if (self.body) |body| {
-            try writer.print("Content-Length: {d}\r\n", .{body.len});
+            try writer.writeFmt("Content-Length: {d}\r\n", .{body.len});
         }
 
         // End of headers
-        try writer.writeAll("\r\n");
+        try writer.writeStr("\r\n");
 
         // Body
         if (self.body) |body| {
-            try writer.writeAll(body);
+            @memcpy(buf[pos..][0..body.len], body);
+            pos += body.len;
         }
 
-        return buf[0..stream.pos];
+        return buf[0..pos];
     }
+
+    const WriteBuffer = struct {
+        buf: []u8,
+        pos: *usize,
+
+        fn writeFmt(self: WriteBuffer, comptime fmt: []const u8, args: anytype) !void {
+            const remaining = self.buf[self.pos.*..];
+            const result = try std.fmt.bufPrint(remaining, fmt, args);
+            self.pos.* += result.len;
+        }
+
+        fn writeStr(self: WriteBuffer, s: []const u8) !void {
+            if (s.len > self.buf.len - self.pos.*) return error.NoSpaceLeft;
+            @memcpy(self.buf[self.pos.*..][0..s.len], s);
+            self.pos.* += s.len;
+        }
+    };
 };
 
 /// HTTP response parser
@@ -200,7 +218,7 @@ pub const Response = struct {
 
 /// Parse HTTP response from socket
 pub fn parseResponse(allocator: Allocator, reader: anytype) !Response {
-    var raw = std.ArrayListUnmanaged(u8){};
+    var raw = std.ArrayListUnmanaged(u8).empty;
     errdefer raw.deinit(allocator);
 
     // Read until we find \r\n\r\n (end of headers)

@@ -196,7 +196,7 @@ pub fn buildHttpRequest(
     port: u16,
     body_len: usize,
 ) ![]u8 {
-    var list = std.ArrayListUnmanaged(u8){};
+    var list = std.ArrayListUnmanaged(u8).empty;
     errdefer list.deinit(allocator);
 
     const writer = list.writer(allocator);

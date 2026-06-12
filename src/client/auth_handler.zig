@@ -11,7 +11,7 @@
 //! overridable fields). Returns `ClientError` on failure.
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 
 const tls = @import("../net/net.zig").tls;
 const softether_proto = @import("../protocol/softether_protocol.zig");
@@ -219,7 +219,10 @@ fn runRedirect(
     };
 
     // Wait a moment for the server to process the redirect
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    {
+        var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(100 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(100 * std.time.ns_per_ms, std.time.ns_per_s)) };
+        _ = std.c.nanosleep(&ts, null);
+    }
 
     // Close current connection
     if (client.tls_socket) |*old_sock| {
@@ -239,8 +242,9 @@ fn runRedirect(
 
     const original = blk: {
         if (client.server_ip) |srv| {
-            if (srv.any.family == std.posix.AF.INET) {
-                break :blk srv.in.sa.addr;
+            switch (srv) {
+                .ip4 => |v4| break :blk @as(u32, @bitCast(v4.bytes)),
+                .ip6 => {},
             }
         }
         break :blk redirect_ip;
@@ -248,11 +252,10 @@ fn runRedirect(
 
     for ([_]u32{ redirect_ip, original }) |try_ip| {
         var try_ip_str: [48]u8 = undefined;
-        // Build an Address just for formatting
-        const addr_for_fmt = net.Address.initIp4(
-            @as(*const [4]u8, @ptrCast(&try_ip)).*,
-            redirect_port,
-        );
+        const try_ip_bytes: [4]u8 = @bitCast(try_ip);
+        const addr_for_fmt = net.IpAddress{
+            .ip4 = net.Ip4Address{ .bytes = try_ip_bytes, .port = 0 },
+        };
         const try_hostname = formatAddress(addr_for_fmt, &try_ip_str);
 
         if (try_ip == redirect_ip) {
@@ -329,10 +332,10 @@ fn runRedirect(
     }
 
     // Update server IP to what we actually connected to
-    const actual_addr = net.Address.initIp4(
-        @as(*const [4]u8, @ptrCast(&actual_ip)).*,
-        redirect_port,
-    );
+    const actual_ip_bytes: [4]u8 = @bitCast(actual_ip);
+    const actual_addr = net.IpAddress{
+        .ip4 = net.Ip4Address{ .bytes = actual_ip_bytes, .port = 0 },
+    };
     client.server_ip = actual_addr;
     client.effective_server_ip = actual_addr;
     client.effective_server_port = redirect_port;

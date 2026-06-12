@@ -10,7 +10,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const posix = std.posix;
 
 // ============================================================================
 // Connection Types
@@ -80,12 +79,20 @@ pub const ConnectionStatistics = struct {
 
     pub fn recordSend(self: *ConnectionStatistics, bytes: usize) void {
         self.bytes_sent += bytes;
-        self.last_send_time = std.time.milliTimestamp();
+        self.last_send_time = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
     }
 
     pub fn recordRecv(self: *ConnectionStatistics, bytes: usize) void {
         self.bytes_received += bytes;
-        self.last_recv_time = std.time.milliTimestamp();
+        self.last_recv_time = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
     }
 };
 
@@ -117,7 +124,7 @@ pub const ConnectionError = error{
 
 /// Low-level TCP connection
 pub const TcpConnection = struct {
-    socket: ?posix.socket_t,
+    socket: ?std.c.socket_t,
     state: ConnectionState,
     stats: ConnectionStatistics,
     params: ConnectionParams,
@@ -162,37 +169,59 @@ pub const TcpConnection = struct {
         };
 
         // Create socket
-        self.socket = posix.socket(
-            address.any.family,
-            posix.SOCK.STREAM,
-            0,
-        ) catch {
+        const family: u16 = switch (address) {
+            .ip4 => 2, // AF_INET
+            .ip6 => 30, // AF_INET6 (Darwin)
+        };
+        const sockfd = std.c.socket(family, std.c.SOCK.STREAM, 0);
+        if (sockfd < 0) {
             self.state = .error_state;
             return ConnectionError.ConnectionFailed;
-        };
+        }
+        self.socket = sockfd;
 
         // Set non-blocking temporarily for timeout
         // In production, would use poll/select for timeout
 
         // Connect
-        posix.connect(self.socket.?, &address.any, address.getLen()) catch |err| {
+        var connect_result: c_int = -1;
+        switch (address) {
+            .ip4 => |v4| {
+                var addr_storage: std.c.sockaddr.in = undefined;
+                @memset(@as([*]u8, @ptrCast(&addr_storage))[0..@sizeOf(@TypeOf(addr_storage))], 0);
+                addr_storage.family = family;
+                addr_storage.port = 0;
+                @memcpy(&addr_storage.addr, &v4.bytes);
+                connect_result = std.c.connect(sockfd, @ptrCast(&addr_storage), @sizeOf(@TypeOf(addr_storage)));
+            },
+            .ip6 => |v6| {
+                var addr_storage: std.c.sockaddr.in6 = undefined;
+                @memset(@as([*]u8, @ptrCast(&addr_storage))[0..@sizeOf(@TypeOf(addr_storage))], 0);
+                addr_storage.family = family;
+                addr_storage.port = 0;
+                @memcpy(&addr_storage.addr, &v6.bytes);
+                addr_storage.interface = v6.interface;
+                connect_result = std.c.connect(sockfd, @ptrCast(&addr_storage), @sizeOf(@TypeOf(addr_storage)));
+            },
+        }
+        if (connect_result < 0) {
             self.close();
             self.state = .error_state;
-            return switch (err) {
-                error.ConnectionRefused => ConnectionError.ConnectionRefused,
-                error.NetworkUnreachable => ConnectionError.NetworkUnreachable,
-                else => ConnectionError.ConnectionFailed,
-            };
-        };
+            return ConnectionError.ConnectionFailed;
+        }
 
         self.state = .connected;
-        self.stats.connect_time = std.time.milliTimestamp();
+        self.stats.connect_time = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
     }
 
     /// Close the connection
     pub fn close(self: *TcpConnection) void {
         if (self.socket) |sock| {
-            posix.close(sock);
+            _ = std.c.close(sock);
             self.socket = null;
         }
         self.state = .disconnected;
@@ -206,10 +235,11 @@ pub const TcpConnection = struct {
 
         const sock = self.socket orelse return ConnectionError.NotConnected;
 
-        const sent = posix.send(sock, data, 0) catch {
+        const sent = std.c.send(sock, data.ptr, data.len, 0);
+        if (sent < 0) {
             self.stats.error_count += 1;
             return ConnectionError.SendFailed;
-        };
+        }
 
         self.stats.recordSend(sent);
         return sent;
@@ -223,10 +253,11 @@ pub const TcpConnection = struct {
 
         const sock = self.socket orelse return ConnectionError.NotConnected;
 
-        const received = posix.recv(sock, buffer, 0) catch {
+        const received = std.c.recv(sock, buffer.ptr, buffer.len, 0);
+        if (received < 0) {
             self.stats.error_count += 1;
             return ConnectionError.RecvFailed;
-        };
+        }
 
         if (received == 0) {
             // Connection closed by peer
@@ -249,13 +280,13 @@ pub const TcpConnection = struct {
     }
 
     // Internal helpers
-    fn resolveAddress(self: *const TcpConnection) !std.net.Address {
+    fn resolveAddress(self: *const TcpConnection) !std.Io.net.IpAddress {
         // Try parsing as IP first
-        if (std.net.Address.parseIp4(self.params.host, self.params.port)) |addr| {
+        if (std.Io.net.IpAddress.parseIp4(self.params.host, self.params.port)) |addr| {
             return addr;
         } else |_| {}
 
-        if (std.net.Address.parseIp6(self.params.host, self.params.port)) |addr| {
+        if (std.Io.net.IpAddress.parseIp6(self.params.host, self.params.port)) |addr| {
             return addr;
         } else |_| {}
 
@@ -371,19 +402,31 @@ pub const KeepAliveManager = struct {
 
     /// Check if keep-alive should be sent
     pub fn shouldSend(self: *const KeepAliveManager) bool {
-        const now = std.time.milliTimestamp();
+        const now = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         return (now - self.last_sent) >= self.interval_ms;
     }
 
     /// Record that keep-alive was sent
     pub fn recordSent(self: *KeepAliveManager) void {
-        self.last_sent = std.time.milliTimestamp();
+        self.last_sent = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         self.pending_pong = true;
     }
 
     /// Record that response was received
     pub fn recordReceived(self: *KeepAliveManager) void {
-        self.last_received = std.time.milliTimestamp();
+        self.last_received = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         self.pending_pong = false;
         self.missed_count = 0;
     }
@@ -392,7 +435,11 @@ pub const KeepAliveManager = struct {
     pub fn isTimedOut(self: *const KeepAliveManager) bool {
         if (!self.pending_pong) return false;
 
-        const now = std.time.milliTimestamp();
+        const now = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         return (now - self.last_sent) >= self.timeout_ms;
     }
 
@@ -465,13 +512,21 @@ pub const ReconnectManager = struct {
         if (!self.enabled) return false;
         if (self.max_attempts > 0 and self.attempt >= self.max_attempts) return false;
 
-        const now = std.time.milliTimestamp();
+        const now = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         return (now - self.last_attempt_time) >= self.current_delay_ms;
     }
 
     /// Record reconnection attempt
     pub fn recordAttempt(self: *ReconnectManager, success: bool) void {
-        self.last_attempt_time = std.time.milliTimestamp();
+        self.last_attempt_time = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
 
         if (success) {
             self.reset();
@@ -509,7 +564,11 @@ pub const ReconnectManager = struct {
 
     /// Get time until next attempt
     pub fn getTimeUntilNext(self: *const ReconnectManager) i64 {
-        const now = std.time.milliTimestamp();
+        const now = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         const elapsed = now - self.last_attempt_time;
         const remaining = @as(i64, self.current_delay_ms) - elapsed;
         return @max(0, remaining);

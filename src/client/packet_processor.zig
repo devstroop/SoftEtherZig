@@ -410,7 +410,7 @@ pub const QueuedPacket = struct {
 pub const PacketQueue = struct {
     allocator: Allocator,
     packets: std.ArrayListUnmanaged(QueuedPacket),
-    mutex: std.Thread.Mutex,
+    mutex: @import("../compat/mutex.zig").Mutex,
     total_bytes: u64,
     dropped_count: u64,
 
@@ -450,7 +450,7 @@ pub const PacketQueue = struct {
         try self.packets.append(self.allocator, .{
             .data = copy,
             .info = classifyPacket(copy),
-            .timestamp = std.time.milliTimestamp(),
+            .timestamp = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); },
             .priority = priority,
         });
 

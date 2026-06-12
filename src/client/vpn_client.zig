@@ -14,13 +14,28 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const Thread = std.Thread;
-const Mutex = Thread.Mutex;
 const builtin = @import("builtin");
-const net = std.net;
+const net = std.Io.net;
+
+// Minimal Mutex — Thread.Mutex was removed in Zig 0.16.
+// Uses pthread on POSIX, SRWLOCK on Windows.
+const Mutex = if (builtin.os.tag == .windows)
+    std.os.windows.SRWLOCK
+else
+    extern struct {
+        handle: std.c.pthread_mutex_t = .{},
+        pub fn lock(self: *@This()) void {
+            _ = std.c.pthread_mutex_lock(&self.handle);
+        }
+        pub fn unlock(self: *@This()) void {
+            _ = std.c.pthread_mutex_unlock(&self.handle);
+        }
+    };
 
 // Import core utilities
 const core = @import("../core/mod.zig");
 const parseIpv4 = core.parseIpv4;
+const compat_timestamp = @import("../compat/timestamp.zig");
 
 // Import extracted client modules
 const state_mod = @import("state.zig");
@@ -271,7 +286,7 @@ pub const VpnClient = struct {
     reconnect_backoff_ms: u32,
     last_error: ?ClientError,
 
-    server_ip: ?net.Address = null,
+    server_ip: ?net.IpAddress = null,
     assigned_ip: u32,
     assigned_mask: u32,
     gateway_ip: u32,
@@ -286,7 +301,7 @@ pub const VpnClient = struct {
     last_dhcpv6_time: i64 = 0,
 
     /// Server IP that we actually connected to (may differ from server_ip after redirect)
-    effective_server_ip: ?net.Address = null,
+    effective_server_ip: ?net.IpAddress = null,
     effective_server_port: u16,
 
     // Authentication state
@@ -448,7 +463,11 @@ pub const VpnClient = struct {
         self.disconnect_reason = .none;
         self.last_error = null;
         self.stats = .{};
-        self.stats.connect_time_ms = std.time.milliTimestamp();
+        self.stats.connect_time_ms = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
 
         self.transitionState(.resolving_dns);
 
@@ -678,12 +697,16 @@ pub const VpnClient = struct {
         };
 
         self.transitionState(.connected);
-        self.stats.connect_time_ms = std.time.milliTimestamp();
+        self.stats.connect_time_ms = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
 
         if (self.event_callback) |cb| {
-            const server_ip_u32 = if (self.server_ip) |srv| blk: {
-                if (srv.any.family == std.posix.AF.INET) break :blk srv.in.sa.addr;
-                break :blk @as(u32, 0);
+            const server_ip_u32 = if (self.server_ip) |srv| switch (srv) {
+                .ip4 => |v4| @as(u32, @bitCast(v4.bytes)),
+                .ip6 => @as(u32, 0),
             } else 0;
             cb(.{ .connected = .{
                 .server_ip = server_ip_u32,
@@ -703,7 +726,10 @@ pub const VpnClient = struct {
         @atomicStore(bool, &self.should_stop, true, .release);
         var wait_count: u32 = 0;
         while (@atomicLoad(bool, &self.data_loop_running, .acquire) and wait_count < 200) : (wait_count += 1) {
-            std.Thread.sleep(10 * std.time.ns_per_ms); // 10ms per check, max 2s
+            {
+                var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(10 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(10 * std.time.ns_per_ms, std.time.ns_per_s)) };
+                _ = std.c.nanosleep(&ts, null);
+            } // 10ms per check, max 2s
         }
 
         // Join the native data loop thread (if any) — this releases its resources
@@ -738,27 +764,48 @@ pub const VpnClient = struct {
         // releasing it. deinit() calls us directly (no event needed).
     }
 
-    fn resolveDns(self: *Self) !net.Address {
+    fn resolveDns(self: *Self) !net.IpAddress {
         const host = self.config.server_host;
 
         // First try parsing as IP address (fast path)
-        if (net.Address.parseIp4(host, self.config.server_port)) |addr| {
+        if (net.IpAddress.parseIp4(host, self.config.server_port)) |addr| {
             return addr;
         } else |_| {}
 
-        if (net.Address.parseIp6(host, self.config.server_port)) |addr| {
+        if (net.IpAddress.parseIp6(host, self.config.server_port)) |addr| {
             return addr;
         } else |_| {}
 
-        // Real DNS resolution using std.net
-        const addrs = net.getAddressList(self.allocator, host, self.config.server_port) catch {
+        // DNS resolution using libc getaddrinfo (std.Io.net.getAddressList removed in Zig 0.16)
+        const c = std.c;
+        var hints: c.addrinfo = undefined;
+        @memset(std.mem.asBytes(&hints), 0);
+        hints.family = c.AF.INET;
+        hints.socktype = c.SOCK.STREAM;
+
+        var result: ?*c.addrinfo = null;
+        const port_z = try std.fmt.allocPrintSentinel(self.allocator, "{d}", .{self.config.server_port}, 0);
+        defer self.allocator.free(port_z);
+        const host_z = try self.allocator.dupeZ(u8, host);
+        defer self.allocator.free(host_z);
+
+        const rc = c.getaddrinfo(host_z.ptr, port_z.ptr, &hints, &result);
+        if (@intFromEnum(rc) != 0) {
             return ClientError.DnsResolutionFailed;
-        };
-        defer addrs.deinit();
+        }
+        defer c.freeaddrinfo(result.?);
 
-        // Return first address (IPv4 or IPv6)
-        if (addrs.addrs.len > 0) {
-            return addrs.addrs[0];
+        // Extract first IPv4 address
+        var ai = result.?;
+        while (true) {
+            if (ai.family == c.AF.INET and ai.addrlen >= @sizeOf(c.sockaddr.in)) {
+                const sa: *const c.sockaddr.in = @ptrCast(@alignCast(ai.addr.?));
+                return net.IpAddress{ .ip4 = .{
+                    .bytes = @bitCast(sa.addr),
+                    .port = self.config.server_port,
+                } };
+            }
+            ai = ai.next orelse break;
         }
 
         return ClientError.DnsResolutionFailed;
@@ -828,18 +875,21 @@ pub const VpnClient = struct {
         // configureSplitTunnel once the TUN has its final IP from the pool.
         if (self.config.static_ip == null and self.gateway_ip != 0) {
             if (self.server_ip) |srv| {
-                if (srv.any.family == std.posix.AF.INET) {
-                    const server_ip_be = @byteSwap(srv.in.sa.addr);
-                    // Default Route (Full Tunnel) — base routing
-                    if (self.config.routing.default_route) {
-                        ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
-                    }
-                    // Advanced Routing — stacks on top
-                    if (self.config.routing.enable_custom_routes) {
-                        if (self.config.routing.ipv4_include) |routes| {
-                            ctx.configureSplitTunnel(self.gateway_ip, routes);
+                switch (srv) {
+                    .ip4 => |v4| {
+                        const server_ip_be = @as(u32, @bitCast(v4.bytes));
+                        // Default Route (Full Tunnel) — base routing
+                        if (self.config.routing.default_route) {
+                            ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
                         }
-                    }
+                        // Advanced Routing — stacks on top
+                        if (self.config.routing.enable_custom_routes) {
+                            if (self.config.routing.ipv4_include) |routes| {
+                                ctx.configureSplitTunnel(self.gateway_ip, routes);
+                            }
+                        }
+                    },
+                    .ip6 => {},
                 }
             }
         }
@@ -999,7 +1049,11 @@ pub const VpnClient = struct {
                         loop_state.dhcp.config.gateway = response.config.gateway;
                         loop_state.dhcp.config.server_id = response.config.server_id;
                         loop_state.dhcp.config.lease_time = response.config.lease_time;
-                        loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
+                        loop_state.timing.last_dhcp_time = blk: {
+                            var ts: std.c.timespec = undefined;
+                            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+                        };
                         std.log.info("Send DHCP Request", .{});
                     }
                 } else if (response.msg_type == .ack and loop_state.dhcp.state == .request_sent) {
@@ -1062,8 +1116,8 @@ pub const VpnClient = struct {
                             const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                             std.log.info("Add IPv4 default route via {d}.{d}.{d}.{d}", .{ gw.a, gw.b, gw.c, gw.d });
                             if (self.server_ip) |srv| {
-                                if (srv.any.family == std.posix.AF.INET) {
-                                    const server_ip_be = @byteSwap(srv.in.sa.addr);
+                                if (srv == .ip4) {
+                                    const server_ip_be = @byteSwap(@as(u32, @bitCast(srv.ip4.bytes)));
                                     adapter.configureFullTunnel(loop_state.our_gateway, server_ip_be);
                                 }
                             }
@@ -1285,7 +1339,8 @@ pub const VpnClient = struct {
 
         // DHCP transaction ID
         var dhcp_xid: u32 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&dhcp_xid));
+        const random = @import("../compat/random.zig");
+        random.bytes(std.mem.asBytes(&dhcp_xid));
 
         // Configuration constants
         const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
@@ -1380,7 +1435,11 @@ pub const VpnClient = struct {
             write_blocked: u64 = 0,
         };
         var diag = DiagStats{};
-        var diag_last_ms: i64 = std.time.milliTimestamp();
+        var diag_last_ms: i64 = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
         // Cycle 6 adaptive poll: track if last iter did work
         var last_iter_had_work: bool = false;
 
@@ -1395,7 +1454,10 @@ pub const VpnClient = struct {
         }
 
         // Wait 300ms then send DHCP discover/inform
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        {
+            var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(300 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(300 * std.time.ns_per_ms, std.time.ns_per_s)) };
+            _ = std.c.nanosleep(&ts, null);
+        }
 
         var dhcp_buf_arr: [512]u8 = undefined;
 
@@ -1416,7 +1478,10 @@ pub const VpnClient = struct {
             }
             // Brief pause so INFORM is sent before DISCOVER
             // (ensures proper ordering even on fast connections).
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            {
+                var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(50 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(50 * std.time.ns_per_ms, std.time.ns_per_s)) };
+                _ = std.c.nanosleep(&ts, null);
+            }
         }
 
         // Always send DISCOVER for DhcpAllocated registration
@@ -1426,7 +1491,11 @@ pub const VpnClient = struct {
                 const blocks = [_][]const u8{dhcp_buf_arr[0..dhcp_disc_size]};
                 if (send_helper.get().sendBlocks(&blocks)) |_| {
                     loop_state.dhcp.state = .discover_sent;
-                    loop_state.timing.last_dhcp_time = std.time.milliTimestamp();
+                    loop_state.timing.last_dhcp_time = blk: {
+                        var ts: std.c.timespec = undefined;
+                        _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                        break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+                    };
                     std.log.debug("Sent DHCP DISCOVER (xid=0x{x:0>8})", .{dhcp_xid});
                 } else |err| {
                     std.log.err("Failed to send DHCP discover: {}", .{err});
@@ -1456,7 +1525,11 @@ pub const VpnClient = struct {
                         const blocks = [_][]const u8{dv6_frame[0..frame_len]};
                         if (send_helper.get().sendBlocks(&blocks)) |_| {
                             self.ipv6_dhcp_sent = true;
-                            self.last_dhcpv6_time = std.time.milliTimestamp();
+                            self.last_dhcpv6_time = blk: {
+                                var ts: std.c.timespec = undefined;
+                                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+                            };
                             std.log.info("Send DHCPv6 Solicit", .{});
                         } else |err| {
                             std.log.err("Failed to send DHCPv6 Solicit: {}", .{err});
@@ -1545,7 +1618,7 @@ pub const VpnClient = struct {
             }
             // Latency tracking: capture wall-clock at the very start of every
             // iteration so we can detect single-iter spikes vs steady state.
-            const iter_start_us = std.time.microTimestamp();
+            const iter_start_us = compat_timestamp.microTimestamp();
             // Snapshot per-conn write_block_count so we can diff at end of iter
             // to count POLLOUT stalls (TCP sndbuf full) attributable to this iter.
             var iter_wb_start: u64 = 0;
@@ -1630,14 +1703,14 @@ pub const VpnClient = struct {
                 }
             }
 
-            const poll_t0 = std.time.microTimestamp();
+            const poll_t0 = compat_timestamp.microTimestamp();
             if (!skip_poll) {
                 _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
             } else {
                 // Keep poll timeout=0 next iter — more data likely follows
                 last_iter_had_work = true;
             }
-            const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
+            const poll_us: u32 = @intCast(@max(0, compat_timestamp.microTimestamp() - poll_t0));
             if (poll_us > diag.poll_us_max) diag.poll_us_max = poll_us;
             diag.poll_us_total += poll_us;
 
@@ -1952,7 +2025,11 @@ pub const VpnClient = struct {
             // ============================================================
             // SLOW PATH: Control plane (ARP/DHCP/keepalive - less frequent)
             // ============================================================
-            const now = std.time.milliTimestamp();
+            const now = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            };
 
             // ARP Reply (urgent - server is waiting)
             if (loop_state.need_arp_reply and is_configured) {
@@ -2136,7 +2213,7 @@ pub const VpnClient = struct {
             // Latency tracking: compute iter wall time and update spike counters.
             // This is the LAST thing in the loop body so it captures everything
             // including poll(), inbound drain, outbound drain, keepalives, DHCP.
-            const iter_us: u64 = @intCast(@max(0, std.time.microTimestamp() - iter_start_us));
+            const iter_us: u64 = @intCast(@max(0, compat_timestamp.microTimestamp() - iter_start_us));
             if (iter_us > diag.iter_us_max) diag.iter_us_max = iter_us;
             diag.iter_us_total += iter_us;
             if (iter_us >= 10_000) diag.iter_slow_10ms += 1;
@@ -2238,57 +2315,11 @@ pub const VpnClient = struct {
     }
 
     fn logRoutingDiag(self: *Self, ifname: []const u8) void {
-        var cmd_buf: [1024]u8 = undefined;
-
-        const cmd = std.fmt.bufPrint(&cmd_buf, "netstat -rn -f inet 2>/dev/null | grep '^default' | head -5", .{}) catch unreachable;
-
-        var child = std.process.Child.init(
-            &[_][]const u8{ "/bin/sh", "-c", cmd },
-            self.allocator,
-        );
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Close;
-        child.spawn() catch |err| {
-            std.log.warn("[ROUTE-ROGUE] spawn failed: {}", .{err});
-            return;
-        };
-        var out_buf: [1024]u8 = undefined;
-        const bytes = child.stdout.?.read(&out_buf) catch |err| {
-            std.log.warn("[ROUTE-ROGUE] read failed: {}", .{err});
-            _ = child.wait() catch {};
-            return;
-        };
-        _ = child.wait() catch {};
-
-        const trimmed = std.mem.trim(u8, out_buf[0..bytes], " \n\r\t");
-        if (trimmed.len > 0) {
-            std.log.warn("[ROUTE-ROGUE] Default routes:\n{s}", .{trimmed});
-        } else {
-            std.log.warn("[ROUTE-ROGUE] NO default route found!", .{});
-        }
-
-        const ifcmd = std.fmt.bufPrint(&cmd_buf, "ifconfig {s} 2>/dev/null | head -3", .{ifname}) catch unreachable;
-
-        var ifchild = std.process.Child.init(
-            &[_][]const u8{ "/bin/sh", "-c", ifcmd },
-            self.allocator,
-        );
-        ifchild.stdout_behavior = .Pipe;
-        ifchild.stderr_behavior = .Close;
-        ifchild.spawn() catch |err| {
-            std.log.warn("[ROUTE-ROGUE] ifconfig spawn failed: {}", .{err});
-            return;
-        };
-        var ifout: [1024]u8 = undefined;
-        const ifbytes = ifchild.stdout.?.read(&ifout) catch |err| {
-            std.log.warn("[ROUTE-ROGUE] ifconfig read failed: {}", .{err});
-            _ = ifchild.wait() catch {};
-            return;
-        };
-        _ = ifchild.wait() catch {};
-
-        const iftrimmed = std.mem.trim(u8, ifout[0..ifbytes], " \n\r\t");
-        std.log.warn("[ROUTE-ROGUE] TUN iface:\n{s}", .{iftrimmed});
+        _ = self;
+        _ = ifname;
+        // NOTE: process.Child.init() removed in Zig 0.16; routing diag disabled.
+        // To re-enable, use std.process.spawn() with an std.Io interface.
+        std.log.info("[ROUTE-ROGUE] routing diagnostic disabled (Zig 0.16 compat)", .{});
     }
 };
 

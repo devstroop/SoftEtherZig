@@ -18,6 +18,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;
+const Io = std.Io;
 
 /// Maximum sizes (matching SoftEther's limits)
 pub const MAX_VALUE_SIZE = 96 * 1024 * 1024;
@@ -48,7 +49,7 @@ pub const Value = union(ValueType) {
 pub const Element = struct {
     name: []const u8,
     value_type: ValueType,
-    values: std.ArrayListUnmanaged(Value),
+    values: std.ArrayList(Value),
 
     fn deinit(self: *Element, allocator: Allocator) void {
         // Free value data
@@ -70,12 +71,12 @@ pub const Pack = struct {
     const Self = @This();
 
     allocator: Allocator,
-    elements: std.ArrayListUnmanaged(Element),
+    elements: std.ArrayList(Element),
 
     pub fn init(allocator: Allocator) Self {
         return .{
             .allocator = allocator,
-            .elements = .{},
+            .elements = std.ArrayList(Element).empty,
         };
     }
 
@@ -131,7 +132,7 @@ pub const Pack = struct {
         try self.elements.append(self.allocator, .{
             .name = name_copy,
             .value_type = value_type,
-            .values = .{},
+            .values = std.ArrayList(Value).empty,
         });
 
         return &self.elements.items[self.elements.items.len - 1];
@@ -222,11 +223,9 @@ pub const Pack = struct {
     }
 
     /// Serialize the Pack to binary format
-    pub fn toBuf(self: *const Self, writer: anytype) !void {
-        // Write number of elements
+    pub fn toBuf(self: *const Self, writer: *BufferWriter) !void {
         try writer.writeInt(u32, @intCast(self.elements.items.len), .big);
 
-        // Write each element
         for (self.elements.items) |elem| {
             try writeElement(writer, &elem);
         }
@@ -234,19 +233,20 @@ pub const Pack = struct {
 
     /// Serialize to a byte buffer
     pub fn toBytes(self: *const Self, allocator: Allocator) ![]u8 {
-        var list = std.ArrayListUnmanaged(u8){};
+        var list = std.ArrayList(u8).empty;
         errdefer list.deinit(allocator);
-        try self.toBuf(list.writer(allocator));
+        var buf_writer = BufferWriter{ .list = &list, .allocator = allocator };
+        try self.toBuf(&buf_writer);
         return list.toOwnedSlice(allocator);
     }
 
     /// Deserialize a Pack from binary format
-    pub fn fromBuf(allocator: Allocator, reader: anytype) !Self {
+    pub fn fromBuf(allocator: Allocator, reader: *Io.Reader) !Self {
         var pack_obj = Self.init(allocator);
         errdefer pack_obj.deinit();
 
         // Read number of elements
-        const num_elements = try reader.readInt(u32, .big);
+        const num_elements = try reader.takeInt(u32, .big);
         if (num_elements > MAX_ELEMENT_NUM) {
             return error.TooManyElements;
         }
@@ -261,21 +261,42 @@ pub const Pack = struct {
 
     /// Deserialize from bytes
     pub fn fromBytes(allocator: Allocator, data: []const u8) !Self {
-        var stream = std.io.fixedBufferStream(data);
-        return try Self.fromBuf(allocator, stream.reader());
+        var reader_buf: [4096]u8 = undefined;
+        var reader = std.testing.Reader.init(&reader_buf, &.{.{ .buffer = data }});
+        return try Self.fromBuf(allocator, &reader.interface);
+    }
+};
+
+/// Simple writer that appends to an ArrayList(u8)
+const BufferWriter = struct {
+    list: *std.ArrayList(u8),
+    allocator: Allocator,
+
+    fn writeInt(self: *BufferWriter, comptime T: type, value: T, endian: std.builtin.Endian) !void {
+        const size = @sizeOf(T);
+        const slice = try self.list.addManyAsSlice(self.allocator, size);
+        std.mem.writeInt(T, slice[0..size], value, endian);
+    }
+
+    fn writeAll(self: *BufferWriter, data: []const u8) !void {
+        try self.list.appendSlice(self.allocator, data);
+    }
+
+    fn writeByte(self: *BufferWriter, byte: u8) !void {
+        try self.list.append(self.allocator, byte);
     }
 };
 
 // Write a null-terminated string with length prefix
 // SoftEther format: length includes null terminator, but we don't write null to stream
-fn writeString(writer: anytype, str: []const u8) !void {
+fn writeString(writer: *BufferWriter, str: []const u8) !void {
     try writer.writeInt(u32, @intCast(str.len + 1), .big); // +1 for null terminator (not written)
     try writer.writeAll(str);
     // Note: null terminator is NOT written to stream, just counted in length
 }
 
 // Write an element
-fn writeElement(writer: anytype, elem: *const Element) !void {
+fn writeElement(writer: *BufferWriter, elem: *const Element) !void {
     // Name (length-prefixed string)
     try writeString(writer, elem.name);
 
@@ -292,7 +313,7 @@ fn writeElement(writer: anytype, elem: *const Element) !void {
 }
 
 // Write a value
-fn writeValue(writer: anytype, value: Value, value_type: ValueType) !void {
+fn writeValue(writer: *BufferWriter, value: Value, value_type: ValueType) !void {
     switch (value_type) {
         .int => {
             try writer.writeInt(u32, value.int, .big);
@@ -319,8 +340,8 @@ fn writeValue(writer: anytype, value: Value, value_type: ValueType) !void {
 
 // Read a string (length-prefixed, null-terminated)
 // SoftEther format: length includes null terminator, but only string body is stored
-fn readString(allocator: Allocator, reader: anytype) ![]u8 {
-    const len = try reader.readInt(u32, .big);
+fn readString(allocator: Allocator, reader: *Io.Reader) ![]u8 {
+    const len = try reader.takeInt(u32, .big);
     if (len > MAX_VALUE_SIZE) return error.StringTooLong;
     if (len == 0) return error.InvalidStringLength; // Length 0 is invalid in SoftEther
 
@@ -331,20 +352,19 @@ fn readString(allocator: Allocator, reader: anytype) ![]u8 {
     const data = try allocator.alloc(u8, str_len);
     errdefer allocator.free(data);
 
-    const bytes_read = try reader.readAll(data);
-    if (bytes_read != str_len) return error.UnexpectedEof;
+    try reader.readSliceAll(data);
 
     return data;
 }
 
 // Read an element and add to pack
-fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
+fn readElement(allocator: Allocator, reader: *Io.Reader, pack_obj: *Pack) !void {
     // Read name
     const name = try readString(allocator, reader);
     defer allocator.free(name);
 
     // Read type
-    const type_int = try reader.readInt(u32, .big);
+    const type_int = try reader.takeInt(u32, .big);
     if (type_int > 4) {
         std.log.err("Invalid element type {d} for '{s}'", .{ type_int, name });
         return error.InvalidElementType;
@@ -352,7 +372,7 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     const value_type: ValueType = @enumFromInt(type_int);
 
     // Read number of values
-    const num_values = try reader.readInt(u32, .big);
+    const num_values = try reader.takeInt(u32, .big);
     if (num_values > MAX_VALUE_NUM) {
         std.log.err("Element '{s}': type={d}, num_values={d} exceeds MAX_VALUE_NUM", .{ name, type_int, num_values });
         return error.TooManyValues;
@@ -364,33 +384,33 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     for (0..num_values) |_| {
         switch (value_type) {
             .int => {
-                const val = try reader.readInt(u32, .big);
+                const val = try reader.takeInt(u32, .big);
                 try pack_obj.addInt(name, val);
             },
             .int64 => {
-                const val = try reader.readInt(u64, .big);
+                const val = try reader.takeInt(u64, .big);
                 try pack_obj.addInt64(name, val);
             },
             .data => {
-                const size = try reader.readInt(u32, .big);
+                const size = try reader.takeInt(u32, .big);
                 if (size > MAX_VALUE_SIZE) return error.DataTooLarge;
                 const data = try allocator.alloc(u8, size);
                 defer allocator.free(data);
-                const bytes_read = try reader.readAll(data);
-                if (bytes_read != size) return error.UnexpectedEof;
+                try reader.readSliceAll(data);
+
                 try pack_obj.addData(name, data);
             },
             .str => {
-                const len = try reader.readInt(u32, .big);
+                const len = try reader.takeInt(u32, .big);
                 if (len > MAX_VALUE_SIZE) return error.StringTooLong;
                 const str = try allocator.alloc(u8, len);
                 defer allocator.free(str);
-                const bytes_read = try reader.readAll(str);
-                if (bytes_read != len) return error.UnexpectedEof;
+                try reader.readSliceAll(str);
+
                 try pack_obj.addStr(name, str);
             },
             .unistr => {
-                const size = try reader.readInt(u32, .big);
+                const size = try reader.takeInt(u32, .big);
                 if (size > MAX_VALUE_SIZE) return error.StringTooLong;
                 if (size == 0) {
                     try pack_obj.addUniStr(name, "");
@@ -398,8 +418,8 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
                 }
                 const data = try allocator.alloc(u8, size);
                 defer allocator.free(data);
-                const bytes_read = try reader.readAll(data);
-                if (bytes_read != size) return error.UnexpectedEof;
+                try reader.readSliceAll(data);
+
                 // Remove null terminator
                 const actual_len = if (data[size - 1] == 0) size - 1 else size;
                 try pack_obj.addUniStr(name, data[0..actual_len]);

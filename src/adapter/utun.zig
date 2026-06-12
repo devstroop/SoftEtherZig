@@ -5,6 +5,23 @@ const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 
+// Zig 0.16 removed posix.socket/close/write/bind/listen/accept/connect/fcntl.
+// Use raw C functions directly.
+const c = struct {
+    const fd_t = std.posix.fd_t;
+    extern "c" fn socket(domain: c_int, type_: c_int, protocol: c_int) c_int;
+    extern "c" fn close(fd: c_int) c_int;
+    extern "c" fn write(fd: c_int, buf: [*]const u8, nbyte: usize) isize;
+    extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+    extern "c" fn fork() std.c.pid_t;
+    extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+    extern "c" fn waitpid(pid: std.c.pid_t, status: ?*c_int, options: c_int) std.c.pid_t;
+    pub const F_GETFL: c_int = 3;
+    pub const F_SETFL: c_int = 4;
+};
+
+const compat_timestamp = @import("../compat/timestamp.zig");
+
 /// Maximum TUN MTU (standard Ethernet)
 pub const TUN_MTU: usize = 1500;
 
@@ -167,14 +184,14 @@ pub const TunStats = struct {
 
 /// Thread-safe packet queue
 pub const PacketQueue = struct {
-    packets: std.ArrayListUnmanaged(*TunPacket),
+    packets: std.ArrayList(*TunPacket),
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex,
+    mutex: @import("../compat/mutex.zig").Mutex,
     max_size: usize,
 
     pub fn init(allocator: std.mem.Allocator, max_size: usize) PacketQueue {
         return .{
-            .packets = .{},
+            .packets = std.ArrayList(*TunPacket).empty,
             .allocator = allocator,
             .mutex = .{},
             .max_size = max_size,
@@ -255,10 +272,11 @@ pub const UtunDevice = struct {
         }
 
         // Create control socket to get utun control ID
-        const temp_fd = posix.socket(AF_SYSTEM, posix.SOCK.DGRAM, SYSPROTO_CONTROL) catch {
+        const temp_fd = c.socket(AF_SYSTEM, posix.SOCK.DGRAM, SYSPROTO_CONTROL);
+        if (temp_fd < 0) {
             return UtunError.SocketCreationFailed;
-        };
-        defer posix.close(temp_fd);
+        }
+        defer _ = c.close(temp_fd);
 
         // Get control ID
         var info = CtlInfo{
@@ -278,9 +296,10 @@ pub const UtunDevice = struct {
         var found = false;
 
         while (unit_number < 16) : (unit_number += 1) {
-            fd = posix.socket(AF_SYSTEM, posix.SOCK.DGRAM, SYSPROTO_CONTROL) catch {
+            fd = c.socket(AF_SYSTEM, posix.SOCK.DGRAM, SYSPROTO_CONTROL);
+            if (fd < 0) {
                 continue;
-            };
+            }
 
             var addr = SockaddrCtl{
                 .sc_len = @sizeOf(SockaddrCtl),
@@ -294,7 +313,7 @@ pub const UtunDevice = struct {
             // Use C connect directly to avoid "unexpected errno" noise for EBUSY (16)
             const connect_result = std.c.connect(fd, @ptrCast(&addr), @sizeOf(SockaddrCtl));
             if (connect_result < 0) {
-                posix.close(fd);
+                _ = c.close(fd);
                 continue;
             }
             found = true;
@@ -316,25 +335,27 @@ pub const UtunDevice = struct {
             &optlen,
         );
         if (getsockopt_result < 0) {
-            posix.close(fd);
+            _ = c.close(fd);
             return UtunError.GetNameFailed;
         }
 
         // Set non-blocking mode
         // O_NONBLOCK on macOS is 0x0004 (bit 2)
         const O_NONBLOCK: usize = 0x0004;
-        const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch {
-            posix.close(fd);
+        const flags = c.fcntl(fd, c.F_GETFL, @as(c_int, 0));
+        if (flags < 0) {
+            _ = c.close(fd);
             return UtunError.SetNonBlockingFailed;
-        };
-        _ = posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK) catch {
-            posix.close(fd);
+        }
+        _ = c.fcntl(fd, c.F_SETFL, @as(c_int, flags | @as(c_int, @intCast(O_NONBLOCK))));
+        if (flags < 0) {
+            _ = c.close(fd);
             return UtunError.SetNonBlockingFailed;
-        };
+        }
 
         // Allocate device
         const self = allocator.create(UtunDevice) catch {
-            posix.close(fd);
+            _ = c.close(fd);
             return UtunError.OutOfMemory;
         };
 
@@ -360,7 +381,11 @@ pub const UtunDevice = struct {
             .stats = .{},
             .is_open = true,
             .halt = false,
-            .connection_start_time = std.time.milliTimestamp(),
+            .connection_start_time = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            },
         };
 
         // Generate IPv6 link-local from MAC
@@ -394,7 +419,11 @@ pub const UtunDevice = struct {
             .stats = .{},
             .is_open = true,
             .halt = false,
-            .connection_start_time = std.time.milliTimestamp(),
+            .connection_start_time = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            },
         };
 
         self.ipv6_config = Ipv6Config.generateLinkLocal(self.mac_address);
@@ -406,7 +435,7 @@ pub const UtunDevice = struct {
     pub fn close(self: *UtunDevice) void {
         if (self.is_open) {
             self.halt = true;
-            posix.close(self.fd);
+            _ = c.close(self.fd);
             self.is_open = false;
         }
         self.recv_queue.deinit();
@@ -517,16 +546,18 @@ pub const UtunDevice = struct {
 
         @memcpy(write_buf[4..][0..data.len], data);
 
-        const written = posix.write(self.fd, write_buf[0 .. data.len + 4]) catch {
+        const written = c.write(self.fd, @ptrCast(write_buf[0 .. data.len + 4]), data.len + 4);
+        if (written < 0) {
             self.stats.errors += 1;
-            return UtunError.WriteFailed;
-        };
-
-        if (written < 4) {
             return UtunError.WriteFailed;
         }
 
-        const payload_written = written - 4;
+        const written_usize: usize = @intCast(written);
+        if (written_usize < 4) {
+            return UtunError.WriteFailed;
+        }
+
+        const payload_written = written_usize - 4;
         self.stats.bytes_sent += payload_written;
         self.stats.packets_sent += 1;
 
@@ -571,13 +602,14 @@ pub const UtunDevice = struct {
         }
 
         // Fallback: run directly (works if already root)
-        var child = std.process.Child.init(
-            &[_][]const u8{ "/bin/sh", "-c", cmd },
-            self.allocator,
-        );
-        _ = child.spawnAndWait() catch {
+        const cmd_z: [:0]u8 = self.allocator.dupeZ(u8, cmd) catch {
             return UtunError.InterfaceConfigFailed;
         };
+        defer self.allocator.free(cmd_z);
+        const ret = spawnShell(cmd_z);
+        if (ret != 0) {
+            return UtunError.InterfaceConfigFailed;
+        }
     }
 
     /// Configure with temporary link-local IP for initial setup
@@ -599,7 +631,7 @@ pub const UtunDevice = struct {
 
         // Format the IPv6 address string
         var addr_buf: [40]u8 = undefined;
-        const ip6 = std.net.Ip6Address.init(address, 0, 0, 0);
+        const ip6 = std.Io.net.Ip6Address{ .bytes = address, .port = 0 };
         const addr_str = std.fmt.bufPrint(&addr_buf, "{f}", .{
             ip6,
         }) catch return UtunError.InterfaceConfigFailed;
@@ -617,13 +649,11 @@ pub const UtunDevice = struct {
             const escalate = @import("utun_escalate.zig");
             if (escalate.runPrivilegedCommand(cmd)) return;
 
-            var child = std.process.Child.init(
-                &[_][]const u8{ "/bin/sh", "-c", cmd },
-                self.allocator,
-            );
-            _ = child.spawnAndWait() catch {
-                return UtunError.InterfaceConfigFailed;
-            };
+            // Fallback: run directly via fork/exec
+            _ = self.allocator.dupeZ(u8, cmd) catch return UtunError.InterfaceConfigFailed;
+            const cmd_z = self.allocator.dupeZ(u8, cmd) catch return UtunError.InterfaceConfigFailed;
+            defer self.allocator.free(cmd_z);
+            _ = spawnShell(cmd_z);
         } else if (builtin.os.tag == .linux) {
             const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 addr add {s}/{d} dev {s}", .{
                 addr_str,
@@ -1029,8 +1059,35 @@ fn generateXid() u32 {
 /// Generate random bytes using system PRNG
 fn generateRandomBytes(comptime n: usize) [n]u8 {
     var buf: [n]u8 = undefined;
-    std.crypto.random.bytes(&buf);
+    var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+    prng.random().bytes(&buf);
     return buf;
+}
+
+/// Run a shell command via fork+exec and return exit code (-1 on error).
+fn spawnShell(cmd: [:0]const u8) i32 {
+    const pid = c.fork();
+    if (pid == 0) {
+        const argv: [4:null]?[*:0]const u8 = .{ "/bin/sh", "-c", cmd.ptr, null };
+        _ = c.execve("/bin/sh", &argv, @ptrCast(@alignCast(&std.c.environ)));
+        _ = std.c._exit(1);
+    } else if (pid > 0) {
+        var status: c_int = 0;
+        _ = c.waitpid(pid, &status, 0);
+        if (_WIFEXITED(status)) {
+            return _WEXITSTATUS(status);
+        }
+        return -1;
+    }
+    return -1;
+}
+
+/// C wait macros (not available as std.c.WIFEXITED in Zig 0.16)
+fn _WIFEXITED(status: c_int) bool {
+    return (status & 0x7f) == 0;
+}
+fn _WEXITSTATUS(status: c_int) i32 {
+    return @intCast((status >> 8) & 0xff);
 }
 
 // ============================================

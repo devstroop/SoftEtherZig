@@ -18,6 +18,19 @@ const pack = @import("pack.zig");
 pub const Pack = pack.Pack;
 const rpc = @import("rpc.zig");
 const auth_mod = @import("auth.zig");
+const compat_timestamp = @import("../compat/timestamp.zig");
+
+/// Helper to generate cryptographically random bytes (Zig 0.16 compat).
+fn randomBytes(buf: []u8) void {
+    var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+    prng.random().bytes(buf);
+}
+
+/// Helper to generate a random integer in range (Zig 0.16 compat).
+fn randomIntRangeAtMost(comptime T: type, min: T, max: T) T {
+    var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+    return prng.random().intRangeAtMost(T, min, max);
+}
 
 /// Protocol error types
 pub const ProtocolError = error{
@@ -180,7 +193,10 @@ pub const Writer = struct {
                 // TLS returns 0 for WANT_WRITE/WANT_READ — retry with backoff
                 retry_count += 1;
                 if (retry_count > 100) return error.ConnectionClosed;
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                {
+                    var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(10 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(10 * std.time.ns_per_ms, std.time.ns_per_s)) };
+                    _ = std.c.nanosleep(&ts, null);
+                }
                 continue;
             }
             retry_count = 0;
@@ -211,55 +227,70 @@ pub const Reader = struct {
 
 /// Build HTTP header for signature upload
 fn buildSignatureHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) ![]u8 {
-    var list = std.ArrayListUnmanaged(u8){};
+    var list = std.ArrayList(u8).empty;
     errdefer list.deinit(allocator);
 
-    const writer = list.writer(allocator);
-
     // Signature uses connect.cgi endpoint and simple headers like C code
-    try writer.print("POST {s} HTTP/1.1\r\n", .{Protocol.vpn_target_signature});
-    try writer.print("Host: {s}\r\n", .{host});
-    try writer.print("Content-Type: {s}\r\n", .{Protocol.content_type_signature});
-    try writer.writeAll("Connection: Keep-Alive\r\n");
-    try writer.print("Content-Length: {d}\r\n", .{body_len});
-    try writer.writeAll("\r\n");
+    try list.print(allocator, "POST {s} HTTP/1.1\r\n", .{Protocol.vpn_target_signature});
+    try list.print(allocator, "Host: {s}\r\n", .{host});
+    try list.print(allocator, "Content-Type: {s}\r\n", .{Protocol.content_type_signature});
+    try list.appendSlice(allocator, "Connection: Keep-Alive\r\n");
+    try list.print(allocator, "Content-Length: {d}\r\n", .{body_len});
+    try list.appendSlice(allocator, "\r\n");
 
     return list.toOwnedSlice(allocator);
 }
 
 /// Build HTTP header for Pack data
 fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) ![]u8 {
-    var list = std.ArrayListUnmanaged(u8){};
+    var list = std.ArrayList(u8).empty;
     errdefer list.deinit(allocator);
-
-    const writer = list.writer(allocator);
 
     // Generate HTTP Date string like C code: "Sat, 20 Dec 2025 13:31:23 GMT"
     const wday = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-    const now_ts = std.time.timestamp();
-    const epoch_secs: u64 = @intCast(now_ts);
-    const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
-    const day_secs = epoch.getDaySeconds();
-    const epoch_day = epoch.getEpochDay();
-    const year_day = epoch_day.calculateYearDay();
+    const now_secs: i64 = @divTrunc(compat_timestamp.microTimestamp(), 1_000_000);
+    // Use the microTimestamp for the date calculation
+    // Build a simple date string from seconds since epoch
+    // Simple POSIX date calculation
+    const days_since_epoch: i64 = @divFloor(now_secs, 86400);
+    const time_of_day: i64 = @mod(now_secs, 86400);
 
-    const hour = day_secs.getHoursIntoDay();
-    const minute = day_secs.getMinutesIntoHour();
-    const second = day_secs.getSecondsIntoMinute();
-    const month_day = year_day.calculateMonthDay();
-    const day: u32 = month_day.day_index + 1;
-    const month_idx: usize = @intFromEnum(month_day.month) - 1;
-    const year = year_day.year;
+    const hour: i64 = @divTrunc(time_of_day, 3600);
+    const minute: i64 = @divTrunc(@mod(time_of_day, 3600), 60);
+    const second: i64 = @mod(time_of_day, 60);
 
-    // Calculate day of week: (epoch_day + 4) % 7 gives 0=Mon ... 6=Sun (Jan 1, 1970 was Thursday = 3)
-    const weekday_idx: usize = @intCast(@mod(@as(i32, @intCast(epoch_day.day)) + 3, 7));
+    // Simple year calculation (approximate, good enough for HTTP Date)
+    var remaining_days: i64 = days_since_epoch;
+    var year: i64 = 1970;
+    while (true) {
+        const days_in_year: i64 = if ((@mod(year, 4) == 0 and @mod(year, 100) != 0) or (@mod(year, 400) == 0)) @as(i64, 366) else @as(i64, 365);
+        if (remaining_days < days_in_year) break;
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    // Month/day calculation
+    const leap = (@mod(year, 4) == 0 and @mod(year, 100) != 0) or (@mod(year, 400) == 0);
+    const month_lengths = [12]i64{ 31, if (leap) @as(i64, 29) else @as(i64, 28), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    var month_idx: usize = 0;
+    var day: i64 = remaining_days;
+    for (month_lengths, 0..) |mlen, i| {
+        if (day < mlen) {
+            month_idx = i;
+            break;
+        }
+        day -= mlen;
+    }
+    day += 1;
+
+    // Day of week (Jan 1, 1970 was Thursday = 4; Mon=0)
+    const weekday_idx: usize = @intCast(@mod(days_since_epoch + 3, 7));
 
     // Pack data uses full keep-alive headers like C code
-    // Order: Date, Host, Keep-Alive, Connection, Content-Type, Content-Length (matches C code)
-    try writer.print("POST {s} HTTP/1.1\r\n", .{Protocol.vpn_target});
-    try writer.print("Date: {s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT\r\n", .{
+    try list.print(allocator, "POST {s} HTTP/1.1\r\n", .{Protocol.vpn_target});
+    try list.print(allocator, "Date: {s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT\r\n", .{
         wday[weekday_idx],
         day,
         month_names[month_idx],
@@ -268,12 +299,12 @@ fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) 
         minute,
         second,
     });
-    try writer.print("Host: {s}\r\n", .{host});
-    try writer.writeAll("Keep-Alive: timeout=15; max=19\r\n");
-    try writer.writeAll("Connection: Keep-Alive\r\n");
-    try writer.print("Content-Type: {s}\r\n", .{Protocol.content_type_pack});
-    try writer.print("Content-Length: {d}\r\n", .{body_len});
-    try writer.writeAll("\r\n");
+    try list.print(allocator, "Host: {s}\r\n", .{host});
+    try list.appendSlice(allocator, "Keep-Alive: timeout=15; max=19\r\n");
+    try list.appendSlice(allocator, "Connection: Keep-Alive\r\n");
+    try list.print(allocator, "Content-Type: {s}\r\n", .{Protocol.content_type_pack});
+    try list.print(allocator, "Content-Length: {d}\r\n", .{body_len});
+    try list.appendSlice(allocator, "\r\n");
 
     return list.toOwnedSlice(allocator);
 }
@@ -465,8 +496,9 @@ pub const UdpBulkKeys = struct {
     /// Generate random bulk keys.
     pub fn generate() UdpBulkKeys {
         var keys: UdpBulkKeys = undefined;
-        std.crypto.random.bytes(&keys.send_key);
-        std.crypto.random.bytes(&keys.recv_key);
+        var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+        prng.random().bytes(&keys.send_key);
+        prng.random().bytes(&keys.recv_key);
         return keys;
     }
 };
@@ -553,7 +585,7 @@ pub fn buildPasswordAuth(
 
     // Unique ID (machine identifier) - GenerateMachineUniqueHash in C
     var unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&unique_id);
+    randomBytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
@@ -562,7 +594,7 @@ pub fn buildPasswordAuth(
 
     // Cedar->UniqueId is SEPARATE from unique_id in C
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&cedar_unique_id);
+    randomBytes(&cedar_unique_id);
 
     // Add NodeInfo fields (required by server)
     const os_info_anon = getOsInfo();
@@ -603,8 +635,8 @@ pub fn buildPasswordAuth(
 
     // Add pencore dummy value (random padding for anti-fingerprinting)
     var pencore_buf: [1000]u8 = undefined;
-    const pencore_size = crypto.random.intRangeAtMost(usize, 0, 1000);
-    crypto.random.bytes(pencore_buf[0..pencore_size]);
+    const pencore_size = randomIntRangeAtMost(usize, 0, 1000);
+    randomBytes(pencore_buf[0..pencore_size]);
     try auth_pack.addData("pencore", pencore_buf[0..pencore_size]);
 
     return auth_pack.toBytes(allocator);
@@ -686,7 +718,7 @@ pub fn buildPasswordAuthWithHash(
 
     // Unique ID (machine identifier) - GenerateMachineUniqueHash in C
     var unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&unique_id);
+    randomBytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
@@ -695,7 +727,7 @@ pub fn buildPasswordAuthWithHash(
 
     // Cedar->UniqueId is SEPARATE from unique_id in C
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&cedar_unique_id);
+    randomBytes(&cedar_unique_id);
 
     // Add NodeInfo fields (required by server)
     const os_info2 = getOsInfo();
@@ -736,8 +768,8 @@ pub fn buildPasswordAuthWithHash(
 
     // Add pencore dummy value (random padding for anti-fingerprinting)
     var pencore_buf2: [1000]u8 = undefined;
-    const pencore_size2 = crypto.random.intRangeAtMost(usize, 0, 1000);
-    crypto.random.bytes(pencore_buf2[0..pencore_size2]);
+    const pencore_size2 = randomIntRangeAtMost(usize, 0, 1000);
+    randomBytes(pencore_buf2[0..pencore_size2]);
     try auth_pack.addData("pencore", pencore_buf2[0..pencore_size2]);
 
     return auth_pack.toBytes(allocator);
@@ -796,7 +828,7 @@ pub fn buildAnonymousAuth(
 
     // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&unique_id);
+    randomBytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
@@ -805,8 +837,8 @@ pub fn buildAnonymousAuth(
 
     // Add pencore dummy value (random padding for anti-fingerprinting)
     var pencore_buf3: [1000]u8 = undefined;
-    const pencore_size3 = crypto.random.intRangeAtMost(usize, 0, 1000);
-    crypto.random.bytes(pencore_buf3[0..pencore_size3]);
+    const pencore_size3 = randomIntRangeAtMost(usize, 0, 1000);
+    randomBytes(pencore_buf3[0..pencore_size3]);
     try auth_pack.addData("pencore", pencore_buf3[0..pencore_size3]);
 
     return auth_pack.toBytes(allocator);
@@ -883,7 +915,7 @@ pub fn buildCertificateAuth(
 
     // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&unique_id);
+    randomBytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk version
@@ -927,8 +959,8 @@ pub fn buildCertificateAuth(
 
     // Anti-fingerprinting padding
     var pencore_buf_c: [1000]u8 = undefined;
-    const pencore_size_c = crypto.random.intRangeAtMost(usize, 0, 1000);
-    crypto.random.bytes(pencore_buf_c[0..pencore_size_c]);
+    const pencore_size_c = randomIntRangeAtMost(usize, 0, 1000);
+    randomBytes(pencore_buf_c[0..pencore_size_c]);
     try auth_pack.addData("pencore", pencore_buf_c[0..pencore_size_c]);
 
     return auth_pack.toBytes(allocator);
@@ -992,7 +1024,7 @@ pub fn buildTicketAuth(
 
     // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&unique_id);
+    randomBytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
     // RUDP bulk max version
@@ -1001,7 +1033,7 @@ pub fn buildTicketAuth(
 
     // Cedar->UniqueId
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
-    std.crypto.random.bytes(&cedar_unique_id);
+    randomBytes(&cedar_unique_id);
 
     // Add NodeInfo fields
     const os_info3 = getOsInfo();
@@ -1042,8 +1074,8 @@ pub fn buildTicketAuth(
 
     // Add pencore dummy value
     var pencore_buf: [1000]u8 = undefined;
-    const pencore_size = crypto.random.intRangeAtMost(usize, 0, 1000);
-    crypto.random.bytes(pencore_buf[0..pencore_size]);
+    const pencore_size = randomIntRangeAtMost(usize, 0, 1000);
+    randomBytes(pencore_buf[0..pencore_size]);
     try auth_pack.addData("pencore", pencore_buf[0..pencore_size]);
 
     return auth_pack.toBytes(allocator);
@@ -1480,7 +1512,7 @@ test "buildPasswordAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
     var random: [Protocol.sha1_size]u8 = undefined;
-    crypto.random.bytes(&random);
+    randomBytes(&random);
 
     const auth_data = try buildPasswordAuth(
         allocator,

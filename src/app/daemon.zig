@@ -128,7 +128,7 @@ fn showConnectProgress(display_ctx: *cli.display.DisplayContext, vpn: *client.Vp
             last_state = current_state;
         }
         spinner.render(display_ctx);
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        { var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(100 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(100 * std.time.ns_per_ms, std.time.ns_per_s)) }; _ = std.c.nanosleep(&ts, null); }
     }
 
     // Show final result
@@ -229,14 +229,14 @@ pub fn run(state: *AppState) !void {
             if (config.reconnect.enabled and state.isRunning()) {
                 cli.display.warning(&state.display, "Connection lost, reconnecting...", .{});
                 vpn.reconnect() catch {
-                    std.Thread.sleep(1 * std.time.ns_per_s);
+                    { var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(1 * std.time.ns_per_s, std.time.ns_per_s)), .nsec = @intCast(@mod(1 * std.time.ns_per_s, std.time.ns_per_s)) }; _ = std.c.nanosleep(&ts, null); }
                 };
             } else {
                 state.stop();
             }
         }
 
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        { var ts: std.c.timespec = .{ .sec = @intCast(@divFloor(100 * std.time.ns_per_ms, std.time.ns_per_s)), .nsec = @intCast(@mod(100 * std.time.ns_per_ms, std.time.ns_per_s)) }; _ = std.c.nanosleep(&ts, null); }
     }
 
     // Cleanup

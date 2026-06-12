@@ -103,7 +103,7 @@ pub const TcpSocketInfo = struct {
     bytes_received: u64,
 
     pub fn init(id: u32, direction: TcpDirection) TcpSocketInfo {
-        const now = std.time.milliTimestamp();
+        const now = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); };
         return .{
             .id = id,
             .direction = direction,
@@ -295,7 +295,7 @@ pub const Connection = struct {
             .send_blocks = BlockQueue.init(allocator),
             .recv_blocks = BlockQueue.init(allocator),
             .current_send_queue_size = 0,
-            .created_time = std.time.milliTimestamp(),
+            .created_time = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); },
             .connected_time = 0,
             .last_comm_time = 0,
             .server_random = undefined,
@@ -410,7 +410,7 @@ pub const Connection = struct {
     /// Queue received data
     pub fn receiveData(self: *Connection, data: []const u8) !void {
         try self.recv_blocks.enqueue(data, false);
-        self.last_comm_time = std.time.milliTimestamp();
+        self.last_comm_time = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); };
     }
 
     /// Get next received block
@@ -422,7 +422,7 @@ pub const Connection = struct {
     pub fn setState(self: *Connection, state: ConnectionState) void {
         self.state = state;
         if (state == .connected) {
-            self.connected_time = std.time.milliTimestamp();
+            self.connected_time = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); };
             self.connect_succeed = true;
         }
     }

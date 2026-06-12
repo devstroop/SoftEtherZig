@@ -53,7 +53,8 @@ pub const DhcpHandler = struct {
     /// Initialize DHCP handler with random transaction ID
     pub fn init() Self {
         var xid: u32 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&xid));
+        const random = @import("../compat/random.zig");
+        random.bytes(std.mem.asBytes(&xid));
         return .{ .xid = xid };
     }
 

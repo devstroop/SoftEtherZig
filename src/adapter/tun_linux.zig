@@ -158,7 +158,7 @@ pub const TunLinuxDevice = struct {
             .is_open = true,
             .is_configured = false,
             .halt = false,
-            .connection_start_time = std.time.milliTimestamp(),
+            .connection_start_time = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); },
         };
 
         return device;

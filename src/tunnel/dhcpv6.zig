@@ -105,7 +105,8 @@ pub const Dhcpv6Client = struct {
 
     pub fn init(allocator: std.mem.Allocator, mac: [6]u8) Dhcpv6Client {
         var xid: u32 = 0;
-        std.crypto.random.bytes(std.mem.asBytes(&xid));
+        const random = @import("../compat/random.zig");
+        random.bytes(std.mem.asBytes(&xid));
         xid &= 0x00FFFFFF; // RFC 8415 §7.1: XID is 24-bit
 
         // Build DUID-LLT (type 2): 2-byte type + 2-byte hw type + 4-byte time + 6-byte MAC
@@ -115,7 +116,11 @@ pub const Dhcpv6Client = struct {
         duid[2] = 0x00; // hw type high (Ethernet = 1)
         duid[3] = 0x01; // hw type low
         // Timestamp (4 bytes, seconds since 2000-01-01)
-        const now_secs: u32 = @intCast(@divTrunc(std.time.milliTimestamp(), 1000));
+        const now_secs: u32 = @intCast(@divTrunc(blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        }, 1000));
         const epoch_diff: u32 = 946684800; // seconds between 1970 and 2000
         const hw_time = now_secs -| epoch_diff;
         duid[4] = @intCast((hw_time >> 24) & 0xFF);
@@ -365,7 +370,7 @@ pub const Dhcpv6Client = struct {
     /// Format the assigned IPv6 address as a string (e.g. "2001:db8::1")
     pub fn formatAddress(self: *const Dhcpv6Client, buffer: []u8) ![]const u8 {
         return std.fmt.bufPrint(buffer, "{}", .{
-            std.net.fmt_ipv6(self.config.address),
+            std.Io.net.fmt_ipv6(self.config.address),
         });
     }
 };

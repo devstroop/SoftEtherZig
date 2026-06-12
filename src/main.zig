@@ -32,7 +32,7 @@ pub const build_date = "2024-12-21";
 // ============================================================================
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.process.Init.gpa();
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

@@ -13,6 +13,7 @@
 //   Direct write keeps drops individual and TCP-friendly, exactly like iOS.
 
 const std = @import("std");
+const compat_timestamp = @import("../compat/timestamp.zig");
 const builtin = @import("builtin");
 const posix = std.posix;
 
@@ -94,8 +95,8 @@ pub const FdAdapter = struct {
     // Stored as usize so 32-bit targets (Android armeabi-v7a) can use native
     // atomic ops. Zig disallows @atomicStore(u64, ...) on 32-bit ARM.
     tx_drops: usize,
-    tx_mutex: std.Thread.Mutex,
-    tx_cond: std.Thread.Condition,
+    tx_mutex: @import("../compat/mutex.zig").Mutex,
+    tx_cond: @import("../compat/mutex.zig").Condition,
     tx_thread: ?std.Thread,
     tx_stop: bool,
 
@@ -115,7 +116,10 @@ pub const FdAdapter = struct {
 
         // Generate random MAC
         var mac: [6]u8 = undefined;
-        std.crypto.random.bytes(&mac);
+        {
+            var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+            prng.random().bytes(&mac);
+        }
         mac[0] = (mac[0] & 0xFC) | 0x02;
 
         device.* = .{
@@ -130,7 +134,11 @@ pub const FdAdapter = struct {
             .stats = .{},
             .is_open = true,
             .halt = false,
-            .connection_start_time = std.time.milliTimestamp(),
+            .connection_start_time = blk: {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+                break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+            },
             .tx_ring = null,
             .tx_head = 0,
             .tx_tail = 0,
@@ -253,16 +261,10 @@ pub const FdAdapter = struct {
         if (data.len == 0) return 0;
 
         // Direct write on all mobile platforms — iOS and Android.
-        const written = posix.write(self.fd, data) catch |err| switch (err) {
-            error.WouldBlock => {
-                @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
-                return FdAdapterError.WriteFailed;
-            },
-            else => {
-                @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
-                return FdAdapterError.WriteFailed;
-            },
-        };
+        const written: usize = @intCast(std.c.write(self.fd, data.ptr, data.len));
+        if (written == @as(usize, @bitCast(@as(isize, -1)))) {
+            return FdAdapterError.WriteFailed;
+        }
         if (written == 0) {
             @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
             return FdAdapterError.WriteFailed;

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const compat_timestamp = @import("../compat/timestamp.zig");
 
 // Android is detected as linux+android ABI; it uses an OS-provided fd from VpnService
 // rather than opening /dev/net/tun directly (which is not permitted to apps).
@@ -235,7 +236,10 @@ pub const VirtualAdapter = struct {
 
     pub fn init(allocator: std.mem.Allocator) VirtualAdapter {
         var rand_buf: [4]u8 = undefined;
-        std.crypto.random.bytes(&rand_buf);
+        {
+            var prng = std.Random.DefaultPrng.init(@intCast(compat_timestamp.microTimestamp()));
+            prng.random().bytes(&rand_buf);
+        }
         const xid = (@as(u32, rand_buf[0]) << 24) |
             (@as(u32, rand_buf[1]) << 16) |
             (@as(u32, rand_buf[2]) << 8) |
@@ -519,7 +523,11 @@ pub const VirtualAdapter = struct {
         try packets.append(dhcp_pkt);
 
         self.dhcp_state = .discover_sent;
-        self.last_dhcp_time = std.time.milliTimestamp();
+        self.last_dhcp_time = blk: {
+            var ts: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+            break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
+        };
     }
 
     /// Process incoming packet and handle DHCP/ARP

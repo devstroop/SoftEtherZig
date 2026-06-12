@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const net = std.net;
+const net = std.Io.net;
 const posix = std.posix;
 
 const socket = @import("socket.zig");
@@ -185,17 +185,17 @@ fn socks5Connect(tcp: *TcpSocket, host: []const u8, port: u16) !void {
     req_buf[off] = 0;
     off += 1; // reserved
 
-    if (net.Address.parseIp4(host, 0)) |addr| {
+    if (net.IpAddress.parseIp4(host, 0)) |addr| {
         req_buf[off] = @intFromEnum(AddressType.ipv4);
         off += 1;
-        const ip4_bytes = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
+        const ip4_bytes: [4]u8 = addr.ip4.bytes;
         for (ip4_bytes, 0..) |b, i| req_buf[off + i] = b;
         off += 4;
     } else |_| {
-        if (net.Address.parseIp6(host, 0)) |addr| {
+        if (net.IpAddress.parseIp6(host, 0)) |addr| {
             req_buf[off] = @intFromEnum(AddressType.ipv6);
             off += 1;
-            for (&addr.in6.sa.addr, 0..) |b, i| req_buf[off + i] = b;
+            for (addr.ip6.bytes, 0..) |b, i| req_buf[off + i] = b;
             off += 16;
         } else |_| {
             if (host.len > 255) return SocksError.UnsupportedAddressType;
@@ -260,7 +260,7 @@ fn socks5Connect(tcp: *TcpSocket, host: []const u8, port: u16) !void {
 
 fn resolveToIpv4(host: []const u8) ![4]u8 {
     // Parse dotted-decimal IPv4 string directly.
-    // net.Address.parseIp4 exists but extracting raw bytes from it in a
+    // net.IpAddress.parseIp4 exists but extracting raw bytes from it in a
     // platform-independent way is fragile (sockaddr layout differs per OS).
     var result: [4]u8 = .{0} ** 4;
     var octet_idx: usize = 0;

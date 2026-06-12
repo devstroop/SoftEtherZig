@@ -17,7 +17,7 @@ pub const ConnectionStats = struct {
 
     /// Update last activity timestamp
     pub fn updateActivity(self: *ConnectionStats) void {
-        self.last_activity_time_ms = std.time.milliTimestamp();
+        self.last_activity_time_ms = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); };
     }
 
     /// Record bytes/packets sent
@@ -37,7 +37,7 @@ pub const ConnectionStats = struct {
     /// Get connection uptime in milliseconds
     pub fn getUptime(self: *const ConnectionStats) u64 {
         if (self.connect_time_ms == 0) return 0;
-        const now = std.time.milliTimestamp();
+        const now = blk: { var ts: std.c.timespec = undefined; _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts); break :blk @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms); };
         if (now < self.connect_time_ms) return 0;
         return @intCast(now - self.connect_time_ms);
     }
