@@ -108,28 +108,41 @@ pub const RoutingState = struct {
         }
     }
 
-    /// Restore original routing state after VPN disconnect
+    /// Restore original routing state after VPN disconnect.
+    ///
+    /// Ordering matters: we delete the host route FIRST (before the default
+    /// route), because the host route is the critical cleanup item — if the
+    /// process crashes mid-restore we must not leave a stale /32 route to the
+    /// VPN server through the physical gateway. The host route doesn't depend
+    /// on the default route, so deleting it first is always safe.
+    ///
+    /// Each step catches its own errors so a failure in one (e.g. default
+    /// route delete when it's already gone) doesn't block remaining cleanup.
     pub fn restore(self: *RoutingState) !void {
         if (!self.routes_configured) return;
 
-        // Remove VPN routes
-        try deleteDefaultRoute();
-
-        // Remove the /32 host route for the VPN server (added by addHostRoute
-        // to prevent a routing loop when connecting to the server). Without
-        // this, the host route leaks on every disconnect.
+        // 1. Immediately delete the /32 host route. This must run first
+        //    so it survives even a mid-restore crash/SIGKILL.
         if (self.vpn_server_ip != 0) {
             deleteHostRoute(self.vpn_server_ip) catch |err| {
                 std.log.warn("[ROUTING] Failed to delete host route: {}", .{err});
             };
         }
 
-        // Restore original default route
+        // 2. Delete the VPN default route (points through utun). Catches
+        //    individually so a missing route doesn't block later steps.
+        deleteDefaultRoute() catch |err| {
+            std.log.warn("[ROUTING] Failed to delete default route: {}", .{err});
+        };
+
+        // 3. Restore the original default route through the physical gateway.
         if (self.original_default_gateway != 0) {
-            try addRoute(0, 0, self.original_default_gateway, null);
+            addRoute(0, 0, self.original_default_gateway, null) catch |err| {
+                std.log.warn("[ROUTING] Failed to restore original default route: {}", .{err});
+            };
         }
 
-        // Re-enable IPv6 if we disabled it
+        // 4. Re-enable IPv6 if we disabled it
         if (self.ipv6_disabled and self.ipv6_service_len > 0) {
             enableIpv6OnService(self.ipv6_service[0..self.ipv6_service_len]);
             self.ipv6_disabled = false;
@@ -464,8 +477,17 @@ pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]cons
     }
 }
 
-/// Add a host route (for specific IP)
+/// Add a host route (for specific IP).
+///
+/// First deletes any pre-existing host route to the same IP (stale leftover
+/// from a previous crashed/killed session), then adds the fresh route. This
+/// makes the call idempotent and self-cleaning: even if the previous session
+/// SIGKILL'd mid-restore before deleteHostRoute ran, the next connect will
+/// detect and remove the stale entry.
 pub fn addHostRoute(host: u32, gateway: u32) !void {
+    // Clean up any stale host route from a previous crashed session
+    deleteHostRoute(host) catch {};
+
     var cmd_buf: [256]u8 = undefined;
 
     const host_str = formatIpv4(host);

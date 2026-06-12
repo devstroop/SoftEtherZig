@@ -366,6 +366,31 @@ fn resolveToIp(allocator: std.mem.Allocator, hostname: []const u8) ?[]u8 {
     return null;
 }
 
+/// Clean up a stale /32 host route to a known VPN server IP.
+///
+/// Unlike purgeStaleRoutes (which only finds routes through dead utun
+/// interfaces), this targets the host bypass route — which goes through the
+/// *physical* gateway (en0/en1). When a VPN session crashes or is SIGKILL'd,
+/// the utun interface disappears but the host route to the VPN server IP
+/// remains, and purgeStaleRoutes cannot see it because the route's interface
+/// column shows the physical NIC, not utun.
+///
+/// Called at connect time after DNS resolution so we have the resolved IP.
+pub fn cleanupStaleHostRoute(allocator: std.mem.Allocator, target_ip: []const u8) void {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return;
+    if (target_ip.len == 0) return;
+
+    var cmd_buf: [128]u8 = undefined;
+    const cmd = if (builtin.os.tag == .macos)
+        std.fmt.bufPrint(&cmd_buf, "route delete -host {s} 2>/dev/null", .{target_ip}) catch return
+    else
+        std.fmt.bufPrint(&cmd_buf, "ip route del {s}/32 2>/dev/null", .{target_ip}) catch return;
+
+    if (runCommand(allocator, cmd)) {
+        std.log.info("[ROUTE-HEAL] Cleaned up stale host route to {s} from previous session", .{target_ip});
+    }
+}
+
 /// Delete a route by parsing a routing table line.
 /// Best-effort: logs and ignores failures.
 fn deleteRouteByLine(allocator: std.mem.Allocator, line: []const u8) void {

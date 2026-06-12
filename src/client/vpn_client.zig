@@ -481,16 +481,59 @@ pub const VpnClient = struct {
     }
 
     pub fn disconnect(self: *Self) ClientError!void {
+        // Check/transition state under the mutex to prevent double-disconnect
+        // when two threads call disconnect() simultaneously.
         self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.state == .disconnected) {
+        const old_state = self.state;
+        if (old_state == .disconnected or old_state == .disconnecting) {
+            self.mutex.unlock();
             return;
         }
+        self.state = .disconnecting;
+        self.mutex.unlock();
 
+        // Fire .disconnecting event OUTSIDE the mutex so the Dart callback
+        // can safely call FFI functions (e.g. softether_get_state) without
+        // deadlocking on VpnClient.mutex.
+        if (self.event_callback) |cb| {
+            cb(.{ .state_changed = .{
+                .old_state = old_state,
+                .new_state = .disconnecting,
+            } }, self.event_user_data);
+        }
+
+        self.mutex.lock();
         self.should_stop = true;
         self.disconnect_reason = .user_requested;
         self.performDisconnect();
+        self.mutex.unlock();
+
+        // Fire .disconnected event and reconnect check OUTSIDE the mutex
+        // so Dart callbacks can safely query fresh VpnClient state.
+        self.finishDisconnect(old_state);
+    }
+
+    /// Complete the disconnect with event notification and reconnection
+    /// check. Called by disconnect() after the mutex is released.
+    fn finishDisconnect(self: *Self, old_state: ClientState) void {
+        // .disconnected state_changed event
+        if (self.event_callback) |cb| {
+            cb(.{ .state_changed = .{
+                .old_state = .disconnecting,
+                .new_state = .disconnected,
+            } }, self.event_user_data);
+        }
+        // Disconnected reason event
+        if (self.event_callback) |cb| {
+            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
+        }
+        // Reconnection check
+        if (self.config.reconnect.enabled and
+            self.disconnect_reason != .user_requested and
+            old_state == .connected)
+        {
+            self.scheduleReconnect();
+        }
     }
 
     /// Signal-safe stop request - just sets the flag without acquiring mutex
@@ -536,6 +579,25 @@ pub const VpnClient = struct {
         };
         self.effective_server_ip = self.server_ip;
         self.effective_server_port = self.config.server_port;
+
+        // Clean up stale host route to the VPN server IP left from a
+        // previous crashed/killed session. The purgeStaleRoutes scan above
+        // only finds routes through dead utun interfaces — it can't see
+        // the host bypass route because that goes through the physical NIC.
+        // This call is idempotent; route delete -host is a no-op if the
+        // route doesn't exist.
+        if (self.server_ip) |srv| {
+            if (srv.any.family == std.posix.AF.INET) {
+                var ip_buf: [16]u8 = undefined;
+                const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
+                    @as(u8, @truncate(srv.in.sa.addr >> 24)),
+                    @as(u8, @truncate(srv.in.sa.addr >> 16)),
+                    @as(u8, @truncate(srv.in.sa.addr >> 8)),
+                    @as(u8, @truncate(srv.in.sa.addr)),
+                }) catch unreachable;
+                route_heal.cleanupStaleHostRoute(self.allocator, ip_str);
+            }
+        }
 
         if (@atomicLoad(bool, &self.should_stop, .acquire)) {
             self.disconnect_reason = .user_requested;
@@ -632,8 +694,10 @@ pub const VpnClient = struct {
     }
 
     pub fn performDisconnect(self: *Self) void {
-        const old_state = self.state;
-        self.transitionState(.disconnecting);
+        // NOTE: event callbacks (.disconnecting / .disconnected / state_changed)
+        // are now fired by disconnect() outside the mutex-locked section.
+        // performDisconnect does ONLY synchronous cleanup — no callbacks, no
+        // blocking privileged I/O while holding the mutex.
 
         // Signal data loop to stop and wait for it to exit
         @atomicStore(bool, &self.should_stop, true, .release);
@@ -667,18 +731,11 @@ pub const VpnClient = struct {
             self.tls_socket = null;
         }
 
-        self.transitionState(.disconnected);
+        self.state = .disconnected;
 
-        if (self.event_callback) |cb| {
-            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
-        }
-
-        if (self.config.reconnect.enabled and
-            self.disconnect_reason != .user_requested and
-            old_state == .connected)
-        {
-            self.scheduleReconnect();
-        }
+        // Fire disconnected event and reconnection check OUTSIDE the mutex.
+        // disconnect() calls us with the mutex held, then fires these after
+        // releasing it. deinit() calls us directly (no event needed).
     }
 
     fn resolveDns(self: *Self) !net.Address {
@@ -1831,14 +1888,14 @@ pub const VpnClient = struct {
                                     if (ip_len > 0 and ip_len <= 1500) {
                                         // TEMPORARY ICMP DIAG: log every ICMP packet read from TUN
                                         // if (ip_len > 9) {
-                                            // const ip_proto = tun_read_bufs[outbound_count][9];
-                                            // if (ip_proto == 1) {
-                                                // const src = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][12]) << 24) | (@as(u32, tun_read_bufs[outbound_count][13]) << 16) | (@as(u32, tun_read_bufs[outbound_count][14]) << 8) | tun_read_bufs[outbound_count][15]);
-                                                // const dst = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][16]) << 24) | (@as(u32, tun_read_bufs[outbound_count][17]) << 16) | (@as(u32, tun_read_bufs[outbound_count][18]) << 8) | tun_read_bufs[outbound_count][19]);
-                                                // const icmp_type = tun_read_bufs[outbound_count][20];
-                                                // const icmp_code = tun_read_bufs[outbound_count][21];
-                                                // std.log.info("[ICMP-OUT] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, ip_len });
-                                            // }
+                                        // const ip_proto = tun_read_bufs[outbound_count][9];
+                                        // if (ip_proto == 1) {
+                                        // const src = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][12]) << 24) | (@as(u32, tun_read_bufs[outbound_count][13]) << 16) | (@as(u32, tun_read_bufs[outbound_count][14]) << 8) | tun_read_bufs[outbound_count][15]);
+                                        // const dst = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][16]) << 24) | (@as(u32, tun_read_bufs[outbound_count][17]) << 16) | (@as(u32, tun_read_bufs[outbound_count][18]) << 8) | tun_read_bufs[outbound_count][19]);
+                                        // const icmp_type = tun_read_bufs[outbound_count][20];
+                                        // const icmp_code = tun_read_bufs[outbound_count][21];
+                                        // std.log.info("[ICMP-OUT] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, ip_len });
+                                        // }
                                         // }
                                         if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
                                             outbound_blocks[outbound_count] = eth_frame;

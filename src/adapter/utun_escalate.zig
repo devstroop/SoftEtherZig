@@ -260,6 +260,8 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
 /// Send a shell command to the privileged helper for execution as root.
 /// Returns true if the command succeeded (exit code 0).
+/// Uses poll() with a 5-second timeout to avoid blocking indefinitely
+/// while the VpnClient mutex is held during disconnect.
 pub fn runPrivilegedCommand(cmd: []const u8) bool {
     if (privileged_cmd_fd < 0) return false;
     if (cmd.len == 0 or cmd.len > 2048) return false;
@@ -279,6 +281,23 @@ pub fn runPrivilegedCommand(cmd: []const u8) bool {
         privileged_cmd_fd = -1;
         return false;
     };
+
+    // Wait up to 5 seconds for the helper response. Route commands
+    // (add/delete) should complete in <100ms; a 5s timeout is generous
+    // while preventing indefinite mutex hold during disconnect.
+    var poll_fds = [1]std.posix.pollfd{
+        .{ .fd = privileged_cmd_fd, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    const poll_ret = std.posix.poll(&poll_fds, 5000) catch {
+        std.log.err("utun_escalate: poll failed on privileged channel", .{});
+        privileged_cmd_fd = -1;
+        return false;
+    };
+    if (poll_ret == 0) {
+        std.log.err("utun_escalate: privileged command timed out after 5s", .{});
+        privileged_cmd_fd = -1;
+        return false;
+    }
 
     // Read 1-byte response (exit code)
     var resp: [1]u8 = undefined;
