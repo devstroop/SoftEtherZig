@@ -18,8 +18,9 @@ pub const StaleRoute = struct {
     interface_len: usize,
 };
 
-/// Maximum number of utun interfaces to check
-const MAX_UTUN: u8 = 16;
+/// Maximum number of utun interfaces to check.
+/// macOS can assign utun numbers into the 40s after many VPN sessions.
+const MAX_UTUN: u8 = 64;
 
 /// Check if a utun interface number exists (e.g. utun3).
 /// Returns true if the interface is live.
@@ -312,6 +313,28 @@ pub fn repairStaleHostRoute(allocator: std.mem.Allocator, hostname: []const u8, 
         return true;
     }
 
+    // Fallback: direct host-route deletion for the target IP.
+    // The utun-based netstat -rn scan above misses routes where the Netif
+    // column displays "link#N" (the kernel interface index) instead of the
+    // BSD name "utunN".  We already know the target IP is unreachable, so
+    // just try deleting it directly — the kernel returns success if a
+    // matching host route existed, or a harmless error if not.
+    if (builtin.os.tag == .macos) {
+        var del_cmd_buf: [128]u8 = undefined;
+        const del_cmd = std.fmt.bufPrint(
+            &del_cmd_buf,
+            "route delete -host {s} 2>/dev/null",
+            .{target_ip},
+        ) catch return false;
+        if (runCommand(allocator, del_cmd)) {
+            std.log.warn(
+                "[ROUTE-HEAL] Directly deleted stale host route to {s} (utun-based scan missed it)",
+                .{target_ip},
+            );
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -358,6 +381,8 @@ fn deleteRouteByLine(allocator: std.mem.Allocator, line: []const u8) void {
         var cmd_buf: [128]u8 = undefined;
         const cmd = if (is_v6)
             std.fmt.bufPrint(&cmd_buf, "route -A inet6 delete {s} 2>/dev/null", .{dest}) catch return
+        else if (std.mem.indexOfScalar(u8, dest, '/') == null)
+            std.fmt.bufPrint(&cmd_buf, "route delete -host {s} 2>/dev/null", .{dest}) catch return
         else
             std.fmt.bufPrint(&cmd_buf, "route delete -net {s} 2>/dev/null", .{dest}) catch return;
         _ = runCommand(allocator, cmd);
