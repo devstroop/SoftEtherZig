@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) void {
         } else |_| {}
 
         // Check standard installation paths (choco installs to C:/OpenSSL-Win64 or C:/Program Files/OpenSSL)
-        for ([_] []const u8{
+        for ([_][]const u8{
             "C:/OpenSSL-Win64/lib/VC/x64/MD",
             "C:/OpenSSL-Win64/lib/VC/arm64/MD",
             "C:/OpenSSL-Win64/lib",
@@ -162,7 +162,7 @@ pub fn build(b: *std.Build) void {
     // Zig 0.15.2's bundled Clang implicitly enables ubsan for C compilation,
     // which inserts references to ___ubsan_handle_* symbols. The Xcode 26.5
     // arm64 linker rejects unresolved ubsan handlers at archive link time.
-    const zlib_c_flags = [_][]const u8{"-std=c99", "-fno-sanitize=undefined"};
+    const zlib_c_flags = [_][]const u8{ "-std=c99", "-fno-sanitize=undefined" };
 
     // Helper to add bundled zlib to a compile step
     const addZlib = struct {
