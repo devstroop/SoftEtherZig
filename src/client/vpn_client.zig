@@ -861,6 +861,17 @@ pub const VpnClient = struct {
         if (is_configured.*) {
             // Configured: fast path for IP packets
             if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                // TEMPORARY ICMP DIAG: log every ICMP packet written to TUN
+                // if (ethertype == 0x0800 and block_data.len > 23) {
+                //     const ip_proto = block_data[23]; // byte 9 of IP header
+                //     if (ip_proto == 1) {
+                //         const src = tunnel_mod.formatIpForLog((@as(u32, block_data[26]) << 24) | (@as(u32, block_data[27]) << 16) | (@as(u32, block_data[28]) << 8) | block_data[29]);
+                //         const dst = tunnel_mod.formatIpForLog((@as(u32, block_data[30]) << 24) | (@as(u32, block_data[31]) << 16) | (@as(u32, block_data[32]) << 8) | block_data[33]);
+                //         const icmp_type = block_data[34];
+                //         const icmp_code = block_data[35];
+                //         std.log.info("[ICMP-IN] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, block_data.len - 14 });
+                //     }
+                // }
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
                         _ = dev.write(block_data[14..]) catch {};
@@ -1818,6 +1829,17 @@ pub const VpnClient = struct {
                             if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                 if (maybe_len) |ip_len| {
                                     if (ip_len > 0 and ip_len <= 1500) {
+                                        // TEMPORARY ICMP DIAG: log every ICMP packet read from TUN
+                                        // if (ip_len > 9) {
+                                            // const ip_proto = tun_read_bufs[outbound_count][9];
+                                            // if (ip_proto == 1) {
+                                                // const src = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][12]) << 24) | (@as(u32, tun_read_bufs[outbound_count][13]) << 16) | (@as(u32, tun_read_bufs[outbound_count][14]) << 8) | tun_read_bufs[outbound_count][15]);
+                                                // const dst = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][16]) << 24) | (@as(u32, tun_read_bufs[outbound_count][17]) << 16) | (@as(u32, tun_read_bufs[outbound_count][18]) << 8) | tun_read_bufs[outbound_count][19]);
+                                                // const icmp_type = tun_read_bufs[outbound_count][20];
+                                                // const icmp_code = tun_read_bufs[outbound_count][21];
+                                                // std.log.info("[ICMP-OUT] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, ip_len });
+                                            // }
+                                        // }
                                         if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
                                             outbound_blocks[outbound_count] = eth_frame;
                                             outbound_bytes += eth_frame.len;
@@ -2065,10 +2087,9 @@ pub const VpnClient = struct {
             if (iter_us >= 100_000) diag.iter_slow_100ms += 1;
 
             if (now - diag_last_ms >= 1000) {
-                // DIAG + per-connection RX are non-standard diagnostic logs:
-                // only emit them under --verbose. The stats reset below still
-                // runs unconditionally so timing/accumulators stay correct.
-                if (self.config.verbose and (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0)) {
+                // DIAG + per-connection RX: always log when data is flowing so
+                // users can see real-time throughput without needing --verbose.
+                if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
                     const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;
                     const mbps_out = @as(f64, @floatFromInt(diag.bytes_out)) * 8.0 / 1_000_000.0;
                     const drain_avg: f64 = if (diag.poll_iters > 0)
