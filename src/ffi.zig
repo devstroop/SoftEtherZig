@@ -872,7 +872,10 @@ export fn softether_set_event_callback(
 
 /// Get library version string. Returns pointer to static string.
 export fn softether_version() [*:0]const u8 {
-    return lib.version;
+    // lib.version is a []const u8 slice, but the underlying bytes are
+    // a null-terminated string literal from build_options. Recover the
+    // sentinel pointer via @ptrCast.
+    return @ptrCast(lib.version.ptr);
 }
 
 // ============================================================================

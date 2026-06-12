@@ -115,6 +115,25 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Verify build.zig.zon version matches tag
+        shell: bash
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Strip 'v' prefix: v0.1.7 → 0.1.7
+          TAG_VERSION="${TAG#v}"
+          # Extract .version from build.zig.zon
+          ZON_VERSION=$(grep -o '\.version\s*=\s*"[^"]*"' build.zig.zon | grep -o '"[^"]*"' | tr -d '"')
+          if [ "$TAG_VERSION" != "$ZON_VERSION" ]; then
+            echo "❌ Version mismatch!"
+            echo "   Git tag:             $TAG → $TAG_VERSION"
+            echo "   build.zig.zon:       $ZON_VERSION"
+            echo ""
+            echo "   Bump .version in build.zig.zon to $TAG_VERSION before tagging."
+            echo "   Example:  sed -i '' 's/\\.version = \"[^\"]*\"/.version = \"$TAG_VERSION\"/' build.zig.zon"
+            exit 1
+          fi
+          echo "✅ Tag $TAG matches build.zig.zon version $ZON_VERSION"
+
       - name: Cache Zig compiler
         uses: actions/cache@v4
         with:

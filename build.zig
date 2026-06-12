@@ -1,5 +1,18 @@
 const std = @import("std");
 
+/// Embed build.zig.zon at comptime so we can extract the version
+/// without duplicating it across files.
+const build_zon = @embedFile("build.zig.zon");
+
+/// Extract the version string from build.zig.zon at comptime.
+/// Parses the `.version = "X.Y.Z"` field using simple string search.
+fn parseVersion(comptime zon: []const u8) []const u8 {
+    const marker = ".version = \"";
+    const start = std.mem.indexOf(u8, zon, marker).? + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, zon, start, '"').?;
+    return zon[start..end];
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
@@ -10,6 +23,12 @@ pub fn build(b: *std.Build) void {
     const target_abi = target.result.abi;
     const target_arch = target.result.cpu.arch;
     const is_android = target_os == .linux and (target_abi == .android or target_abi == .androideabi);
+
+    // Parse version from build.zig.zon (single source of truth)
+    const version = comptime parseVersion(build_zon);
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
+    const build_options_mod = build_options.createModule();
 
     // Detect Homebrew OpenSSL path (ARM vs Intel Mac)
     const openssl_lib: []const u8 = if (target_os == .macos) blk: {
@@ -299,6 +318,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options_mod },
+            },
         }),
     });
 
@@ -348,6 +370,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = optimize != .Debug and target_os != .macos,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options_mod },
+            },
         }),
     });
 
@@ -376,6 +401,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = optimize != .Debug,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options_mod },
+            },
         }),
     });
 
@@ -503,6 +531,9 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/ffi.zig"),
                 .target = target,
                 .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "build_options", .module = build_options_mod },
+                },
             }),
             .filters = &.{"ffi"},
         });

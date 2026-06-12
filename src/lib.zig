@@ -83,8 +83,8 @@ pub const formatIpv4 = core.formatIpv4;
 // Version Information
 // ============================================================================
 
-/// Library version
-pub const version = "0.1.7";
+/// Library version (from build.zig.zon via build_options)
+pub const version = @import("build_options").version;
 
 /// Get version string
 pub fn getVersion() []const u8 {
@@ -114,5 +114,5 @@ test "library exports" {
 }
 
 test "version" {
-    try std.testing.expectEqualStrings("0.1.7", getVersion());
+    try std.testing.expectEqualStrings(@import("build_options").version, getVersion());
 }
