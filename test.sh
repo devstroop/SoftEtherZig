@@ -11,7 +11,6 @@ CONFIGS=(
   config.compress.json
   config.halfconn.json
   config.halfconn-ipv4.json
-  config.compress-halfconn.json
   config.encrypt-off.json
   config.udp-accel.json
   config.multi-conn.json
