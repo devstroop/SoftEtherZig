@@ -11,6 +11,7 @@ const client = @import("../client/mod.zig");
 const state_mod = @import("state.zig");
 const config_mod = @import("config.zig");
 const events_mod = @import("events.zig");
+const compat = @import("../compat/mod.zig");
 
 const AppState = state_mod.AppState;
 
@@ -22,7 +23,7 @@ const pid_filename = "softether.pid";
 
 fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     // Try XDG_RUNTIME_DIR first (e.g. /run/user/1000/)
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "XDG_RUNTIME_DIR")) |dir| {
+    if (compat.getenv.getEnvOwnedSlice(std.heap.page_allocator, "XDG_RUNTIME_DIR")) |dir| {
         defer std.heap.page_allocator.free(dir);
         return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, pid_filename }) catch null;
     } else |_| {}

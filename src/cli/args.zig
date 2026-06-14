@@ -4,6 +4,7 @@
 //! Replaces std.process.args usage with structured parser
 
 const std = @import("std");
+const compat = @import("../compat/mod.zig");
 const Allocator = std.mem.Allocator;
 
 // ============================================================================
@@ -339,69 +340,69 @@ pub const ArgParser = struct {
                 return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "yes");
             }
         }.check;
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_SERVER")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_SERVER")) |v| {
             if (self.args.server == null) self.args.server = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PORT")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_PORT")) |v| {
             if (self.args.port == 443) {
                 self.args.port = std.fmt.parseInt(u16, v, 10) catch 443;
             }
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_HUB")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_HUB")) |v| {
             if (self.args.hub == null) self.args.hub = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_USER")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_USER")) |v| {
             if (self.args.username == null) self.args.username = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_PASSWORD")) |v| {
             if (self.args.password == null) self.args.password = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD_HASH")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_PASSWORD_HASH")) |v| {
             if (self.args.password_hash == null) self.args.password_hash = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONFIG")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_CONFIG")) |v| {
             if (self.args.config_file == null) self.args.config_file = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_COMPRESS")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_COMPRESS")) |v| {
             self.args.use_compress = isTrue(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ENCRYPT")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_ENCRYPT")) |v| {
             self.args.use_encrypt = isTrue(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_HALF_CONNECTION")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_HALF_CONNECTION")) |v| {
             self.args.half_connection = isTrue(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_QOS")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_QOS")) |v| {
             self.args.qos = isTrue(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_IP_VERSION")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_IP_VERSION")) |v| {
             self.args.ip_version = IpVersion.fromString(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_SKIP_TLS_VERIFY")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_SKIP_TLS_VERIFY")) |v| {
             self.args.skip_tls_verify = isTrue(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_UDP_ACCEL")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_UDP_ACCEL")) |v| {
             self.args.udp_accel = isTrue(v);
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_MAX_CONNECTIONS")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_MAX_CONNECTIONS")) |v| {
             self.args.max_connections = std.fmt.parseInt(u8, v, 10) catch self.args.max_connections;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_MTU")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_MTU")) |v| {
             self.args.mtu = std.fmt.parseInt(u16, v, 10) catch self.args.mtu;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_LOG_LEVEL")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_LOG_LEVEL")) |v| {
             if (LogLevel.fromString(v)) |l| self.args.log_level = l;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONNECT_TIMEOUT")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_CONNECT_TIMEOUT")) |v| {
             self.args.connect_timeout_ms = std.fmt.parseInt(u32, v, 10) catch self.args.connect_timeout_ms;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_READ_TIMEOUT")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_READ_TIMEOUT")) |v| {
             self.args.read_timeout_ms = std.fmt.parseInt(u32, v, 10) catch self.args.read_timeout_ms;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_KEEPALIVE_INTERVAL")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_KEEPALIVE_INTERVAL")) |v| {
             self.args.keepalive_interval_ms = std.fmt.parseInt(u32, v, 10) catch self.args.keepalive_interval_ms;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PROXY")) |v| {
+        if (compat.getenv.getEnvOwnedSlice(allocator, "SOFTETHER_PROXY")) |v| {
             if (self.args.proxy == null) self.args.proxy = v;
         } else |_| {}
     }

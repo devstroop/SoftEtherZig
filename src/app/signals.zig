@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const c = std.c;
 
 const state_mod = @import("state.zig");
 const AppState = state_mod.AppState;
@@ -35,7 +36,7 @@ pub fn setupSignalHandlers() void {
 }
 
 /// Signal handler callback
-fn handleSignal(sig: c_int) callconv(.c) void {
+fn handleSignal(sig: c.SIG) callconv(.c) void {
     _ = sig;
     if (global_state) |s| {
         s.running = false;

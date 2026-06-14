@@ -31,10 +31,8 @@ pub const build_date = "2024-12-21";
 // Entry Point
 // ============================================================================
 
-pub fn main() !void {
-    var gpa = std.process.Init.gpa();
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     var state = app.AppState.init(allocator);
     defer state.deinit();
@@ -46,11 +44,14 @@ pub fn main() !void {
     app.signals.setupSignalHandlers();
 
     // Parse command line arguments
-    const args = std.process.argsAlloc(allocator) catch |err| {
-        cli.display.failure(&state.display, "Failed to get arguments: {s}", .{@errorName(err)});
-        return;
-    };
-    defer std.process.argsFree(allocator, args);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_list = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    defer args_list.deinit(allocator);
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, try allocator.dupe(u8, arg));
+    }
+    const args = try args_list.toOwnedSlice(allocator);
+    defer allocator.free(args);
 
     // Check for subcommand (argv[1] without leading dash)
     var connect_mode = false;

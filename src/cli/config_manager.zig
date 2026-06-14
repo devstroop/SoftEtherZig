@@ -5,6 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const args_mod = @import("args.zig");
+const compat = @import("../compat/mod.zig");
 
 // ============================================================================
 // Configuration Structure
@@ -166,7 +167,7 @@ pub const ConfigManager = struct {
 
     /// Get default configuration file path
     pub fn getDefaultPath(allocator: Allocator) ![]const u8 {
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoHomeDir;
+        const home = compat.getenv.getEnvOwnedSlice(allocator, "HOME") catch return error.NoHomeDir;
         defer allocator.free(home);
         return try std.fmt.allocPrint(allocator, "{s}/.config/softether-zig/config.json", .{home});
     }
@@ -174,7 +175,7 @@ pub const ConfigManager = struct {
     /// Check if default config file exists
     pub fn defaultConfigExists() bool {
         const allocator = std.heap.page_allocator;
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch return false;
+        const home = compat.getenv.getEnvOwnedSlice(allocator, "HOME") catch return false;
         defer allocator.free(home);
 
         var path_buf: [512]u8 = undefined;

@@ -606,13 +606,13 @@ pub const VpnClient = struct {
         // This call is idempotent; route delete -host is a no-op if the
         // route doesn't exist.
         if (self.server_ip) |srv| {
-            if (srv.any.family == std.posix.AF.INET) {
+            if (srv == .ip4) {
                 var ip_buf: [16]u8 = undefined;
                 const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                    @as(u8, @truncate(srv.in.sa.addr >> 24)),
-                    @as(u8, @truncate(srv.in.sa.addr >> 16)),
-                    @as(u8, @truncate(srv.in.sa.addr >> 8)),
-                    @as(u8, @truncate(srv.in.sa.addr)),
+                    srv.ip4.bytes[0],
+                    srv.ip4.bytes[1],
+                    srv.ip4.bytes[2],
+                    srv.ip4.bytes[3],
                 }) catch unreachable;
                 route_heal.cleanupStaleHostRoute(self.allocator, ip_str);
             }

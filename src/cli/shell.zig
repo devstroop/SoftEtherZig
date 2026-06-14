@@ -171,7 +171,7 @@ pub const Shell = struct {
 
         self.displayWelcome();
 
-        const stdin = std.fs.File.stdin();
+        const stdin = std.Io.File.stdin();
         var line_buf: [1024]u8 = undefined;
 
         while (self.running) {

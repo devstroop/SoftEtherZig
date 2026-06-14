@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const File = std.fs.File;
+const File = std.Io.File;
 
 // ============================================================================
 // ANSI Color Codes
@@ -68,9 +68,23 @@ pub const DisplayContext = struct {
     const Self = @This();
 
     pub fn init() Self {
-        const stdout = std.fs.File.stdout();
-        // Check if stdout is a valid TTY
-        const use_color = if (stdout.isTty()) stdout.getOrEnableAnsiEscapeSupport() else false;
+        const stdout = std.Io.File.stdout();
+        // Check if stdout is a valid TTY — always false for now (Zig 0.16
+        // requires passing an Io handle to isTty, not available at init time).
+        const use_color = false;
+
+        return .{
+            .file = stdout,
+            .use_color = use_color,
+            .use_unicode = true,
+            .verbose = false,
+            .quiet = false,
+        };
+    }
+
+    pub fn initWithIo(io: std.Io) Self {
+        const stdout = std.Io.File.stdout();
+        const use_color = stdout.isTty(io) catch false;
 
         return .{
             .file = stdout,
@@ -83,7 +97,7 @@ pub const DisplayContext = struct {
 
     pub fn initWithOptions(use_color: bool, use_unicode: bool) Self {
         return .{
-            .file = std.fs.File.stdout(),
+            .file = std.Io.File.stdout(),
             .use_color = use_color,
             .use_unicode = use_unicode,
             .verbose = false,

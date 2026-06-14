@@ -1,5 +1,6 @@
 const std = @import("std");
 const errors = @import("errors.zig");
+const compat = @import("compat/mod.zig");
 
 const VpnError = errors.VpnError;
 
@@ -228,7 +229,7 @@ pub const JsonConfig = struct {
 /// Expand tilde (~) in path to home directory
 fn expandPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     if (path.len > 0 and path[0] == '~') {
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoHomeDirectory;
+        const home = compat.getenv.getEnvOwnedSlice(allocator, "HOME") catch return error.NoHomeDirectory;
         defer allocator.free(home);
         if (path.len == 1) {
             return try allocator.dupe(u8, home);
@@ -289,7 +290,7 @@ pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !std.json.Pa
 
 /// Get default config file path
 pub fn getDefaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoHomeDirectory;
+    const home = compat.getenv.getEnvOwnedSlice(allocator, "HOME") catch return error.NoHomeDirectory;
     defer allocator.free(home);
     return try std.fmt.allocPrint(allocator, "{s}/.config/softether-zig/{s}", .{ home, DEFAULT_CONFIG_FILE });
 }
