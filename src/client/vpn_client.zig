@@ -597,11 +597,12 @@ pub const VpnClient = struct {
         if (self.server_ip) |srv| {
             if (srv.any.family == std.posix.AF.INET) {
                 var ip_buf: [16]u8 = undefined;
+                const addr_be = @byteSwap(srv.in.sa.addr);
                 const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                    @as(u8, @truncate(srv.in.sa.addr >> 24)),
-                    @as(u8, @truncate(srv.in.sa.addr >> 16)),
-                    @as(u8, @truncate(srv.in.sa.addr >> 8)),
-                    @as(u8, @truncate(srv.in.sa.addr)),
+                    @as(u8, @truncate(addr_be >> 24)),
+                    @as(u8, @truncate(addr_be >> 16)),
+                    @as(u8, @truncate(addr_be >> 8)),
+                    @as(u8, @truncate(addr_be)),
                 }) catch unreachable;
                 route_heal.cleanupStaleHostRoute(self.allocator, ip_str);
             }
@@ -635,12 +636,12 @@ pub const VpnClient = struct {
                 var ip_buf: [64]u8 = undefined;
                 for (addrs.addrs) |addr| {
                     if (addr.any.family != std.posix.AF.INET) continue;
-                    const ip_u32 = addr.in.sa.addr;
+                    const ip_be = @byteSwap(addr.in.sa.addr);
                     const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                        @as(u8, @truncate(ip_u32 >> 24)),
-                        @as(u8, @truncate(ip_u32 >> 16)),
-                        @as(u8, @truncate(ip_u32 >> 8)),
-                        @as(u8, @truncate(ip_u32)),
+                        @as(u8, @truncate(ip_be >> 24)),
+                        @as(u8, @truncate(ip_be >> 16)),
+                        @as(u8, @truncate(ip_be >> 8)),
+                        @as(u8, @truncate(ip_be)),
                     }) catch continue;
                     if (probeClusterServer(ip_str, port, self.allocator, host)) {
                         self.server_ip = addr;
