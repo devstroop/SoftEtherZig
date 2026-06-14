@@ -486,6 +486,31 @@ pub const VpnClient = struct {
         self.runDataLoop() catch |err| {
             std.log.err("Data loop thread exited with error: {}", .{err});
         };
+        // Data loop exited — we are ON this thread, so calling disconnect()
+        // would deadlock (performDisconnect tries to join self).
+        // Instead, null out the thread handle and fire the disconnect event
+        // so the client's event loop (CLI/Flutter) can react with a reconnect.
+        self.data_loop_thread = null;
+        @atomicStore(bool, &self.data_loop_running, false, .release);
+
+        // Fire disconnect event just like finishDisconnect would.
+        // The disconnect_reason is already set (by health check or error path).
+        if (self.event_callback) |cb| {
+            cb(.{ .state_changed = .{
+                .old_state = .connected,
+                .new_state = .disconnected,
+            } }, self.event_user_data);
+            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
+        }
+
+        // Only reconnecting state clients should call scheduleReconnect.
+        // Auto-reconnect applies when reconnect.enabled and reason permits it.
+        if (self.config.reconnect.enabled and
+            self.disconnect_reason != .user_requested and
+            self.disconnect_reason.shouldReconnect())
+        {
+            self.scheduleReconnect();
+        }
     }
 
     pub fn disconnect(self: *Self) ClientError!void {
@@ -834,7 +859,7 @@ pub const VpnClient = struct {
         var path_buf: [64]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/api/VPN/dt{d:0>4}{d:0>2}{d:0>2}{d:0>2}{d:0>2}{d:0>2}", .{
             dt.year, @intFromEnum(md.month), md.day_index + 1,
-            h, m, s,
+            h,       m,                      s,
         }) catch return false;
 
         // Probe TLS config: short timeout, no cert verify
@@ -853,13 +878,14 @@ pub const VpnClient = struct {
 
         // Send HTTP GET request
         var req_buf: [256]u8 = undefined;
-        const request = std.fmt.bufPrint(&req_buf,
+        const request = std.fmt.bufPrint(
+            &req_buf,
             "GET {s} HTTP/1.1\r\n" ++
-            "Host: {s}\r\n" ++
-            "User-Agent: SoftEtherZig/0.1\r\n" ++
-            "Accept: */*\r\n" ++
-            "Connection: close\r\n" ++
-            "\r\n",
+                "Host: {s}\r\n" ++
+                "User-Agent: SoftEtherZig/0.1\r\n" ++
+                "Accept: */*\r\n" ++
+                "Connection: close\r\n" ++
+                "\r\n",
             .{ path, ip_str },
         ) catch return false;
 
@@ -886,7 +912,7 @@ pub const VpnClient = struct {
 
         // Check HTTP status line: expects "HTTP/1.1 401"
         const status_ok = std.mem.startsWith(u8, resp_buf[0..@min(resp_len, 15)], "HTTP/1.1 401") or
-                          std.mem.startsWith(u8, resp_buf[0..@min(resp_len, 15)], "HTTP/1.0 401");
+            std.mem.startsWith(u8, resp_buf[0..@min(resp_len, 15)], "HTTP/1.0 401");
         if (!status_ok) return false;
 
         // Check Content-Length: 1274
