@@ -297,6 +297,52 @@ pub const TunLinuxDevice = struct {
         });
     }
 
+    /// Configure an IPv6 address on the TUN interface.
+    /// Uses the 'ip -6 addr add' command (standard Linux netlink tool).
+    pub fn configureIpv6(self: *TunLinuxDevice, address: [16]u8, prefix_len: u8) !void {
+        if (builtin.os.tag != .linux) return TunLinuxError.NotLinux;
+        _ = self.fd orelse return TunLinuxError.DeviceNotOpen;
+
+        // Format IPv6 address as colon-hex string
+        var addr_buf: [40]u8 = undefined;
+        const addr_str = std.fmt.bufPrint(&addr_buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
+            address[0],  address[1],  address[2],  address[3],
+            address[4],  address[5],  address[6],  address[7],
+            address[8],  address[9],  address[10], address[11],
+            address[12], address[13], address[14], address[15],
+        }) catch return TunLinuxError.ConfigureFailed;
+
+        var cmd_buf: [256]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 addr add {s}/{d} dev {s}", .{
+            addr_str,
+            prefix_len,
+            self.getName(),
+        }) catch return TunLinuxError.ConfigureFailed;
+
+        std.log.info("Running: {s}", .{cmd});
+
+        var child = std.process.Child.init(
+            &[_][]const u8{ "sh", "-c", cmd },
+            self.allocator,
+        );
+        child.stdout_behavior = .Close;
+        child.stderr_behavior = .Close;
+
+        child.spawn() catch {
+            std.log.err("Failed to spawn ip -6 addr command", .{});
+            return TunLinuxError.ConfigureFailed;
+        };
+
+        const result = child.wait() catch {
+            std.log.err("Failed to wait for ip -6 addr command", .{});
+            return TunLinuxError.ConfigureFailed;
+        };
+
+        if (result.Exited != 0) {
+            std.log.warn("ip -6 addr command returned non-zero: {}", .{result.Exited});
+        }
+    }
+
     /// Bring interface up
     fn bringInterfaceUp(self: *TunLinuxDevice) !void {
         const sock_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch {

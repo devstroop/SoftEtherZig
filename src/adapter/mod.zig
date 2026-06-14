@@ -439,15 +439,26 @@ pub const VirtualAdapter = struct {
         try route.addIpv6Routes(gateway, routes_str);
     }
 
-    /// Configure IPv6 on the tunnel interface and add IPv6 routes
+    /// Configure IPv6 on the tunnel interface and add IPv6 routes.
+    ///
+    /// Platform support:
+    ///   - macOS:    ✓ utun (ifconfig inet6)
+    ///   - Linux:    ✓ TUN  (ip -6 addr add)
+    ///   - Windows:  ✗ TAP  (netsh interface ipv6 or IP Helper API — not yet ported)
     pub fn configureIpv6(self: *VirtualAdapter, address: [16]u8, prefix_len: u8, gateway: []const u8) !void {
         const dev = self.device orelse return UtunError.DeviceNotOpen;
 
-        // Configure IPv6 address on the interface (utun only — Linux TUN and Windows TAP TODO)
+        // Delegate to device-specific IPv6 configuration (macOS utun, Linux TUN).
+        // Windows TAP does not yet implement configureIpv6; IPv6 will be
+        // unreachable on Windows until the IP Helper API is integrated.
         if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
             if (@hasDecl(@TypeOf(dev.*), "configureIpv6")) {
                 try dev.configureIpv6(address, prefix_len);
+            } else {
+                std.log.info("Device does not support IPv6 configuration (os={s})", .{@tagName(builtin.os.tag)});
             }
+        } else {
+            std.log.info("IPv6 interface configuration not implemented for {s}", .{@tagName(builtin.os.tag)});
         }
 
         // Add IPv6 default route through gateway
