@@ -612,6 +612,47 @@ pub const VpnClient = struct {
             return ClientError.OperationCancelled;
         }
 
+        // === Cluster server probe: detect broken data-plane nodes early ===
+        // DNS may return multiple IPs; probe each with a quick HTTP GET to
+        // /api/VPN/dtTIMESTAMP. A genuine healthy SoftEther server responds
+        // 401 with Content-Length: 1274. Skip nodes that fail this probe so
+        // we don't waste time on servers that accept TLS but silently drop
+        // upload traffic (broken data-plane). If ALL nodes fail the probe,
+        // fall back to the first resolved IP with a warning.
+        probe_done: {
+            const host = self.config.server_host;
+            const port = self.config.server_port;
+            // Only probe when hostname is not already an IP literal
+            const is_ip_literal = if (net.Address.parseIp4(host, port)) |_| true else |_| if (net.Address.parseIp6(host, port)) |_| true else |_| false;
+            if (!is_ip_literal) {
+                // Resolve all IPs and probe each; pick the first healthy one.
+                // If DNS or all probes fail, keep the address from resolveDns.
+                const addrs = net.getAddressList(self.allocator, host, port) catch {
+                    // DNS failed — skip probing, keep resolveDns result
+                    break :probe_done;
+                };
+                defer addrs.deinit();
+                var ip_buf: [64]u8 = undefined;
+                for (addrs.addrs) |addr| {
+                    if (addr.any.family != std.posix.AF.INET) continue;
+                    const ip_u32 = addr.in.sa.addr;
+                    const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
+                        @as(u8, @truncate(ip_u32 >> 24)),
+                        @as(u8, @truncate(ip_u32 >> 16)),
+                        @as(u8, @truncate(ip_u32 >> 8)),
+                        @as(u8, @truncate(ip_u32)),
+                    }) catch continue;
+                    if (probeClusterServer(ip_str, port, self.allocator, host)) {
+                        self.server_ip = addr;
+                        self.effective_server_ip = addr;
+                        std.log.info("Cluster probe OK: {s}:{d}", .{ ip_str, port });
+                        break :probe_done;
+                    }
+                    std.log.warn("Cluster probe FAILED: {s}:{d} — skipping broken node", .{ ip_str, port });
+                }
+            }
+        }
+
         self.transitionState(.connecting_tcp);
         self.transitionState(.ssl_handshake);
 
@@ -771,6 +812,102 @@ pub const VpnClient = struct {
         }
 
         return ClientError.DnsResolutionFailed;
+    }
+
+    /// Cluster server probe: quick TLS + HTTP GET to verify the target
+    /// is a genuine SoftEther server with a healthy data-plane.
+    /// Per spec: GET /api/VPN/dtTIMESTAMP → expect 401 + Content-Length: 1274.
+    /// Returns true if the server passes the probe, false otherwise.
+    fn probeClusterServer(ip_str: []const u8, port: u16, allocator: Allocator, hostname: []const u8) bool {
+        // Build timestamp path: /api/VPN/dtYYYYMMDDHHMMSS
+        const now_ts = std.time.timestamp();
+        const epoch_secs: u64 = @as(u64, @intCast(@max(0, now_ts)));
+        const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+        const dt = epoch.getEpochDay().calculateYearDay();
+        const md = dt.calculateMonthDay();
+        const day_seconds = epoch.getDaySeconds();
+        const h = day_seconds.getHoursIntoDay();
+        const m = day_seconds.getMinutesIntoHour();
+        const s = day_seconds.getSecondsIntoMinute();
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/api/VPN/dt{d:0>4}{d:0>2}{d:0>2}{d:0>2}{d:0>2}{d:0>2}", .{
+            dt.year, @intFromEnum(md.month), md.day_index + 1,
+            h, m, s,
+        }) catch return false;
+
+        // Probe TLS config: short timeout, no cert verify
+        const probe_config = tls.TlsConfig{
+            .verify_certificate = false,
+            .allow_self_signed = true,
+            .timeout_ms = 3000,
+            .client_cert_pem = null,
+            .client_key_pem = null,
+            .sni_hostname = hostname,
+            .proxy = null,
+        };
+
+        var sock = tls.TlsSocket.connect(allocator, ip_str, port, probe_config) catch return false;
+        defer sock.close();
+
+        // Send HTTP GET request
+        var req_buf: [256]u8 = undefined;
+        const request = std.fmt.bufPrint(&req_buf,
+            "GET {s} HTTP/1.1\r\n" ++
+            "Host: {s}\r\n" ++
+            "User-Agent: SoftEtherZig/0.1\r\n" ++
+            "Accept: */*\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n",
+            .{ path, ip_str },
+        ) catch return false;
+
+        sock.writeAll(request) catch return false;
+
+        // Read response — just need headers to check status + Content-Length
+        var resp_buf: [2048]u8 = undefined;
+        var resp_len: usize = 0;
+        const read_start = std.time.milliTimestamp();
+        while (resp_len < resp_buf.len - 1) {
+            const n = sock.read(resp_buf[resp_len..]) catch {
+                // Connection closed / error — if we already have headers, try to parse
+                break;
+            };
+            if (n == 0) break;
+            resp_len += n;
+            // Stop after headers (\r\n\r\n)
+            if (resp_len >= 4 and std.mem.eql(u8, resp_buf[resp_len - 4 .. resp_len], "\r\n\r\n")) break;
+            // Timeout
+            if (std.time.milliTimestamp() - read_start > 3000) break;
+        }
+
+        if (resp_len < 16) return false;
+
+        // Check HTTP status line: expects "HTTP/1.1 401"
+        const status_ok = std.mem.startsWith(u8, resp_buf[0..@min(resp_len, 15)], "HTTP/1.1 401") or
+                          std.mem.startsWith(u8, resp_buf[0..@min(resp_len, 15)], "HTTP/1.0 401");
+        if (!status_ok) return false;
+
+        // Check Content-Length: 1274
+        const response_str = resp_buf[0..resp_len];
+        var cl_found = false;
+        var lines = std.mem.splitScalar(u8, response_str, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimRight(u8, line, "\r");
+            if (std.mem.startsWith(u8, trimmed, "Content-Length:") or
+                std.mem.startsWith(u8, trimmed, "content-length:"))
+            {
+                const value = std.mem.trimLeft(u8, trimmed["Content-Length:".len..], " \t");
+                if (std.fmt.parseInt(u32, value, 10) catch null) |cl_val| {
+                    if (cl_val == 1274) {
+                        cl_found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return cl_found;
     }
 
     fn configureAdapter(self: *Self) !void {
