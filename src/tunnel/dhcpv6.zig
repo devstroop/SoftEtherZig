@@ -423,7 +423,7 @@ test "Build DHCPv6 Solicit" {
     // Message type should be Solicit (1)
     try std.testing.expectEqual(@as(u8, 1), buffer[0]);
     // Transaction ID should match
-    try std.testing.expectEqual(@as(u8, (client.transaction_id >> 16) & 0xFF), buffer[1]);
+    try std.testing.expectEqual(@as(u8, @truncate((client.transaction_id >> 16) & 0xFF)), buffer[1]);
     // Should have at least: msg_type(1) + xid(3) + rapid_commit(4) + client_id + ia_na + oro
     try std.testing.expect(len > 40);
 }

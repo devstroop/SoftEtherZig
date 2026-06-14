@@ -546,6 +546,51 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_ffi_test.step);
     }
 
+    // Whole-package test — same root as shared-lib (ffi.zig).
+    // Runs ALL embedded test blocks in every imported module transitively
+    // (session, protocol, net, crypto, etc.) that need sibling-import linkage
+    // and can't be tested standalone.
+    // Excludes: adapter.* (needs TUN), client.vpn_client (needs server),
+    // protocol.tunnel (zlib state not reset between tests, issue #82).
+    {
+        const all_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ffi.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "build_options", .module = build_options_mod },
+                },
+            }),
+            .filters = &.{
+                "crypto.",
+                "core.",
+                "net.",
+                "session.",
+                "client.state",
+                "client.stats",
+                "client.events",
+                "tunnel.arp",
+                "tunnel.dhcpv6",
+                "tunnel.dhcp.",
+                "config.",
+                "types.",
+                "protocol.pack",
+                "protocol.auth",
+                "protocol.rpc",
+                "cli.args",
+                "cli.config_manager",
+            },
+        });
+        linkOpenSsl(b, all_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include);
+        addZlib(all_test, b);
+        if (is_android) setupAndroidNdk(b, all_test, target_arch);
+        all_test.linkLibC();
+
+        const run_all_test = b.addRunArtifact(all_test);
+        test_step.dependOn(&run_all_test.step);
+    }
+
     // Protocol integration tests — drive the full handshake (signature →
     // hello → auth) against a scripted in-memory transport. Lives under
     // test/integration so it is clearly separate from in-source unit tests.
