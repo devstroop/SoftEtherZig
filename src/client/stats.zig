@@ -68,6 +68,10 @@ pub const DisconnectReason = enum {
     network_error,
     protocol_error,
     configuration_error,
+    /// Server accepted TLS + auth, but upload throughput is near-zero
+    /// while download is healthy. The server's data plane is broken —
+    /// TCP handshake succeeds but payload forwarding stalls.
+    broken_data_plane,
 
     /// Check if disconnect was intentional
     pub fn isIntentional(self: DisconnectReason) bool {
@@ -78,7 +82,7 @@ pub const DisconnectReason = enum {
     pub fn shouldReconnect(self: DisconnectReason) bool {
         return switch (self) {
             .none, .user_requested, .auth_failed, .configuration_error => false,
-            .server_closed, .timeout, .network_error, .protocol_error => true,
+            .server_closed, .timeout, .network_error, .protocol_error, .broken_data_plane => true,
         };
     }
 
@@ -93,6 +97,7 @@ pub const DisconnectReason = enum {
             .network_error => "Network error",
             .protocol_error => "Protocol error",
             .configuration_error => "Configuration error",
+            .broken_data_plane => "Server data plane broken (upload stall detected)",
         };
     }
 };

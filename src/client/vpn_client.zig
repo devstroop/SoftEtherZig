@@ -289,6 +289,14 @@ pub const VpnClient = struct {
     effective_server_ip: ?net.Address = null,
     effective_server_port: u16,
 
+    /// Millisecond timestamp of successful connection (set after auth completes).
+    /// Used as baseline for health check grace period.
+    connect_time: i64 = 0,
+
+    /// Consecutive DIAG windows where upload ratio was below threshold.
+    /// Reset on each window where ratio >= 1.5% or when no data flows.
+    health_check_broken_count: u32 = 0,
+
     // Authentication state
     auth_credentials: ?auth_mod.ClientAuth,
     auth_session_key: ?[20]u8,
@@ -679,6 +687,7 @@ pub const VpnClient = struct {
 
         self.transitionState(.connected);
         self.stats.connect_time_ms = std.time.milliTimestamp();
+        self.connect_time = std.time.milliTimestamp();
 
         if (self.event_callback) |cb| {
             const server_ip_u32 = if (self.server_ip) |srv| blk: {
@@ -2185,6 +2194,35 @@ pub const VpnClient = struct {
                     if (mbps_in > 1.0 and mbps_out < 0.5) {
                         if (adapter.getName()) |ifname| {
                             self.logRoutingDiag(ifname);
+                        }
+                    }
+
+                    // Health check: detect broken data plane (server-side upload stall).
+                    // Ratio threshold: upload < 1.5% of download. Healthy TCP ACK
+                    // ratio is 2-4%; broken full-duplex drops to 0.3-1.2%.
+                    // Uses 5 consecutive windows (DIAG fires ~1/s) and a 10s grace
+                    // period after connect to let DHCP/ARP/initial burst settle.
+                    const HEALTH_RATIO_THRESHOLD = 0.015; // 1.5%
+                    const HEALTH_WINDOW_COUNT = 5;
+                    const HEALTH_GRACE_MS: i64 = 10_000;
+                    if (diag.bytes_in > 0 and diag.bytes_out > 0) {
+                        const ratio = @as(f64, @floatFromInt(diag.bytes_out)) / @as(f64, @floatFromInt(diag.bytes_in));
+                        if (self.connect_time > 0 and (now - self.connect_time) > HEALTH_GRACE_MS) {
+                            if (ratio < HEALTH_RATIO_THRESHOLD) {
+                                self.health_check_broken_count += 1;
+                                if (self.health_check_broken_count >= HEALTH_WINDOW_COUNT) {
+                                    std.log.err("Health check: upload ratio {d:.1}% below {d:.1}% threshold for {d}/{d} windows — server data plane is broken. Triggering disconnect.", .{
+                                        ratio * 100, HEALTH_RATIO_THRESHOLD * 100, self.health_check_broken_count, HEALTH_WINDOW_COUNT,
+                                    });
+                                    self.disconnect_reason = .broken_data_plane;
+                                    // Signal the data loop to stop. The outer `while` loop checks
+                                    // should_stop; finishDisconnect fires after the loop exits with
+                                    // the broken_data_plane reason, which shouldReconnect() = true.
+                                    @atomicStore(bool, &self.should_stop, true, .release);
+                                }
+                            } else {
+                                self.health_check_broken_count = 0;
+                            }
                         }
                     }
                 }
