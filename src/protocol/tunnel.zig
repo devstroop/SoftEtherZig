@@ -415,6 +415,11 @@ pub const TunnelConnection = struct {
             }
         }
 
+        const total = offset;
+        if (total > 0) {
+            std.log.debug("SEND-DBG blocks={d} total_bytes={d} compressed={}", .{ blocks.len, total, self.use_compress });
+        }
+
         const n = try self.write_fn(self.context, send_buffer[0..offset]);
         if (n == 0) return error.ConnectionClosed;
         if (n < offset) {
@@ -575,13 +580,20 @@ pub const TunnelConnection = struct {
     /// Compress a block using persistent deflate stream.
     fn compressBlock(self: *TunnelConnection, compressed_buf: []u8, data: []const u8) ![]const u8 {
         const stream = &self.deflate_stream;
-        _ = c.deflateReset(stream);
+        const reset_ret = c.deflateReset(stream);
+        if (reset_ret != c.Z_OK) {
+            std.log.err("compress: deflateReset failed ret={d}", .{reset_ret});
+            return error.CompressionFailed;
+        }
         stream.next_in = @ptrCast(@constCast(data.ptr));
         stream.avail_in = @intCast(data.len);
         stream.next_out = @ptrCast(compressed_buf.ptr);
         stream.avail_out = @intCast(compressed_buf.len);
         const ret = c.deflate(stream, c.Z_FINISH);
-        if (ret != c.Z_STREAM_END) return error.CompressionFailed;
+        if (ret != c.Z_STREAM_END) {
+            std.log.err("compress: deflate failed ret={d} avail_in={d} avail_out_start={d} avail_out_end={d}", .{ ret, data.len, compressed_buf.len, stream.avail_out });
+            return error.CompressionFailed;
+        }
         return compressed_buf[0..(compressed_buf.len - stream.avail_out)];
     }
 };
@@ -628,8 +640,16 @@ test "compressBlock round-trip zlib" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -655,8 +675,16 @@ test "compressBlock empty data round-trip" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -677,8 +705,16 @@ test "compressBlock multiple calls work serial re-use" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -714,8 +750,16 @@ test "batch-level compression wire format" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -726,11 +770,16 @@ test "batch-level compression wire format" {
 
     var raw: [32]u8 = undefined;
     var off: usize = 0;
-    mem.writeInt(u32, raw[off..][0..4], 2, .big); off += 4;
-    mem.writeInt(u32, raw[off..][0..4], 4, .big); off += 4;
-    @memcpy(raw[off..][0..4], "test"); off += 4;
-    mem.writeInt(u32, raw[off..][0..4], 3, .big); off += 4;
-    @memcpy(raw[off..][0..3], "xyz"); off += 3;
+    mem.writeInt(u32, raw[off..][0..4], 2, .big);
+    off += 4;
+    mem.writeInt(u32, raw[off..][0..4], 4, .big);
+    off += 4;
+    @memcpy(raw[off..][0..4], "test");
+    off += 4;
+    mem.writeInt(u32, raw[off..][0..4], 3, .big);
+    off += 4;
+    @memcpy(raw[off..][0..3], "xyz");
+    off += 3;
 
     const raw_slice = raw[0..off];
 
@@ -772,8 +821,16 @@ test "compressBlock multiple batches are independent" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -804,8 +861,16 @@ test "decompressBlock rejects garbage" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -815,7 +880,7 @@ test "decompressBlock rejects garbage" {
     defer conn.deinit();
 
     var decompress_buf: [128]u8 = undefined;
-    const garbage = &[_]u8{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const garbage = &[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
     try std.testing.expectError(error.DecompressionFailed, conn.decompressBlock(garbage, &decompress_buf));
 }
@@ -842,7 +907,11 @@ test "sendBlocks produces correct wire format" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = undefined,
         .inflate_stream = undefined,
@@ -894,7 +963,11 @@ test "sendBlocksZeroCopy produces correct wire format" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = undefined,
         .inflate_stream = undefined,
@@ -946,7 +1019,11 @@ test "sendSinglePacketDirect produces correct wire format" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = undefined,
         .inflate_stream = undefined,
@@ -987,11 +1064,16 @@ test "receiveBlocksBatch parses uncompressed batch from stream" {
     // Build pre-canned stream data: [num_blocks=2][size=4][ABCD][size=3][XYZ]
     var stream_data: [32]u8 = undefined;
     var off: usize = 0;
-    mem.writeInt(u32, stream_data[off..][0..4], 2, .big); off += 4;
-    mem.writeInt(u32, stream_data[off..][0..4], 4, .big); off += 4;
-    @memcpy(stream_data[off..][0..4], "ABCD"); off += 4;
-    mem.writeInt(u32, stream_data[off..][0..4], 3, .big); off += 4;
-    @memcpy(stream_data[off..][0..3], "XYZ"); off += 3;
+    mem.writeInt(u32, stream_data[off..][0..4], 2, .big);
+    off += 4;
+    mem.writeInt(u32, stream_data[off..][0..4], 4, .big);
+    off += 4;
+    @memcpy(stream_data[off..][0..4], "ABCD");
+    off += 4;
+    mem.writeInt(u32, stream_data[off..][0..4], 3, .big);
+    off += 4;
+    @memcpy(stream_data[off..][0..3], "XYZ");
+    off += 3;
     const stream = stream_data[0..off];
 
     var read_pos: usize = 0;
@@ -1014,7 +1096,11 @@ test "receiveBlocksBatch parses uncompressed batch from stream" {
         .allocator = std.testing.allocator,
         .read_fn = ReadContext.read,
         .context = &rctx,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .use_compress = false,
         .compression_initialized = false,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -1035,8 +1121,16 @@ test "receiveBlocksBatch parses compressed blocks" {
     const allocator = std.testing.allocator;
     var conn = TunnelConnection{
         .allocator = allocator,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .context = undefined,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -1051,11 +1145,16 @@ test "receiveBlocksBatch parses compressed blocks" {
 
     var wire: [512]u8 = undefined;
     var off: usize = 0;
-    mem.writeInt(u32, wire[off..][0..4], 2, .big); off += 4;
-    mem.writeInt(u32, wire[off..][0..4], @as(u32, @intCast(c1.len)), .big); off += 4;
-    @memcpy(wire[off..][0..c1.len], c1); off += c1.len;
-    mem.writeInt(u32, wire[off..][0..4], @as(u32, @intCast(c2.len)), .big); off += 4;
-    @memcpy(wire[off..][0..c2.len], c2); off += c2.len;
+    mem.writeInt(u32, wire[off..][0..4], 2, .big);
+    off += 4;
+    mem.writeInt(u32, wire[off..][0..4], @as(u32, @intCast(c1.len)), .big);
+    off += 4;
+    @memcpy(wire[off..][0..c1.len], c1);
+    off += c1.len;
+    mem.writeInt(u32, wire[off..][0..4], @as(u32, @intCast(c2.len)), .big);
+    off += 4;
+    @memcpy(wire[off..][0..c2.len], c2);
+    off += c2.len;
     const wire_len = off;
 
     var read_pos: usize = 0;
@@ -1078,7 +1177,11 @@ test "receiveBlocksBatch parses compressed blocks" {
         .allocator = std.testing.allocator,
         .read_fn = ReadContext.read,
         .context = &rctx,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .use_compress = true,
         .compression_initialized = false,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -1118,7 +1221,11 @@ test "sendBlocks and receiveBlocksBatch compress round-trip" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = true,
         .deflate_stream = std.mem.zeroes(c.z_stream),
         .inflate_stream = std.mem.zeroes(c.z_stream),
@@ -1150,7 +1257,11 @@ test "sendBlocks and receiveBlocksBatch compress round-trip" {
         .allocator = std.testing.allocator,
         .read_fn = ReadContext.read,
         .context = &rctx,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .use_compress = true,
         .compression_initialized = false,
         .deflate_stream = std.mem.zeroes(c.z_stream),
@@ -1192,7 +1303,11 @@ test "sendKeepalive produces correct wire format" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = undefined,
         .inflate_stream = undefined,
@@ -1235,7 +1350,11 @@ test "receiveBlocksBatch detects keepalive" {
         .allocator = std.testing.allocator,
         .read_fn = ReadContext.read,
         .context = &rctx,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = std.mem.zeroes(c.z_stream),
         .inflate_stream = std.mem.zeroes(c.z_stream),
@@ -1277,7 +1396,11 @@ test "receiveBlocksBatch returns WouldBlock on partial data" {
         .allocator = std.testing.allocator,
         .read_fn = ReadContext.read,
         .context = &rctx,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = std.mem.zeroes(c.z_stream),
         .inflate_stream = std.mem.zeroes(c.z_stream),
@@ -1311,7 +1434,11 @@ test "total_send and total_recv counters" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = undefined,
         .inflate_stream = undefined,
@@ -1322,7 +1449,7 @@ test "total_send and total_recv counters" {
     try std.testing.expectEqual(@as(u64, 0), conn.total_send);
     try std.testing.expectEqual(@as(u64, 0), conn.total_recv);
 
-    const blocks = [_][]const u8{ "ABCD" };
+    const blocks = [_][]const u8{"ABCD"};
     try conn.sendBlocks(&blocks);
     // 4 bytes num_blocks + 4 bytes size + 4 bytes data = 12
     try std.testing.expectEqual(@as(u64, 12), conn.total_send);
@@ -1354,7 +1481,11 @@ test "block format edge cases: zero-length block" {
         .allocator = std.testing.allocator,
         .write_fn = WriteContext.write,
         .context = &wctx,
-        .read_fn = struct { fn f(_: *anyopaque, _: []u8) anyerror!usize { return error.WouldBlock; } }.f,
+        .read_fn = struct {
+            fn f(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.WouldBlock;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = undefined,
         .inflate_stream = undefined,
@@ -1365,7 +1496,7 @@ test "block format edge cases: zero-length block" {
     try std.testing.expectEqual(@as(usize, 0), captured_len);
 
     // Single block with empty data
-    const blocks = [_][]const u8{ "" };
+    const blocks = [_][]const u8{""};
     try conn.sendBlocks(&blocks);
     try std.testing.expectEqual(@as(usize, 4 + 4 + 0), captured_len);
     try std.testing.expectEqual(@as(u32, 1), mem.readInt(u32, captured[0..4], .big));
@@ -1375,10 +1506,12 @@ test "block format edge cases: zero-length block" {
 test "out_data slice length limit in receiveBlocksBatch" {
     var stream_data: [32]u8 = undefined;
     var off: usize = 0;
-    mem.writeInt(u32, stream_data[off..][0..4], 10, .big); off += 4;
+    mem.writeInt(u32, stream_data[off..][0..4], 10, .big);
+    off += 4;
     // Fill rest with plausible-looking block headers
     for (0..10) |_| {
-        mem.writeInt(u32, stream_data[off..][0..4], 4, .big); off += 4;
+        mem.writeInt(u32, stream_data[off..][0..4], 4, .big);
+        off += 4;
     }
     const stream = stream_data[0..off];
 
@@ -1402,7 +1535,11 @@ test "out_data slice length limit in receiveBlocksBatch" {
         .allocator = std.testing.allocator,
         .read_fn = ReadContext.read,
         .context = &rctx,
-        .write_fn = struct { fn f(_: *anyopaque, data: []const u8) anyerror!usize { return data.len; } }.f,
+        .write_fn = struct {
+            fn f(_: *anyopaque, data: []const u8) anyerror!usize {
+                return data.len;
+            }
+        }.f,
         .use_compress = false,
         .deflate_stream = std.mem.zeroes(c.z_stream),
         .inflate_stream = std.mem.zeroes(c.z_stream),

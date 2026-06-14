@@ -263,6 +263,10 @@ pub const VpnClient = struct {
     data_loop_thread: ?Thread = null,
     should_stop: bool,
     data_loop_running: bool,
+    /// Atomic flag set by the data loop health check (from a separate thread)
+    /// to signal the daemon that it should initiate disconnect+reconnect.
+    /// The daemon polls this via isConnected(), which returns false when set.
+    disconnect_requested: bool,
 
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
@@ -297,6 +301,12 @@ pub const VpnClient = struct {
     last_keepalive_sent: i64,
     last_keepalive_recv: i64,
 
+    /// Consecutive DIAG periods (1s each) where upload < 1.5% of download
+    /// while download is active (>1 Mbps). When this reaches the threshold (5),
+    /// the data loop triggers disconnect+reconnect to try a different cluster
+    /// data node. Only applies in full-duplex mode.
+    consecutive_broken_upload_diags: u32 = 0,
+
     const Self = @This();
 
     pub fn init(allocator: Allocator, config: ClientConfig) Self {
@@ -315,6 +325,7 @@ pub const VpnClient = struct {
             .mutex = .{},
             .should_stop = false,
             .data_loop_running = false,
+            .disconnect_requested = false,
             .event_callback = null,
             .event_user_data = null,
             .reconnect_attempt = 0,
@@ -380,6 +391,7 @@ pub const VpnClient = struct {
     }
 
     pub fn isConnected(self: *const Self) bool {
+        if (@atomicLoad(bool, &self.disconnect_requested, .acquire)) return false;
         return self.state.isConnected();
     }
 
@@ -445,10 +457,12 @@ pub const VpnClient = struct {
         }
 
         self.should_stop = false;
+        self.disconnect_requested = false;
         self.disconnect_reason = .none;
         self.last_error = null;
         self.stats = .{};
         self.stats.connect_time_ms = std.time.milliTimestamp();
+        self.consecutive_broken_upload_diags = 0;
 
         self.transitionState(.resolving_dns);
 
@@ -503,8 +517,12 @@ pub const VpnClient = struct {
         }
 
         self.mutex.lock();
-        self.should_stop = true;
-        self.disconnect_reason = .user_requested;
+        @atomicStore(bool, &self.disconnect_requested, false, .release);
+        // Preserve an already-set non-default disconnect reason (e.g.
+        // .broken_data_plane from the cluster health check). Only fall
+        // back to .user_requested when nothing more specific happened.
+        if (self.disconnect_reason == .none)
+            self.disconnect_reason = .user_requested;
         self.performDisconnect();
         self.mutex.unlock();
 
@@ -573,41 +591,141 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.resolving_dns);
-        self.server_ip = self.resolveDns() catch {
+
+        // Collect all DNS-resolved addresses so we can try each cluster member.
+        // DNS round-robin / geo-dns may return multiple IPs; some cluster
+        // members may be transiently unavailable. We iterate until one works.
+        var resolved = std.ArrayList(net.Address).initCapacity(self.allocator, 8) catch {
+            self.disconnect_reason = .network_error;
+            return ClientError.OutOfMemory;
+        };
+        defer resolved.deinit(self.allocator);
+
+        self.resolveDns(&resolved) catch {
             self.disconnect_reason = .network_error;
             return ClientError.DnsResolutionFailed;
         };
-        self.effective_server_ip = self.server_ip;
-        self.effective_server_port = self.config.server_port;
 
-        // Clean up stale host route to the VPN server IP left from a
-        // previous crashed/killed session. The purgeStaleRoutes scan above
-        // only finds routes through dead utun interfaces — it can't see
-        // the host bypass route because that goes through the physical NIC.
-        // This call is idempotent; route delete -host is a no-op if the
-        // route doesn't exist.
-        if (self.server_ip) |srv| {
-            if (srv.any.family == std.posix.AF.INET) {
-                var ip_buf: [16]u8 = undefined;
-                const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                    @as(u8, @truncate(srv.in.sa.addr >> 24)),
-                    @as(u8, @truncate(srv.in.sa.addr >> 16)),
-                    @as(u8, @truncate(srv.in.sa.addr >> 8)),
-                    @as(u8, @truncate(srv.in.sa.addr)),
-                }) catch unreachable;
+        if (resolved.items.len == 0) {
+            self.disconnect_reason = .network_error;
+            return ClientError.DnsResolutionFailed;
+        }
+
+        std.log.info("Resolved {d} address(es) for '{s}' — will try each until one succeeds", .{
+            resolved.items.len,
+            self.config.server_host,
+        });
+
+        // Save original config values that applyServerOverrides may mutate.
+        // When failing over between cluster members, each attempt must start
+        // from the user's original config — not the previous server's overrides.
+        const orig_max_conn = self.config.max_connections;
+        const orig_half_conn = self.config.half_connection;
+        const orig_use_compress = self.config.use_compress;
+        const orig_use_encrypt = self.config.use_encrypt;
+
+        // Try each resolved address until one succeeds (cluster-aware).
+        var connected = false;
+        var last_err: ?ClientError = null;
+
+        for (resolved.items, 0..) |addr, attempt| {
+            if (@atomicLoad(bool, &self.should_stop, .acquire)) {
+                self.disconnect_reason = .user_requested;
+                return ClientError.OperationCancelled;
+            }
+
+            self.server_ip = addr;
+            self.effective_server_ip = addr;
+            self.effective_server_port = self.config.server_port;
+
+            // Format the resolved IP as a string for TlsSocket.connect().
+            // We pass the IP literal (not the hostname) so TlsSocket.connect()
+            // connects to THIS specific cluster member without re-resolving DNS.
+            // SNI is set separately to the original hostname for TLS cert validation.
+            var ip_str_buf: [48]u8 = undefined;
+            const ip_str = core.formatAddress(addr, &ip_str_buf);
+
+            // Reset any server-overridden config from a previous failed attempt.
+            // Each cluster member re-negotiates these independently.
+            self.config.max_connections = orig_max_conn;
+            self.config.half_connection = orig_half_conn;
+            self.config.use_compress = orig_use_compress;
+            self.config.use_encrypt = orig_use_encrypt;
+
+            // Clean up stale host route to this VPN server IP left from a
+            // previous crashed/killed session.
+            if (addr.any.family == std.posix.AF.INET) {
                 route_heal.cleanupStaleHostRoute(self.allocator, ip_str);
             }
+
+            if (resolved.items.len > 1) {
+                std.log.info("Attempting cluster member {}/{d}: {f}", .{
+                    attempt + 1,
+                    resolved.items.len,
+                    addr,
+                });
+            }
+
+            self.tryConnectAndAuthOne(ip_str) catch |err| {
+                last_err = err;
+                std.log.warn("Cluster member {f} failed: {any} — {s}", .{
+                    addr,
+                    err,
+                    if (attempt + 1 < resolved.items.len) "trying next address..." else "all addresses exhausted",
+                });
+                // Clean up any partially-established state before the next attempt.
+                self.cleanupAttemptState();
+                continue;
+            };
+
+            connected = true;
+            std.log.info("Connected to cluster member {f} (attempt {}/{d})", .{
+                addr,
+                attempt + 1,
+                resolved.items.len,
+            });
+            break;
         }
 
-        if (@atomicLoad(bool, &self.should_stop, .acquire)) {
-            self.disconnect_reason = .user_requested;
-            return ClientError.OperationCancelled;
+        if (!connected) {
+            self.disconnect_reason = .network_error;
+            return last_err orelse ClientError.ConnectionFailed;
         }
 
+        self.transitionState(.configuring_adapter);
+        self.configureAdapter() catch {
+            self.disconnect_reason = .configuration_error;
+            return ClientError.AdapterConfigurationFailed;
+        };
+
+        self.transitionState(.connected);
+        self.stats.connect_time_ms = std.time.milliTimestamp();
+
+        if (self.event_callback) |cb| {
+            const server_ip_u32 = if (self.server_ip) |srv| blk: {
+                if (srv.any.family == std.posix.AF.INET) break :blk srv.in.sa.addr;
+                break :blk @as(u32, 0);
+            } else 0;
+            cb(.{ .connected = .{
+                .server_ip = server_ip_u32,
+                .assigned_ip = self.assigned_ip,
+                .gateway_ip = self.gateway_ip,
+            } }, self.event_user_data);
+        }
+    }
+
+    /// Try TLS connect → auth → session setup for a single server address.
+    /// `ip_str` is the IP literal (e.g. "62.24.65.217") to connect to — we
+    /// bypass DNS re-resolution so each cluster member is tried individually.
+    /// On failure the caller must call cleanupAttemptState() before retrying.
+    fn tryConnectAndAuthOne(self: *Self, ip_str: []const u8) ClientError!void {
         self.transitionState(.connecting_tcp);
         self.transitionState(.ssl_handshake);
 
-        // Establish TLS connection to VPN server
+        // Establish TLS connection to VPN server.
+        // Pass the IP literal so TlsSocket.connect() connects directly without
+        // re-resolving DNS. Set sni_hostname to the original hostname so the
+        // TLS SNI extension uses the correct name (load balancers route on SNI).
         const tls_config = tls.TlsConfig{
             .verify_certificate = self.config.verify_certificate,
             .allow_self_signed = !self.config.verify_certificate,
@@ -620,12 +738,13 @@ pub const VpnClient = struct {
                 .certificate => |cert| cert.key_data,
                 else => null,
             },
+            .sni_hostname = self.config.server_host,
             .proxy = self.config.proxy,
         };
 
         self.tls_socket = tls.TlsSocket.connect(
             self.allocator,
-            self.config.server_host,
+            ip_str,
             self.config.server_port,
             tls_config,
         ) catch {
@@ -650,9 +769,6 @@ pub const VpnClient = struct {
                 self.disconnect_reason = .network_error;
                 return ClientError.ConnectionFailed;
             }
-            // Application-level err so operators grepping `(err)` still see auth
-            // failures even though the protocol layer logs server-side rejections
-            // at warn (those are normal protocol outcomes, not library bugs).
             std.log.err("Authentication failed for hub '{s}': {}", .{ self.config.hub_name, err });
             self.disconnect_reason = .auth_failed;
             return ClientError.AuthenticationFailed;
@@ -670,27 +786,33 @@ pub const VpnClient = struct {
             self.disconnect_reason = .user_requested;
             return ClientError.OperationCancelled;
         }
+    }
 
-        self.transitionState(.configuring_adapter);
-        self.configureAdapter() catch {
-            self.disconnect_reason = .configuration_error;
-            return ClientError.AdapterConfigurationFailed;
-        };
-
-        self.transitionState(.connected);
-        self.stats.connect_time_ms = std.time.milliTimestamp();
-
-        if (self.event_callback) |cb| {
-            const server_ip_u32 = if (self.server_ip) |srv| blk: {
-                if (srv.any.family == std.posix.AF.INET) break :blk srv.in.sa.addr;
-                break :blk @as(u32, 0);
-            } else 0;
-            cb(.{ .connected = .{
-                .server_ip = server_ip_u32,
-                .assigned_ip = self.assigned_ip,
-                .gateway_ip = self.gateway_ip,
-            } }, self.event_user_data);
+    /// Clean up partially-established connection state after a failed attempt,
+    /// so the next address starts from a clean slate.
+    fn cleanupAttemptState(self: *Self) void {
+        // Close any connection manager that session_setup may have created
+        // (it may have partially established additional connections).
+        if (self.conn_manager) |*cm| {
+            cm.deinit();
+            self.conn_manager = null;
         }
+        // Close the TLS socket. runRedirect may have already closed it
+        // and set a new one — close whatever is there now.
+        if (self.tls_socket) |*sock| {
+            sock.close();
+            self.tls_socket = null;
+        }
+        // Reset auth state so the next attempt re-negotiates fresh.
+        self.auth_session_key = null;
+        self.auth_hello_random = null;
+        // Reset session wrapper if session_setup created one.
+        if (self.session) |*sess| {
+            sess.deinit();
+            self.session = null;
+        }
+        // Reset disconnect reason so the next attempt's error takes precedence.
+        self.disconnect_reason = .none;
     }
 
     pub fn performDisconnect(self: *Self) void {
@@ -738,30 +860,41 @@ pub const VpnClient = struct {
         // releasing it. deinit() calls us directly (no event needed).
     }
 
-    fn resolveDns(self: *Self) !net.Address {
+    /// Resolve the server hostname to all available addresses.
+    /// Populates `list` with IPv4/IPv6 addresses. If the host is already an IP
+    /// literal, a single entry is added. On DNS failure returns DnsResolutionFailed.
+    fn resolveDns(self: *Self, list: *std.ArrayList(net.Address)) !void {
         const host = self.config.server_host;
 
-        // First try parsing as IP address (fast path)
+        // First try parsing as IP address (fast path — no DNS needed)
         if (net.Address.parseIp4(host, self.config.server_port)) |addr| {
-            return addr;
+            try list.append(self.allocator, addr);
+            return;
         } else |_| {}
 
         if (net.Address.parseIp6(host, self.config.server_port)) |addr| {
-            return addr;
+            try list.append(self.allocator, addr);
+            return;
         } else |_| {}
 
-        // Real DNS resolution using std.net
+        // Real DNS resolution using std.net — get ALL addresses.
+        // DNS round-robin clusters return multiple A/AAAA records; we want
+        // to try each one so a single dead cluster member doesn't block the
+        // connection.
         const addrs = net.getAddressList(self.allocator, host, self.config.server_port) catch {
             return ClientError.DnsResolutionFailed;
         };
         defer addrs.deinit();
 
-        // Return first address (IPv4 or IPv6)
-        if (addrs.addrs.len > 0) {
-            return addrs.addrs[0];
+        if (addrs.addrs.len == 0) {
+            return ClientError.DnsResolutionFailed;
         }
 
-        return ClientError.DnsResolutionFailed;
+        // Collect all resolved addresses. We try them in the order DNS returned
+        // them (which is typically round-robin shuffled by the resolver).
+        for (addrs.addrs) |addr| {
+            try list.append(self.allocator, addr);
+        }
     }
 
     fn configureAdapter(self: *Self) !void {
@@ -1170,7 +1303,9 @@ pub const VpnClient = struct {
         fn get(ctx: @This()) *protocol_tunnel_mod.TunnelConnection {
             if (ctx.cm_ptr) |m| {
                 if (m.selectSendConnection()) |conn| return &conn.tunnel;
+                std.log.warn("SEND-HELPER: selectSendConnection returned null, falling back to primary", .{});
                 if (m.getPrimary()) |primary| return &primary.tunnel;
+                std.log.err("SEND-HELPER: no primary connection either, falling back to single_ptr", .{});
             }
             return ctx.single_ptr;
         }
@@ -1886,17 +2021,6 @@ pub const VpnClient = struct {
                             if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                 if (maybe_len) |ip_len| {
                                     if (ip_len > 0 and ip_len <= 1500) {
-                                        // TEMPORARY ICMP DIAG: log every ICMP packet read from TUN
-                                        // if (ip_len > 9) {
-                                        // const ip_proto = tun_read_bufs[outbound_count][9];
-                                        // if (ip_proto == 1) {
-                                        // const src = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][12]) << 24) | (@as(u32, tun_read_bufs[outbound_count][13]) << 16) | (@as(u32, tun_read_bufs[outbound_count][14]) << 8) | tun_read_bufs[outbound_count][15]);
-                                        // const dst = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][16]) << 24) | (@as(u32, tun_read_bufs[outbound_count][17]) << 16) | (@as(u32, tun_read_bufs[outbound_count][18]) << 8) | tun_read_bufs[outbound_count][19]);
-                                        // const icmp_type = tun_read_bufs[outbound_count][20];
-                                        // const icmp_code = tun_read_bufs[outbound_count][21];
-                                        // std.log.info("[ICMP-OUT] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, ip_len });
-                                        // }
-                                        // }
                                         if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
                                             outbound_blocks[outbound_count] = eth_frame;
                                             outbound_bytes += eth_frame.len;
@@ -2185,6 +2309,72 @@ pub const VpnClient = struct {
                     if (mbps_in > 1.0 and mbps_out < 0.5) {
                         if (adapter.getName()) |ifname| {
                             self.logRoutingDiag(ifname);
+                        }
+                    }
+                }
+
+                // ============================================================
+                // CLUSTER HEALTH CHECK: Detect dead-data-plane nodes.
+                // Some cluster members accept TCP/TLS/auth but have a broken
+                // data-plane upload path (e.g. .216 single-conn backend).
+                //
+                // On a broken node, data download runs fast but upload stays
+                // at ~0.3-1.2% of download bandwidth (all TCP ACKs, no real
+                // data bytes). On a healthy full-duplex link, TCP ACKs during
+                // download-only periods show ~2-4% upload ratio.
+                //
+                // Half-connection mode is inherently asymmetric (server sends
+                // on one TCP session, client on another) so the upload ratio
+                // can dip to healthy-looking 0.5-2% — we skip the health
+                // check for those configs to avoid false positives.
+                //
+                // Strategy: download > 1 Mbps AND upload < 1.5% of download
+                // for 5 consecutive 1s DIAG windows → reconnect.
+                // ============================================================
+                const dl_min_bytes: u64 = 125_000; // >1 Mbps active download
+                const broken_threshold: u32 = 5; // 5 consecutive 1s DIAGs
+                const grace_period_ms: i64 = 10_000;
+
+                // Skip health check in half-connection mode: the protocol
+                // inherently has asymmetric upload/download paths, so the
+                // upload ratio naturally looks like a broken node.
+                if (is_configured and !self.config.half_connection) {
+                    const uptime_ms: i64 = if (self.stats.connect_time_ms > 0)
+                        @as(i64, @intCast(now)) - self.stats.connect_time_ms
+                    else
+                        0;
+
+                    if (uptime_ms > grace_period_ms) {
+                        // upload < 1.5% of download → possible broken data plane
+                        // Uses bytes_out * 200 < bytes_in * 3 to avoid overflow.
+                        const upload_dead = diag.bytes_out * 200 < diag.bytes_in * 3;
+                        const download_alive = diag.bytes_in > dl_min_bytes;
+
+                        if (download_alive and upload_dead) {
+                            self.consecutive_broken_upload_diags += 1;
+                            if (self.consecutive_broken_upload_diags >= broken_threshold) {
+                                const rip: u32 = if (self.effective_server_ip) |eip|
+                                    if (eip.any.family == std.posix.AF.INET) eip.in.sa.addr else 0
+                                else
+                                    0;
+                                const rip_bytes = @as([4]u8, @bitCast(rip));
+                                const ul_pct: u64 = if (diag.bytes_in > 0)
+                                    diag.bytes_out * 100 / diag.bytes_in
+                                else
+                                    0;
+                                std.log.err(
+                                    "Cluster node {d}.{d}.{d}.{d} has broken upload path " ++
+                                        "(dl={d} B/s, ul={d} B/s = {d}% of dl, after {d}s). " ++
+                                        "Disconnecting to retry a different cluster member...",
+                                    .{ rip_bytes[0], rip_bytes[1], rip_bytes[2], rip_bytes[3], diag.bytes_in, diag.bytes_out, ul_pct, broken_threshold },
+                                );
+                                self.disconnect_reason = .broken_data_plane;
+                                @atomicStore(bool, &self.should_stop, true, .release);
+                                @atomicStore(bool, &self.disconnect_requested, true, .release);
+                            }
+                        } else {
+                            // Upload flowing or download not active yet — reset
+                            self.consecutive_broken_upload_diags = 0;
                         }
                     }
                 }

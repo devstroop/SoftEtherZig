@@ -175,11 +175,29 @@ pub const Pack = struct {
         try self.addInt(name, if (value) 1 else 0);
     }
 
-    /// Get an integer value
+    /// Get an integer value (first element if array)
     pub fn getInt(self: *const Self, name: []const u8) ?u32 {
         const elem = self.findElementConst(name) orelse return null;
         if (elem.value_type != .int or elem.values.items.len == 0) return null;
         return elem.values.items[0].int;
+    }
+
+    /// Number of integer values for a named element. Returns 0 if not found or
+    /// wrong type. Use with getIntAt() to iterate multi-value integer arrays
+    /// (e.g. Port = [443, 992, 1194, 5555] in a redirect response).
+    pub fn getIntCount(self: *const Self, name: []const u8) usize {
+        const elem = self.findElementConst(name) orelse return 0;
+        if (elem.value_type != .int) return 0;
+        return elem.values.items.len;
+    }
+
+    /// Get the i-th integer value for a named element. Returns null if out of
+    /// bounds or element not found / wrong type.
+    pub fn getIntAt(self: *const Self, name: []const u8, index: usize) ?u32 {
+        const elem = self.findElementConst(name) orelse return null;
+        if (elem.value_type != .int) return null;
+        if (index >= elem.values.items.len) return null;
+        return elem.values.items[index].int;
     }
 
     /// Get a 64-bit integer value

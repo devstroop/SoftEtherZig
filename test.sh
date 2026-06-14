@@ -2,6 +2,21 @@
 set -euo pipefail
 trap 'echo "[FATAL] test.sh failed at line $LINENO (last cmd: $BASH_COMMAND)" >&2' ERR
 
+# Cleanup on Ctrl-C / SIGTERM: kill any running VPN daemon and remove
+# stale PID lock so re-running test.sh doesn't hit "Another instance running".
+cleanup_on_interrupt() {
+  echo "" >&2
+  echo "[$(date '+%H:%M:%S')] Interrupted — killing VPN daemon..." >&2
+  pids=$(pgrep -f 'vpnclient connect' 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    echo "$pids" | xargs sudo kill -9 2>/dev/null || true
+  fi
+  sudo rm -f /tmp/softether.pid 2>/dev/null || true
+  sudo "${BINARY:-./zig-out/bin/vpnclient}" cleanup > /dev/null 2>&1 || true
+  exit 130
+}
+trap cleanup_on_interrupt INT TERM
+
 BINARY="./zig-out/bin/vpnclient"
 LOGDIR="test-logs"
 DURATION="${1:-60}"           # max seconds per config (speedtest timeout), default 60
@@ -71,6 +86,22 @@ for cfg in "${CONFIGS[@]}"; do
   # that was killed or crashed. Without this, a SIGKILL'd prior run can leave
   # the host with no network and break subsequent tests.
   echo -n "[$(ts)] [$cfg] cleanup... "
+  # Kill any stale vpnclient daemon from a previous crashed/killed run.
+  # Try SIGTERM first, then SIGKILL if the process ignored it. Only then
+  # remove the PID lock file so "Another instance is running" doesn't block
+  # this test. The route/utun cleanup runs separately via the CLI.
+  stale_pids=$(pgrep -f 'vpnclient connect' 2>/dev/null || true)
+  if [ -n "$stale_pids" ]; then
+    echo "$stale_pids" | xargs sudo kill 2>/dev/null || true
+    sleep 1
+    # If any are still alive, SIGKILL them
+    still_alive=$(pgrep -f 'vpnclient connect' 2>/dev/null || true)
+    if [ -n "$still_alive" ]; then
+      echo "$still_alive" | xargs sudo kill -9 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  sudo rm -f /tmp/softether.pid 2>/dev/null || true
   if sudo "$BINARY" cleanup > /dev/null 2>&1; then
     echo "ok"
   else
@@ -114,13 +145,14 @@ for cfg in "${CONFIGS[@]}"; do
     echo "[$(ts)] routing ready"
   fi
 
-  # Run netprobe for low-level tunnel throughput diagnostics (TCP/UDP)
-  # Timeout is short (15s) — if the server is unreachable we don't want to
-  # block the entire test suite.
+  # Run netprobe for low-level tunnel throughput diagnostics (TCP/UDP).
+  # diag runs TCP UL (--duration) + TCP DL (--duration) + UDP (--duration),
+  # so the total wall time is ~3× the per-phase duration. We set the timeout
+  # wrapper to 4× to allow headroom for startup/teardown.
   if $HAS_NETPROBE; then
     echo -n "[$(ts)] netprobe-diag... "
     if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" 15 "$NETPROBE" diag 10.21.0.10:7000 --duration 10 > "$netprobe_log" 2>&1 || true
+      "$TIMEOUT_BIN" 45 "$NETPROBE" diag 10.21.0.10:7000 --duration 10 > "$netprobe_log" 2>&1 || true
     else
       "$NETPROBE" diag 10.21.0.10:7000 --duration 10 > "$netprobe_log" 2>&1 || true
     fi
@@ -155,6 +187,11 @@ for cfg in "${CONFIGS[@]}"; do
     fi
   fi
   wait "$VPN_PID" 2>/dev/null || true
+
+  # Belt-and-suspenders: remove PID lock file so the next config
+  # never hits "Another instance is running". Also run route/tun cleanup.
+  sudo rm -f /tmp/softether.pid 2>/dev/null || true
+  sudo "$BINARY" cleanup > /dev/null 2>&1 || true
 
   # Extract diag stats across ALL DIAG samples (BSD-safe, no -P).
   # Format: dl=0.0Mbps(2p) ul=0.0Mbps(0p) ... tcp_drop=0p ... pollout_skip=0
@@ -210,8 +247,8 @@ for cfg in "${CONFIGS[@]}"; do
     if grep -q "tcp_ul DONE" "$netprobe_log" 2>/dev/null || grep -q "tcp_dl DONE" "$netprobe_log" 2>/dev/null; then
       dl_line=$(grep "tcp_dl DONE" "$netprobe_log" | tail -1) || true
       ul_line=$(grep "tcp_ul DONE" "$netprobe_log" | tail -1) || true
-      [ -n "$dl_line" ] && np_dl=$(echo "$dl_line" | awk '{print $NF}') || true
-      [ -n "$ul_line" ] && np_ul=$(echo "$ul_line" | awk '{print $NF}') || true
+      [ -n "$dl_line" ] && np_dl=$(echo "$dl_line" | awk '{print $(NF-1)}') || true
+      [ -n "$ul_line" ] && np_ul=$(echo "$ul_line" | awk '{print $(NF-1)}') || true
       np_rtt_line=$(grep "rtt" "$netprobe_log" | head -1) || true
       [ -n "$np_rtt_line" ] && np_rtt=$(echo "$np_rtt_line" | grep -oE '[0-9]+us' | head -1 | tr -d 'us') || true
     fi

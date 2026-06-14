@@ -29,6 +29,7 @@ build.log
 3rd-party.log
 3rd-party-app-log.txt
 log-*.log
+test-logs/
 
 # Test outputs
 *.tmp

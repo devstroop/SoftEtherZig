@@ -103,10 +103,16 @@ pub const HelloResponse = struct {
     }
 };
 
+/// Maximum number of redirect ports the server can send. SoftEther servers
+/// typically send up to 4 (e.g. [443, 992, 1194, 5555]).
+pub const MAX_REDIRECT_PORTS = 8;
+
 /// Redirect information for cluster server setups
 pub const RedirectInfo = struct {
     ip: u32, // IPv4 address in host byte order
-    port: u16,
+    /// Redirect ports to try in order. port_count >= 1; ports[0] is the primary.
+    ports: [MAX_REDIRECT_PORTS]u16 = [_]u16{0} ** MAX_REDIRECT_PORTS,
+    port_count: u8 = 0,
     ticket: [Protocol.sha1_size]u8,
 };
 
@@ -1180,7 +1186,26 @@ pub fn uploadAuth(
     const redirect_flag = resp_pack.getInt("Redirect") orelse 0;
     if (redirect_flag != 0) {
         const redirect_ip = resp_pack.getInt("Ip") orelse 0;
-        const redirect_port: u16 = @intCast(resp_pack.getInt("Port") orelse 443);
+
+        // Collect all redirect ports. SoftEther sends Port as either a single
+        // integer or an array (e.g. [443, 992, 1194, 5555]). Try each in order.
+        var redirect_ports: [MAX_REDIRECT_PORTS]u16 = [_]u16{0} ** MAX_REDIRECT_PORTS;
+        var redirect_port_count: u8 = 0;
+        const port_count = resp_pack.getIntCount("Port");
+        if (port_count > 0) {
+            for (0..@min(port_count, MAX_REDIRECT_PORTS)) |i| {
+                if (resp_pack.getIntAt("Port", i)) |p| {
+                    redirect_ports[redirect_port_count] = @intCast(p);
+                    redirect_port_count += 1;
+                }
+            }
+        }
+        // Fallback: if no Port array, try single int (backward compat)
+        if (redirect_port_count == 0) {
+            const single_port: u16 = @intCast(resp_pack.getInt("Port") orelse 443);
+            redirect_ports[0] = single_port;
+            redirect_port_count = 1;
+        }
 
         var ticket: [Protocol.sha1_size]u8 = .{0} ** Protocol.sha1_size;
         if (resp_pack.getData("Ticket")) |ticket_data| {
@@ -1197,8 +1222,9 @@ pub fn uploadAuth(
 
         // Convert IP to string for logging (SoftEther uses host byte order)
         const ip_bytes: [4]u8 = @bitCast(redirect_ip);
-        std.log.info("Server redirect to: {d}.{d}.{d}.{d}:{d}", .{
-            ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], redirect_port,
+        std.log.info("Server redirect to: {d}.{d}.{d}.{d} ports={any}", .{
+            ip_bytes[0],                            ip_bytes[1], ip_bytes[2], ip_bytes[3],
+            redirect_ports[0..redirect_port_count],
         });
 
         return AuthResult{
@@ -1209,7 +1235,8 @@ pub fn uploadAuth(
             .policy = null,
             .redirect = RedirectInfo{
                 .ip = redirect_ip,
-                .port = redirect_port,
+                .ports = redirect_ports,
+                .port_count = redirect_port_count,
                 .ticket = ticket,
             },
         };

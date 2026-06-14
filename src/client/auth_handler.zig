@@ -192,7 +192,6 @@ fn runRedirect(
     // Store the ticket for redirect auth
     const ticket = redirect.ticket;
     const redirect_ip = redirect.ip;
-    const redirect_port = redirect.port;
 
     // CRITICAL: Send empty pack to acknowledge redirect before disconnecting
     // This tells the controller we received the redirect info
@@ -228,13 +227,12 @@ fn runRedirect(
     }
 
     // Try redirect IP first, then fallback to original server IP.
+    // For each IP, try every port the server provided (e.g. [443, 992, 1194, 5555]).
     // Redirects are IPv4-only in the current protocol (RedirectInfo.ip is u32).
     var connected = false;
     var actual_ip: u32 = redirect_ip;
+    var actual_port: u16 = redirect.ports[0];
     var last_connect_error: ?anyerror = null;
-    // True when we land on the original server because the redirect target
-    // was unreachable. The ticket we received is only valid for the redirect
-    // target, so ticket auth will almost certainly fail on the original.
     var used_fallback_after_redirect_unreachable = false;
 
     const original = blk: {
@@ -246,55 +244,55 @@ fn runRedirect(
         break :blk redirect_ip;
     };
 
-    for ([_]u32{ redirect_ip, original }) |try_ip| {
-        var try_ip_str: [48]u8 = undefined;
-        // Build an Address just for formatting
-        const addr_for_fmt = net.Address.initIp4(
-            @as(*const [4]u8, @ptrCast(&try_ip)).*,
-            redirect_port,
-        );
-        const try_hostname = formatAddress(addr_for_fmt, &try_ip_str);
+    outer: for ([_]u32{ redirect_ip, original }) |try_ip| {
+        const ports = redirect.ports[0..redirect.port_count];
+        for (ports) |try_port| {
+            var try_ip_str: [48]u8 = undefined;
+            const addr_for_fmt = net.Address.initIp4(
+                @as(*const [4]u8, @ptrCast(&try_ip)).*,
+                try_port,
+            );
+            const try_hostname = formatAddress(addr_for_fmt, &try_ip_str);
 
-        if (try_ip == redirect_ip) {
-            std.log.debug("Connecting to redirect server: {s}:{d}", .{ try_hostname, redirect_port });
-        } else {
-            std.log.info("Redirect server unreachable, trying original server: {s}:{d}", .{ try_hostname, redirect_port });
+            if (try_ip == redirect_ip) {
+                std.log.debug("Connecting to redirect server: {s}:{d}", .{ try_hostname, try_port });
+            } else {
+                std.log.info("Redirect server unreachable, trying original server {s}:{d}", .{ try_hostname, try_port });
+            }
+
+            const redirect_tls_config = tls.TlsConfig{
+                .verify_certificate = client.config.verify_certificate,
+                .allow_self_signed = !client.config.verify_certificate,
+                .timeout_ms = client.config.connect_timeout_ms,
+                .client_cert_pem = switch (client.config.auth) {
+                    .certificate => |cert| cert.cert_data,
+                    else => null,
+                },
+                .client_key_pem = switch (client.config.auth) {
+                    .certificate => |cert| cert.key_data,
+                    else => null,
+                },
+                .sni_hostname = client.config.server_host,
+                .proxy = client.config.proxy,
+            };
+
+            client.tls_socket = tls.TlsSocket.connect(
+                client.allocator,
+                try_hostname,
+                try_port,
+                redirect_tls_config,
+            ) catch |err| {
+                last_connect_error = err;
+                std.log.warn("Failed to connect to {s}:{d}: {}", .{ try_hostname, try_port, err });
+                continue;
+            };
+
+            connected = true;
+            actual_ip = try_ip;
+            actual_port = try_port;
+            used_fallback_after_redirect_unreachable = (try_ip != redirect_ip);
+            break :outer;
         }
-
-        const redirect_tls_config = tls.TlsConfig{
-            .verify_certificate = client.config.verify_certificate,
-            .allow_self_signed = !client.config.verify_certificate,
-            .timeout_ms = client.config.connect_timeout_ms,
-            .client_cert_pem = switch (client.config.auth) {
-                .certificate => |cert| cert.cert_data,
-                else => null,
-            },
-            .client_key_pem = switch (client.config.auth) {
-                .certificate => |cert| cert.key_data,
-                else => null,
-            },
-            // Use the original server hostname for SNI, not the
-            // redirect IP literal. Load balancers routing on SNI
-            // will drop connections with an IP as SNI.
-            .sni_hostname = client.config.server_host,
-            .proxy = client.config.proxy,
-        };
-
-        client.tls_socket = tls.TlsSocket.connect(
-            client.allocator,
-            try_hostname,
-            redirect_port,
-            redirect_tls_config,
-        ) catch |err| {
-            last_connect_error = err;
-            std.log.warn("Failed to connect to {s}:{d}: {}", .{ try_hostname, redirect_port, err });
-            continue;
-        };
-
-        connected = true;
-        actual_ip = try_ip;
-        used_fallback_after_redirect_unreachable = (try_ip != redirect_ip);
-        break;
     }
 
     if (!connected) {
@@ -306,11 +304,11 @@ fn runRedirect(
         const is_unreachable = if (last_connect_error) |e| e == error.AddressNotAvailable else false;
         if (is_unreachable) {
             std.log.err(
-                "Redirect target {d}.{d}.{d}.{d}:{d} is UNREACHABLE (AddressNotAvailable). " ++
+                "Redirect target {d}.{d}.{d}.{d} (ports={any}) is UNREACHABLE (AddressNotAvailable). " ++
                     "This is usually a transient infrastructure issue — the VPN server's data " ++
                     "backend is offline or unreachable from this network. Wait a few minutes " ++
                     "and retry. If it persists, the backend may be down for maintenance.",
-                .{ rip[0], rip[1], rip[2], rip[3], redirect_port },
+                .{ rip[0], rip[1], rip[2], rip[3], redirect.ports[0..redirect.port_count] },
             );
         } else {
             std.log.err("Failed to connect to any redirect server (last error: {?})", .{last_connect_error});
@@ -321,21 +319,21 @@ fn runRedirect(
     if (used_fallback_after_redirect_unreachable) {
         const rip = @as([4]u8, @bitCast(redirect_ip));
         std.log.warn(
-            "Redirect target {d}.{d}.{d}.{d}:{d} was unreachable; connected to original server instead. " ++
+            "Redirect target {d}.{d}.{d}.{d} was unreachable; connected to original server instead. " ++
                 "Ticket auth that follows is likely to fail because the ticket is bound to the redirect target. " ++
                 "If ticket auth fails with code 9, the redirect target's backend is down — not a credentials issue.",
-            .{ rip[0], rip[1], rip[2], rip[3], redirect_port },
+            .{ rip[0], rip[1], rip[2], rip[3] },
         );
     }
 
     // Update server IP to what we actually connected to
     const actual_addr = net.Address.initIp4(
         @as(*const [4]u8, @ptrCast(&actual_ip)).*,
-        redirect_port,
+        actual_port,
     );
     client.server_ip = actual_addr;
     client.effective_server_ip = actual_addr;
-    client.effective_server_port = redirect_port;
+    client.effective_server_port = actual_port;
 
     // Get username for ticket auth
     const username = switch (client.config.auth) {
@@ -474,8 +472,7 @@ fn startUdpAcceleration(client: *VpnClient, auth_result: softether_proto.AuthRes
 
     // Use server IP for UDP
     var server_ip_buf: [48]u8 = undefined;
-    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else
-        client.config.server_host;
+    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else client.config.server_host;
 
     const udp_config = udp_accel_mod.UdpAccelConfig{
         .server_ip = server_ip_str,
