@@ -77,6 +77,16 @@ pub fn run(client: *VpnClient) !void {
     }
 
     // Step 3: Build and upload auth
+    // C client sends the actual connected IP as ServerIpAddress in the auth pack.
+    // The controller uses this to route data-plane packets to the correct backend.
+    // server_ip is sa.addr in host byte order (same byte order SSTP C sends).
+    const server_ip: u32 = if (client.server_ip) |srv|
+        srv.in.sa.addr
+    else
+        0;
+    var ip_buf: [48]u8 = undefined;
+    const server_hostname = if (client.server_ip) |addr| formatAddress(addr, &ip_buf) else client.config.server_host;
+
     const session_opts = softether_proto.SessionOptions{
         .max_connection = client.config.max_connections,
         .half_connection = client.config.half_connection,
@@ -95,6 +105,8 @@ pub fn run(client: *VpnClient) !void {
                     p.password, // base64-encoded hash
                     client.config.hub_name,
                     &hello.random,
+                    server_ip,
+                    server_hostname,
                     client.config.udp_acceleration,
                     bulk_keys_ptr,
                     session_opts,
@@ -107,6 +119,8 @@ pub fn run(client: *VpnClient) !void {
                     p.password,
                     client.config.hub_name,
                     &hello.random,
+                    server_ip,
+                    server_hostname,
                     client.config.udp_acceleration,
                     bulk_keys_ptr,
                     session_opts,
@@ -116,6 +130,8 @@ pub fn run(client: *VpnClient) !void {
         .anonymous => softether_proto.buildAnonymousAuth(
             client.allocator,
             client.config.hub_name,
+            server_ip,
+            server_hostname,
             client.config.udp_acceleration,
             bulk_keys_ptr,
             session_opts,
@@ -126,6 +142,8 @@ pub fn run(client: *VpnClient) !void {
             cert.key_data,
             client.config.hub_name,
             &hello.random,
+            server_ip,
+            server_hostname,
             client.config.udp_acceleration,
             bulk_keys_ptr,
             session_opts,

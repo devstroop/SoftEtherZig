@@ -412,6 +412,8 @@ test "buildCertificateAuth produces a well-formed cert auth pack" {
         test_key_pem,
         "DEFAULT",
         &server_random,
+        0,
+        "",
         false, // udp_accel
         null, // bulk_keys
         session_opts,
@@ -480,6 +482,8 @@ test "cert auth full handshake against scripted server" {
         test_key_pem,
         "DEFAULT",
         &server_random,
+        0,
+        "",
         false,
         null,
         proto.SessionOptions{},

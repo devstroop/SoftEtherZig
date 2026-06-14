@@ -488,6 +488,8 @@ pub fn buildPasswordAuth(
     password: []const u8,
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
+    server_ip: u32,
+    server_hostname: []const u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
     opts: SessionOptions,
@@ -572,7 +574,7 @@ pub fn buildPasswordAuth(
     try auth_pack.addStr("ClientOsVer", os_info_anon.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
-    try auth_pack.addStr("ServerHostname", "");
+    try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
@@ -583,7 +585,7 @@ pub fn buildPasswordAuth(
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
-    try addPackIp32(&auth_pack, "ServerIpAddress", 0);
+    try addPackIp32(&auth_pack, "ServerIpAddress", server_ip);
     try auth_pack.addData("ServerIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ServerPort2", 0);
     try addPackIp32(&auth_pack, "ProxyIpAddress", 0);
@@ -617,6 +619,8 @@ pub fn buildPasswordAuthWithHash(
     password_hash_base64: []const u8,
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
+    server_ip: u32,
+    server_hostname: []const u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
     opts: SessionOptions,
@@ -705,7 +709,7 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addStr("ClientOsVer", os_info2.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
-    try auth_pack.addStr("ServerHostname", "");
+    try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
@@ -716,7 +720,7 @@ pub fn buildPasswordAuthWithHash(
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
-    try addPackIp32(&auth_pack, "ServerIpAddress", 0);
+    try addPackIp32(&auth_pack, "ServerIpAddress", server_ip);
     try auth_pack.addData("ServerIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ServerPort2", 0);
     try addPackIp32(&auth_pack, "ProxyIpAddress", 0);
@@ -747,10 +751,14 @@ pub fn buildPasswordAuthWithHash(
 pub fn buildAnonymousAuth(
     allocator: Allocator,
     hub_name: []const u8,
+    server_ip: u32,
+    server_hostname: []const u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
     opts: SessionOptions,
 ) ![]u8 {
+    _ = server_ip;
+    _ = server_hostname;
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
@@ -820,6 +828,8 @@ pub fn buildCertificateAuth(
     key_pem: []const u8,
     hub_name: []const u8,
     server_random: *const [Protocol.sha1_size]u8,
+    server_ip: u32,
+    server_hostname: []const u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
     opts: SessionOptions,
@@ -898,7 +908,7 @@ pub fn buildCertificateAuth(
     try auth_pack.addStr("ClientOsVer", os_info_cert.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
-    try auth_pack.addStr("ServerHostname", "");
+    try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
     try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
@@ -907,7 +917,7 @@ pub fn buildCertificateAuth(
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
-    try addPackIp32(&auth_pack, "ServerIpAddress", 0);
+    try addPackIp32(&auth_pack, "ServerIpAddress", server_ip);
     try auth_pack.addData("ServerIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ServerPort2", 0);
     try addPackIp32(&auth_pack, "ProxyIpAddress", 0);
@@ -1346,9 +1356,9 @@ pub fn performHandshake(
     // Step 3: Build and upload auth
     const default_opts = SessionOptions{};
     const auth_data = if (password) |pwd|
-        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, udp_accel, null, default_opts)
+        try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, 0, "", udp_accel, null, default_opts)
     else
-        try buildAnonymousAuth(allocator, hub_name, udp_accel, null, default_opts);
+        try buildAnonymousAuth(allocator, hub_name, 0, "", udp_accel, null, default_opts);
     defer allocator.free(auth_data);
 
     var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
