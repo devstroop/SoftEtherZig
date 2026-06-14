@@ -33,6 +33,9 @@ log-*.log
 # Test outputs
 *.tmp
 
+# Test output artifacts
+test-logs/
+
 # Compiled binaries
 *.exe
 *.dll

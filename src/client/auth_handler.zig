@@ -474,8 +474,7 @@ fn startUdpAcceleration(client: *VpnClient, auth_result: softether_proto.AuthRes
 
     // Use server IP for UDP
     var server_ip_buf: [48]u8 = undefined;
-    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else
-        client.config.server_host;
+    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else client.config.server_host;
 
     const udp_config = udp_accel_mod.UdpAccelConfig{
         .server_ip = server_ip_str,
