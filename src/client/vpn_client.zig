@@ -1387,6 +1387,18 @@ pub const VpnClient = struct {
             // since last DIAG. High = TX bound. Diff'd from per-conn
             // TlsSocket.write_block_count snapshots.
             write_blocked: u64 = 0,
+            // === Deep TX-path logging: track upload data from TUN→Ethernet→TLS→TCP ===
+            // Counters per DIAG window (1s). Proves whether the client is actually
+            // sending upload data, or only TCP ACKs for download traffic.
+            tun_reads: u64 = 0, // Number of successful dev.read() calls
+            tun_bytes: u64 = 0, // Total IP-level bytes from TUN reads
+            tun_read_attempts: u64 = 0, // Total dev.read() calls (incl WouldBlock)
+            eth_pkts: u64 = 0, // Number of Ethernet frames created
+            eth_bytes: u64 = 0, // Total bytes in Ethernet frames
+            tls_send_calls: u64 = 0, // Number of sendBlocksZeroCopy calls
+            tls_send_bytes: u64 = 0, // Total bytes passed to sendBlocksZeroCopy
+            pkt_small: u64 = 0, // Outbound packets < 200B (mostly ACKs)
+            pkt_large: u64 = 0, // Outbound packets >= 200B (data payload)
         };
         var diag = DiagStats{};
         var diag_last_ms: i64 = std.time.milliTimestamp();
@@ -1892,21 +1904,20 @@ pub const VpnClient = struct {
                         var outbound_bytes: usize = 0;
 
                         while (outbound_count < batch_limit) {
+                            diag.tun_read_attempts += 1;
                             if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                 if (maybe_len) |ip_len| {
                                     if (ip_len > 0 and ip_len <= 1500) {
-                                        // TEMPORARY ICMP DIAG: log every ICMP packet read from TUN
-                                        // if (ip_len > 9) {
-                                        // const ip_proto = tun_read_bufs[outbound_count][9];
-                                        // if (ip_proto == 1) {
-                                        // const src = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][12]) << 24) | (@as(u32, tun_read_bufs[outbound_count][13]) << 16) | (@as(u32, tun_read_bufs[outbound_count][14]) << 8) | tun_read_bufs[outbound_count][15]);
-                                        // const dst = tunnel_mod.formatIpForLog((@as(u32, tun_read_bufs[outbound_count][16]) << 24) | (@as(u32, tun_read_bufs[outbound_count][17]) << 16) | (@as(u32, tun_read_bufs[outbound_count][18]) << 8) | tun_read_bufs[outbound_count][19]);
-                                        // const icmp_type = tun_read_bufs[outbound_count][20];
-                                        // const icmp_code = tun_read_bufs[outbound_count][21];
-                                        // std.log.info("[ICMP-OUT] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, ip_len });
-                                        // }
-                                        // }
+                                        diag.tun_reads += 1;
+                                        diag.tun_bytes += ip_len;
                                         if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
+                                            diag.eth_pkts += 1;
+                                            diag.eth_bytes += eth_frame.len;
+                                            if (eth_frame.len >= 200) {
+                                                diag.pkt_large += 1;
+                                            } else {
+                                                diag.pkt_small += 1;
+                                            }
                                             outbound_blocks[outbound_count] = eth_frame;
                                             outbound_bytes += eth_frame.len;
                                             outbound_count += 1;
@@ -1930,6 +1941,10 @@ pub const VpnClient = struct {
                             // The sendq-based throttle should prevent this edge case.
                             if (udp_sent_count < outbound_count) {
                                 var tls_send_ok = true;
+                                var send_bytes: usize = 0;
+                                for (outbound_blocks[udp_sent_count..outbound_count]) |b| send_bytes += b.len;
+                                diag.tls_send_calls += 1;
+                                diag.tls_send_bytes += send_bytes;
                                 send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
                                     error.ConnectionClosed, error.BrokenPipe => {
                                         std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
@@ -2189,6 +2204,18 @@ pub const VpnClient = struct {
                         diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,
                         diag.sendq_max,      sendq_avg,           diag.write_blocked,
                     });
+                    // TX-path trace: where do upload bytes go? Tracks TUN→Ethernet→TLS.
+                    // When upload is stalled (ul < 0.5 Mbps, dl > 1 Mbps), this reveals
+                    // whether the OS is generating outbound packets, whether we're
+                    // wrapping them into Ethernet frames, and whether they reach TLS.
+                    if (mbps_in > 1.0 and mbps_out < 0.5) {
+                        std.log.info("DIAG-TX tun[reads={d} bytes={d}B attempts={d}] eth[pkts={d} bytes={d}B] tls[calls={d} bytes={d}B] pkts[small={d} large={d}] sendq[max={d}B avg={d:.0}B] write_blocked={d}", .{
+                            diag.tun_reads,      diag.tun_bytes, diag.tun_read_attempts,
+                            diag.eth_pkts,       diag.eth_bytes, diag.tls_send_calls,
+                            diag.tls_send_bytes, diag.pkt_small, diag.pkt_large,
+                            diag.sendq_max,      sendq_avg,      diag.write_blocked,
+                        });
+                    }
                     // Routing diagnostic: when download works but upload is stuck,
                     // log the default route and TUN interface state.
                     if (mbps_in > 1.0 and mbps_out < 0.5) {
