@@ -25,6 +25,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const compat = @import("../compat/mod.zig");
 const testing = std.testing;
 
 const ssl = @cImport({
@@ -294,7 +295,7 @@ pub const Challenge = struct {
 
     pub fn generate() Challenge {
         var random: [sha0_digest_length]u8 = undefined;
-        std.crypto.random.bytes(&random);
+        compat.random.bytes(&random);
         return .{
             .random = random,
             .timestamp = @intCast(std.time.timestamp()),

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const crypto = std.crypto;
+const compat = @import("../compat/mod.zig");
 const testing = std.testing;
 
 /// AES block size (always 16 bytes)
@@ -249,7 +250,7 @@ pub const ChaCha20Poly1305 = crypto.aead.chacha_poly.ChaCha20Poly1305;
 
 /// Generate cryptographically secure random bytes
 pub fn randomBytes(buffer: []u8) void {
-    crypto.random.bytes(buffer);
+    compat.random.bytes(buffer);
 }
 
 /// Generate random u32
