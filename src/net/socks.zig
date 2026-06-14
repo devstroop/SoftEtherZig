@@ -155,11 +155,14 @@ fn socks5UserPassAuth(tcp: *TcpSocket, username: []const u8, password: []const u
 
     var auth_buf: [513]u8 = undefined;
     var off: usize = 0;
-    auth_buf[off] = 1; off += 1; // version
-    auth_buf[off] = @as(u8, @intCast(username.len)); off += 1;
+    auth_buf[off] = 1;
+    off += 1; // version
+    auth_buf[off] = @as(u8, @intCast(username.len));
+    off += 1;
     for (username, 0..) |b, i| auth_buf[off + i] = b;
     off += username.len;
-    auth_buf[off] = @as(u8, @intCast(password.len)); off += 1;
+    auth_buf[off] = @as(u8, @intCast(password.len));
+    off += 1;
     for (password, 0..) |b, i| auth_buf[off + i] = b;
     off += password.len;
 
@@ -175,31 +178,40 @@ fn socks5Connect(tcp: *TcpSocket, host: []const u8, port: u16) !void {
     var req_buf: [262]u8 = undefined;
     var off: usize = 0;
 
-    req_buf[off] = 5; off += 1; // version
-    req_buf[off] = 1; off += 1; // CONNECT
-    req_buf[off] = 0; off += 1; // reserved
+    req_buf[off] = 5;
+    off += 1; // version
+    req_buf[off] = 1;
+    off += 1; // CONNECT
+    req_buf[off] = 0;
+    off += 1; // reserved
 
     if (net.Address.parseIp4(host, 0)) |addr| {
-        req_buf[off] = @intFromEnum(AddressType.ipv4); off += 1;
+        req_buf[off] = @intFromEnum(AddressType.ipv4);
+        off += 1;
         const ip4_bytes = @as(*const [4]u8, @ptrCast(&addr.in.sa.addr));
         for (ip4_bytes, 0..) |b, i| req_buf[off + i] = b;
         off += 4;
     } else |_| {
         if (net.Address.parseIp6(host, 0)) |addr| {
-            req_buf[off] = @intFromEnum(AddressType.ipv6); off += 1;
+            req_buf[off] = @intFromEnum(AddressType.ipv6);
+            off += 1;
             for (&addr.in6.sa.addr, 0..) |b, i| req_buf[off + i] = b;
             off += 16;
         } else |_| {
             if (host.len > 255) return SocksError.UnsupportedAddressType;
-            req_buf[off] = @intFromEnum(AddressType.domain); off += 1;
-            req_buf[off] = @as(u8, @intCast(host.len)); off += 1;
+            req_buf[off] = @intFromEnum(AddressType.domain);
+            off += 1;
+            req_buf[off] = @as(u8, @intCast(host.len));
+            off += 1;
             for (host, 0..) |b, i| req_buf[off + i] = b;
             off += host.len;
         }
     }
 
-    req_buf[off] = @as(u8, @intCast(port >> 8)); off += 1;
-    req_buf[off] = @as(u8, @intCast(port & 0xFF)); off += 1;
+    req_buf[off] = @as(u8, @intCast(port >> 8));
+    off += 1;
+    req_buf[off] = @as(u8, @intCast(port & 0xFF));
+    off += 1;
 
     try tcp.writeAll(req_buf[0..off]);
 
@@ -314,18 +326,24 @@ test "SOCKS5 IPv6 address type encoding" {
     var req_buf: [262]u8 = undefined;
     var off: usize = 0;
 
-    req_buf[off] = 5; off += 1;
-    req_buf[off] = 1; off += 1;
-    req_buf[off] = 0; off += 1;
-    req_buf[off] = @intFromEnum(AddressType.ipv6); off += 1;
+    req_buf[off] = 5;
+    off += 1;
+    req_buf[off] = 1;
+    off += 1;
+    req_buf[off] = 0;
+    off += 1;
+    req_buf[off] = @intFromEnum(AddressType.ipv6);
+    off += 1;
 
     const ipv6_bytes = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
     for (&ipv6_bytes, 0..) |b, i| req_buf[off + i] = b;
     off += 16;
 
     const port: u16 = 443;
-    req_buf[off] = @as(u8, @intCast(port >> 8)); off += 1;
-    req_buf[off] = @as(u8, @intCast(port & 0xFF)); off += 1;
+    req_buf[off] = @as(u8, @intCast(port >> 8));
+    off += 1;
+    req_buf[off] = @as(u8, @intCast(port & 0xFF));
+    off += 1;
 
     try testing.expectEqual(@as(u8, 5), req_buf[0]);
     try testing.expectEqual(@as(u8, 1), req_buf[1]);
