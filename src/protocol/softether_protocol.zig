@@ -935,11 +935,18 @@ pub fn buildCertificateAuth(
 }
 
 /// Build Auth Pack with ticket authentication (for cluster redirect)
+/// Build ticket-based authentication for cluster redirect.
+/// @param server_ip The redirect target's IPv4 address in host byte order.
+///                  C client sends this as ServerIpAddress; server uses it to
+///                  route data-plane packets to the correct backend node.
+/// @param server_hostname The redirect target's hostname for Host header.
 pub fn buildTicketAuth(
     allocator: Allocator,
     hub_name: []const u8,
     username: []const u8,
     ticket: *const [Protocol.sha1_size]u8,
+    server_ip: u32,
+    server_hostname: []const u8,
     udp_accel: bool,
     bulk_keys: ?*const UdpBulkKeys,
     opts: SessionOptions,
@@ -1011,7 +1018,7 @@ pub fn buildTicketAuth(
     try auth_pack.addStr("ClientOsVer", os_info3.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", "zig-client");
-    try auth_pack.addStr("ServerHostname", "");
+    try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
@@ -1022,7 +1029,7 @@ pub fn buildTicketAuth(
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
-    try addPackIp32(&auth_pack, "ServerIpAddress", 0);
+    try addPackIp32(&auth_pack, "ServerIpAddress", server_ip);
     try auth_pack.addData("ServerIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ServerPort2", 0);
     try addPackIp32(&auth_pack, "ProxyIpAddress", 0);

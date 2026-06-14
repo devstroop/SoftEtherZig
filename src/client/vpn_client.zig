@@ -486,14 +486,43 @@ pub const VpnClient = struct {
         self.runDataLoop() catch |err| {
             std.log.err("Data loop thread exited with error: {}", .{err});
         };
-        // Data loop exited — we are ON this thread, so calling disconnect()
-        // would deadlock (performDisconnect tries to join self).
-        // Instead, null out the thread handle and fire the disconnect event
-        // so the client's event loop (CLI/Flutter) can react with a reconnect.
+
+        // === Clean up adapter + routes (subset of performDisconnect) ===
+        // We are ON the data loop thread, so we cannot join ourselves.
+        // But the adapter MUST be closed to restore routes — otherwise
+        // the default route stays pointed at the dead TUN and the local
+        // network interface is broken until a new connect() call cleans up.
+
+        // Null out the thread handle before cleanup so a concurrent
+        // disconnect() won't try to join us.
         self.data_loop_thread = null;
         @atomicStore(bool, &self.data_loop_running, false, .release);
 
-        // Fire disconnect event just like finishDisconnect would.
+        // Stop UDP acceleration
+        if (self.udp_accel) |*ua| {
+            ua.stop();
+        }
+        self.udp_accel = null;
+
+        // Close adapter — this restores original routes (VirtualAdapter.routes.restore)
+        if (self.adapter_ctx) |*ctx| ctx.close();
+
+        // Close session
+        if (self.session) |*sess| sess.disconnect();
+
+        // Close all TLS connections
+        if (self.conn_manager) |*cm| {
+            cm.deinit();
+            self.conn_manager = null;
+        }
+        if (self.tls_socket) |*sock| {
+            sock.close();
+            self.tls_socket = null;
+        }
+
+        self.state = .disconnected;
+
+        // === Fire disconnect events + auto-reconnect ===
         // The disconnect_reason is already set (by health check or error path).
         if (self.event_callback) |cb| {
             cb(.{ .state_changed = .{
@@ -503,8 +532,7 @@ pub const VpnClient = struct {
             cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
         }
 
-        // Only reconnecting state clients should call scheduleReconnect.
-        // Auto-reconnect applies when reconnect.enabled and reason permits it.
+        // Auto-reconnect when enabled and reason permits it.
         if (self.config.reconnect.enabled and
             self.disconnect_reason != .user_requested and
             self.disconnect_reason.shouldReconnect())

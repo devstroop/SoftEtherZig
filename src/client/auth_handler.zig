@@ -366,12 +366,17 @@ fn runRedirect(
     };
     defer redirect_hello.deinit(client.allocator);
 
-    // Build ticket auth
+    // Build ticket auth — pass the redirect target's IP and hostname so the
+    // server can route data-plane packets to the correct backend node.
+    // C client sends ServerIpAddress in PackAddClientVersion; omitting it
+    // (sending 0) causes the server to silently drop upload traffic.
     const ticket_auth_data = softether_proto.buildTicketAuth(
         client.allocator,
         client.config.hub_name,
         username,
         &ticket,
+        actual_ip,
+        redirect_host,
         client.config.udp_acceleration,
         bulk_keys_ptr,
         session_opts,
