@@ -26,45 +26,45 @@ const std = @import("std");
 // ============================================================================
 
 /// Main VPN client - use this to establish and manage VPN connections
-pub const VpnClient = @import("client/mod.zig").VpnClient;
+pub const VpnClient = @import("cedar/client/mod.zig").VpnClient;
 
 /// Client configuration struct
-pub const ClientConfig = @import("client/mod.zig").ClientConfig;
+pub const ClientConfig = @import("cedar/client/mod.zig").ClientConfig;
 
 /// Builder pattern for creating client configurations
-pub const ClientConfigBuilder = @import("client/mod.zig").ClientConfigBuilder;
+pub const ClientConfigBuilder = @import("cedar/client/mod.zig").ClientConfigBuilder;
 
 // ============================================================================
 // Client State & Events
 // ============================================================================
 
 /// Connection state machine states
-pub const ClientState = @import("client/mod.zig").ClientState;
+pub const ClientState = @import("cedar/client/mod.zig").ClientState;
 
 /// Events emitted by the VPN client
-pub const ClientEvent = @import("client/mod.zig").ClientEvent;
+pub const ClientEvent = @import("cedar/client/mod.zig").ClientEvent;
 
 /// Errors that can occur during client operations
-pub const ClientError = @import("client/mod.zig").ClientError;
+pub const ClientError = @import("cedar/client/mod.zig").ClientError;
 
 /// Connection statistics
-pub const ConnectionStats = @import("client/mod.zig").ConnectionStats;
+pub const ConnectionStats = @import("cedar/client/mod.zig").ConnectionStats;
 
 /// Reasons for disconnection
-pub const DisconnectReason = @import("client/mod.zig").DisconnectReason;
+pub const DisconnectReason = @import("cedar/client/mod.zig").DisconnectReason;
 
 /// Event callback function type
-pub const EventCallback = @import("client/mod.zig").EventCallback;
+pub const EventCallback = @import("cedar/client/mod.zig").EventCallback;
 
 // ============================================================================
 // Configuration Types
 // ============================================================================
 
 /// Authentication methods
-pub const AuthMethod = @import("client/mod.zig").AuthMethod;
+pub const AuthMethod = @import("cedar/client/mod.zig").AuthMethod;
 
 /// Reconnection behavior configuration
-pub const ReconnectConfig = @import("client/mod.zig").ReconnectConfig;
+pub const ReconnectConfig = @import("cedar/client/mod.zig").ReconnectConfig;
 
 // ============================================================================
 // Utility Types
