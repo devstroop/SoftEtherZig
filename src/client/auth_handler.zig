@@ -14,8 +14,8 @@ const std = @import("std");
 const net = std.net;
 
 const tls = @import("../mayaqua/network/net.zig").tls;
-const softether_proto = @import("../protocol/softether_protocol.zig");
-const pack_mod = @import("../protocol/pack.zig");
+const softether_proto = @import("../cedar/protocol/softether_protocol.zig");
+const pack_mod = @import("../cedar/protocol/pack.zig");
 const udp_accel_mod = @import("../mayaqua/network/udp_accel.zig");
 const core = @import("../mayaqua/kernel/mod.zig");
 const formatAddress = core.formatAddressForHost;

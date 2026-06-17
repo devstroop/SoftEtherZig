@@ -12,11 +12,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 // Import protocol tunnel for TunnelConnection
-const protocol_tunnel = @import("../cedar/protocol/tunnel.zig");
+const protocol_tunnel = @import("../protocol/tunnel.zig");
 const TunnelConnection = protocol_tunnel.TunnelConnection;
 
 // Import adapter for packet building
-const adapter_mod = @import("../adapter/mod.zig");
+const adapter_mod = @import("../../adapter/mod.zig");
 
 // Import local modules
 const dhcp_mod = @import("dhcp.zig");
