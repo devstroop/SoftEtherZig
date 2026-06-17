@@ -9,7 +9,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 
 const tls = @import("../mayaqua/network/tls.zig");
-const protocol_tunnel = @import("../protocol/tunnel.zig");
+const protocol_tunnel = @import("../cedar/protocol/tunnel.zig");
 const TunnelConnection = protocol_tunnel.TunnelConnection;
 
 /// Maximum number of TCP connections per session (SoftEther protocol limit)

@@ -40,7 +40,7 @@ const net_mod = @import("../mayaqua/network/net.zig");
 const tls = net_mod.tls;
 
 // Import session module
-const session_mod = @import("../session/mod.zig");
+const session_mod = @import("../cedar/session/mod.zig");
 
 pub const SessionOptions = session_mod.SessionOptions;
 pub const SessionWrapper = session_mod.SessionWrapper;
@@ -51,21 +51,21 @@ const adapter_mod = @import("../adapter/mod.zig");
 const AdapterWrapper = adapter_mod.AdapterWrapper;
 
 // Import protocol modules
-const auth_mod = @import("../protocol/auth.zig");
-const softether_proto = @import("../protocol/softether_protocol.zig");
-const protocol_tunnel_mod = @import("../protocol/tunnel.zig");
+const auth_mod = @import("../cedar/protocol/auth.zig");
+const softether_proto = @import("../cedar/protocol/softether_protocol.zig");
+const protocol_tunnel_mod = @import("../cedar/protocol/tunnel.zig");
 
 // Import UDP acceleration
 const udp_accel_mod = @import("../mayaqua/network/udp_accel.zig");
 
 // Import tunnel module (data loop helpers)
-const tunnel_mod = @import("../tunnel/mod.zig");
+const tunnel_mod = @import("../cedar/tunnel/mod.zig");
 
 // Import route healing (#9, #10)
 const route_heal = @import("../adapter/route_heal.zig");
 
 // Import DHCPv6
-const dhcpv6_mod = @import("../tunnel/dhcpv6.zig");
+const dhcpv6_mod = @import("../cedar/tunnel/dhcpv6.zig");
 const Dhcpv6Client = dhcpv6_mod.Dhcpv6Client;
 
 // Import connection manager for multi-TCP
