@@ -466,7 +466,7 @@ test "ConfigManager fromArgs" {
         .server = "test.com",
         .port = 443,
         .hub = "TEST",
-        .reconnect = true,
+        .reconnect = false,
         .max_retries = 10,
     };
 

@@ -897,7 +897,7 @@ pub const TlsSocket = struct {
         //   4MB → kernel doubles to ~8MB = 4× BDP at 86 Mbps/180ms RTT.
         //   Sndbuf never fills in steady state; no stalls, no cascade.
         //   Memory cost: 4MB per TLS connection (negligible).
-        const snd_cap: u32 = 4 * 1024 * 1024;
+        const snd_cap: u32 = 2 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the

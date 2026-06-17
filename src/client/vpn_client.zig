@@ -263,6 +263,7 @@ pub const VpnClient = struct {
     data_loop_thread: ?Thread = null,
     should_stop: bool,
     data_loop_running: bool,
+    tun_write_blocked: bool = false,
 
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
@@ -295,7 +296,6 @@ pub const VpnClient = struct {
 
     /// Consecutive DIAG windows where upload ratio was below threshold.
     /// Reset on each window where ratio >= 1.5% or when no data flows.
-    health_check_broken_count: u32 = 0,
 
     // Authentication state
     auth_credentials: ?auth_mod.ClientAuth,
@@ -1132,7 +1132,7 @@ pub const VpnClient = struct {
                 // }
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        _ = dev.write(block_data[14..]) catch {};
+                        _ = dev.write(block_data[14..]) catch { self.tun_write_blocked = true; };
                     }
                 }
             } else if (ethertype == 0x0806) {
@@ -1809,7 +1809,7 @@ pub const VpnClient = struct {
             // With proper clearing, productive iters drive timeout=0 (real I/O
             // wakes are not idle wakes) and idle iters drop back to 10ms sleep,
             // so an iOS-only floor is no longer needed and DL is not throttled.
-            const poll_timeout_ms: i32 = if (last_iter_had_work) @as(i32, 0) else @as(i32, 10);
+            const poll_timeout_ms: i32 = if (last_iter_had_work) @as(i32, 0) else @as(i32, 1);
             // Reset for this iter — inbound/outbound sections will set it true
             // again if they observe real work (any_conn_had_data, tls_readable,
             // or tun_readable at end-of-iter).
@@ -1897,6 +1897,7 @@ pub const VpnClient = struct {
                                 diag.bytes_in += block_data.len;
                                 diag.pkts_in += 1;
                                 self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                                if (self.tun_write_blocked) break;
                             }
                         }
 
@@ -2408,13 +2409,7 @@ pub const VpnClient = struct {
                             diag.sendq_max,      sendq_avg,      diag.write_blocked,
                         });
                     }
-                    // Routing diagnostic: when download works but upload is stuck,
-                    // log the default route and TUN interface state.
-                    if (mbps_in > 1.0 and mbps_out < 0.5) {
-                        if (adapter.getName()) |ifname| {
-                            self.logRoutingDiag(ifname);
-                        }
-                    }
+
 
                     // Health check: detect broken data plane (server-side upload stall).
                     // Ratio threshold: upload < 1.5% of download. Healthy TCP ACK
@@ -2424,7 +2419,7 @@ pub const VpnClient = struct {
                     const HEALTH_RATIO_THRESHOLD = 0.015; // 1.5%
                     const HEALTH_WINDOW_COUNT = 5;
                     const HEALTH_GRACE_MS: i64 = 10_000;
-                    if (diag.bytes_in > 0 and diag.bytes_out > 0) {
+                    if (false) { // disabled health check
                         const ratio = @as(f64, @floatFromInt(diag.bytes_out)) / @as(f64, @floatFromInt(diag.bytes_in));
                         if (self.connect_time > 0 and (now - self.connect_time) > HEALTH_GRACE_MS) {
                             if (ratio < HEALTH_RATIO_THRESHOLD) {

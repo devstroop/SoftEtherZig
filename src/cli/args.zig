@@ -45,7 +45,7 @@ pub const CliArgs = struct {
     ip_version: ?IpVersion = null,
 
     // Reconnection
-    reconnect: bool = true,
+    reconnect: bool = false,
     max_retries: u32 = 0,
 
     // IP configuration
