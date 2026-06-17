@@ -535,7 +535,7 @@ export fn softether_set_verify_certificate(client: ?*VpnClient, verify: bool) vo
 /// tunnel that's not yet established → instant ECONNREFUSED.
 /// Pass NULL or "" to clear.
 export fn softether_set_bind_interface(name: ?[*:0]const u8) void {
-    const tls = @import("net/tls.zig");
+    const tls = @import("mayaqua/network/tls.zig");
     if (name == null) {
         tls.bind_interface_index = 0;
         return;
@@ -565,7 +565,7 @@ export fn softether_set_bind_interface(name: ?[*:0]const u8) void {
 /// Used on iOS NEPacketTunnelProvider where the extension's own POSIX
 /// connect() is denied by NECP — Swift dials via NEProvider.createTCPConnection
 /// (which goes outside the tunnel) and bridges bytes through a socketpair.
-const tls_mod = @import("net/tls.zig");
+const tls_mod = @import("mayaqua/network/tls.zig");
 
 export fn softether_set_tcp_dial_callback(cb: ?tls_mod.ExternalTcpDialFn) void {
     tls_mod.external_tcp_dial = cb;

@@ -6,7 +6,7 @@ const std = @import("std");
 
 const cli = @import("../cli/mod.zig");
 const client = @import("../client/mod.zig");
-const tls = @import("../net/tls.zig");
+const tls = @import("../mayaqua/network/tls.zig");
 
 pub const ConfigBuildError = error{
     MissingServer,

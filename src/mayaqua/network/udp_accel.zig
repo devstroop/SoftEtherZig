@@ -22,7 +22,7 @@ const socket_mod = @import("socket.zig");
 const UdpSocket = socket_mod.UdpSocket;
 const Address = socket_mod.Address;
 
-const cipher_mod = @import("../mayaqua/encrypt/cipher.zig");
+const cipher_mod = @import("../encrypt/cipher.zig");
 const Aes128Cbc = cipher_mod.Aes128Cbc;
 const block_size = cipher_mod.block_size;
 

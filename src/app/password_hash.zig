@@ -5,7 +5,7 @@
 const std = @import("std");
 
 const cli = @import("../cli/mod.zig");
-const crypto = @import("../crypto/crypto.zig");
+const crypto = @import("../mayaqua/encrypt/crypto.zig");
 
 /// Generate a SoftEther password hash and print it
 pub fn generate(user: []const u8, pass: []const u8) void {
