@@ -5,7 +5,7 @@
 const std = @import("std");
 
 const cli = @import("../cli/mod.zig");
-const client = @import("../client/mod.zig");
+const client = @import("../cedar/client/mod.zig");
 const state_mod = @import("state.zig");
 const AppState = state_mod.AppState;
 

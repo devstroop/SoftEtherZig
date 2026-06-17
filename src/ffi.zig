@@ -111,7 +111,7 @@ pub const std_options: std.Options = .{
 };
 
 // Import library modules
-const client_mod = @import("client/mod.zig");
+const client_mod = @import("cedar/client/mod.zig");
 const VpnClient = client_mod.VpnClient;
 const ClientConfig = client_mod.ClientConfig;
 const ClientState = client_mod.ClientState;

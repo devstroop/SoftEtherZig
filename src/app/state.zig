@@ -6,7 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const cli = @import("../cli/mod.zig");
-const client = @import("../client/mod.zig");
+const client = @import("../cedar/client/mod.zig");
 
 /// Application state container
 pub const AppState = struct {

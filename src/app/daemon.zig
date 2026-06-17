@@ -7,7 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const cli = @import("../cli/mod.zig");
-const client = @import("../client/mod.zig");
+const client = @import("../cedar/client/mod.zig");
 const state_mod = @import("state.zig");
 const config_mod = @import("config.zig");
 const events_mod = @import("events.zig");
