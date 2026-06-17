@@ -8,7 +8,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
-const tls = @import("../net/tls.zig");
+const tls = @import("../mayaqua/network/tls.zig");
 const protocol_tunnel = @import("../protocol/tunnel.zig");
 const TunnelConnection = protocol_tunnel.TunnelConnection;
 

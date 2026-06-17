@@ -71,7 +71,7 @@ pub const ReconnectConfig = @import("client/mod.zig").ReconnectConfig;
 // ============================================================================
 
 /// Core utilities (IP parsing, etc.)
-pub const core = @import("core/mod.zig");
+pub const core = @import("mayaqua/kernel/mod.zig");
 
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;

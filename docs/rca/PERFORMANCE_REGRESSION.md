@@ -471,3 +471,24 @@ Before merging any change to the data loop, verify:
 | receiveBlocksBatch | `src/protocol/tunnel.zig` | 260-420 |
 | sendBlocksZeroCopy | `src/protocol/tunnel.zig` | 428-464 |
 | DIAG logging | `src/client/vpn_client.zig` | 2370-2420 |
+
+---
+
+## Appendix C: Cross-Validation Methodology
+
+Every RCA in this directory should be cross-validated against the reference C implementation at `../../SoftEtherVPN/src/` before finalization. The C source is the protocol specification. Deviations identified during cross-validation for the initial RCAs:
+
+| RCA | Discrepancies Found | Corrective Action |
+|-----|--------------------|--------------------|
+| AES-256-CBC | C uses RC4 not AES-CBC; modes are mutually exclusive (TLS xor RC4) | Added cross-validation section |
+| Multi-TCP | C has connection replenishment (`ClientAdditionalConnectChance`), uses `LateCount` not `pending_bytes` | Added cross-validation section |
+| UDP Accel | C uses RC4/ChaCha20 (not AES-CBC), has retransmission/RTT backoff, NAT-T re-probing | Added cross-validation section |
+
+### Cross-validation checklist for future RCAs:
+
+- [ ] Compare encryption algorithms (Zig vs C — should match)
+- [ ] Compare state machine transitions (session setup, auth, data flow)
+- [ ] Compare key sizes and derivation methods
+- [ ] Compare error handling (timeout, WouldBlock, disconnect)
+- [ ] Compare version negotiation fields and defaults
+- [ ] Compare configuration defaults (reconnect, encryption, compression)

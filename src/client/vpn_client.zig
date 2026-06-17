@@ -19,7 +19,7 @@ const builtin = @import("builtin");
 const net = std.net;
 
 // Import core utilities
-const core = @import("../core/mod.zig");
+const core = @import("../mayaqua/kernel/mod.zig");
 const parseIpv4 = core.parseIpv4;
 
 // Import extracted client modules
@@ -35,7 +35,7 @@ pub const ClientError = events_mod.ClientError;
 pub const EventCallback = events_mod.EventCallback;
 
 // Import real networking modules
-const net_mod = @import("../net/net.zig");
+const net_mod = @import("../mayaqua/network/net.zig");
 
 const tls = net_mod.tls;
 
@@ -56,7 +56,7 @@ const softether_proto = @import("../protocol/softether_protocol.zig");
 const protocol_tunnel_mod = @import("../protocol/tunnel.zig");
 
 // Import UDP acceleration
-const udp_accel_mod = @import("../net/udp_accel.zig");
+const udp_accel_mod = @import("../mayaqua/network/udp_accel.zig");
 
 // Import tunnel module (data loop helpers)
 const tunnel_mod = @import("../tunnel/mod.zig");

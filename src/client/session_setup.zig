@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const tls = @import("../net/net.zig").tls;
+const tls = @import("../mayaqua/network/net.zig").tls;
 const softether_proto = @import("../protocol/softether_protocol.zig");
-const core = @import("../core/mod.zig");
+const core = @import("../mayaqua/kernel/mod.zig");
 const formatAddress = core.formatAddressForHost;
 
 const vpn_client = @import("vpn_client.zig");
