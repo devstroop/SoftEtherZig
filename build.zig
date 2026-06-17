@@ -467,26 +467,26 @@ pub fn build(b: *std.Build) void {
     // NOTE: Files under src/app/ and src/net/ import sibling modules and
     // must be tested as part of the full package, not as standalone modules.
     const test_sources = [_][]const u8{
-        "src/crypto/sha0.zig",
-        "src/crypto/cipher.zig",
-        "src/crypto/hash.zig",
-        "src/protocol/pack.zig",
-        "src/protocol/auth.zig",
-        "src/protocol/rpc.zig",
-        "src/client/state.zig",
-        "src/client/stats.zig",
-        "src/client/events.zig",
-        "src/core/ip.zig",
-        "src/core/errors.zig",
-        "src/core/types.zig",
+        "src/mayaqua/encrypt/sha0.zig",
+        "src/mayaqua/encrypt/cipher.zig",
+        "src/mayaqua/encrypt/hash.zig",
+        "src/cedar/protocol/pack.zig",
+        "src/cedar/protocol/auth.zig",
+        "src/cedar/protocol/rpc.zig",
+        "src/cedar/client/state.zig",
+        "src/cedar/client/stats.zig",
+        "src/cedar/client/events.zig",
+        "src/mayaqua/kernel/ip.zig",
+        "src/mayaqua/kernel/errors.zig",
+        "src/mayaqua/kernel/types.zig",
         "src/config.zig",
         "src/types.zig",
-        "src/tunnel/arp.zig",
-        "src/tunnel/dhcp.zig",
+        "src/cedar/tunnel/arp.zig",
+        "src/cedar/tunnel/dhcp.zig",
         "src/cli/args.zig",
         "src/cli/config_manager.zig",
-        "src/net/dns_cache.zig",
-        "src/net/socks.zig",
+        "src/mayaqua/network/dns_cache.zig",
+        "src/mayaqua/network/socks.zig",
     };
 
     for (test_sources) |test_src| {
@@ -598,7 +598,7 @@ pub fn build(b: *std.Build) void {
     // imports that escape the module's source root.
     {
         const proto_mod = b.createModule(.{
-            .root_source_file = b.path("src/protocol/softether_protocol.zig"),
+            .root_source_file = b.path("src/cedar/protocol/softether_protocol.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -630,7 +630,7 @@ pub fn build(b: *std.Build) void {
     // messages against RFC 8415. No sockets, no live server, CI-friendly.
     {
         const dhcpv6_mod = b.createModule(.{
-            .root_source_file = b.path("src/tunnel/dhcpv6.zig"),
+            .root_source_file = b.path("src/cedar/tunnel/dhcpv6.zig"),
             .target = target,
             .optimize = optimize,
         });
