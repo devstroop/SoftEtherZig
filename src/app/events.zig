@@ -3,6 +3,7 @@
 //! Handles VPN client events and displays them to the user.
 
 const std = @import("std");
+const log = std.log.scoped(.app);
 
 const cli = @import("../cli/mod.zig");
 const client = @import("../cedar/client/mod.zig");

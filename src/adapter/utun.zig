@@ -2,6 +2,7 @@
 // macOS utun kernel interface for packet forwarding
 
 const std = @import("std");
+const log = std.log.scoped(.adapter_tun);
 const builtin = @import("builtin");
 const posix = std.posix;
 

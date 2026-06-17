@@ -9,6 +9,7 @@
 //! The protocol uses HTTP as transport with Pack binary serialization.
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_proto);
 const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = mem.Allocator;

@@ -8,6 +8,7 @@
 //! - Automatic reconnection
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_conn);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const posix = std.posix;

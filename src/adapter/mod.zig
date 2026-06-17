@@ -2,6 +2,7 @@
 // Network adapter management
 
 const std = @import("std");
+const log = std.log.scoped(.adapter_tun);
 const builtin = @import("builtin");
 
 // Android is detected as linux+android ABI; it uses an OS-provided fd from VpnService

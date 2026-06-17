@@ -2,6 +2,7 @@
 // macOS routing table manipulation
 
 const std = @import("std");
+const log = std.log.scoped(.adapter_route);
 const builtin = @import("builtin");
 const posix = std.posix;
 

@@ -5,6 +5,7 @@
 //! certificates, and we need fine-grained control over certificate verification.
 
 const std = @import("std");
+const log = std.log.scoped(.mayaqua_tls);
 const builtin = @import("builtin");
 const net = std.net;
 const c = @cImport({

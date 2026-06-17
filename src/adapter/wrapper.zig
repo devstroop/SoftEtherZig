@@ -4,6 +4,7 @@
 //! Provides TUN device management, routing, and packet I/O.
 
 const std = @import("std");
+const log = std.log.scoped(.adapter_tun);
 const Allocator = std.mem.Allocator;
 
 // Import adapter module

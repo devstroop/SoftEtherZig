@@ -15,6 +15,7 @@
 //!   - UNISTR: [utf8_size:u32] [utf8_bytes...]
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_pack);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;

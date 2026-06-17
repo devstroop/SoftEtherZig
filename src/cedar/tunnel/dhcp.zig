@@ -3,6 +3,7 @@
 //! Handles DHCP discovery, request, and configuration for the VPN tunnel.
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_tunnel);
 
 /// DHCP state machine states
 pub const DhcpState = enum {

@@ -4,6 +4,7 @@
 //! Supports PID file management and connection progress display.
 
 const std = @import("std");
+const log = std.log.scoped(.app);
 const builtin = @import("builtin");
 
 const cli = @import("../cli/mod.zig");

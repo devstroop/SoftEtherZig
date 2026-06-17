@@ -4,6 +4,7 @@
 //! Learns gateway MAC and responds to ARP requests for our IP.
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_tunnel);
 
 /// ARP handler for gateway MAC learning and request handling
 pub const ArpHandler = struct {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.cedar_session);
 
 const tls = @import("../../mayaqua/network/net.zig").tls;
 const softether_proto = @import("../protocol/softether_protocol.zig");

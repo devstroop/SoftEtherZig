@@ -23,6 +23,7 @@
 //! if an attacker captures the handshake.
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_auth);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;

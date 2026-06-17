@@ -14,12 +14,32 @@ const lib = @import("lib.zig");
 // Logging Configuration
 // ============================================================================
 
-/// Configure log levels per scope to filter out noisy per-packet logs
+/// Configure log levels per scope to filter out noisy per-packet logs.
+/// Scope naming follows the module hierarchy: subsystem.component
+///   - cedar.*     VPN protocol layer (client, session, tunnel, auth, pack)
+///   - mayaqua.*   Platform abstraction (tls, net, dns, udp)
+///   - adapter.*   TUN/TAP adapters (tun, route)
+///   - app.*       Application lifecycle
+///   - ffi         C FFI layer
+///   - *.debug     Per-packet I/O trace (noisiest)
 pub const std_options: std.Options = .{
-    .log_level = .debug, // Default level for most scopes
+    .log_level = switch (builtin.mode) {
+        .Debug => .debug,
+        else => .info,
+    },
     .log_scope_levels = &.{
-        // Silence per-packet trace logs (use --log-level trace to see them)
+        // Per-packet I/O: only show in debug builds
         .{ .scope = .packet_trace, .level = .err },
+        .{ .scope = .mayaqua, .level = .info },
+        .{ .scope = .adapter, .level = .info },
+        // Cedar protocol scopes
+        .{ .scope = .cedar_client, .level = .info },
+        .{ .scope = .cedar_conn, .level = .info },
+        .{ .scope = .cedar_proto, .level = .info },
+        .{ .scope = .cedar_tunnel, .level = .info },
+        .{ .scope = .cedar_auth, .level = .info },
+        .{ .scope = .cedar_pack, .level = .info },
+        .{ .scope = .cedar_session, .level = .info },
     },
 };
 

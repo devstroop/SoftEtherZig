@@ -4,6 +4,7 @@
 //! Provides cross-platform TCP/UDP socket abstractions.
 
 const std = @import("std");
+const log = std.log.scoped(.mayaqua_net);
 const net = std.net;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;

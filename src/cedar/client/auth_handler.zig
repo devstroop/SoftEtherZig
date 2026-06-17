@@ -11,6 +11,7 @@
 //! overridable fields). Returns `ClientError` on failure.
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_client);
 const net = std.net;
 
 const tls = @import("../../mayaqua/network/net.zig").tls;

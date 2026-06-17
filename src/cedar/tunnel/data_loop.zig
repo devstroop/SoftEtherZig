@@ -9,6 +9,7 @@
 //! - IP packet parsing helpers for logging
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_tunnel);
 const Allocator = std.mem.Allocator;
 
 // Import protocol tunnel for TunnelConnection

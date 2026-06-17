@@ -14,6 +14,7 @@
 //!   [N bytes] keep_alive_data (random padding)
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_tunnel);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const c = @cImport(@cInclude("zlib.h"));

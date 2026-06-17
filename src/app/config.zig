@@ -3,6 +3,7 @@
 //! Builds VPN client configuration from CLI arguments.
 
 const std = @import("std");
+const log = std.log.scoped(.app);
 
 const cli = @import("../cli/mod.zig");
 const client = @import("../cedar/client/mod.zig");

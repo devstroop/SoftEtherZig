@@ -9,6 +9,7 @@
 //! Output: libsoftether.dylib (macOS), libsoftether.so (Linux), softether.dll (Windows)
 
 const std = @import("std");
+const log = std.log.scoped(.ffi);
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const lib = @import("lib.zig");

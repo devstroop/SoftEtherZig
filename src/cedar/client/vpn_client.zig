@@ -11,6 +11,7 @@
 //! - PacketProcessor: Packet processing pipeline
 
 const std = @import("std");
+const log = std.log.scoped(.cedar_client);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const Thread = std.Thread;
@@ -2489,59 +2490,6 @@ pub const VpnClient = struct {
         std.log.info("Data channel loop ended", .{});
     }
 
-    fn logRoutingDiag(self: *Self, ifname: []const u8) void {
-        var cmd_buf: [1024]u8 = undefined;
-
-        const cmd = std.fmt.bufPrint(&cmd_buf, "netstat -rn -f inet 2>/dev/null | grep '^default' | head -5", .{}) catch unreachable;
-
-        var child = std.process.Child.init(
-            &[_][]const u8{ "/bin/sh", "-c", cmd },
-            self.allocator,
-        );
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Close;
-        child.spawn() catch |err| {
-            std.log.warn("[ROUTE-ROGUE] spawn failed: {}", .{err});
-            return;
-        };
-        var out_buf: [1024]u8 = undefined;
-        const bytes = child.stdout.?.read(&out_buf) catch |err| {
-            std.log.warn("[ROUTE-ROGUE] read failed: {}", .{err});
-            _ = child.wait() catch {};
-            return;
-        };
-        _ = child.wait() catch {};
-
-        const trimmed = std.mem.trim(u8, out_buf[0..bytes], " \n\r\t");
-        if (trimmed.len > 0) {
-            std.log.warn("[ROUTE-ROGUE] Default routes:\n{s}", .{trimmed});
-        } else {
-            std.log.warn("[ROUTE-ROGUE] NO default route found!", .{});
-        }
-
-        const ifcmd = std.fmt.bufPrint(&cmd_buf, "ifconfig {s} 2>/dev/null | head -3", .{ifname}) catch unreachable;
-
-        var ifchild = std.process.Child.init(
-            &[_][]const u8{ "/bin/sh", "-c", ifcmd },
-            self.allocator,
-        );
-        ifchild.stdout_behavior = .Pipe;
-        ifchild.stderr_behavior = .Close;
-        ifchild.spawn() catch |err| {
-            std.log.warn("[ROUTE-ROGUE] ifconfig spawn failed: {}", .{err});
-            return;
-        };
-        var ifout: [1024]u8 = undefined;
-        const ifbytes = ifchild.stdout.?.read(&ifout) catch |err| {
-            std.log.warn("[ROUTE-ROGUE] ifconfig read failed: {}", .{err});
-            _ = ifchild.wait() catch {};
-            return;
-        };
-        _ = ifchild.wait() catch {};
-
-        const iftrimmed = std.mem.trim(u8, ifout[0..ifbytes], " \n\r\t");
-        std.log.warn("[ROUTE-ROGUE] TUN iface:\n{s}", .{iftrimmed});
-    }
 };
 
 // ============================================================================

@@ -5,6 +5,7 @@
 // #10: On startup, scans the routing table for routes via dead utunN and removes them.
 
 const std = @import("std");
+const log = std.log.scoped(.adapter_route);
 const builtin = @import("builtin");
 const posix = std.posix;
 
