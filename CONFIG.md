@@ -11,7 +11,7 @@ Every config property must be present in **all six layers** to be maintainable.
 | Config file | `src/cli/config_manager.zig` | `"json_key"` |
 | Bridge | `src/app/config.zig` | CliArgs → ClientConfig |
 | FFI setter | `src/ffi.zig` | `softether_set_*()` |
-| ClientConfig | `src/client/vpn_client.zig` | struct field |
+| ClientConfig | `src/cedar/client/vpn_client.zig` | struct field |
 
 ## Field Matrix
 
@@ -27,18 +27,18 @@ Every config property must be present in **all six layers** to be maintainable.
 | 8 | use_encrypt | `--use-encrypt` / `--no-encrypt` | `SOFTETHER_ENCRYPT` | `"use_encrypt"` | ✅ | `softether_set_encryption` | `use_encrypt` | `"use_encrypt"` |
 | 9 | half_connection | `--half-connection` / `--no-half-connection` | `SOFTETHER_HALF_CONNECTION` | `"half_connection"` | ✅ | `softether_set_half_connection` | `half_connection` | `"half_connection"` |
 | 10 | qos | `--qos` / `--no-qos` | `SOFTETHER_QOS` | `"qos"` | ✅ | `softether_set_qos` | `qos` | `"qos"` |
-| 11 | udp_acceleration | `--udp-accel` | `SOFTETHER_UDP_ACCEL` | `"udp_accel"` | ✅ | **❌ missing** | `udp_acceleration` | `"use_udp_acceleration"` |
+| 11 | udp_acceleration | `--udp-accel` | `SOFTETHER_UDP_ACCEL` | `"udp_accel"` | ✅ | `softether_set_udp_acceleration` | `udp_acceleration` | `"use_udp_acceleration"` |
 | 12 | max_connections | `--max-connections` | `SOFTETHER_MAX_CONNECTIONS` | `"max_connections"` | ✅ | `softether_set_max_connections` | `max_connections` | `"max_connection"` |
 | 13 | mtu | `--mtu` | `SOFTETHER_MTU` | `"mtu"` | ✅ | `softether_set_mtu` | `mtu` | — |
-| 14 | ip_version | `--ip-version` | — | `"ip_version"` | **❌ unused** | **❌ missing** | **❌ field doesn't exist** | — |
+| 14 | ip_version | `--ip-version` | `SOFTETHER_IP_VERSION` | `"ip_version"` | ✅ | `softether_set_ip_version` | `ip_version` | — |
 | 15 | skip_tls_verify | `--skip-tls-verify` | `SOFTETHER_SKIP_TLS_VERIFY` | `"skip_tls_verify"` | ✅ (inverted) | `softether_set_verify_certificate` | `verify_certificate` | — |
-| 16 | default_route | `--full-tunnel` | — | `"routing.default_route"` | ✅ | `softether_set_default_route` | `routing.default_route` | — |
-| 17 | accept_pushed_routes | — | — | `"routing.accept_pushed_routes"` | ✅ | **❌ missing** | `routing.accept_pushed_routes` | — |
-| 18 | enable_custom_routes | — | — | `"routing.enable_custom_routes"` | ✅ | **❌ missing** | `routing.enable_custom_routes` | — |
-| 19 | ipv4_include | `--ipv4-include` | — | `"routing.ipv4_include"` | ✅ | **❌ missing** | `routing.ipv4_include` | — |
-| 20 | ipv4_exclude | `--ipv4-exclude` | — | `"routing.ipv4_exclude"` | ✅ | **❌ missing** | `routing.ipv4_exclude` | — |
-| 21 | ipv6_include | `--ipv6-include` | — | `"routing.ipv6_include"` | ✅ | **❌ missing** | `routing.ipv6_include` | — |
-| 22 | ipv6_exclude | `--ipv6-exclude` | — | `"routing.ipv6_exclude"` | ✅ | **❌ missing** | `routing.ipv6_exclude` | — |
+| 16 | default_route | ❌ missing | — | `"routing.default_route"` | ✅ | `softether_set_default_route` | `routing.default_route` | — |
+| 17 | accept_pushed_routes | — | — | `"routing.accept_pushed_routes"` | ✅ | `softether_set_accept_pushed_routes` | `routing.accept_pushed_routes` | — |
+| 18 | enable_custom_routes | — | — | `"routing.enable_custom_routes"` | ✅ | `softether_set_enable_custom_routes` | `routing.enable_custom_routes` | — |
+| 19 | ipv4_include | `--ipv4-include` | — | `"routing.ipv4_include"` | ✅ | `softether_set_ipv4_include` | `routing.ipv4_include` | — |
+| 20 | ipv4_exclude | `--ipv4-exclude` | — | `"routing.ipv4_exclude"` | ✅ | `softether_set_ipv4_exclude` | `routing.ipv4_exclude` | — |
+| 21 | ipv6_include | `--ipv6-include` | — | `"routing.ipv6_include"` | ✅ | `softether_set_ipv6_include` | `routing.ipv6_include` | — |
+| 22 | ipv6_exclude | `--ipv6-exclude` | — | `"routing.ipv6_exclude"` | ✅ | `softether_set_ipv6_exclude` | `routing.ipv6_exclude` | — |
 | 23 | static_ipv4 | `--static-ipv4` | — | `"static_ip.ipv4_address"` | ✅ | **❌ missing** | `static_ip.ipv4_address` | — |
 | 24 | static_ipv4_netmask | `--static-ipv4-netmask` | — | `"static_ip.ipv4_netmask"` | ✅ | **❌ missing** | `static_ip.ipv4_netmask` | — |
 | 25 | static_ipv4_gateway | `--static-ipv4-gateway` | — | `"static_ip.ipv4_gateway"` | ✅ | **❌ missing** | `static_ip.ipv4_gateway` | — |
@@ -48,10 +48,10 @@ Every config property must be present in **all six layers** to be maintainable.
 | 29 | dns_servers | `--dns-server` (multi) | — | `"static_ip.dns_servers"` | ✅ | **❌ missing** | `static_ip.dns_servers` | — |
 | 30 | reconnect | `--reconnect` / `--no-reconnect` | — | `"reconnect.enabled"` | ✅ | `softether_set_reconnect` | `reconnect.enabled` | — |
 | 31 | max_retries | `--max-retries` | — | `"reconnect.max_attempts"` | ✅ | `softether_set_reconnect` arg | `reconnect.max_attempts` | — |
-| 32 | proxy | `--proxy` | `SOFTETHER_PROXY` | **❌ missing** | ✅ | `softether_set_proxy` | `proxy` | — |
-| 33 | connect_timeout_ms | **❌ missing** | **❌ missing** | **❌ missing** | hardcoded 30000 | **❌ missing** | `connect_timeout_ms` | — |
-| 34 | read_timeout_ms | **❌ missing** | **❌ missing** | **❌ missing** | hardcoded 60000 | **❌ missing** | `read_timeout_ms` | — |
-| 35 | keepalive_interval_ms | **❌ missing** | **❌ missing** | **❌ missing** | hardcoded 10000 | **❌ missing** | `keepalive_interval_ms` | — |
+| 32 | proxy | `--proxy` | `SOFTETHER_PROXY` | `"proxy"` | ✅ | `softether_set_proxy` | `proxy` | — |
+| 33 | connect_timeout_ms | `--connect-timeout` | `SOFTETHER_CONNECT_TIMEOUT` | `"connect_timeout_ms"` | ✅ | `softether_set_connect_timeout` | `connect_timeout_ms` | — |
+| 34 | read_timeout_ms | `--read-timeout` | `SOFTETHER_READ_TIMEOUT` | `"read_timeout_ms"` | ✅ | `softether_set_read_timeout` | `read_timeout_ms` | — |
+| 35 | keepalive_interval_ms | `--keepalive-interval` | `SOFTETHER_KEEPALIVE_INTERVAL` | `"keepalive_interval_ms"` | ✅ | `softether_set_keepalive_interval` | `keepalive_interval_ms` | — |
 | 36 | log_level | `--log-level` | `SOFTETHER_LOG_LEVEL` | `"log_level"` | runtime only | **❌ missing** | **❌ (runtime)** | — |
 | 37 | tunnel_fd | — | — | — | — | `softether_set_tunnel_fd` | `tunnel_fd` | — |
 
@@ -71,11 +71,15 @@ SOFTETHER_COMPRESS           → isTrue(1|true|yes)
 SOFTETHER_ENCRYPT            → isTrue(1|true|yes)
 SOFTETHER_HALF_CONNECTION    → isTrue(1|true|yes)
 SOFTETHER_QOS                → isTrue(1|true|yes)
+SOFTETHER_IP_VERSION         → 4|6
 SOFTETHER_SKIP_TLS_VERIFY    → isTrue(1|true|yes)
 SOFTETHER_UDP_ACCEL          → isTrue(1|true|yes)
 SOFTETHER_MAX_CONNECTIONS    → parseInt
 SOFTETHER_MTU                → parseInt
 SOFTETHER_LOG_LEVEL          → silent|error|warn|info|debug|trace
+SOFTETHER_CONNECT_TIMEOUT    → parseInt (ms)
+SOFTETHER_READ_TIMEOUT       → parseInt (ms)
+SOFTETHER_KEEPALIVE_INTERVAL → parseInt (ms)
 SOFTETHER_PROXY
 ```
 
@@ -84,7 +88,7 @@ Priority: CLI flag > env var > config file > code default.
 ## Wire Protocol Names
 
 The SoftEther VPN server uses these field names in the auth handshake
-(`src/protocol/softether_protocol.zig`):
+(`src/cedar/protocol/softether_protocol.zig`):
 
 | Server-sent field | Mapped to |
 |---|---|
@@ -103,12 +107,6 @@ The SoftEther VPN server uses these field names in the auth handshake
 
 Priority order for filling:
 
-1. **udp_acceleration** — no FFI setter. Add `softether_set_udp_acceleration()`.
-2. **proxy** — no config file field. Add `"proxy"` to `ConfigFile`.
-3. **connect_timeout_ms** — missing from CLI, env, config file, FFI. Hardcoded 30s in bridge.
-4. **read_timeout_ms** — same as above. Hardcoded 60s.
-5. **keepalive_interval_ms** — same as above. Hardcoded 10s.
-6. **ip_version** — parsed in CLI, goes nowhere. Dead field. Either wire to DNS resolution or remove.
-7. **Routing sub-fields** — no FFI setters for accept_pushed_routes, custom_routes, include/exclude.
-8. **Static IP sub-fields** — no FFI setters.
-9. **log_level** — no FFI setter.
+1. **Static IP sub-fields** — no FFI setters for `softether_set_static_ipv4()`, etc. Add once a mobile host needs to set a static IP at runtime rather than via config file.
+2. **log_level** — no FFI setter. Currently runtime-only via `--log-level` CLI flag or `SOFTETHER_LOG_LEVEL` env var.
+3. **Missing CLI flags** — `--full-tunnel`, `--accept-pushed-routes`, `--enable-custom-routes` are not parsed in CLI arg parser. Use config file or FFI setters instead. Add to `src/cli/args.zig`.

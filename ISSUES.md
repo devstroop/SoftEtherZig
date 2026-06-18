@@ -40,60 +40,56 @@ const win_openssl_lib: []const u8 = if (target_os == .windows) blk: {
 - TAP adapter properly installs and configures
 
 ### References
-- `build.zig` - Windows OpenSSL detection (lines ~40-60)
+- `build.zig` - Windows OpenSSL detection
 - `src/adapter/tap_windows.zig` - TAP adapter implementation
 - `README.md` - Platform support table
 
 ---
 
-## Issue #2: SOCKS Proxy Support
+## Issue #2: softether_app_version Not Implemented
 
-**Status**: ❌ Not Fully Wired  
+**Status**: ❌ Not Implemented  
 **Priority**: Low  
-**Effort**: 1-2 days  
-**Labels**: `network`, `proxy`, `feature`
+**Effort**: 30 minutes  
+**Labels**: `ffi`, `c-api`
 
 ### Description
-Proxy configuration exists in `src/client/connection.zig` (`ProxyConfig` struct) and `src/cli/args.zig`, but the actual proxy connection logic is not fully implemented in the connection establishment path.
+`softether_app_version()` is declared in `include/softether.h` (line 360) but never implemented in `src/ffi.zig`. Any C consumer calling this function will get a linker error. The app version string is commonly needed by Flutter/mobile hosts to display the library version alongside the app version.
 
-### Current State
-```zig
-// src/client/connection.zig
-pub const ProxyConfig = struct {
-    host: []const u8,
-    port: u16,
-    auth_username: ?[]const u8 = null,
-    auth_password: ?[]const u8 = null,
-    proxy_type: ProxyType = .http,
-    // ... but no actual HTTP CONNECT implementation wired to TlsSocket.connect()
-};
-```
-
-CLI supports `--proxy` argument but it's not passed to the connection layer.
-
-### Tasks
-- [ ] Implement HTTP CONNECT method in `src/net/tls.zig` or `src/net/socket.zig`
-- [ ] Add SOCKS4/SOCKS5 proxy support
-- [ ] Wire proxy config from `ClientConfig` to `TlsSocket.connect()`
-- [ ] Add proxy authentication (username/password)
-- [ ] Test with actual proxy servers (Burp, mitmproxy, etc.)
-- [ ] Add unit tests for proxy connection logic
-
-### Acceptance Criteria
-- Client can connect through HTTP CONNECT proxy
-- Client can connect through SOCKS5 proxy
-- Proxy authentication works (if configured)
-- Connection falls back to direct if proxy fails (optional)
+### Fix
+Add an `export fn softether_app_version` in `src/ffi.zig` that returns `@import("build_options").app_version` or a static `"0.2.0"` string. The header already has the declaration.
 
 ### References
-- `src/client/connection.zig` - ProxyConfig struct (lines ~25-35)
-- `src/cli/args.zig` - CLI proxy argument
-- `src/net/tls.zig` - TlsSocket.connect() (needs proxy support)
-- C reference: `Cedar/Connection.c` - Proxy connection logic
+- `include/softether.h` — line 360 (declaration)
+- `src/ffi.zig` — where export should be added
 
 ---
 
-## Issue #3: Certificate Pinning
+## Issue #3: SOCKS Proxy Support
+
+**Status**: ✅ Implemented  
+**Priority**: Low  
+**Effort**: Complete  
+**Labels**: `network`, `proxy`, `feature`
+
+### Description
+SOCKS4/SOCKS5 and HTTP CONNECT proxy support has been implemented and is fully wired through the CLI (`--proxy`), config file (`"proxy"`), env var (`SOFTETHER_PROXY`), and FFI (`softether_set_proxy`).
+
+### Implementation
+- Full SOCKS4/SOCKS5 client in `src/mayaqua/network/socks.zig` (358 lines)
+- Proxy URL parsing in `src/app/config.zig` (`parseProxyUrl`)
+- TLS socket integration via `ProxyConfig` in `src/mayaqua/network/tls.zig`
+- Auth support (username/password) for both HTTP and SOCKS5 proxies
+
+### References
+- `src/app/config.zig` - Proxy URL parser
+- `src/mayaqua/network/socks.zig` - SOCKS4/5 implementation
+- `src/mayaqua/network/tls.zig` - Proxy TlsSocket
+- `src/ffi.zig` - `softether_set_proxy()`
+
+---
+
+## Issue #4: Certificate Pinning
 
 **Status**: ❌ Not Implemented  
 **Priority**: Medium  
@@ -105,7 +101,7 @@ Currently uses OpenSSL's built-in certificate verification. Certificate pinning 
 
 ### Current State
 ```zig
-// src/net/tls.zig
+// src/mayaqua/network/tls.zig
 pub const TlsConfig = struct {
     verify_certificate: bool = true,
     allow_self_signed: bool = false, // Only option for self-signed certs
@@ -128,66 +124,41 @@ pub const TlsConfig = struct {
 - Clear error message on pin mismatch
 
 ### References
-- `src/net/tls.zig` - TlsConfig and TlsSocket
+- `src/mayaqua/network/tls.zig` - TlsConfig and TlsSocket
 - OpenSSL documentation: `SSL_get_peer_certificate()`, `X509_digest()`
 - OWASP Certificate Pinning Guide
 
 ---
 
-## Issue #4: IPv6 Support
+## Issue #5: IPv6 Support
 
-**Status**: ❌ Not Implemented  
+**Status**: 🚧 Partial  
 **Priority**: Low  
-**Effort**: 3-5 days  
+**Effort**: 2-3 days remaining  
 **Labels**: `network`, `ipv6`, `feature`
 
 ### Description
-Client currently only supports IPv4. DHCPv6, IPv6 routing, and IPv6 tunnel support are missing.
+DHCPv6 client (`src/cedar/tunnel/dhcpv6.zig`, 448 lines, RFC 8415) is implemented with full Solicit/Advertise/Request/Reply cycle, IA_NA/IA_TA, and RDNSS option parsing. IPv6 routing CLI flags (`--ipv6-include`, `--ipv6-exclude`, `--static-ipv6`) and FFI setters (`softether_set_ipv6_include`, `softether_set_ipv6_exclude`, `softether_set_ip_version`) exist.
 
-### Current State
-```zig
-// src/adapter/tun_linux.zig
-// Only handles IPv4 configuration:
-pub const TunLinuxDevice = struct {
-    ipv4_address: u32,
-    ipv4_netmask: u32,
-    ipv4_gateway: u32,
-    // No IPv6 fields
-};
-```
+Remaining gaps: IPv6 address assignment to TUN/TAP adapters (utun, tun_linux, tap_windows) not yet wired, and IPv6 default route setup not implemented.
 
-```zig
-// src/adapter/dhcp.zig
-// Only DHCPv4, no DHCPv6
-pub fn buildDhcpDiscover(...) !usize { ... }  // Only v4
-```
-
-### Tasks
-- [ ] Add IPv6 address support to TUN/TAP devices
-  - Linux: `in6_addr` configuration
-  - macOS/iOS: `utun` IPv6 support
-  - Windows: TAP IPv6 support
-- [ ] Implement DHCPv6 client (IA_NA, IA_TA options)
-- [ ] Add IPv6 routing table management
-- [ ] Support IPv6 DNS servers (RDNSS option)
-- [ ] Update CLI to accept IPv6 config (`--ipv6`, `--ipv6-gateway`)
-- [ ] Test with IPv6-only networks
-
-### Acceptance Criteria
-- Client can receive IPv6 address via DHCPv6
-- IPv6 routes are properly configured
-- IPv6 traffic passes through tunnel
-- Dual-stack (IPv4 + IPv6) works simultaneously
+### Remaining Tasks
+- [ ] Wire IPv6 address configuration to utun on macOS/iOS
+- [ ] Wire IPv6 address configuration to tun_linux
+- [ ] Wire IPv6 address configuration to tap_windows
+- [ ] Add IPv6 default route via VPN gateway
+- [ ] Test with IPv6-only and dual-stack servers
 
 ### References
-- `src/adapter/tun_linux.zig` - Linux TUN device
+- `src/cedar/tunnel/dhcpv6.zig` - DHCPv6 client (RFC 8415)
 - `src/adapter/utun.zig` - macOS/iOS utun device
-- RFC 3315 - DHCPv6
-- RFC 4861 - Neighbor Discovery for IPv6
+- `src/adapter/tun_linux.zig` - Linux TUN device
+- `src/adapter/tap_windows.zig` - Windows TAP device
+- RFC 8415 - DHCPv6
 
 ---
 
-## Issue #5: Bridge Mode (Layer 2)
+## Issue #6: Bridge Mode (Layer 2)
 
 **Status**: ❌ Not Implemented  
 **Priority**: Low  
@@ -217,7 +188,7 @@ Client operates in Layer 3 mode (IP routing only). No Layer 2 bridging support.
 
 ### References
 - C reference: `Cedar/Bridge.c`, `Cedar/VLan.c`
-- `src/tunnel/data_loop.zig` - Would need modification for L2 mode
+- `src/cedar/tunnel/data_loop.zig` - Would need modification for L2 mode
 - IEEE 802.1Q - VLAN tagging
 - IEEE 802.1D - Spanning Tree Protocol
 
@@ -228,10 +199,11 @@ Client operates in Layer 3 mode (IP routing only). No Layer 2 bridging support.
 | Issue | Priority | Effort | Status | Labels |
 |-------|----------|--------|--------|--------|
 | #1 Windows Build | Medium | 2-3 days | 🚧 Planned | `platform`, `windows` |
-| #2 SOCKS Proxy | Low | 1-2 days | ❌ Not Wired | `network`, `proxy` |
-| #3 Cert Pinning | Medium | 1 day | ❌ Missing | `security`, `tls` |
-| #4 IPv6 Support | Low | 3-5 days | ❌ Missing | `network`, `ipv6` |
-| #5 Bridge Mode | Low | 5-10 days | ❌ Missing | `feature`, `layer2` |
+| #2 app_version | Low | 30 min | ❌ Missing | `ffi`, `c-api` |
+| #3 SOCKS Proxy | Low | Complete | ✅ Implemented | `network`, `proxy` |
+| #4 Cert Pinning | Medium | 1 day | ❌ Missing | `security`, `tls` |
+| #5 IPv6 Tunnel | Low | 2-3 days | 🚧 Partial | `network`, `ipv6` |
+| #6 Bridge Mode | Low | 5-10 days | ❌ Missing | `feature`, `layer2` |
 
 ---
 

@@ -36,12 +36,12 @@
     },
     "password_hash": {
       "type": "string",
-      "description": "Pre-hashed password (base64-encoded SHA1). Generate with: vpnclient --gen-hash username password"
+      "description": "Pre-hashed password (base64-encoded SHA1). Generate with: vpnclient passhash --user username --password password"
     },
     "use_compress": {
       "type": "boolean",
       "description": "Enable data compression",
-      "default": true
+      "default": false
     },
     "use_encrypt": {
       "type": "boolean",

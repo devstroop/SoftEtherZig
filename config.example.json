@@ -46,7 +46,7 @@
   "log_level": "info",
   
   "notes": [
-    "Generate password hash with: ./zig-out/bin/vpnclient --gen-hash username password",
+    "Generate password hash with: ./zig-out/bin/vpnclient passhash --user username --password password",
     "Command-line arguments override environment variables",
     "Environment variables override this config file",
     "Set password_hash to null to use password (not recommended)",

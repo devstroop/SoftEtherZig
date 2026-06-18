@@ -369,6 +369,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    help                    Show this help message\n", .{});
     ctx.print("    version                 Show version information\n", .{});
     ctx.print("    passhash                Generate a SoftEther password hash\n", .{});
+    ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
     ctx.print("    connect                 Connect to a VPN server\n", .{});
     ctx.newline();
 
@@ -406,8 +407,6 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --reconnect             Enable automatic reconnection (default)\n", .{});
     ctx.print("    --no-reconnect          Disable automatic reconnection\n", .{});
     ctx.print("    --max-retries <N>       Maximum attempts, 0=infinite (default: 0)\n", .{});
-    ctx.print("    --min-backoff <SEC>     Minimum backoff delay (default: 5)\n", .{});
-    ctx.print("    --max-backoff <SEC>     Maximum backoff delay (default: 300)\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "PASSHASH OPTIONS:\n", .{});
@@ -419,6 +418,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
     ctx.print("    vpnclient passhash -u myuser -p mypassword\n", .{});
+    ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient connect --config config.json\n", .{});
     ctx.print("    vpnclient connect -s vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.newline();

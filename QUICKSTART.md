@@ -7,7 +7,7 @@ Platform-specific build and run instructions. For overview, C API, and project s
 ```bash
 brew install zig openssl@3
 zig build --release=fast
-sudo ./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u myuser -P mypassword
+sudo ./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u myuser -P mypassword
 ```
 
 Check connection: `ifconfig | grep utun`
@@ -18,7 +18,7 @@ Check connection: `ifconfig | grep utun`
 zig build utun-helper --release=fast
 sudo chown root:wheel zig-out/bin/softether-utun-helper
 sudo chmod u+s zig-out/bin/softether-utun-helper
-./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u myuser -P mypassword
+./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u myuser -P mypassword
 ```
 
 ### Shared library for Flutter/macOS
@@ -79,12 +79,12 @@ The Android VpnService creates the TUN fd; pass it to the library via `softether
 # Debian/Ubuntu
 sudo apt install libssl-dev
 zig build --release=fast
-sudo ./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u myuser -P mypassword
+sudo ./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u myuser -P mypassword
 
 # Fedora/RHEL
 sudo dnf install openssl-devel
 zig build --release=fast
-sudo ./zig-out/bin/vpnclient -s vpn.example.com -H VPN -u myuser -P mypassword
+sudo ./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u myuser -P mypassword
 ```
 
 Check connection: `ip addr show | grep tun`
@@ -111,7 +111,7 @@ Requires TAP-Windows6 driver (from OpenVPN) and OpenSSL for Windows.
 
 ```powershell
 zig build -Dtarget=x86_64-windows --release=fast
-.\zig-out\bin\vpnclient.exe -s vpn.example.com -H VPN -u myuser -P mypassword
+.\zig-out\bin\vpnclient.exe connect -s vpn.example.com -H VPN -u myuser -P mypassword
 ```
 
 ---
@@ -121,7 +121,7 @@ zig build -Dtarget=x86_64-windows --release=fast
 Any platform, instead of CLI args:
 
 ```bash
-sudo ./zig-out/bin/vpnclient --config config.json
+sudo ./zig-out/bin/vpnclient connect --config config.json
 ```
 
 See [config.minimal.json](config.minimal.json) and [config.example.json](config.example.json).
