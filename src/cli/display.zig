@@ -361,7 +361,8 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.printColored(.bold, "USAGE:\n", .{});
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
-    ctx.print("    vpnclient passhash --user <USERNAME> --password <PASSWORD>\n", .{});
+    ctx.print("    vpnclient passhash [<username> <password>]\n", .{});
+    ctx.print("    vpnclient password-hash [<username> <password>]\n", .{});
     ctx.print("    vpnclient connect [OPTIONS]\n", .{});
     ctx.newline();
 
@@ -369,6 +370,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    help                    Show this help message\n", .{});
     ctx.print("    version                 Show version information\n", .{});
     ctx.print("    passhash                Generate a SoftEther password hash\n", .{});
+    ctx.print("    password-hash           Alias for passhash\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
     ctx.print("    connect                 Connect to a VPN server\n", .{});
     ctx.newline();
@@ -410,6 +412,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.newline();
 
     ctx.printColored(.bold, "PASSHASH OPTIONS:\n", .{});
+    ctx.print("    <username> <password>    Positional arguments (alternative to flags)\n", .{});
     ctx.print("    -u, --user <USERNAME>   Username (required)\n", .{});
     ctx.print("    -p, --password <PASS>   Password (required)\n", .{});
     ctx.newline();
@@ -417,6 +420,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.printColored(.bold, "EXAMPLES:\n", .{});
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
+    ctx.print("    vpnclient passhash myuser mypassword\n", .{});
     ctx.print("    vpnclient passhash -u myuser -p mypassword\n", .{});
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient connect --config config.json\n", .{});

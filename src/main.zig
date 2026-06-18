@@ -88,33 +88,41 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[1], "version")) {
             cli.showVersion(version);
             return;
-        } else if (std.mem.eql(u8, args[1], "passhash")) {
+        } else if (std.mem.eql(u8, args[1], "passhash") or std.mem.eql(u8, args[1], "password-hash")) {
             var hash_user: ?[]const u8 = null;
             var hash_pass: ?[]const u8 = null;
-            var i: usize = 2;
-            while (i < args.len) : (i += 1) {
-                const a = args[i];
-                if (std.mem.eql(u8, a, "-u") or std.mem.eql(u8, a, "--user")) {
-                    i += 1;
-                    if (i >= args.len) {
-                        cli.display.failure(&state.display, "Missing value for {s}", .{a});
+
+            if (args.len >= 4 and args[2][0] != '-' and args[3][0] != '-') {
+                hash_user = args[2];
+                hash_pass = args[3];
+            } else {
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const a = args[i];
+                    if (std.mem.eql(u8, a, "-u") or std.mem.eql(u8, a, "--user")) {
+                        i += 1;
+                        if (i >= args.len) {
+                            cli.display.failure(&state.display, "Missing value for {s}", .{a});
+                            std.process.exit(1);
+                        }
+                        hash_user = args[i];
+                    } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--password")) {
+                        i += 1;
+                        if (i >= args.len) {
+                            cli.display.failure(&state.display, "Missing value for {s}", .{a});
+                            std.process.exit(1);
+                        }
+                        hash_pass = args[i];
+                    } else {
+                        cli.display.failure(&state.display, "Unknown passhash option: {s}", .{a});
                         std.process.exit(1);
                     }
-                    hash_user = args[i];
-                } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--password")) {
-                    i += 1;
-                    if (i >= args.len) {
-                        cli.display.failure(&state.display, "Missing value for {s}", .{a});
-                        std.process.exit(1);
-                    }
-                    hash_pass = args[i];
-                } else {
-                    cli.display.failure(&state.display, "Unknown passhash option: {s}", .{a});
-                    std.process.exit(1);
                 }
             }
+
             if (hash_user == null or hash_pass == null) {
-                cli.display.failure(&state.display, "Usage: vpnclient passhash --user <username> --password <password>", .{});
+                cli.display.failure(&state.display, "Usage: vpnclient passhash [<username> <password>]", .{});
+                cli.display.failure(&state.display, "       vpnclient passhash --user <username> --password <password>", .{});
                 std.process.exit(1);
             }
             app.password_hash.generate(hash_user.?, hash_pass.?);

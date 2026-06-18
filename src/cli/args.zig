@@ -88,10 +88,19 @@ pub const CliArgs = struct {
     allocator: ?Allocator = null,
 
     pub fn deinit(self: *CliArgs) void {
-        if (self.allocator) |alloc| {
-            if (self.dns_servers.len > 0) {
-                alloc.free(self.dns_servers);
+        const alloc = self.allocator orelse return;
+        const fields = comptime switch (@typeInfo(@TypeOf(self.*))) {
+            .@"struct" => |info| info.fields,
+            else => @compileError("expected struct"),
+        };
+        inline for (fields) |field| {
+            if (field.type == ?[]const u8) {
+                if (@field(self, field.name)) |s| alloc.free(s);
             }
+        }
+        if (self.dns_servers.len > 0) {
+            for (self.dns_servers) |s| alloc.free(s);
+            alloc.free(self.dns_servers);
         }
     }
 };
@@ -163,6 +172,7 @@ pub const ArgParser = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        for (self.dns_list.items) |s| self.allocator.free(s);
         self.dns_list.deinit(self.allocator);
         for (self.errors.items) |err| {
             self.allocator.free(err);
@@ -190,6 +200,7 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--port");
+                defer self.allocator.free(val);
                 self.args.port = std.fmt.parseInt(u16, val, 10) catch return ParseError.InvalidPort;
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hub")) {
                 i += 1;
@@ -197,7 +208,7 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
                 i += 1;
                 self.args.username = try self.requireValue(argv, i, "--user");
-            } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
+            } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--password")) {
                 i += 1;
                 self.args.password = try self.requireValue(argv, i, "--password");
             } else if (std.mem.eql(u8, arg, "--password-hash")) {
@@ -228,10 +239,12 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--mtu")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--mtu");
+                defer self.allocator.free(val);
                 self.args.mtu = std.fmt.parseInt(u16, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--ip-version")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--ip-version");
+                defer self.allocator.free(val);
                 self.args.ip_version = IpVersion.fromString(val) orelse return ParseError.InvalidValue;
             } else if (std.mem.eql(u8, arg, "--reconnect")) {
                 self.args.reconnect = true;
@@ -240,6 +253,7 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--max-retries")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--max-retries");
+                defer self.allocator.free(val);
                 self.args.max_retries = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--static-ipv4")) {
                 i += 1;
@@ -256,6 +270,7 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--static-ipv6-prefix")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--static-ipv6-prefix");
+                defer self.allocator.free(val);
                 self.args.static_ipv6_prefix = std.fmt.parseInt(u8, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--static-ipv6-gateway")) {
                 i += 1;
@@ -285,6 +300,7 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--log-level")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--log-level");
+                defer self.allocator.free(val);
                 self.args.log_level = LogLevel.fromString(val) orelse return ParseError.InvalidValue;
             } else if (std.mem.eql(u8, arg, "--gen-hash")) {
                 i += 1;
@@ -294,14 +310,17 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--connect-timeout")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--connect-timeout");
+                defer self.allocator.free(val);
                 self.args.connect_timeout_ms = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--read-timeout")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--read-timeout");
+                defer self.allocator.free(val);
                 self.args.read_timeout_ms = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--keepalive-interval")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--keepalive-interval");
+                defer self.allocator.free(val);
                 self.args.keepalive_interval_ms = std.fmt.parseInt(u32, val, 10) catch return ParseError.InvalidNumber;
             } else if (std.mem.eql(u8, arg, "--proxy")) {
                 i += 1;
@@ -317,23 +336,24 @@ pub const ArgParser = struct {
         // Convert DNS list to slice
         if (self.dns_list.items.len > 0) {
             self.args.dns_servers = try self.allocator.dupe([]const u8, self.dns_list.items);
+            // Transfer ownership: strings are now owned via dns_servers
+            self.dns_list.items.len = 0;
         }
 
         return self.args;
     }
 
     fn requireValue(self: *Self, argv: []const []const u8, idx: usize, name: []const u8) ParseError![]const u8 {
-        _ = self;
         _ = name;
         if (idx >= argv.len) {
             return ParseError.MissingValue;
         }
-        return argv[idx];
+        return self.allocator.dupe(u8, argv[idx]);
     }
 
     /// Load from environment variables
     pub fn loadFromEnv(self: *Self) void {
-        const allocator = std.heap.page_allocator;
+        const allocator = self.allocator;
         const isTrue = struct {
             fn check(v: []const u8) bool {
                 return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "yes");
@@ -465,7 +485,8 @@ test "ArgParser basic flags" {
     defer parser.deinit();
 
     const argv = [_][]const u8{ "vpnclient", "-h" };
-    const args = try parser.parse(&argv);
+    var args = try parser.parse(&argv);
+    defer args.deinit();
 
     try std.testing.expect(args.help);
     try std.testing.expect(!args.version);
@@ -476,7 +497,8 @@ test "ArgParser server options" {
     defer parser.deinit();
 
     const argv = [_][]const u8{ "vpnclient", "-s", "vpn.example.com", "-p", "8443", "-H", "VPN" };
-    const args = try parser.parse(&argv);
+    var args = try parser.parse(&argv);
+    defer args.deinit();
 
     try std.testing.expectEqualStrings("vpn.example.com", args.server.?);
     try std.testing.expectEqual(@as(u16, 8443), args.port);
@@ -488,7 +510,8 @@ test "ArgParser auth options" {
     defer parser.deinit();
 
     const argv = [_][]const u8{ "vpnclient", "-u", "testuser", "-P", "testpass" };
-    const args = try parser.parse(&argv);
+    var args = try parser.parse(&argv);
+    defer args.deinit();
 
     try std.testing.expectEqualStrings("testuser", args.username.?);
     try std.testing.expectEqualStrings("testpass", args.password.?);

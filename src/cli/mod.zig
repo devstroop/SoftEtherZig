@@ -70,26 +70,17 @@ pub fn loadConfig(allocator: std.mem.Allocator, cli_args: *CliArgs) !void {
 
     if (config_path) |path| {
         var mgr = ConfigManager.init(allocator);
+        defer mgr.deinit();
 
         mgr.loadFromFile(path) catch |err| {
             // Config file errors are warnings, not fatal
-            mgr.deinit();
             var ctx = DisplayContext.init();
             display.warning(&ctx, "Could not load config file: {}", .{err});
             return;
         };
 
-        // Merge with CLI args
-        mgr.mergeWithArgs(cli_args);
-
-        // NOTE: mgr.deinit() is intentionally NOT called here.
-        // mergeWithArgs copies string pointers (server, hub, username, etc.)
-        // from the ConfigManager's parsed JSON into cli_args. The config
-        // manager owns those allocations. Calling deinit() would free them,
-        // leaving dangling pointers in cli_args that cause segfaults later
-        // (e.g. in buildClientConfig / daemon.run).
-        //
-        // The leak is ~1KB per config load — acceptable for a short-lived CLI.
+        // Merge with CLI args (deep-copies strings, so mgr can be freed)
+        mgr.mergeWithArgs(cli_args) catch {};
     }
 }
 
