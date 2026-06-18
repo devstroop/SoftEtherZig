@@ -265,6 +265,7 @@ pub const VpnClient = struct {
     should_stop: bool,
     data_loop_running: bool,
     tun_write_blocked: bool = false,
+    tun_eagain_count: u64 = 0,
 
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
@@ -1133,7 +1134,10 @@ pub const VpnClient = struct {
                 // }
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        _ = dev.write(block_data[14..]) catch { self.tun_write_blocked = true; };
+                        _ = dev.write(block_data[14..]) catch {
+                            self.tun_write_blocked = true;
+                            self.tun_eagain_count += 1;
+                        };
                     }
                 }
             } else if (ethertype == 0x0806) {
@@ -1876,7 +1880,7 @@ pub const VpnClient = struct {
                 // batches while OpenSSL has buffered data — identical to the
                 // single-conn drain loop. Without this, DL is capped at ~1
                 // batch per poll iteration per connection (~7 Mbps).
-                const MAX_INBOUND_DRAIN: u32 = 64;
+                const MAX_INBOUND_DRAIN: u32 = 256;
                 var any_conn_had_data = false;
                 var iter = cm.forEachReadable(poll_fds[0..tls_fd_count]);
                 while (iter.next()) |conn| {
@@ -1959,7 +1963,7 @@ pub const VpnClient = struct {
                     // hasPending() is the natural terminator; the cap is just a
                     // safety net to ensure outbound can run occasionally.
                     // Cycle 5 regression came from batch=32, NOT drain=32.
-                    const MAX_INBOUND_DRAIN: u32 = 64;
+                    const MAX_INBOUND_DRAIN: u32 = 256;
                     var drain_iter: u32 = 0;
                     var inbound_dead = false;
                     while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
@@ -1983,6 +1987,7 @@ pub const VpnClient = struct {
                             diag.bytes_in += block_data.len;
                             diag.pkts_in += 1;
                             self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                            if (self.tun_write_blocked) break;
                         }
 
                         // Stop draining if TLS has no more buffered/decrypted data
@@ -2386,15 +2391,20 @@ pub const VpnClient = struct {
                     diag.tx_drops_delta = tx_drops_now -| diag.tx_drops_last;
                     diag.tx_drops_last = tx_drops_now;
 
+                    // Sample TUN EAGAIN count from the client struct and reset.
+                    diag.tun_eagain = self.tun_eagain_count;
+                    self.tun_eagain_count = 0;
+
                     const sendq_avg: f64 = if (diag.sendq_samples > 0)
                         @as(f64, @floatFromInt(diag.sendq_sum)) / @as(f64, @floatFromInt(diag.sendq_samples))
                     else
                         0.0;
-                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p fda_drop={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
+                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p fda_drop={d}p tun_eagain={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
                         mbps_in,             diag.pkts_in,        mbps_out,             diag.pkts_out,
                         drain_avg,           diag.drain_max,      diag.drain_cap_hits,  diag.ssl_pending_max,
                         diag.nread_max,      diag.nwrite_max,     diag.pollout_skipped, diag.tcp_drops_pkts,
-                        diag.tx_drops_delta, diag.poll_iters,     iter_avg_us,          diag.iter_us_max,
+                        diag.tx_drops_delta, diag.tun_eagain,     diag.poll_iters,      iter_avg_us,
+                        diag.iter_us_max,
                         diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,
                         diag.sendq_max,      sendq_avg,           diag.write_blocked,
                     });
