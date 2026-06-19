@@ -123,18 +123,30 @@ jobs:
           echo "PKG_CONFIG_PATH=${PC_DIR}" >> "$GITHUB_ENV"
           echo "Exported PKG_CONFIG_PATH=${PC_DIR}"
 
-          # Verify pkg-config can find the libraries Zig needs
+          # On Debian/Ubuntu, OpenSSL 3.x puts platform-specific config headers
+          # (e.g. openssl/opensslconf.h) in the multiarch include directory.
+          # Symlink them into the standard include tree so that -I/usr/include
+          # is sufficient and we don't need to add the entire multiarch include
+          # dir (which would pull in conflicting system glibc headers).
+          INC_DIR="/usr/include/${MULTIARCH}"
+          if [ -f "$INC_DIR/openssl/opensslconf.h" ] && [ ! -f "/usr/include/openssl/opensslconf.h" ]; then
+            sudo ln -sf "$INC_DIR/openssl/opensslconf.h" "/usr/include/openssl/opensslconf.h"
+            echo "Symlinked opensslconf.h from multiarch include dir"
+          fi
+          if [ -f "$INC_DIR/openssl/configuration.h" ] && [ ! -f "/usr/include/openssl/configuration.h" ]; then
+            sudo ln -sf "$INC_DIR/openssl/configuration.h" "/usr/include/openssl/configuration.h"
+            echo "Symlinked configuration.h from multiarch include dir"
+          fi
+
+          # Verify the include chain works
           echo ""
-          echo "--- pkg-config verification ---"
-          for lib in ssl crypto; do
-            if pkg-config --exists "$lib"; then
-              echo "  ✓ pkg-config finds $lib: $(pkg-config --libs "$lib")"
-            else
-              echo "  ✗ pkg-config cannot find $lib"
-              echo "    Search dirs: $(pkg-config --variable pc_path pkg-config 2>/dev/null || echo 'N/A')"
-              echo "    Files in PC_DIR: $(ls -la "$PC_DIR" 2>/dev/null | head -10 || echo '(empty)')"
-            fi
-          done
+          echo "--- OpenSSL include verification ---"
+          if [ -f "/usr/include/openssl/opensslconf.h" ]; then
+            echo "  ✓ openssl/opensslconf.h is accessible from /usr/include"
+          else
+            echo "  ✗ openssl/opensslconf.h not found at /usr/include"
+            echo "    Checking multiarch: $(ls -la "$INC_DIR/openssl/" 2>/dev/null | head -5 || echo '(empty)')"
+          fi
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -511,11 +523,19 @@ jobs:
 
           for lib in ssl crypto; do
             if pkg-config --exists "$lib"; then
-              echo "✓ pkg-config finds $lib"
+              echo "✓ pkg-config finds $lib: $(pkg-config --libs "$lib")"
             else
               echo "✗ pkg-config cannot find $lib"
             fi
           done
+
+          INC_DIR="/usr/include/${MULTIARCH}"
+          if [ -f "$INC_DIR/openssl/opensslconf.h" ] && [ ! -f "/usr/include/openssl/opensslconf.h" ]; then
+            sudo ln -sf "$INC_DIR/openssl/opensslconf.h" "/usr/include/openssl/opensslconf.h"
+          fi
+          if [ -f "$INC_DIR/openssl/configuration.h" ] && [ ! -f "/usr/include/openssl/configuration.h" ]; then
+            sudo ln -sf "$INC_DIR/openssl/configuration.h" "/usr/include/openssl/configuration.h"
+          fi
 
       - name: Build vpnclient
         shell: bash
