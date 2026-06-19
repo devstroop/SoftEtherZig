@@ -158,7 +158,6 @@ pub fn build(b: *std.Build) void {
     std.debug.print("  Optimize: {s}\n", .{@tagName(optimize)});
     std.debug.print("  SSL: {s}\n", .{if (is_android) "static (deps/openssl-android)" else "system OpenSSL"});
     if (linux_lib_dir) |d| std.debug.print("  Linux lib dir: {s}\n", .{d});
-    if (linux_inc_dir) |d| std.debug.print("  Linux inc dir: {s}\n", .{d});
     std.debug.print("\n", .{});
 
     // Bundled zlib C source files (for block compression)
