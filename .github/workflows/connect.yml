@@ -290,8 +290,12 @@ jobs:
 
           BIN="zig-out/bin/vpnclient"
           [ "${{ runner.os }}" = "Windows" ] && BIN="${BIN}.exe"
+          # Linux: cap_net_admin is set via setcap above, so no sudo needed.
+          # macOS: needs sudo for TUN, but sudo -E to preserve env vars.
           SUDO=""
-          [ "${{ matrix.needs_sudo }}" = "true" ] && SUDO="sudo"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            SUDO="sudo -E"
+          fi
 
           echo "::group::Platform info"
           uname -a
@@ -647,7 +651,7 @@ jobs:
           mkdir -p "$SERVER_RUNTIME_DIR"
 
           XDG_RUNTIME_DIR="$SERVER_RUNTIME_DIR" \
-            sudo nohup "$BIN" connect $SERVER_FLAGS \
+            sudo -E nohup "$BIN" connect $SERVER_FLAGS \
             > /tmp/server-vpn.log 2>&1 &
           SERVER_PID=$!
           echo "Server vpnclient PID: $SERVER_PID"
