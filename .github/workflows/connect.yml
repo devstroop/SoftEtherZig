@@ -330,7 +330,6 @@ jobs:
           # Start vpnclient in daemon mode
           # The daemon runs its own data loop and stays connected
           # until signalled.
-          echo "Launching: $SUDO $BIN connect (env vars: SERVER=${SOFTETHER_SERVER}:${SOFTETHER_PORT:-443} HUB=${SOFTETHER_HUB:-VPN} USER=${SOFTETHER_USER})"
           $SUDO nohup "$BIN" connect \
             > /tmp/vpnclient.log 2>&1 &
           CLIENT_PID=$!
@@ -644,7 +643,6 @@ jobs:
 
           # ── Phase 1: Start server instance (devstroop1) ─────────
           echo "=== Phase 1: Starting server instance (${SERVER_USER}) ==="
-          echo "Flags: $SERVER_FLAGS"
 
           # Use a separate XDG_RUNTIME_DIR so the PID file doesn't collide
           SERVER_RUNTIME_DIR="/tmp/vpn-server"
@@ -707,7 +705,6 @@ jobs:
           # ── Phase 3: Start client instance (devstroop2) ─────────
           echo ""
           echo "=== Phase 3: Starting client instance (${CLIENT_USER}) ==="
-          echo "Flags: $CLIENT_FLAGS"
 
           CLIENT_RUNTIME_DIR="/tmp/vpn-client"
           mkdir -p "$CLIENT_RUNTIME_DIR"
