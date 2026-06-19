@@ -93,18 +93,46 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          set -euo pipefail
+
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-          # Create pkg-config aliases for zig's linkSystemLibrary("ssl").
-          # libssl-dev installs libssl.pc (module "libssl") but zig looks for
-          # module "ssl" — create symlinks so pkg-config finds them.
-          PC_DIR="/usr/lib/$(dpkg-architecture -q DEB_HOST_MULTIARCH)/pkgconfig"
+          sudo apt-get install -y libssl-dev pkg-config dpkg-dev
+
+          # Determine the multiarch triplet (e.g. x86_64-linux-gnu)
+          MULTIARCH="$(dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null || gcc -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)"
+          PC_DIR="/usr/lib/${MULTIARCH}/pkgconfig"
+          echo "Multiarch: ${MULTIARCH}"
+          echo "PC_DIR:    ${PC_DIR}"
+
+          # Create pkg-config aliases: libssl.pc → ssl.pc, libcrypto.pc → crypto.pc
+          # Zig's linkSystemLibrary("ssl") looks for module "ssl", but libssl-dev
+          # installs libssl.pc (module "libssl") — the symlinks bridge the gap.
           for pair in "libssl:ssl" "libcrypto:crypto"; do
             src="${pair%:*}.pc"
             dst="${pair#*:*}.pc"
             if [ -f "$PC_DIR/$src" ]; then
               sudo ln -sf "$PC_DIR/$src" "$PC_DIR/$dst"
-              echo "Aliased $src → $dst"
+              echo "  Aliased $src → $dst"
+            else
+              echo "  WARNING: $PC_DIR/$src not found — skipping"
+            fi
+          done
+
+          # Export PKG_CONFIG_PATH so the Zig compiler's pkg-config invocation
+          # finds the .pc files.
+          echo "PKG_CONFIG_PATH=${PC_DIR}" >> "$GITHUB_ENV"
+          echo "Exported PKG_CONFIG_PATH=${PC_DIR}"
+
+          # Verify pkg-config can find the libraries Zig needs
+          echo ""
+          echo "--- pkg-config verification ---"
+          for lib in ssl crypto; do
+            if pkg-config --exists "$lib"; then
+              echo "  ✓ pkg-config finds $lib: $(pkg-config --libs "$lib")"
+            else
+              echo "  ✗ pkg-config cannot find $lib"
+              echo "    Search dirs: $(pkg-config --variable pc_path pkg-config 2>/dev/null || echo 'N/A')"
+              echo "    Files in PC_DIR: $(ls -la "$PC_DIR" 2>/dev/null | head -10 || echo '(empty)')"
             fi
           done
 
@@ -463,14 +491,29 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libssl-dev iperf3 pkg-config
-          PC_DIR="/usr/lib/$(dpkg-architecture -q DEB_HOST_MULTIARCH)/pkgconfig"
+          sudo apt-get install -y libssl-dev iperf3 pkg-config dpkg-dev
+
+          MULTIARCH="$(dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null || gcc -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)"
+          PC_DIR="/usr/lib/${MULTIARCH}/pkgconfig"
+          echo "PKG_CONFIG_PATH=${PC_DIR}" >> "$GITHUB_ENV"
+
           for pair in "libssl:ssl" "libcrypto:crypto"; do
             src="${pair%:*}.pc"
             dst="${pair#*:*}.pc"
             if [ -f "$PC_DIR/$src" ]; then
               sudo ln -sf "$PC_DIR/$src" "$PC_DIR/$dst"
+            else
+              echo "WARNING: $PC_DIR/$src not found"
+            fi
+          done
+
+          for lib in ssl crypto; do
+            if pkg-config --exists "$lib"; then
+              echo "✓ pkg-config finds $lib"
+            else
+              echo "✗ pkg-config cannot find $lib"
             fi
           done
 
