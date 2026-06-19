@@ -316,6 +316,7 @@ pub fn build(b: *std.Build) void {
                 if (linux_lib) |d| {
                     step.addLibraryPath(.{ .cwd_relative = d });
                 }
+                step.addIncludePath(.{ .cwd_relative = "/usr/include" });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
                 step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
             }
@@ -355,6 +356,7 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary("iphlpapi");
     } else {
         if (linux_lib_dir) |d| vpnclient.addLibraryPath(.{ .cwd_relative = d });
+        vpnclient.addIncludePath(.{ .cwd_relative = "/usr/include" });
         vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
     }
@@ -443,6 +445,7 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else {
         if (linux_lib_dir) |d| static_lib.addLibraryPath(.{ .cwd_relative = d });
+        static_lib.addIncludePath(.{ .cwd_relative = "/usr/include" });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .static });
     }
@@ -527,6 +530,7 @@ pub fn build(b: *std.Build) void {
             t.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else {
             if (linux_lib_dir) |d| t.addLibraryPath(.{ .cwd_relative = d });
+            t.addIncludePath(.{ .cwd_relative = "/usr/include" });
             t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
             t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
         }
