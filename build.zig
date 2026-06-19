@@ -302,8 +302,8 @@ pub fn build(b: *std.Build) void {
                 step.linkSystemLibrary("iphlpapi");
                 step.linkSystemLibrary("winmm");
             } else {
-                step.linkSystemLibrary("ssl");
-                step.linkSystemLibrary("crypto");
+                step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
             }
             step.linkLibC();
         }
@@ -340,8 +340,8 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary("advapi32");
         vpnclient.linkSystemLibrary("iphlpapi");
     } else {
-        vpnclient.linkSystemLibrary("ssl");
-        vpnclient.linkSystemLibrary("crypto");
+        vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
+        vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
     }
     if (is_android) setupAndroidNdk(b, vpnclient, target_arch);
     vpnclient.linkLibC();
@@ -427,8 +427,8 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else {
-        static_lib.linkSystemLibrary("ssl");
-        static_lib.linkSystemLibrary("crypto");
+        static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .static });
+        static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .static });
     }
     static_lib.linkLibC();
     addZlib(static_lib, b);
@@ -510,8 +510,8 @@ pub fn build(b: *std.Build) void {
             t.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             t.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else {
-            t.linkSystemLibrary("ssl");
-            t.linkSystemLibrary("crypto");
+            t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
+            t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
         }
         if (is_android) setupAndroidNdk(b, t, target_arch);
         t.linkLibC();
