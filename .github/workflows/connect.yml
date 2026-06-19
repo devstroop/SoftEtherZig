@@ -713,7 +713,7 @@ jobs:
           mkdir -p "$CLIENT_RUNTIME_DIR"
 
           XDG_RUNTIME_DIR="$CLIENT_RUNTIME_DIR" \
-            sudo nohup "$BIN" connect $CLIENT_FLAGS \
+            sudo -E nohup "$BIN" connect $CLIENT_FLAGS \
             > /tmp/client-vpn.log 2>&1 &
           CLIENT_PID=$!
           echo "Client vpnclient PID: $CLIENT_PID"
