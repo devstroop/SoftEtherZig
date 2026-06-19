@@ -138,15 +138,18 @@ pub fn build(b: *std.Build) void {
         else => "deps/openssl-android/arm64-v8a/include",
     } else "";
 
-    // Linux multiarch library directory (e.g. /usr/lib/x86_64-linux-gnu)
-    // Used as a fallback search path when pkg-config is unavailable.
-    const linux_lib_dir: ?[]const u8 = if (target_os == .linux) switch (target_arch) {
-        .x86_64 => "/usr/lib/x86_64-linux-gnu",
-        .aarch64 => "/usr/lib/aarch64-linux-gnu",
-        .arm => "/usr/lib/arm-linux-gnueabihf",
-        .riscv64 => "/usr/lib/riscv64-linux-gnu",
-        else => "/usr/lib",
+    // Linux multiarch triplet (e.g. x86_64-linux-gnu).
+    // Used to construct fallback library and include paths when pkg-config
+    // is unavailable or Zig's pkg-config integration does not propagate them.
+    const linux_multiarch: ?[]const u8 = if (target_os == .linux) switch (target_arch) {
+        .x86_64 => "x86_64-linux-gnu",
+        .aarch64 => "aarch64-linux-gnu",
+        .arm => "arm-linux-gnueabihf",
+        .riscv64 => "riscv64-linux-gnu",
+        else => null,
     } else null;
+    const linux_lib_dir = if (linux_multiarch) |t| b.fmt("/usr/lib/{s}", .{t}) else null;
+    const linux_inc_dir = if (linux_multiarch) |t| b.fmt("/usr/include/{s}", .{t}) else null;
 
     // Print build configuration
     std.debug.print("Build Configuration:\n", .{});
@@ -154,6 +157,7 @@ pub fn build(b: *std.Build) void {
     std.debug.print("  Optimize: {s}\n", .{@tagName(optimize)});
     std.debug.print("  SSL: {s}\n", .{if (is_android) "static (deps/openssl-android)" else "system OpenSSL"});
     if (linux_lib_dir) |d| std.debug.print("  Linux lib dir: {s}\n", .{d});
+    if (linux_inc_dir) |d| std.debug.print("  Linux inc dir: {s}\n", .{d});
     std.debug.print("\n", .{});
 
     // Bundled zlib C source files (for block compression)
@@ -289,7 +293,7 @@ pub fn build(b: *std.Build) void {
 
     // Helper to link OpenSSL for a given compile step
     const linkOpenSsl = struct {
-        fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, arch: std.Target.Cpu.Arch, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8, linux_lib: ?[]const u8) void {
+        fn link(builder: *std.Build, step: *std.Build.Step.Compile, os: std.Target.Os.Tag, android: bool, arch: std.Target.Cpu.Arch, mac_lib: []const u8, mac_inc: []const u8, win_lib: []const u8, win_inc: []const u8, and_lib: []const u8, and_inc: []const u8, linux_lib: ?[]const u8, linux_inc: ?[]const u8) void {
             if (android) {
                 setupAndroidNdk(builder, step, arch);
                 step.addLibraryPath(.{ .cwd_relative = and_lib });
@@ -315,6 +319,9 @@ pub fn build(b: *std.Build) void {
             } else {
                 if (linux_lib) |d| {
                     step.addLibraryPath(.{ .cwd_relative = d });
+                }
+                if (linux_inc) |d| {
+                    step.addIncludePath(.{ .cwd_relative = d });
                 }
                 step.addIncludePath(.{ .cwd_relative = "/usr/include" });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
@@ -356,6 +363,7 @@ pub fn build(b: *std.Build) void {
         vpnclient.linkSystemLibrary("iphlpapi");
     } else {
         if (linux_lib_dir) |d| vpnclient.addLibraryPath(.{ .cwd_relative = d });
+        if (linux_inc_dir) |d| vpnclient.addIncludePath(.{ .cwd_relative = d });
         vpnclient.addIncludePath(.{ .cwd_relative = "/usr/include" });
         vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
@@ -399,7 +407,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Link OpenSSL for shared library too
-    linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+    linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir, linux_inc_dir);
     addZlib(shared_lib, b);
 
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
@@ -445,6 +453,7 @@ pub fn build(b: *std.Build) void {
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     } else {
         if (linux_lib_dir) |d| static_lib.addLibraryPath(.{ .cwd_relative = d });
+        if (linux_inc_dir) |d| static_lib.addIncludePath(.{ .cwd_relative = d });
         static_lib.addIncludePath(.{ .cwd_relative = "/usr/include" });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .static });
@@ -530,6 +539,7 @@ pub fn build(b: *std.Build) void {
             t.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         } else {
             if (linux_lib_dir) |d| t.addLibraryPath(.{ .cwd_relative = d });
+            if (linux_inc_dir) |d| t.addIncludePath(.{ .cwd_relative = d });
             t.addIncludePath(.{ .cwd_relative = "/usr/include" });
             t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
             t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .yes, .preferred_link_mode = .dynamic });
@@ -558,7 +568,7 @@ pub fn build(b: *std.Build) void {
             }),
             .filters = &.{"ffi"},
         });
-        linkOpenSsl(b, ffi_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+        linkOpenSsl(b, ffi_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir, linux_inc_dir);
         addZlib(ffi_test, b);
         if (is_android) setupAndroidNdk(b, ffi_test, target_arch);
         ffi_test.linkLibC();
@@ -603,7 +613,7 @@ pub fn build(b: *std.Build) void {
                 "cli.config_manager",
             },
         });
-        linkOpenSsl(b, all_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+        linkOpenSsl(b, all_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir, linux_inc_dir);
         addZlib(all_test, b);
         if (is_android) setupAndroidNdk(b, all_test, target_arch);
         all_test.linkLibC();
@@ -638,7 +648,7 @@ pub fn build(b: *std.Build) void {
         test_mod.addImport("proto", proto_mod);
 
         const integration_test = b.addTest(.{ .root_module = test_mod });
-        linkOpenSsl(b, integration_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+        linkOpenSsl(b, integration_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir, linux_inc_dir);
         addZlib(integration_test, b);
         if (is_android) setupAndroidNdk(b, integration_test, target_arch);
         integration_test.linkLibC();
