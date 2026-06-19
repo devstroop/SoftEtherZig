@@ -138,8 +138,8 @@ pub const ConfigManager = struct {
         }
 
         try self.parseJson(content);
-        self.json_source = content;
         self.config_path = try self.allocator.dupe(u8, path);
+        self.json_source = content;
     }
 
     /// Load from JSON string
@@ -184,37 +184,38 @@ pub const ConfigManager = struct {
         return true;
     }
 
-    /// Merge CLI args with config file (CLI takes priority)
-    pub fn mergeWithArgs(self: *const Self, cli_args: *args_mod.CliArgs) void {
+    /// Merge CLI args with config file (CLI takes priority).
+    /// Deep-copies all string fields so the ConfigManager can be freed afterward.
+    pub fn mergeWithArgs(self: *const Self, cli_args: *args_mod.CliArgs) !void {
+        const alloc = cli_args.allocator orelse return;
+
         // Server settings
-        if (cli_args.server == null) cli_args.server = self.config.server;
+        if (cli_args.server == null) {
+            if (self.config.server) |s| cli_args.server = try alloc.dupe(u8, s);
+        }
         if (cli_args.port == 443 and self.config.port != null) cli_args.port = self.config.port.?;
-        if (cli_args.hub == null) cli_args.hub = self.config.hub;
+        if (cli_args.hub == null) {
+            if (self.config.hub) |s| cli_args.hub = try alloc.dupe(u8, s);
+        }
 
         // Authentication
-        if (cli_args.username == null) cli_args.username = self.config.username;
-        if (cli_args.password == null) cli_args.password = self.config.password;
-        if (cli_args.password_hash == null) cli_args.password_hash = self.config.password_hash;
+        if (cli_args.username == null) {
+            if (self.config.username) |s| cli_args.username = try alloc.dupe(u8, s);
+        }
+        if (cli_args.password == null) {
+            if (self.config.password) |s| cli_args.password = try alloc.dupe(u8, s);
+        }
+        if (cli_args.password_hash == null) {
+            if (self.config.password_hash) |s| cli_args.password_hash = try alloc.dupe(u8, s);
+        }
 
         // Connection options
-        if (self.config.skip_tls_verify) |stv| {
-            cli_args.skip_tls_verify = stv;
-        }
-        if (self.config.use_compress) |comp| {
-            cli_args.use_compress = comp;
-        }
-        if (self.config.use_encrypt) |v| {
-            cli_args.use_encrypt = v;
-        }
-        if (self.config.half_connection) |v| {
-            cli_args.half_connection = v;
-        }
-        if (self.config.qos) |v| {
-            cli_args.qos = v;
-        }
-        if (self.config.udp_accel) |accel| {
-            cli_args.udp_accel = accel;
-        }
+        if (self.config.skip_tls_verify) |stv| cli_args.skip_tls_verify = stv;
+        if (self.config.use_compress) |comp| cli_args.use_compress = comp;
+        if (self.config.use_encrypt) |v| cli_args.use_encrypt = v;
+        if (self.config.half_connection) |v| cli_args.half_connection = v;
+        if (self.config.qos) |v| cli_args.qos = v;
+        if (self.config.udp_accel) |accel| cli_args.udp_accel = accel;
         if (self.config.max_connections) |max| cli_args.max_connections = max;
         if (self.config.mtu) |m| cli_args.mtu = m;
         if (self.config.ip_version) |v| {
@@ -231,14 +232,28 @@ pub const ConfigManager = struct {
 
         // Static IP
         if (self.config.static_ip) |sip| {
-            if (sip.ipv4_address) |ip| cli_args.static_ipv4 = ip;
-            if (sip.ipv4_netmask) |nm| cli_args.static_ipv4_netmask = nm;
-            if (sip.ipv4_gateway) |gw| cli_args.static_ipv4_gateway = gw;
-            if (sip.ipv6_address) |ip| cli_args.static_ipv6 = ip;
+            if (cli_args.static_ipv4 == null) {
+                if (sip.ipv4_address) |s| cli_args.static_ipv4 = try alloc.dupe(u8, s);
+            }
+            if (cli_args.static_ipv4_netmask == null) {
+                if (sip.ipv4_netmask) |s| cli_args.static_ipv4_netmask = try alloc.dupe(u8, s);
+            }
+            if (cli_args.static_ipv4_gateway == null) {
+                if (sip.ipv4_gateway) |s| cli_args.static_ipv4_gateway = try alloc.dupe(u8, s);
+            }
+            if (cli_args.static_ipv6 == null) {
+                if (sip.ipv6_address) |s| cli_args.static_ipv6 = try alloc.dupe(u8, s);
+            }
             if (sip.ipv6_prefix) |pf| cli_args.static_ipv6_prefix = pf;
-            if (sip.ipv6_gateway) |gw| cli_args.static_ipv6_gateway = gw;
+            if (cli_args.static_ipv6_gateway == null) {
+                if (sip.ipv6_gateway) |s| cli_args.static_ipv6_gateway = try alloc.dupe(u8, s);
+            }
             if (sip.dns_servers) |dns| {
-                if (cli_args.dns_servers.len == 0) cli_args.dns_servers = dns;
+                if (cli_args.dns_servers.len == 0) {
+                    const duped = try alloc.alloc([]const u8, dns.len);
+                    for (dns, 0..) |server, j| duped[j] = try alloc.dupe(u8, server);
+                    cli_args.dns_servers = duped;
+                }
             }
         }
 
@@ -247,15 +262,23 @@ pub const ConfigManager = struct {
             if (rt.default_route) |dr| cli_args.default_route = dr;
             if (rt.accept_pushed_routes) |apr| cli_args.accept_pushed_routes = apr;
             if (rt.enable_custom_routes) |ecr| cli_args.enable_custom_routes = ecr;
-            if (rt.ipv4_include) |inc| cli_args.ipv4_include = inc;
-            if (rt.ipv4_exclude) |exc| cli_args.ipv4_exclude = exc;
-            if (rt.ipv6_include) |inc| cli_args.ipv6_include = inc;
-            if (rt.ipv6_exclude) |exc| cli_args.ipv6_exclude = exc;
+            if (cli_args.ipv4_include == null) {
+                if (rt.ipv4_include) |s| cli_args.ipv4_include = try alloc.dupe(u8, s);
+            }
+            if (cli_args.ipv4_exclude == null) {
+                if (rt.ipv4_exclude) |s| cli_args.ipv4_exclude = try alloc.dupe(u8, s);
+            }
+            if (cli_args.ipv6_include == null) {
+                if (rt.ipv6_include) |s| cli_args.ipv6_include = try alloc.dupe(u8, s);
+            }
+            if (cli_args.ipv6_exclude == null) {
+                if (rt.ipv6_exclude) |s| cli_args.ipv6_exclude = try alloc.dupe(u8, s);
+            }
         }
 
         // Proxy
-        if (self.config.proxy) |p| {
-            if (cli_args.proxy == null) cli_args.proxy = p;
+        if (cli_args.proxy == null) {
+            if (self.config.proxy) |s| cli_args.proxy = try alloc.dupe(u8, s);
         }
 
         // Timeouts
@@ -265,9 +288,7 @@ pub const ConfigManager = struct {
 
         // Log level
         if (self.config.log_level) |ll| {
-            if (args_mod.LogLevel.fromString(ll)) |l| {
-                cli_args.log_level = l;
-            }
+            if (args_mod.LogLevel.fromString(ll)) |l| cli_args.log_level = l;
         }
 
         // Verbose diagnostics
@@ -447,11 +468,13 @@ test "ConfigManager mergeWithArgs" {
     try mgr.loadFromString(json);
 
     var cli_args = args_mod.CliArgs{
-        .server = "cli-server.com", // CLI should take priority
+        .server = try std.testing.allocator.dupe(u8, "cli-server.com"), // CLI should take priority
         .port = 443, // Default, should be overridden
+        .allocator = std.testing.allocator,
     };
+    defer cli_args.deinit();
 
-    mgr.mergeWithArgs(&cli_args);
+    try mgr.mergeWithArgs(&cli_args);
 
     // CLI takes priority
     try std.testing.expectEqualStrings("cli-server.com", cli_args.server.?);
