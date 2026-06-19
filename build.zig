@@ -321,6 +321,7 @@ pub fn build(b: *std.Build) void {
                     step.addLibraryPath(.{ .cwd_relative = d });
                 }
                 step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+                step.linker_allow_shlib_undefined = true;
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
                 step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             }
@@ -361,6 +362,7 @@ pub fn build(b: *std.Build) void {
     } else {
         if (linux_lib_dir) |d| vpnclient.addLibraryPath(.{ .cwd_relative = d });
         vpnclient.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+        vpnclient.linker_allow_shlib_undefined = true;
         vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
     }
@@ -450,6 +452,7 @@ pub fn build(b: *std.Build) void {
     } else {
         if (linux_lib_dir) |d| static_lib.addLibraryPath(.{ .cwd_relative = d });
         static_lib.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+        static_lib.linker_allow_shlib_undefined = true;
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
     }
@@ -535,6 +538,7 @@ pub fn build(b: *std.Build) void {
         } else {
             if (linux_lib_dir) |d| t.addLibraryPath(.{ .cwd_relative = d });
             t.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+            t.linker_allow_shlib_undefined = true;
             t.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
             t.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         }
