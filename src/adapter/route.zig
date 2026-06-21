@@ -99,9 +99,15 @@ pub const RoutingState = struct {
         self.local_netmask = 0xFFFFFF00;
 
         // Capture physical interface name BEFORE routing changes
+        var iface_buf: [64]u8 = undefined;
         if (builtin.os.tag == .macos) {
-            var iface_buf: [64]u8 = undefined;
             if (getDefaultInterfaceMacOS(self.allocator, &iface_buf)) |iface| {
+                const len = @min(iface.len, self.physical_interface.len);
+                @memcpy(self.physical_interface[0..len], iface[0..len]);
+                self.physical_interface_len = len;
+            }
+        } else if (builtin.os.tag == .linux) {
+            if (getDefaultInterfaceLinux(self.allocator, &iface_buf)) |iface| {
                 const len = @min(iface.len, self.physical_interface.len);
                 @memcpy(self.physical_interface[0..len], iface[0..len]);
                 self.physical_interface_len = len;
@@ -136,16 +142,31 @@ pub const RoutingState = struct {
             std.log.warn("[ROUTING] Failed to delete default route: {}", .{err});
         };
 
-        // 3. Restore the original default route through the physical gateway.
+        // 3. Clean up the local network route added by configureFullTunnel to
+        //    avoid circular route lookups when restoring the default route.
+        if (self.original_default_gateway != 0 and self.local_network != 0) {
+            deleteRoute(self.local_network, self.local_netmask) catch {};
+        }
+
+        // 4. Restore the original default route through the physical gateway.
+        //    Include the device name on Linux to avoid ambiguity.
         if (self.original_default_gateway != 0) {
-            addRoute(0, 0, self.original_default_gateway, null) catch |err| {
+            const iface = if (self.physical_interface_len > 0)
+                self.physical_interface[0..self.physical_interface_len]
+            else
+                null;
+            addRoute(0, 0, self.original_default_gateway, iface) catch |err| {
                 std.log.warn("[ROUTING] Failed to restore original default route: {}", .{err});
             };
         }
 
-        // 4. Re-enable IPv6 if we disabled it
-        if (self.ipv6_disabled and self.ipv6_service_len > 0) {
-            enableIpv6OnService(self.ipv6_service[0..self.ipv6_service_len]);
+        // 5. Re-enable IPv6 if we disabled it
+        if (self.ipv6_disabled) {
+            if (builtin.os.tag == .macos and self.ipv6_service_len > 0) {
+                enableIpv6OnService(self.ipv6_service[0..self.ipv6_service_len]);
+            } else if (builtin.os.tag == .linux and self.physical_interface_len > 0) {
+                enableIpv6OnService(self.physical_interface[0..self.physical_interface_len]);
+            }
             self.ipv6_disabled = false;
         }
 
@@ -254,6 +275,10 @@ pub const RouteManager = struct {
         if (builtin.os.tag == .macos and self.state.ipv6_service_len > 0) {
             const svc = self.state.ipv6_service[0..self.state.ipv6_service_len];
             disableIpv6OnService(svc);
+            self.state.ipv6_disabled = true;
+        } else if (builtin.os.tag == .linux and self.state.physical_interface_len > 0) {
+            const iface = self.state.physical_interface[0..self.state.physical_interface_len];
+            disableIpv6OnService(iface);
             self.state.ipv6_disabled = true;
         }
     }
@@ -452,7 +477,10 @@ pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]cons
     if (builtin.os.tag == .linux) {
         // Linux uses 'ip route' command
         const cmd = if (destination == 0 and netmask == 0)
-            std.fmt.bufPrint(&cmd_buf, "ip route add default via {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
+            if (interface) |iface|
+                std.fmt.bufPrint(&cmd_buf, "ip route add default via {s} dev {s}", .{ trimNull(&gw_str), iface }) catch return RouteError.CommandFailed
+            else
+                std.fmt.bufPrint(&cmd_buf, "ip route add default via {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
         else if (interface) |iface|
             std.fmt.bufPrint(&cmd_buf, "ip route add {s}/{d} dev {s}", .{
                 trimNull(&dest_str), prefix, iface,
@@ -642,37 +670,70 @@ pub fn deleteIpv6Route(prefix: []const u8) void {
 }
 
 // ============================================
-// DNS Configuration (macOS specific)
+// DNS Configuration
 // ============================================
 
-/// Configure DNS servers for the VPN interface
+const DNS_BACKUP_PATH = "/tmp/softether-resolv.conf.bak";
+
+/// Configure DNS servers for the VPN interface.
+/// On macOS: uses networksetup with the given interface.
+/// On Linux: saves /etc/resolv.conf backup, then writes VPN DNS servers.
 pub fn configureDns(interface: []const u8, dns_servers: []const u32) !void {
     if (dns_servers.len == 0) return;
 
-    var cmd_buf: [512]u8 = undefined;
-    var pos: usize = 0;
+    if (builtin.os.tag == .linux) {
+        // Backup current resolv.conf before overwriting
+        _ = runCommand("cp /etc/resolv.conf " ++ DNS_BACKUP_PATH ++ " 2>/dev/null");
 
-    // Build networksetup command
-    const prefix_str = "networksetup -setdnsservers Wi-Fi";
-    @memcpy(cmd_buf[pos..][0..prefix_str.len], prefix_str);
-    pos += prefix_str.len;
+        // Write new resolv.conf with VPN DNS servers
+        var file = std.fs.createFileAbsolute("/etc/resolv.conf", .{}) catch {
+            std.log.warn("[ROUTING] Failed to write /etc/resolv.conf", .{});
+            return;
+        };
+        defer file.close();
 
-    for (dns_servers) |dns| {
-        const dns_str = formatIpv4(dns);
-        cmd_buf[pos] = ' ';
-        pos += 1;
-        const dns_trimmed = trimNull(&dns_str);
-        @memcpy(cmd_buf[pos..][0..dns_trimmed.len], dns_trimmed);
-        pos += dns_trimmed.len;
+        var buf: [512]u8 = undefined;
+        var pos: usize = 0;
+        for (dns_servers) |dns| {
+            const dns_str = formatIpv4(dns);
+            const line = std.fmt.bufPrint(buf[pos..], "nameserver {s}\n", .{trimNull(&dns_str)}) catch continue;
+            pos += line.len;
+        }
+        _ = file.write(buf[0..pos]) catch {};
+        std.log.info("[ROUTING] DNS configured via /etc/resolv.conf", .{});
+    } else if (builtin.os.tag == .macos) {
+        var cmd_buf: [512]u8 = undefined;
+        var pos: usize = 0;
+
+        const prefix = std.fmt.bufPrint(&cmd_buf, "networksetup -setdnsservers {s}", .{interface}) catch return;
+        pos += prefix.len;
+
+        for (dns_servers) |dns| {
+            const dns_str = formatIpv4(dns);
+            cmd_buf[pos] = ' ';
+            pos += 1;
+            const trimmed = trimNull(&dns_str);
+            @memcpy(cmd_buf[pos..][0..trimmed.len], trimmed);
+            pos += trimmed.len;
+        }
+
+        _ = runCommand(cmd_buf[0..pos]);
     }
-
-    _ = runCommand(cmd_buf[0..pos]);
-    _ = interface;
 }
 
-/// Clear DNS configuration
+/// Clear DNS configuration, restoring pre-VPN settings.
+/// On macOS: resets DNS servers for the primary service.
+/// On Linux: restores /etc/resolv.conf from backup.
 pub fn clearDns() !void {
-    _ = runCommand("networksetup -setdnsservers Wi-Fi Empty");
+    if (builtin.os.tag == .linux) {
+        // Restore from backup created by configureDns
+        if (runCommand("cp " ++ DNS_BACKUP_PATH ++ " /etc/resolv.conf 2>/dev/null")) {
+            _ = runCommand("rm -f " ++ DNS_BACKUP_PATH);
+            std.log.info("[ROUTING] DNS restored from backup", .{});
+        }
+    } else if (builtin.os.tag == .macos) {
+        _ = runCommand("networksetup -setdnsservers Wi-Fi Empty");
+    }
 }
 
 // ============================================
@@ -691,6 +752,29 @@ pub fn getNetworkServiceForInterface(allocator: std.mem.Allocator, iface: []cons
     ) catch return null;
 
     var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Close;
+    child.spawn() catch return null;
+
+    const n = child.stdout.?.read(buf) catch {
+        _ = child.wait() catch {};
+        return null;
+    };
+    _ = child.wait() catch {};
+
+    var end = n;
+    while (end > 0 and (buf[end - 1] == '\n' or buf[end - 1] == '\r' or buf[end - 1] == ' ')) end -= 1;
+    if (end == 0) return null;
+    return buf[0..end];
+}
+
+/// Get the interface name that carries the IPv4 default route on Linux (e.g. "eth0").
+pub fn getDefaultInterfaceLinux(allocator: std.mem.Allocator, buf: []u8) ?[]u8 {
+    if (builtin.os.tag != .linux) return null;
+    var child = std.process.Child.init(
+        &[_][]const u8{ "sh", "-c", "ip -4 route show default 2>/dev/null | awk '/default/ {print $5}' | head -1" },
+        allocator,
+    );
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Close;
     child.spawn() catch return null;
@@ -733,20 +817,32 @@ pub fn getDefaultInterfaceMacOS(allocator: std.mem.Allocator, buf: []u8) ?[]u8 {
 /// Disable IPv6 on a network service (e.g. "Wi-Fi") to prevent IPv6 leaks.
 /// Runs as root via the privileged channel (route commands already need root).
 pub fn disableIpv6OnService(service: []const u8) void {
-    if (builtin.os.tag != .macos) return;
-    var cmd_buf: [512]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6off \"{s}\"", .{service}) catch return;
-    _ = runCommand(cmd);
-    std.log.info("[ROUTING] IPv6 disabled on service \"{s}\" (leak prevention)", .{service});
+    if (builtin.os.tag == .macos) {
+        var cmd_buf: [512]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6off \"{s}\"", .{service}) catch return;
+        _ = runCommand(cmd);
+        std.log.info("[ROUTING] IPv6 disabled on service \"{s}\" (leak prevention)", .{service});
+    } else if (builtin.os.tag == .linux) {
+        var cmd_buf: [128]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "sh -c 'echo 1 > /proc/sys/net/ipv6/conf/{s}/disable_ipv6'", .{service}) catch return;
+        _ = runCommand(cmd);
+        std.log.info("[ROUTING] IPv6 disabled on interface \"{s}\" (leak prevention)", .{service});
+    }
 }
 
 /// Re-enable IPv6 on a network service after VPN disconnect.
 pub fn enableIpv6OnService(service: []const u8) void {
-    if (builtin.os.tag != .macos) return;
-    var cmd_buf: [512]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6automatic \"{s}\"", .{service}) catch return;
-    _ = runCommand(cmd);
-    std.log.info("[ROUTING] IPv6 re-enabled on service \"{s}\"", .{service});
+    if (builtin.os.tag == .macos) {
+        var cmd_buf: [512]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6automatic \"{s}\"", .{service}) catch return;
+        _ = runCommand(cmd);
+        std.log.info("[ROUTING] IPv6 re-enabled on service \"{s}\"", .{service});
+    } else if (builtin.os.tag == .linux) {
+        var cmd_buf: [128]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "sh -c 'echo 0 > /proc/sys/net/ipv6/conf/{s}/disable_ipv6'", .{service}) catch return;
+        _ = runCommand(cmd);
+        std.log.info("[ROUTING] IPv6 re-enabled on interface \"{s}\"", .{service});
+    }
 }
 
 /// Run a shell command (helper function).
@@ -764,13 +860,23 @@ fn runCommand(cmd: []const u8) bool {
         &[_][]const u8{ "/bin/sh", "-c", cmd },
         std.heap.page_allocator,
     );
-    child.stderr_behavior = .Ignore;
+    child.stderr_behavior = .Pipe;
     child.stdout_behavior = .Ignore;
     const term = child.spawnAndWait() catch return false;
-    return switch (term) {
+    const ok = switch (term) {
         .Exited => |code| code == 0,
         else => false,
     };
+    if (!ok) {
+        var err_buf: [512]u8 = undefined;
+        if (child.stderr) |stderr| {
+            const n = stderr.read(&err_buf) catch 0;
+            if (n > 0) {
+                std.log.warn("[ROUTING] command failed (stderr): {s}", .{std.mem.trimRight(u8, err_buf[0..n], &[_]u8{ '\n', '\r', ' ' })});
+            }
+        }
+    }
+    return ok;
 }
 
 /// Parse IPv4 address string to u32
