@@ -26,13 +26,6 @@ if [ ! -f "$BINARY" ]; then
   zig build
 fi
 
-# Detect test tools independently
-NETPROBE="../../netprobe/zig-out/bin/netprobe"
-HAS_NETPROBE=false
-if [ -x "$NETPROBE" ]; then
-  HAS_NETPROBE=true
-fi
-
 HAS_SPEEDTEST=false
 SPEEDTEST_CMD=""
 SPEEDTEST_NAME=""
@@ -80,11 +73,8 @@ for cfg in "${CONFIGS[@]}"; do
   log="$LOGDIR/$name.log"
   ts_log="$LOGDIR/$name.tsv"
   speed_log="$LOGDIR/$name.speed"
-  netprobe_log="$LOGDIR/$name.netprobe"
 
-  # Clear any artifacts from a previous run so a config that fails early can't
-  # display stale throughput/error numbers in the summary table.
-  rm -f "$log" "$ts_log" "$speed_log" "$netprobe_log"
+  rm -f "$log" "$ts_log" "$speed_log"
 
   echo -n "[$(ts)] [$name] connecting... "
   sudo "$BINARY" connect --config "$cfg" --verbose > "$log" 2>&1 &
@@ -98,7 +88,7 @@ for cfg in "${CONFIGS[@]}"; do
     if ! kill -0 "$VPN_PID" 2>/dev/null; then
       echo "[$(ts)] FAILED (immediate exit)"
       RESULTS+=("FAIL  $name  vpn client exited immediately")
-      printf "%s\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-\tFAIL\n" "$name" > "$ts_log"
+      printf "%s\t-\t-\t-\t-\t-\t-\t-\tFAIL\n" "$name" > "$ts_log"
       continue 2
     fi
     if grep -q "\[ROUTING\] ✅ Full-tunnel routing configured successfully" "$log" 2>/dev/null; then
@@ -111,19 +101,6 @@ for cfg in "${CONFIGS[@]}"; do
     echo "[$(ts)] TIMEOUT (no routing-ready log in ${ROUTE_WAIT_MAX}s, continuing)"
   else
     echo "[$(ts)] routing ready"
-  fi
-
-  # Run netprobe for low-level tunnel throughput diagnostics (TCP/UDP)
-  # Timeout is short (15s) — if the server is unreachable we don't want to
-  # block the entire test suite.
-  if $HAS_NETPROBE; then
-    echo -n "[$(ts)] netprobe-diag... "
-    if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" 15 "$NETPROBE" diag 10.21.0.10:7000 --duration 10 > "$netprobe_log" 2>&1 || true
-    else
-      "$NETPROBE" diag 10.21.0.10:7000 --duration 10 > "$netprobe_log" 2>&1 || true
-    fi
-    echo "done"
   fi
 
   # Run Ookla speedtest for application-layer throughput
@@ -203,39 +180,33 @@ for cfg in "${CONFIGS[@]}"; do
     fi
   fi
 
-  # Parse netprobe result (low-level tunnel throughput)
-  np_dl="?"; np_ul="?"; np_rtt="?"
-  if [ -f "$netprobe_log" ]; then
-    if grep -q "tcp_ul DONE" "$netprobe_log" 2>/dev/null || grep -q "tcp_dl DONE" "$netprobe_log" 2>/dev/null; then
-      dl_line=$(grep "tcp_dl DONE" "$netprobe_log" | tail -1) || true
-      ul_line=$(grep "tcp_ul DONE" "$netprobe_log" | tail -1) || true
-      [ -n "$dl_line" ] && np_dl=$(echo "$dl_line" | awk '{print $NF}') || true
-      [ -n "$ul_line" ] && np_ul=$(echo "$ul_line" | awk '{print $NF}') || true
-      np_rtt_line=$(grep "rtt" "$netprobe_log" | head -1) || true
-      [ -n "$np_rtt_line" ] && np_rtt=$(echo "$np_rtt_line" | grep -oE '[0-9]+us' | head -1 | tr -d 'us') || true
-    fi
-  fi
-
   # Parse Ookla speedtest result (application-layer throughput)
+  # Ookla CLI v2 JSON: "bandwidth" in bytes/sec, "latency" in ms.
+  # speedtest-cli plaintext: "Download: N.NN Mbit/s" — already in Mbps.
+  # We normalize everything to Mbps for the summary table.
   st_dl="?"; st_ul="?"; st_ping="?"; st_err=""
   if [ -f "$speed_log" ]; then
     st_err=$(awk 'match($0, /"error":"[^"]+"/) {v=substr($0,RSTART+9,RLENGTH-10); print v}' "$speed_log" | head -1)
     if [ -n "$st_err" ]; then
       st_dl="ERR"; st_ul="$st_err"; st_ping="$st_err"
     elif grep -q '"latency"' "$speed_log" 2>/dev/null; then
+      # Ookla CLI v2 JSON: bandwidth in bytes/sec
       st_ping=$(awk 'match($0, /"latency":[0-9.]+/) {v=substr($0,RSTART,RLENGTH); gsub(/[^0-9.]/,"",v); print v}' "$speed_log" | tail -1)
       bw=$(awk '{r=$0; if(match(r,/"bandwidth":[0-9]+/)){a=substr(r,RSTART+11,RLENGTH-11); gsub(/[^0-9]/,"",a); r=substr(r,RSTART+RLENGTH)} if(match(r,/"bandwidth":[0-9]+/)){b=substr(r,RSTART+11,RLENGTH-11); gsub(/[^0-9]/,"",b)} print a+0, b+0}' "$speed_log")
       st_dl_raw="${bw%% *}";  st_dl_raw=${st_dl_raw:-0}
       st_ul_raw="${bw##* }";  st_ul_raw=${st_ul_raw:-0}
-      st_dl=$(awk "BEGIN {printf \"%.1f\", ${st_dl_raw} / 1e6}")
-      st_ul=$(awk "BEGIN {printf \"%.1f\", ${st_ul_raw} / 1e6}")
+      # bytes/sec → Mbps: divide by 125000 (1e6/8)
+      st_dl=$(awk "BEGIN {printf \"%.1f\", ${st_dl_raw} / 125000}")
+      st_ul=$(awk "BEGIN {printf \"%.1f\", ${st_ul_raw} / 125000}")
     elif grep -q '"ping"' "$speed_log" 2>/dev/null; then
+      # Old Ookla JSON format: download/upload in bytes/sec
       st_ping=$(awk 'match($0, /"ping":[[:space:]]*[0-9.]+/) {v=substr($0,RSTART,RLENGTH); gsub(/[^0-9.]/,"",v); print v}' "$speed_log" | tail -1)
-      st_dl=$(awk 'match($0, /"download":[[:space:]]*[0-9.]+/) {v=substr($0,RSTART,RLENGTH); gsub(/[^0-9.]/,"",v); print v}' "$speed_log" | tail -1)
-      st_ul=$(awk 'match($0, /"upload":[[:space:]]*[0-9.]+/) {v=substr($0,RSTART,RLENGTH); gsub(/[^0-9.]/,"",v); print v}' "$speed_log" | tail -1)
-      st_dl=$(awk "BEGIN {printf \"%.1f\", ${st_dl:-0} / 1e6}")
-      st_ul=$(awk "BEGIN {printf \"%.1f\", ${st_ul:-0} / 1e6}")
+      st_dl_raw=$(awk 'match($0, /"download":[[:space:]]*[0-9.]+/) {v=substr($0,RSTART,RLENGTH); gsub(/[^0-9.]/,"",v); print v}' "$speed_log" | tail -1)
+      st_ul_raw=$(awk 'match($0, /"upload":[[:space:]]*[0-9.]+/) {v=substr($0,RSTART,RLENGTH); gsub(/[^0-9.]/,"",v); print v}' "$speed_log" | tail -1)
+      st_dl=$(awk "BEGIN {printf \"%.1f\", ${st_dl_raw:-0} / 125000}")
+      st_ul=$(awk "BEGIN {printf \"%.1f\", ${st_ul_raw:-0} / 125000}")
     elif grep -q 'Download:' "$speed_log" 2>/dev/null; then
+      # speedtest-cli plaintext: already in Mbit/s
       st_ping=$(awk '/Ping:/ {gsub(/[^0-9.]/,"",$2); print $2}' "$speed_log" | tail -1)
       st_dl=$(awk '/Download:/ {gsub(/[^0-9.]/,"",$2); print $2}' "$speed_log" | tail -1)
       st_ul=$(awk '/Upload:/ {gsub(/[^0-9.]/,"",$2); print $2}' "$speed_log" | tail -1)
@@ -245,24 +216,19 @@ for cfg in "${CONFIGS[@]}"; do
   # Build display strings
   st_display="$st_dl/$st_ul"
   if [ -n "$st_err" ]; then st_display="ERR:$st_err"; fi
-  np_display="$np_dl/$np_ul"
-  if [ "$np_dl" = "?" ] && [ "$np_ul" = "?" ]; then
-    if $HAS_NETPROBE; then np_display="RUNNING"; else np_display="SKIP"; fi
-  fi
 
-  # TSV summary row (netprobe + speedtest)
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  # TSV summary row (speedtest only)
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$name" "$tunnel_up_mbps" "$tunnel_down_mbps" \
-    "${np_dl}" "${np_ul}" "${np_rtt}" \
     "${st_dl}" "${st_ul}" "${st_ping}" \
     "$drops" "$poll_skip" "${errors:-0}" > "$ts_log"
 
   if [ "${errors:-0}" -gt 0 ]; then
-    echo "[$(ts)] [$name] DONE (${errors} err)  TUN_UP=${tunnel_up_mbps}M  TUN_DOWN=${tunnel_down_mbps}M  netprobe=${np_display}  speedtest=${st_display}"
-    RESULTS+=("FAIL  $name  up=${tunnel_up_mbps}M  down=${tunnel_down_mbps}M  netprobe=${np_display}  speedtest=${st_display}")
+    echo "[$(ts)] [$name] DONE (${errors} err)  TUN_UP=${tunnel_up_mbps}M  TUN_DOWN=${tunnel_down_mbps}M  speedtest=${st_display}"
+    RESULTS+=("FAIL  $name  up=${tunnel_up_mbps}M  down=${tunnel_down_mbps}M  speedtest=${st_display}")
   else
-    echo "[$(ts)] [$name] DONE  TUN_UP=${tunnel_up_mbps}M  TUN_DOWN=${tunnel_down_mbps}M  netprobe=${np_display}  speedtest=${st_display}"
-    RESULTS+=("OK    $name  up=${tunnel_up_mbps}M  down=${tunnel_down_mbps}M  netprobe=${np_display}  speedtest=${st_display}")
+    echo "[$(ts)] [$name] DONE  TUN_UP=${tunnel_up_mbps}M  TUN_DOWN=${tunnel_down_mbps}M  speedtest=${st_display}"
+    RESULTS+=("OK    $name  up=${tunnel_up_mbps}M  down=${tunnel_down_mbps}M  speedtest=${st_display}")
   fi
 done
 
@@ -271,20 +237,19 @@ echo ""
 echo "========================================"
 echo "TEST RESULTS (timeout: ${DURATION}s per config)"
 echo "========================================"
-printf "%-20s %8s %8s %7s %7s %6s %7s %7s %6s %6s %6s\n" "CONFIG" "TUN_UP" "TUN_DOWN" "NP_DL" "NP_UL" "NP_RTT" "ST_DL" "ST_UL" "PING" "DROP" "ERR"
-printf "%-20s %8s %8s %7s %7s %6s %7s %7s %6s %6s %6s\n" "-----" "------" "--------" "-----" "-----" "-----" "-----" "-----" "-----" "----" "---"
+printf "%-20s %8s %8s %7s %7s %6s %6s %6s\n" "CONFIG" "TUN_UP" "TUN_DOWN" "ST_DL" "ST_UL" "PING" "DROP" "ERR"
+printf "%-20s %8s %8s %7s %7s %6s %6s %6s\n" "-----" "------" "--------" "-----" "-----" "-----" "----" "---"
 for cfg in "${CONFIGS[@]}"; do
   name="${cfg%.json}"
   if [ -f "$LOGDIR/$name.tsv" ]; then
-    IFS=$'\t' read -r _ tun_up tun_down np_dl np_ul np_rtt st_dl st_ul st_ping drops poll_skip errors < "$LOGDIR/$name.tsv" || true
-    printf "%-20s %8s %8s %7s %7s %6s %7s %7s %6s %6s %6s\n" \
+    IFS=$'\t' read -r _ tun_up tun_down st_dl st_ul st_ping drops _poll_skip errors < "$LOGDIR/$name.tsv" || true
+    printf "%-20s %8s %8s %7s %7s %6s %6s %6s\n" \
       "$name" "${tun_up:-?}" "${tun_down:-?}" \
-      "${np_dl:-?}" "${np_ul:-?}" "${np_rtt:-?}" \
       "${st_dl:-?}" "${st_ul:-?}" "${st_ping:-?}" \
       "${drops:-0}" "${errors:-0}"
   fi
 done
 echo ""
 echo "Full logs: $LOGDIR/"
-echo "NP=netprobe (tunnel-level), ST=speedtest (application-level)"
-echo "TUN_UP/TUN_DOWN = tunnel throughput from diag stats"
+echo "ST=speedtest (Ookla application-level)"
+echo "TUN_UP/TUN_DOWN = tunnel throughput from DIAG stats"
