@@ -704,7 +704,7 @@ pub const VpnClient = struct {
                         std.log.info("Cluster probe OK: {s}:{d}", .{ ip_str, port });
                         break :probe_done;
                     }
-                    std.log.warn("Cluster probe FAILED: {s}:{d} — skipping broken node", .{ ip_str, port });
+                    std.log.debug("Cluster probe failed: {s}:{d} — not a cluster node (this is normal for standalone VPN Gate servers)", .{ ip_str, port });
                 }
             }
         }
