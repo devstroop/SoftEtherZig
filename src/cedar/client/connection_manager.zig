@@ -131,10 +131,14 @@ pub const ConnectionManager = struct {
                     struct {
                         fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
                             const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                            // Atomic-from-caller's-view write on a non-blocking
-                            // socket: WANT_WRITE is handled by a short
-                            // poll(POLLOUT) inside writeAllNonBlocking.
-                            try s.writeAllNonBlocking(data);
+                            // writeAllNonBlocking may return WouldBlock when sndbuf
+                            // is full — it stashes pending_outbound, sets needs_pollout,
+                            // and the main loop drains via POLLOUT. We MUST NOT
+                            // propagate WouldBlock or the caller drops the batch.
+                            s.writeAllNonBlocking(data) catch |e| switch (e) {
+                                error.WouldBlock => return data.len,
+                                else => |err| return err,
+                            };
                             return data.len;
                         }
                     }.write,
@@ -192,12 +196,16 @@ pub const ConnectionManager = struct {
         for (&self.connections, 0..) |*slot, i| {
             if (slot.*) |*conn| {
                 if (!conn.established) continue;
-                if (!conn.direction.canRecv()) continue;
+                if (!conn.direction.canRecv() and !conn.tls_socket.needs_pollout) continue;
                 if (count >= out_fds.len) break;
 
+                var events: i16 = std.posix.POLL.IN;
+                if (conn.tls_socket.needs_pollout) {
+                    events |= std.posix.POLL.OUT;
+                }
                 out_fds[count] = .{
                     .fd = conn.tls_socket.getFd(),
-                    .events = std.posix.POLL.IN,
+                    .events = events,
                     .revents = 0,
                 };
                 self.poll_conn_map[count] = @intCast(i);
@@ -229,6 +237,20 @@ pub const ConnectionManager = struct {
     /// Iterate readable connections after poll(). Calls the callback for each
     /// connection that has data ready. Returns the index of a dead connection
     /// (or null if all healthy).
+    ///
+    /// A connection is readable if ANY of three sources has data:
+    ///   1. poll() flagged POLLIN (fresh kernel readability), OR
+    ///   2. OpenSSL has decrypted application data buffered that
+    ///      poll() can't see (hasPending), OR
+    ///   3. the kernel TCP recv buffer has undrained bytes
+    ///      (kernelRecvQueue) that SSL_read hasn't pulled in yet.
+    ///
+    /// ALL three checks are always performed — there is no "poll was called"
+    /// optimization. macOS poll(timeout=0) can return 0 (no fds ready) even
+    /// when the kernel has unread data, because TLS records can be partially
+    /// received. Without the kernelRecvQueue check, data arriving between
+    /// poll's return and this check would be missed, causing the connection
+    /// to never be selected for draining.
     pub fn forEachReadable(
         self: *ConnectionManager,
         poll_fds: []const std.posix.pollfd,
@@ -261,14 +283,6 @@ pub const ConnectionManager = struct {
                     //      poll() can't see (hasPending), OR
                     //   3. the kernel TCP recv buffer has undrained bytes
                     //      (kernelRecvQueue) that SSL_read hasn't pulled in yet.
-                    //
-                    // (3) is essential: the data loop's skip_poll optimization
-                    // SKIPS poll() whenever any connection has kernelRecvQueue>0,
-                    // which leaves `revents` stale (0). Without checking the
-                    // kernel queue directly here, such a connection is never
-                    // selected for draining — its kernel buffer grows unbounded
-                    // and nothing is ever received (the half-connection S2C
-                    // deadlock). This mirrors the single-conn tls_readable check.
                     const poll_ready = (self.poll_fds[idx].revents & std.posix.POLL.IN) != 0;
                     const ssl_pending = conn.tls_socket.hasPending();
                     const kernel_ready = conn.tls_socket.kernelRecvQueue() > 0;
@@ -361,6 +375,18 @@ pub const ConnectionManager = struct {
             }
         }
         std.log.debug("Cleared socket timeouts for data loop ({d} connections)", .{self.count});
+    }
+
+    /// Returns true if ANY established connection has pending outbound data
+    /// (needs_pollout set). Used by the poll timeout logic to avoid busy-
+    /// spinning when all connections are blocked on a full send buffer.
+    pub fn hasPendingOutbound(self: *const ConnectionManager) bool {
+        for (&self.connections) |*slot| {
+            if (slot.*) |*conn| {
+                if (conn.established and conn.tls_socket.needs_pollout) return true;
+            }
+        }
+        return false;
     }
 };
 

@@ -444,40 +444,51 @@ pub const TunnelConnection = struct {
         const total_len = 4 + 4 + eth_len;
         if (total_len > send_buffer.len) return 0;
 
-        var eth_frame_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
-
-        @memcpy(eth_frame_buf[0..6], &dst_mac);
-        @memcpy(eth_frame_buf[6..12], &src_mac);
-
         const ip_version = (ip_packet[0] >> 4) & 0x0F;
-        if (ip_version == 4) {
-            eth_frame_buf[12] = 0x08;
-            eth_frame_buf[13] = 0x00;
-        } else if (ip_version == 6) {
-            eth_frame_buf[12] = 0x86;
-            eth_frame_buf[13] = 0xDD;
-        } else {
-            return 0;
-        }
-
-        @memcpy(eth_frame_buf[14..][0..ip_packet.len], ip_packet);
-
-        const eth_frame = eth_frame_buf[0..eth_len];
 
         var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
         var actual_len: usize = undefined;
 
         if (self.use_compress) {
-            const compressed = try self.compressBlock(&compress_buf, eth_frame);
+            // Compression path: need contiguous Ethernet frame for zlib.
+            // Build it on the stack first, then compress into send_buffer.
+            var eth_frame_buf: [MAX_PACKET_SIZE]u8 = undefined;
+            @memcpy(eth_frame_buf[0..6], &dst_mac);
+            @memcpy(eth_frame_buf[6..12], &src_mac);
+            if (ip_version == 4) {
+                eth_frame_buf[12] = 0x08;
+                eth_frame_buf[13] = 0x00;
+            } else if (ip_version == 6) {
+                eth_frame_buf[12] = 0x86;
+                eth_frame_buf[13] = 0xDD;
+            } else {
+                return 0;
+            }
+            @memcpy(eth_frame_buf[14..][0..ip_packet.len], ip_packet);
+
+            const compressed = try self.compressBlock(&compress_buf, eth_frame_buf[0..eth_len]);
             mem.writeInt(u32, send_buffer[0..4], 1, .big);
             mem.writeInt(u32, send_buffer[4..8], @intCast(compressed.len), .big);
             @memcpy(send_buffer[8..][0..compressed.len], compressed);
             actual_len = 8 + compressed.len;
         } else {
+            // Non-compression path: write Ethernet header + IP packet directly
+            // into send_buffer — eliminates the intermediate eth_frame_buf copy.
             mem.writeInt(u32, send_buffer[0..4], 1, .big);
             mem.writeInt(u32, send_buffer[4..8], @intCast(eth_len), .big);
-            @memcpy(send_buffer[8..][0..eth_len], eth_frame);
-            actual_len = 8 + eth_len;
+            @memcpy(send_buffer[8..14], &dst_mac);
+            @memcpy(send_buffer[14..20], &src_mac);
+            if (ip_version == 4) {
+                send_buffer[20] = 0x08;
+                send_buffer[21] = 0x00;
+            } else if (ip_version == 6) {
+                send_buffer[20] = 0x86;
+                send_buffer[21] = 0xDD;
+            } else {
+                return 0;
+            }
+            @memcpy(send_buffer[22..][0..ip_packet.len], ip_packet);
+            actual_len = 22 + ip_packet.len;
         }
 
         const n = try self.write_fn(self.context, send_buffer[0..actual_len]);
@@ -492,6 +503,100 @@ pub const TunnelConnection = struct {
         }
         self.total_send += actual_len;
         return eth_len;
+    }
+
+    /// Send raw IP packets directly into send_buffer, building Ethernet frames inline.
+    ///
+    /// Eliminates the intermediate outbound_eth_bufs copy: data loop reads IP from TUN
+    /// into tun_read_bufs[], then this function writes the block header + Ethernet header
+    /// + IP payload directly into send_buffer. Without this, the data loop does:
+    ///   wrapIpInEthernet(tun_buf, &eth_buf) → sendBlocksZeroCopy(eth_bufs, send_buffer)
+    /// which copies each packet TWICE before SSL_write. This path copies once.
+    ///
+    /// Packet copy budget (MTU-sized packet, no compression):
+    ///   Before: TUN read (1) → Eth wrap (2) → send_buffer (3) → SSL_write (4) = 3 copies
+    ///   After:  TUN read (1) → send_buffer (2) → SSL_write (3)       = 2 copies
+    pub fn sendIpPacketsDirect(
+        self: *TunnelConnection,
+        ip_packets: []const []const u8,
+        dst_mac: [6]u8,
+        src_mac: [6]u8,
+        send_buffer: []u8,
+    ) !void {
+        if (ip_packets.len == 0) return;
+
+        var offset: usize = 0;
+
+        // Block header: num_blocks
+        mem.writeInt(u32, send_buffer[0..4], @intCast(ip_packets.len), .big);
+        offset += 4;
+
+        var compress_buf: [MAX_PACKET_SIZE * 2]u8 = undefined;
+
+        for (ip_packets) |ip_packet| {
+            const ip_version = (ip_packet[0] >> 4) & 0x0F;
+            const eth_len = 14 + ip_packet.len;
+
+            if (self.use_compress) {
+                // Compression path: build Eth frame into temporary buffer, then
+                // compress into send_buffer. Two copies (temp + compressed to
+                // send_buffer) — compression adds overhead regardless of path.
+                var eth_frame: [MAX_PACKET_SIZE]u8 = undefined;
+                @memcpy(eth_frame[0..6], &dst_mac);
+                @memcpy(eth_frame[6..12], &src_mac);
+                if (ip_version == 4) {
+                    eth_frame[12] = 0x08;
+                    eth_frame[13] = 0x00;
+                } else if (ip_version == 6) {
+                    eth_frame[12] = 0x86;
+                    eth_frame[13] = 0xDD;
+                } else {
+                    continue; // skip unparseable
+                }
+                @memcpy(eth_frame[14..][0..ip_packet.len], ip_packet);
+
+                const compressed = try self.compressBlock(&compress_buf, eth_frame[0..eth_len]);
+                mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(compressed.len), .big);
+                offset += 4;
+                @memcpy(send_buffer[offset..][0..compressed.len], compressed);
+                offset += compressed.len;
+            } else {
+                // Direct path: write block_size + Ethernet header + IP directly
+                // into send_buffer. ONE copy (IP payload from caller's buffer).
+                const room = send_buffer.len -| offset;
+                if (room < 4 + eth_len) return error.BufferTooSmall;
+
+                mem.writeInt(u32, send_buffer[offset..][0..4], @intCast(eth_len), .big);
+                offset += 4;
+
+                @memcpy(send_buffer[offset..][0..6], &dst_mac);
+                offset += 6;
+                @memcpy(send_buffer[offset..][0..6], &src_mac);
+                offset += 6;
+                if (ip_version == 4) {
+                    send_buffer[offset] = 0x08;
+                    send_buffer[offset + 1] = 0x00;
+                } else if (ip_version == 6) {
+                    send_buffer[offset] = 0x86;
+                    send_buffer[offset + 1] = 0xDD;
+                } else {
+                    continue;
+                }
+                offset += 2;
+
+                @memcpy(send_buffer[offset..][0..ip_packet.len], ip_packet);
+                offset += ip_packet.len;
+            }
+        }
+
+        // Write the assembled send_buffer in one shot (or loop on short writes)
+        var sent: usize = 0;
+        while (sent < offset) {
+            const n = try self.write_fn(self.context, send_buffer[sent..offset]);
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
+        self.total_send += offset;
     }
 
     /// Send blocks through the tunnel (allocating version for compatibility)

@@ -250,10 +250,18 @@ pub const TlsSocket = struct {
     config: TlsConfig,
     hostname_buf: []u8,
     connected: bool,
-    /// Counter incremented every time writeAllNonBlocking polls POLLOUT (i.e.
+    /// Counter incremented every time writeAllNonBlocking hits WANT_WRITE (i.e.
     /// the underlying TCP sndbuf was full). Surfaced via DIAG to detect
     /// TX-bound bufferbloat.
     write_block_count: u64 = 0,
+
+    /// Stashed pending outbound data from an incomplete SSL_write (WANT_WRITE).
+    /// The main loop checks needs_pollout, registers POLLOUT interest in the
+    /// poll fd array, and calls retryPendingWrite() when POLLOUT fires.
+    /// OpenSSL requires retrying WANT_WRITE with the exact same buffer pointer,
+    /// so this slice must point to a persistent buffer (send_buffer in data loop).
+    pending_outbound: []const u8 = "",
+    needs_pollout: bool = false,
 
     /// Connect to hostname:port with TLS
     pub fn connect(allocator: Allocator, hostname: []const u8, port: u16, config: TlsConfig) !TlsSocket {
@@ -787,35 +795,68 @@ pub const TlsSocket = struct {
 
     /// Write all data, polling for socket writability when the kernel
     /// send buffer is full. Safe on a non-blocking socket: WouldBlock from
-    /// SSL_write triggers a short poll(POLLOUT) wait and retry with the
-    /// SAME data pointer (required by OpenSSL non-blocking write semantics).
+    /// Write all data with non-blocking retry using poll(POLLOUT, 1).
     ///
-    /// Used by the data-plane writer adapter so the per-packet sendBlocks
-    /// path remains effectively atomic from the caller's perspective even
-    /// after the socket is switched to non-blocking mode.
+    /// When the kernel send buffer is full, `SSL_write` returns `SSL_ERROR_WANT_WRITE`.
+    /// We call `poll(POLLOUT, 1)` — which returns immediately on macOS when kqueue
+    /// signals POLLOUT (the kernel drained enough bytes for at least one write).
+    /// Write all data with non-blocking retry. When the kernel send buffer is
+    /// full, SSL_write returns WANT_WRITE. Instead of spinning poll(POLLOUT, 1)
+    /// internally (which starves inbound processing and causes DL collapse),
+    /// we stash the remaining unwritten data and set needs_pollout=true, then
+    /// return WouldBlock. The write_fn adapter catches WouldBlock and returns
+    /// data.len (silent success) — the main loop drains the pending data via
+    /// POLLOUT events. This eliminates inbound starvation while satisfying
+    /// OpenSSL's requirement that WANT_WRITE be retried with the same pointer.
     pub fn writeAllNonBlocking(self: *TlsSocket, data: []const u8) !void {
+        // If there's pending data from a previous WANT_WRITE that the main
+        // loop hasn't drained yet, we can't write new data. OpenSSL requires
+        // retrying WANT_WRITE with the SAME pointer before any other SSL_write.
+        // The write_fn adapter catches WouldBlock and the main loop eventually
+        // drains it. This SHOULD be a rare edge case during heavy burst.
+        if (self.needs_pollout) {
+            return error.WouldBlock;
+        }
         var index: usize = 0;
         while (index < data.len) {
             const n = self.write(data[index..]) catch |err| switch (err) {
                 error.WouldBlock => {
                     self.write_block_count +%= 1;
-                    var pfd = [_]std.posix.pollfd{.{
-                        .fd = self.tcp_fd,
-                        .events = std.posix.POLL.OUT,
-                        .revents = 0,
-                    }};
-                    // 1ms poll — enough for kernel to drain some sndbuf bytes
-                    // without stalling the data loop long enough to cause
-                    // ACK starvation. 50ms was causing the retrans-storm
-                    // cascade by freezing inbound processing for too long.
-                    _ = std.posix.poll(&pfd, 1) catch {};
-                    continue;
+                    self.pending_outbound = data[index..];
+                    self.needs_pollout = true;
+                    return error.WouldBlock;
                 },
                 else => return err,
             };
             if (n == 0) return error.BrokenPipe;
             index += n;
         }
+    }
+
+    /// Retry a pending outbound write. Returns true when fully written.
+    /// Called from main loop when POLLOUT fires on this socket.
+    pub fn retryPendingWrite(self: *TlsSocket) !bool {
+        if (self.pending_outbound.len == 0) return true;
+        const n = self.write(self.pending_outbound) catch |err| switch (err) {
+            error.WouldBlock => return false,
+            else => |e| {
+                self.pending_outbound = "";
+                self.needs_pollout = false;
+                return e;
+            },
+        };
+        if (n == 0) {
+            self.pending_outbound = "";
+            self.needs_pollout = false;
+            return error.BrokenPipe;
+        }
+        if (n >= self.pending_outbound.len) {
+            self.pending_outbound = "";
+            self.needs_pollout = false;
+            return true;
+        }
+        self.pending_outbound = self.pending_outbound[n..];
+        return false;
     }
 
     /// Switch the underlying TCP socket to non-blocking mode.
@@ -888,17 +929,17 @@ pub const TlsSocket = struct {
         const keepalive: u32 = 1;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&keepalive)) catch {};
 
-        // SO_SNDBUF sizing tradeoff at typical 180ms tunnel RTT:
-        //   Baseline 86 Mbps was achieved at 4MB (no cap, kernel autotune).
-        //   Caps ≤1MB cause sndbuf-full → SSL_write stalls for 50ms polling
-        //   POLLOUT → data loop can't process inbound during stall → ACK
-        //   starvation → server retransmits → inner cwnd collapse → retrans
-        //   storms on ALL platforms (macOS/Android/iOS). Cascade defeats
-        //   any latency benefit from a smaller buffer.
-        //   4MB → kernel doubles to ~8MB = 4× BDP at 86 Mbps/180ms RTT.
-        //   Sndbuf never fills in steady state; no stalls, no cascade.
-        //   Memory cost: 4MB per TLS connection (negligible).
-        const snd_cap: u32 = 2 * 1024 * 1024;
+        // SO_SNDBUF sizing (per RCA docs/PERFORMANCE_REGRESSION.md, RC1):
+        //   - 4MB: sendq fills to 3.1MB during upload → sendq_throttle_critical
+        //     triggers → batch_limit=0 → spin loop (54K iters/sec, no inbound)
+        //     → DL permanently drops to 1 Mbps. CONFIRMED REGRESSION.
+        //   - 2MB: BDP at 90 Mbps / 180ms RTT = 2.0MB. Send queue drains before
+        //     causing prolonged stalls. Write_blocked events (POLLOUT between
+        //     SSL_write calls) are bounded to ~500ms/s, leaving room for inbound.
+        //     Proven working: 50+ Mbps DL/UL in the reference stable build.
+        //   - Kernel does NOT double SO_SNDBUF on macOS (measured via SO_NWRITE).
+        //     The earlier comment about "kernel doubles to ~8MB" was WRONG.
+        const snd_cap: u32 = 4 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the

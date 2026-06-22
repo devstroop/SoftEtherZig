@@ -1455,7 +1455,17 @@ pub const VpnClient = struct {
                 struct {
                     fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
                         const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                        try s.writeAllNonBlocking(data);
+                        // writeAllNonBlocking returns WouldBlock when the kernel
+                        // send buffer is full. It stashes the pending data in
+                        // s.pending_outbound and the main loop drains it via
+                        // POLLOUT events. We MUST NOT propagate WouldBlock — the
+                        // caller (sendBlocksZeroCopy) would drop the entire batch.
+                        // Returning data.len (silent success) prevents drops while
+                        // the pending write completes asynchronously.
+                        s.writeAllNonBlocking(data) catch |e| switch (e) {
+                            error.WouldBlock => return data.len,
+                            else => |err| return err,
+                        };
                         return data.len;
                     }
                 }.write,
@@ -1552,7 +1562,6 @@ pub const VpnClient = struct {
             ssl_pending_max: u32 = 0,
             nread_max: u32 = 0,
             nwrite_max: u32 = 0,
-            pollout_skipped: u64 = 0,
             tcp_drops_pkts: u64 = 0,
             tun_eagain: u64 = 0,
             tx_drops_delta: u64 = 0, // FdAdapter ring buffer drops (this second)
@@ -1584,6 +1593,11 @@ pub const VpnClient = struct {
             // since last DIAG. High = TX bound. Diff'd from per-conn
             // TlsSocket.write_block_count snapshots.
             write_blocked: u64 = 0,
+            // Count of consecutive iterations where needs_pollout was true
+            // AND no inbound data was processed — the circular deadlock
+            // signature. Resets to 0 on any successful retryPendingWrite
+            // or any inbound data receipt. Monotonically climbs when stuck.
+            stalled_iters: u64 = 0,
             // === Deep TX-path logging: track upload data from TUN→Ethernet→TLS→TCP ===
             // Counters per DIAG window (1s). Proves whether the client is actually
             // sending upload data, or only TCP ACKs for download traffic.
@@ -1780,8 +1794,11 @@ pub const VpnClient = struct {
                 // Multi-connection: build poll fds from all recv-capable connections
                 tls_fd_count = cm.buildPollFds(&poll_fds);
             } else if (single_sock) |ss| {
-                // Single-connection: just the one TLS socket
-                poll_fds[0] = .{ .fd = ss.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+                // Single-connection: just the one TLS socket.
+                // Add POLLOUT when sndbuf was full (needs_pollout).
+                var events: i16 = std.posix.POLL.IN;
+                if (ss.needs_pollout) events |= std.posix.POLL.OUT;
+                poll_fds[0] = .{ .fd = ss.getFd(), .events = events, .revents = 0 };
                 tls_fd_count = 1;
             }
 
@@ -1802,66 +1819,59 @@ pub const VpnClient = struct {
             };
 
             const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + (if (has_udp) @as(usize, 2) else if (builtin.os.tag == .windows) @as(usize, 0) else @as(usize, 1)));
-            // Adaptive poll timeout: timeout=0 (immediate return) when last
-            // iter did productive I/O so we keep up with bursts; timeout=10ms
-            // when idle so the CPU can sleep.
-            //
-            // CRITICAL: last_iter_had_work MUST be cleared at the start of each
-            // iter (see below) so it represents "this iter did work" rather than
-            // "any iter ever did work". A previous version left it sticky-true,
-            // which on iOS caused a 50k iters/sec busy-spin during what should
-            // have been idle periods → CPU-wakeup-limit kill (45001 wakes/18s).
-            // With proper clearing, productive iters drive timeout=0 (real I/O
-            // wakes are not idle wakes) and idle iters drop back to 10ms sleep,
-            // so an iOS-only floor is no longer needed and DL is not throttled.
-            const poll_timeout_ms: i32 = if (last_iter_had_work) @as(i32, 0) else @as(i32, 1);
-            // Reset for this iter — inbound/outbound sections will set it true
-            // again if they observe real work (any_conn_had_data, tls_readable,
-            // or tun_readable at end-of-iter).
+            // Adaptive poll: timeout=0 (immediate) when last iter did REAL work,
+            // timeout=1ms when idle or stuck. When needs_pollout is true, TUN
+            // reads are silently dropped (WouldBlock swallowed by write_fn) —
+            // counting this as "work" creates a busy-spin at poll(0) where
+            // inbound is never processed, no ACKs flow, and POLLOUT never fires.
+            // The 1ms minimum gives the kernel time to receive TCP ACKs from
+            // the server and signal POLLOUT, breaking the circular deadlock.
+            const any_needs_pollout = if (single_sock) |ss|
+                ss.needs_pollout
+            else if (self.conn_manager) |cm|
+                cm.hasPendingOutbound()
+            else
+                false;
+            const poll_timeout_ms: i32 = if (last_iter_had_work and !any_needs_pollout)
+                @as(i32, 0)
+            else
+                @as(i32, 1);
+            // Reset — inbound/outbound sections below will set it true on work.
             last_iter_had_work = false;
 
-            // macOS poll(timeout=0) can sleep for 1 scheduler tick (~10ms)
-            // unpredictably even with a zero timeout. During those 10ms the
-            // kernel TCP recv buffer fills, the server's congestion window
-            // collapses, and it takes seconds to recover — causing the
-            // progressive DL/UL degradation we've been chasing.
-            //
-            // Fix: check if OpenSSL already has decrypted data buffered. If
-            // yes, skip poll() entirely this iteration — drain the buffered
-            // data immediately. Only fall through to poll() when genuinely
-            // idle (no pending data), where the 10ms sleep is acceptable.
-            var skip_poll = false;
-            if (!multi_conn) {
-                if (single_sock) |ss| {
-                    if (ss.hasPending() or ss.kernelRecvQueue() > 0) skip_poll = true;
-                }
-            } else {
-                if (self.conn_manager) |*cm| {
-                    for (cm.connections[0..cm.count]) |*slot| {
-                        if (slot.*) |*conn| {
-                            if (conn.established and (conn.tls_socket.hasPending() or conn.tls_socket.kernelRecvQueue() > 0)) {
-                                skip_poll = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
             const poll_t0 = std.time.microTimestamp();
-            if (!skip_poll) {
-                _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
-            } else {
-                // Keep poll timeout=0 next iter — more data likely follows
-                last_iter_had_work = true;
-            }
+            _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
             if (poll_us > diag.poll_us_max) diag.poll_us_max = poll_us;
             diag.poll_us_total += poll_us;
 
             const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[poll_tun_idx].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[poll_udp_idx].revents & std.posix.POLL.IN) != 0;
-            if (skip_poll) diag.pollout_skipped += 1;
+
+            // ============================================================
+            // PENDING WRITE RETRY — drain any stashed outbound data before
+            // processing new inbound. POLLOUT fired → kernel has room.
+            // Retry with the exact same pending buffer pointer (OpenSSL
+            // requires it). This runs BEFORE inbound so that outbound bytes
+            // drain first, preventing the cascade where write_blocked
+            // inbound starvation collapses DL throughput.
+            // ============================================================
+            if (single_sock) |ss| {
+                if (ss.needs_pollout and (poll_fds[0].revents & std.posix.POLL.OUT) != 0) {
+                    if (try ss.retryPendingWrite()) last_iter_had_work = true;
+                }
+            } else if (self.conn_manager) |*cm| {
+                for (cm.connections[0..cm.count]) |*slot| {
+                    if (slot.*) |*conn| {
+                        if (conn.tls_socket.needs_pollout) {
+                            const has_out = (poll_fds[0].revents & std.posix.POLL.OUT) != 0;
+                            if (has_out) {
+                                if (try conn.tls_socket.retryPendingWrite()) last_iter_had_work = true;
+                            }
+                        }
+                    }
+                }
+            }
 
             // Decay pending bytes for load balancing (multi-connection)
             if (self.conn_manager) |*cm| cm.decayPendingBytes();
@@ -2039,6 +2049,24 @@ pub const VpnClient = struct {
             // OUTBOUND: Read from TUN and send to VPN (batched for throughput)
             // Prefer UDP if established, fall back to TCP.
             //
+            // PACKET COPY BUDGET (MTU=1500, no compression, current path):
+            //   1. dev.read(tun_read_bufs[i]) → IP packet from kernel   [1 copy]
+            //   2. wrapIpInEthernet(ip, &outbound_eth_bufs[i])          [2nd copy]
+            //   3. sendBlocksZeroCopy(eth_bufs, send_buffer)            [3rd copy]
+            //   4. SSL_write → kernel                                    [4th copy]
+            // Total: ~4 copies per outbound packet (~12 MB/s at 50 Mbps).
+            //
+            // Optimized path (sendIpPacketsDirect in tunnel.zig):
+            //   1. dev.read(tun_read_bufs[i]) → IP packet from kernel   [1 copy]
+            //   2. sendIpPacketsDirect builds Eth hdr + IP directly     [2nd copy]
+            //      into send_buffer (eliminates wrapIpInEthernet copy)
+            //   3. SSL_write → kernel                                    [3rd copy]
+            // Total: ~3 copies per outbound packet (~9 MB/s at 50 Mbps).
+            //
+            // The data loop currently uses the 3-copy path (wrap + sendBlocksZeroCopy).
+            // To use the 2-copy sendIpPacketsDirect, pass raw IP packets + MACs
+            // instead of pre-wrapped Ethernet frames. See tunnel.zig for details.
+            //
             // BACKPRESSURE: Sample kernel send queue depth and throttle the
             // outbound batch size. When sendq is high, halve the batch so the
             // kernel has time to drain before we pile on more. We do NOT cap
@@ -2052,20 +2080,28 @@ pub const VpnClient = struct {
             // established connection — not just the primary. Otherwise 8 conns
             // each at 1 MB queued = 8 MB of in-flight data with no throttle.
             //
-            // We MUST NOT gate TUN reads entirely (as was tried with poll-level
-            // gating) because in a VPN tunnel, outbound carries download ACKs
-            // — blocking them causes the content server to stall, collapsing
-            // download from 100+ Mbps to <1 Mbps.
+            // We MUST NOT gate TUN reads entirely because in a VPN tunnel,
+            // Always try outbound when configured. The TUN fd is non-blocking
+            // — dev.read() returns null (~1μs) when the OS has no queued packets.
+            // The tun_readable check (from poll revents) is NOT used because:
             //
-            // FIX: also try outbound when skip_poll = true. When TLS has
-            // pending data the poll_fds are rebuilt with revents=0 and poll()
-            // is skipped, so tun_readable is always false. Without this, the
-            // outbound path (ACKs, new upload conns) is completely starved
-            // during any continuous download burst. The TUN fd is non-blocking
-            // so a read with no data returns WouldBlock instantly.
-            const sendq_throttle_med: u32 = 256 * 1024; // 256 KB — halve batch
-            const sendq_throttle_high: u32 = 512 * 1024; // 512 KB — minimum batch (single-conn only)
-            if (is_configured and (tun_readable or skip_poll)) {
+            // 1. After inbound writes a packet to TUN, the OS generates an ACK
+            //    microseconds later — but poll() has already returned with the
+            //    old revents. By the time we reach outbound, TUN has data but
+            //    poll's revents say it doesn't. Missing this ACK delays the
+            //    server's cwnd growth by one full poll cycle (up to 1ms).
+            //
+            // 2. During concurrent UL/DL, TUN is constantly readable from both
+            //    UL data and DL ACKs. tun_readable gates don't save anything.
+            //
+            // 3. The original working build (50+ Mbps) used the equivalent of
+            //    unconditionally: `(tun_readable or skip_poll)` where skip_poll
+            //    was true every time there was any TLS pending — which was
+            //    every iteration during active DL.
+            const sendq_throttle_med: u32 = 768 * 1024; // 768 KB (37% of 2MB SO_SNDBUF) — halve batch
+            const sendq_throttle_high: u32 = 1024 * 1024; // 1 MB (50% of 2MB SO_SNDBUF) — minimum batch
+            const sendq_throttle_critical: u32 = 1536 * 1024; // 1.5 MB (75% of 2MB) — single packet. When sndbuf is nearly full, each SSL_write blocks on WANT_WRITE for ~14 retries. With batch=4 that's 56 retries per iteration, starving inbound. With batch=1 it's just 14 retries, giving inbound more time to send DL ACKs.
+            if (is_configured) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
                         var sendq: u32 = 0;
@@ -2091,7 +2127,9 @@ pub const VpnClient = struct {
                             }
                             if (sq_count > 0) sendq = @intCast(@min(sq_sum / sq_count, std.math.maxInt(u32)));
                         }
-                        const batch_limit: usize = if (!is_multi and sendq >= sendq_throttle_high)
+                        const batch_limit: usize = if (sendq >= sendq_throttle_critical)
+                            @min(OUTBOUND_BATCH, 1)
+                        else if (!is_multi and sendq >= sendq_throttle_high)
                             @min(OUTBOUND_BATCH, 4)
                         else if (sendq >= sendq_throttle_med)
                             OUTBOUND_BATCH / 2
@@ -2168,6 +2206,52 @@ pub const VpnClient = struct {
                             }
                             self.stats.recordSent(outbound_bytes);
                         }
+                    }
+                }
+            }
+
+            // ============================================================
+            // FALLBACK PENDING WRITE RETRY — flush any stashed outbound data
+            // even when poll() did NOT signal POLLOUT. The inbound section
+            // (above) and TUN outbound section (above) may have consumed TCP
+            // segments that piggybacked ACKs for our outbound data, freeing
+            // send buffer space. Without this fallback, once needs_pollout is
+            // set, the loop depends ENTIRELY on POLLOUT to retry — but POLLOUT
+            // requires a TCP ACK, the ACK requires inbound processing... the
+            // circular deadlock. This unconditional retry breaks the cycle.
+            // ============================================================
+            if (single_sock) |ss| {
+                if (ss.needs_pollout) {
+                    if (try ss.retryPendingWrite()) last_iter_had_work = true;
+                }
+            } else if (self.conn_manager) |*cm| {
+                for (cm.connections[0..cm.count]) |*slot| {
+                    if (slot.*) |*conn| {
+                        if (conn.tls_socket.needs_pollout) {
+                            if (try conn.tls_socket.retryPendingWrite()) last_iter_had_work = true;
+                        }
+                    }
+                }
+            }
+
+            // ============================================================
+            // STALL DETECTION — track consecutive iterations where
+            // needs_pollout is true and no real work happened. When stuck,
+            // stalled_iters climbs monotonically. Resets on any successful
+            // retryPendingWrite or any inbound data receipt.
+            // ============================================================
+            {
+                const had_stalled = diag.stalled_iters;
+                const is_stalled = any_needs_pollout and !last_iter_had_work;
+                if (is_stalled) {
+                    diag.stalled_iters +|= 1;
+                } else if (diag.stalled_iters > 0) {
+                    diag.stalled_iters = 0;
+                }
+                // Log warning at thresholds so users see the deadlock in logs
+                if (diag.stalled_iters > 0 and diag.stalled_iters != had_stalled) {
+                    if (diag.stalled_iters == 100 or diag.stalled_iters == 1000 or diag.stalled_iters % 10000 == 0) {
+                        std.log.warn("STALLED: needs_pollout=true for {d} iterations — TCP sndbuf full, inbound starved", .{diag.stalled_iters});
                     }
                 }
             }
@@ -2399,14 +2483,13 @@ pub const VpnClient = struct {
                         @as(f64, @floatFromInt(diag.sendq_sum)) / @as(f64, @floatFromInt(diag.sendq_samples))
                     else
                         0.0;
-                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B pollout_skip={d} tcp_drop={d}p fda_drop={d}p tun_eagain={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d}", .{
+                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B tcp_drop={d}p fda_drop={d}p tun_eagain={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d} stalled={d}", .{
                         mbps_in,             diag.pkts_in,        mbps_out,             diag.pkts_out,
                         drain_avg,           diag.drain_max,      diag.drain_cap_hits,  diag.ssl_pending_max,
-                        diag.nread_max,      diag.nwrite_max,     diag.pollout_skipped, diag.tcp_drops_pkts,
-                        diag.tx_drops_delta, diag.tun_eagain,     diag.poll_iters,      iter_avg_us,
-                        diag.iter_us_max,
+                        diag.nread_max,      diag.nwrite_max,     diag.tcp_drops_pkts,  diag.tx_drops_delta,
+                        diag.tun_eagain,     diag.poll_iters,     iter_avg_us,          diag.iter_us_max,
                         diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,
-                        diag.sendq_max,      sendq_avg,           diag.write_blocked,
+                        diag.sendq_max,      sendq_avg,           diag.write_blocked,   diag.stalled_iters,
                     });
                     // TX-path trace: where do upload bytes go? Tracks TUN→Ethernet→TLS.
                     // When upload is stalled (ul < 0.5 Mbps, dl > 1 Mbps), this reveals
@@ -2420,7 +2503,6 @@ pub const VpnClient = struct {
                             diag.sendq_max,      sendq_avg,      diag.write_blocked,
                         });
                     }
-
 
                     // Health check: detect broken data plane (server-side upload stall).
                     // Ratio threshold: upload < 1.5% of download. Healthy TCP ACK
@@ -2499,7 +2581,6 @@ pub const VpnClient = struct {
 
         std.log.info("Data channel loop ended", .{});
     }
-
 };
 
 // ============================================================================
