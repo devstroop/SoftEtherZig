@@ -1821,11 +1821,12 @@ pub const VpnClient = struct {
             const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + (if (has_udp) @as(usize, 2) else if (builtin.os.tag == .windows) @as(usize, 0) else @as(usize, 1)));
             // Adaptive poll: timeout=0 (immediate) when last iter did REAL work,
             // timeout=1ms when idle or stuck. When needs_pollout is true, TUN
-            // reads are silently dropped (WouldBlock swallowed by write_fn) —
-            // counting this as "work" creates a busy-spin at poll(0) where
-            // inbound is never processed, no ACKs flow, and POLLOUT never fires.
-            // The 1ms minimum gives the kernel time to receive TCP ACKs from
-            // the server and signal POLLOUT, breaking the circular deadlock.
+            // reads are silently dropped (WouldBlock swallowed by write_fn) and
+            // inbound-acl generated responses also hit WouldBlock — counting
+            // these as "work" creates a busy-spin at poll(0) where no ACKs flow
+            // and POLLOUT never fires. The 1ms minimum gives the kernel time to
+            // receive TCP ACKs from the server and signal POLLOUT, breaking the
+            // circular deadlock.
             const any_needs_pollout = if (single_sock) |ss|
                 ss.needs_pollout
             else if (self.conn_manager) |cm|
@@ -2046,6 +2047,29 @@ pub const VpnClient = struct {
                 }
             }
 
+            // ============================================================
+            // MID-LOOP PENDING WRITE RETRY — flush pending_outbound BEFORE
+            // reading new UL data from TUN. Without this, a POLLOUT that
+            // fired during inbound processing (piggybacked ACK in server's
+            // DL TCP segment) is missed by the pre-inbound retry. The TUN
+            // section then runs with needs_pollout=true, silently dropping
+            // all UL data. This retry clears needs_pollout so the TUN
+            // section's writes actually succeed.
+            // ============================================================
+            if (single_sock) |ss| {
+                if (ss.needs_pollout) {
+                    if (try ss.retryPendingWrite()) last_iter_had_work = true;
+                }
+            } else if (self.conn_manager) |*cm| {
+                for (cm.connections[0..cm.count]) |*slot| {
+                    if (slot.*) |*conn| {
+                        if (conn.tls_socket.needs_pollout) {
+                            if (try conn.tls_socket.retryPendingWrite()) last_iter_had_work = true;
+                        }
+                    }
+                }
+            }
+
             // OUTBOUND: Read from TUN and send to VPN (batched for throughput)
             // Prefer UDP if established, fall back to TCP.
             //
@@ -2098,9 +2122,11 @@ pub const VpnClient = struct {
             //    unconditionally: `(tun_readable or skip_poll)` where skip_poll
             //    was true every time there was any TLS pending — which was
             //    every iteration during active DL.
-            const sendq_throttle_med: u32 = 768 * 1024; // 768 KB (37% of 2MB SO_SNDBUF) — halve batch
-            const sendq_throttle_high: u32 = 1024 * 1024; // 1 MB (50% of 2MB SO_SNDBUF) — minimum batch
-            const sendq_throttle_critical: u32 = 1536 * 1024; // 1.5 MB (75% of 2MB) — single packet. When sndbuf is nearly full, each SSL_write blocks on WANT_WRITE for ~14 retries. With batch=4 that's 56 retries per iteration, starving inbound. With batch=1 it's just 14 retries, giving inbound more time to send DL ACKs.
+            const sendq_throttle_med: u32 = 768 * 1024; // 768 KB — halve batch. Kept at 2MB-SO_SNDBUF levels even though
+            const sendq_throttle_high: u32 = 1024 * 1024; // 1 MB — minimum batch.  Larger throttle values let sendq
+            const sendq_throttle_critical: u32 = 1536 * 1024; // 1.5 MB — single packet.  fill to 3-4MB before backoff,
+            // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
+            // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
@@ -2248,10 +2274,17 @@ pub const VpnClient = struct {
                 } else if (diag.stalled_iters > 0) {
                     diag.stalled_iters = 0;
                 }
-                // Log warning at thresholds so users see the deadlock in logs
+                // Log warning at thresholds so users see real deadlocks.
+                // 100 iterations (100ms) is normal TCP drain at 166ms RTT —
+                // the server ACK takes 1 RTT to arrive, during which
+                // needs_pollout stays true. 1000 iterations (1 second)
+                // indicates a genuine event-loop stall, not just TCP drain.
                 if (diag.stalled_iters > 0 and diag.stalled_iters != had_stalled) {
-                    if (diag.stalled_iters == 100 or diag.stalled_iters == 1000 or diag.stalled_iters % 10000 == 0) {
-                        std.log.warn("STALLED: needs_pollout=true for {d} iterations — TCP sndbuf full, inbound starved", .{diag.stalled_iters});
+                    if (diag.stalled_iters == 1000) {
+                        std.log.warn("STALLED: needs_pollout=true for 1000 iterations — possible deadlock", .{});
+                    }
+                    if (diag.stalled_iters > 0 and diag.stalled_iters % 10000 == 0) {
+                        std.log.warn("STALLED: needs_pollout=true for {d} iterations — deadlock confirmed", .{diag.stalled_iters});
                     }
                 }
             }
@@ -2415,7 +2448,22 @@ pub const VpnClient = struct {
             // Use OR-set so any work source keeps the flag true. The flag is
             // cleared at the TOP of each iter (just before poll), so this only
             // preserves work observed during THIS iter, not all prior iters.
-            if (tun_readable) last_iter_had_work = true;
+            // Only count TUN readability as "real work" when we can actually
+            // send the data. When needs_pollout is true, the write_fn silently
+            // swallows WouldBlock — TUN data is dropped without any real work
+            // done. Counting fake work keeps last_iter_had_work=true, which
+            // forces poll(0) on the next iteration → busy-spin where no ACKs
+            // flow and POLLOUT never fires. The fallback retryPendingWrite()
+            // (above) handles draining when POLLOUT eventually fires.
+            if (tun_readable) {
+                if (single_sock) |ss| {
+                    if (!ss.needs_pollout) last_iter_had_work = true;
+                } else if (self.conn_manager) |cm| {
+                    if (!cm.hasPendingOutbound()) last_iter_had_work = true;
+                } else {
+                    last_iter_had_work = true;
+                }
+            }
 
             // Bufferbloat sampling — snapshot kernel TCP sendq depth across
             // all conns and accumulate write-blocked deltas.

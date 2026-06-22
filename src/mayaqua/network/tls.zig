@@ -835,28 +835,37 @@ pub const TlsSocket = struct {
 
     /// Retry a pending outbound write. Returns true when fully written.
     /// Called from main loop when POLLOUT fires on this socket.
+    ///
+    /// Loops internally to drain as many TLS records as possible in a single
+    /// call. Without the loop, a 100KB pending buffer with 16KB TLS records
+    /// takes 6+ poll(1ms) iterations to drain — and during every drain
+    /// iteration, TUN reads are silently dropped (needs_pollout=true blocks
+    /// writeAllNonBlocking). Each dropped TUN read is lost UL data. The loop
+    /// eliminates the per-record iteration cost.
     pub fn retryPendingWrite(self: *TlsSocket) !bool {
-        if (self.pending_outbound.len == 0) return true;
-        const n = self.write(self.pending_outbound) catch |err| switch (err) {
-            error.WouldBlock => return false,
-            else => |e| {
+        while (self.pending_outbound.len > 0) {
+            const n = self.write(self.pending_outbound) catch |err| switch (err) {
+                error.WouldBlock => return false, // sndbuf full, retry next iter
+                else => |e| {
+                    self.pending_outbound = "";
+                    self.needs_pollout = false;
+                    return e;
+                },
+            };
+            if (n == 0) {
                 self.pending_outbound = "";
                 self.needs_pollout = false;
-                return e;
-            },
-        };
-        if (n == 0) {
-            self.pending_outbound = "";
-            self.needs_pollout = false;
-            return error.BrokenPipe;
+                return error.BrokenPipe;
+            }
+            if (n >= self.pending_outbound.len) {
+                self.pending_outbound = "";
+                self.needs_pollout = false;
+                return true;
+            }
+            // Partial write — advance and loop to write the next TLS record
+            self.pending_outbound = self.pending_outbound[n..];
         }
-        if (n >= self.pending_outbound.len) {
-            self.pending_outbound = "";
-            self.needs_pollout = false;
-            return true;
-        }
-        self.pending_outbound = self.pending_outbound[n..];
-        return false;
+        return true;
     }
 
     /// Switch the underlying TCP socket to non-blocking mode.
@@ -929,17 +938,21 @@ pub const TlsSocket = struct {
         const keepalive: u32 = 1;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&keepalive)) catch {};
 
-        // SO_SNDBUF sizing (per RCA docs/PERFORMANCE_REGRESSION.md, RC1):
-        //   - 4MB: sendq fills to 3.1MB during upload → sendq_throttle_critical
-        //     triggers → batch_limit=0 → spin loop (54K iters/sec, no inbound)
-        //     → DL permanently drops to 1 Mbps. CONFIRMED REGRESSION.
-        //   - 2MB: BDP at 90 Mbps / 180ms RTT = 2.0MB. Send queue drains before
-        //     causing prolonged stalls. Write_blocked events (POLLOUT between
-        //     SSL_write calls) are bounded to ~500ms/s, leaving room for inbound.
-        //     Proven working: 50+ Mbps DL/UL in the reference stable build.
+        // SO_SNDBUF sizing:
+        //   - 2MB: BDP at 90 Mbps / 180ms RTT = 2.0MB. Matches the sendq
+        //     throttle thresholds (critical=1.5MB = 75%). When the throttle
+        //     limits batch to 1 at 1.5MB, the buffer has only 0.5MB headroom
+        //     to fill before hitting the ceiling → Server cwnd never fully
+        //     collapses → UL oscillates in a narrow 20-50→80 Mbps band
+        //     instead of violent 28-96 Mbps plunges.
+        //   - 4MB: 2.5MB headroom between throttle (1.5MB) and ceiling (4MB)
+        //     → buffer fills completely → server cwnd collapses to zero →
+        //     10+ second drain at 3 Mbps ACK rate → violent TCP sawtooth.
+        //     The original deadlock (poll(0) busy-spin) is now fixed via
+        //     needs_pollout poll timeout, so 4MB no longer causes permanent
+        //     DL collapse — but the bufferbloat-induced cwnd sawtooth remains.
         //   - Kernel does NOT double SO_SNDBUF on macOS (measured via SO_NWRITE).
-        //     The earlier comment about "kernel doubles to ~8MB" was WRONG.
-        const snd_cap: u32 = 4 * 1024 * 1024;
+        const snd_cap: u32 = 2 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the
