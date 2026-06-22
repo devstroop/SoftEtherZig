@@ -41,6 +41,10 @@ pub fn build(b: *std.Build) void {
             break :blk p;
         }
         break :blk "/opt/homebrew/opt/openssl@3/lib"; // fallback
+    } else if (target_os == .ios) blk: {
+        const ios_root = b.build_root.path orelse ".";
+        const ios_lib = std.fs.path.join(b.allocator, &.{ ios_root, "deps", "openssl-ios", "lib" }) catch break :blk "";
+        break :blk ios_lib;
     } else "";
     const openssl_include: []const u8 = if (target_os == .macos) blk: {
         const candidates = [_][]const u8{
@@ -52,6 +56,11 @@ pub fn build(b: *std.Build) void {
             break :blk p;
         }
         break :blk "/opt/homebrew/opt/openssl@3/include"; // fallback
+    } else if (target_os == .ios) blk: {
+        // iOS cross-compilation: use bundled static OpenSSL libs from deps/
+        const ios_root = b.build_root.path orelse ".";
+        const ios_inc = std.fs.path.join(b.allocator, &.{ ios_root, "deps", "openssl-ios", "include" }) catch break :blk "";
+        break :blk ios_inc;
     } else "";
 
     // Windows: detect OpenSSL installation path
@@ -306,6 +315,12 @@ pub fn build(b: *std.Build) void {
                 step.addIncludePath(.{ .cwd_relative = mac_inc });
                 step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
                 step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+            } else if (os == .ios) {
+                step.addLibraryPath(.{ .cwd_relative = mac_lib });
+                step.addIncludePath(.{ .cwd_relative = mac_inc });
+                step.addSystemIncludePath(.{ .cwd_relative = mac_inc });
+                step.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+                step.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
             } else if (os == .windows) {
                 step.addLibraryPath(.{ .cwd_relative = win_lib });
                 step.addIncludePath(.{ .cwd_relative = win_inc });

@@ -653,6 +653,20 @@ export fn softether_set_ip_version(client: ?*VpnClient, version: c_int) void {
     };
 }
 
+/// Switch to plain password auth (authtype=2) instead of hashed.
+/// Must be called BEFORE connect(). If not called, the client uses
+/// the default hashed-password auth (authtype=1) created at init.
+export fn softether_set_plain_password(client: ?*VpnClient) void {
+    const c = client orelse return;
+    if (c.config.auth == .password) {
+        const pw = c.config.auth.password;
+        c.config.auth = .{ .plain_password = .{
+            .username = pw.username,
+            .password = pw.password,
+        }};
+    }
+}
+
 /// Set proxy configuration. Must be called before connect().
 /// proxy_type: 0=none (clears), 1=HTTP, 2=SOCKS5.
 /// host/port/username/password are ignored when proxy_type is 0.
