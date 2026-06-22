@@ -94,18 +94,23 @@ const winmm = if (builtin.os.tag == .windows) struct {
 
 /// Authentication method for VPN connection
 pub const AuthMethod = union(enum) {
-    /// Password authentication
+    /// Password authentication (SHA-256 hashed, authtype=1)
     password: struct {
         username: []const u8,
         password: []const u8,
         is_hashed: bool = false,
     },
-    /// Certificate authentication
+    /// Plaintext password authentication (authtype=2) for older servers
+    plain_password: struct {
+        username: []const u8,
+        password: []const u8,
+    },
+    /// Certificate authentication (authtype=3)
     certificate: struct {
         cert_data: []const u8,
         key_data: []const u8,
     },
-    /// Anonymous authentication
+    /// Anonymous authentication (authtype=0)
     anonymous: void,
 };
 

@@ -128,6 +128,17 @@ pub fn run(client: *VpnClient) !void {
                 ) catch return ClientError.OutOfMemory;
             }
         },
+        .plain_password => |p| softether_proto.buildPlainsPasswordAuth(
+            client.allocator,
+            p.username,
+            p.password,
+            client.config.hub_name,
+            server_ip,
+            server_hostname,
+            client.config.udp_acceleration,
+            bulk_keys_ptr,
+            session_opts,
+        ) catch return ClientError.OutOfMemory,
         .anonymous => softether_proto.buildAnonymousAuth(
             client.allocator,
             client.config.hub_name,
@@ -359,6 +370,7 @@ fn runRedirect(
     // Get username for ticket auth
     const username = switch (client.config.auth) {
         .password => |p| p.username,
+        .plain_password => |p| p.username,
         .anonymous => "anonymous",
         .certificate => "certificate",
     };

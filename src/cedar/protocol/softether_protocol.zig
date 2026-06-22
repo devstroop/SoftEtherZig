@@ -613,6 +613,122 @@ pub fn buildPasswordAuth(
     return auth_pack.toBytes(allocator);
 }
 
+/// Build Auth Pack with plaintext password (authtype=2).
+/// Used when connecting to older SoftEther servers or VPN Gate relays
+/// that require plaintext password authentication instead of hashed.
+pub fn buildPlainsPasswordAuth(
+    allocator: Allocator,
+    username: []const u8,
+    password: []const u8,
+    hub_name: []const u8,
+    server_ip: u32,
+    server_hostname: []const u8,
+    udp_accel: bool,
+    bulk_keys: ?*const UdpBulkKeys,
+    opts: SessionOptions,
+) ![]u8 {
+    _ = bulk_keys;
+    var auth_pack = Pack.init(allocator);
+    defer auth_pack.deinit();
+
+    // Authentication fields — plaintext, no hashing
+    try auth_pack.addStr("method", "login");
+    try auth_pack.addStr("hubname", hub_name);
+    try auth_pack.addStr("username", username);
+    try auth_pack.addInt("authtype", @intFromEnum(AuthType.plain_password));
+    try auth_pack.addStr("password", password);
+
+    // Protocol metadata
+    try auth_pack.addStr("client_str", Protocol.client_str);
+    try auth_pack.addInt("client_ver", Protocol.client_ver);
+    try auth_pack.addInt("client_build", Protocol.client_build);
+    try auth_pack.addInt("protocol", 0);
+
+    try auth_pack.addStr("hello", Protocol.client_str);
+    try auth_pack.addInt("version", Protocol.client_ver);
+    try auth_pack.addInt("build", Protocol.client_build);
+    try auth_pack.addInt("client_id", 0);
+
+    // Protocol options
+    try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
+    try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_compress", opts.use_compress);
+    try auth_pack.addBool("half_connection", opts.half_connection);
+
+    try auth_pack.addBool("require_bridge_routing_mode", false);
+    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("qos", opts.qos);
+    try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
+    try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
+    try auth_pack.addBool("support_udp_recovery", false);
+
+    // Unique client ID
+    const unique_id: [Protocol.sha1_size]u8 = [1]u8{0} ** Protocol.sha1_size;
+    try auth_pack.addData("unique_id", &unique_id);
+
+    if (udp_accel) {
+        try auth_pack.addInt("rudp_bulk_max_version", 1);
+    } else {
+        try auth_pack.addInt("rudp_bulk_max_version", 0);
+    }
+
+    // OS info
+    const os_info_anon = getOsInfo();
+    try auth_pack.addStr("ClientProductName", Protocol.client_str);
+    try auth_pack.addStr("ServerProductName", "");
+    try auth_pack.addStr("ClientOsName", os_info_anon.name);
+    try auth_pack.addStr("ClientOsVer", os_info_anon.version);
+    try auth_pack.addStr("ClientOsProductId", "");
+    try auth_pack.addStr("ClientHostname", "zig-client");
+    try auth_pack.addStr("ServerHostname", server_hostname);
+    try auth_pack.addStr("ProxyHostname", "");
+    try auth_pack.addData("UniqueId", &unique_id);
+    try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
+    try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
+    try auth_pack.addInt("ServerProductVer", 0);
+    try auth_pack.addInt("ServerProductBuild", 0);
+
+    // Network info
+    try auth_pack.addBool("ClientIpAddress@ipv6_bool", false);
+    try auth_pack.addData("ClientIpAddress@ipv6_array", &[_]u8{0} ** 16);
+    try auth_pack.addInt("ClientIpAddress@ipv6_scope_id", 0);
+    try auth_pack.addInt("ClientIpAddress", 0);
+    try auth_pack.addData("ClientIpAddress6", &[_]u8{0} ** 16);
+    try auth_pack.addInt("ClientPort", 0);
+
+    try auth_pack.addBool("ServerIpAddress@ipv6_bool", false);
+    try auth_pack.addData("ServerIpAddress@ipv6_array", &[_]u8{0} ** 16);
+    try auth_pack.addInt("ServerIpAddress@ipv6_scope_id", 0);
+    try auth_pack.addInt("ServerIpAddress", server_ip);
+    try auth_pack.addData("ServerIpAddress6", &[_]u8{0} ** 16);
+    try auth_pack.addInt("ServerPort2", 0);
+
+    try auth_pack.addBool("ProxyIpAddress@ipv6_bool", false);
+    try auth_pack.addData("ProxyIpAddress@ipv6_array", &[_]u8{0} ** 16);
+    try auth_pack.addInt("ProxyIpAddress@ipv6_scope_id", 0);
+    try auth_pack.addInt("ProxyIpAddress", 0);
+    try auth_pack.addData("ProxyIpAddress6", &[_]u8{0} ** 16);
+    try auth_pack.addInt("ProxyPort", 0);
+
+    // OS version
+    try auth_pack.addInt("V_IsWindows", 0);
+    try auth_pack.addInt("V_IsNT", 0);
+    try auth_pack.addInt("V_IsServer", 0);
+    try auth_pack.addInt("V_IsBeta", 0);
+    try auth_pack.addInt("V_VerMajor", 14);
+    try auth_pack.addInt("V_VerMinor", 0);
+    try auth_pack.addInt("V_Build", 0);
+    try auth_pack.addInt("V_ServicePack", 0);
+    try auth_pack.addStr("V_Title", os_info_anon.title);
+
+    var pencore_buf2: [1000]u8 = undefined;
+    const pencore_size2 = crypto.random.intRangeAtMost(usize, 0, 1000);
+    crypto.random.bytes(pencore_buf2[0..pencore_size2]);
+    try auth_pack.addData("pencore", pencore_buf2[0..pencore_size2]);
+
+    return auth_pack.toBytes(allocator);
+}
+
 /// Build Auth Pack with pre-hashed password (base64 encoded)
 pub fn buildPasswordAuthWithHash(
     allocator: Allocator,

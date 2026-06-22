@@ -27,6 +27,7 @@ fn createSession(client: *VpnClient) void {
     if (client.config.use_encrypt and client.auth_session_key != null and client.auth_hello_random != null) {
         const username = switch (client.config.auth) {
             .password => |p| p.username,
+            .plain_password => |p| p.username,
             .anonymous => "anonymous",
             .certificate => "certificate",
         };
