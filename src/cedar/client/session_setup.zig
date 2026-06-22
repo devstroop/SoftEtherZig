@@ -53,6 +53,18 @@ fn createSession(client: *VpnClient) void {
 fn establishAdditionalConnections(client: *VpnClient) void {
     if (client.config.max_connections <= 1) return;
 
+    // In half-connection mode, the C2S connection is TX-only. Dual-stack
+    // IPv6 traffic (DHCPv6 solicitation, neighbor discovery) competes with
+    // UL data for the 2MB SO_SNDBUF on this connection, causing cwnd recovery
+    // starvation after UL bursts. Default to IPv4-only in halfconn unless
+    // the user explicitly requested dual-stack via config.
+    //   halfconn dual-stack:  UL 38.3 Mbps (stuck at 16-27 after burst)
+    //   halfconn ipv4-only:   UL 51.5 Mbps (recovers to 41-59 after burst)
+    if (client.config.half_connection and client.config.ip_version == null) {
+        client.config.ip_version = .v4;
+        std.log.info("Half-connection mode: defaulting to IPv4-only (set ip_version in config to use dual-stack)", .{});
+    }
+
     const session_key = client.auth_session_key orelse {
         std.log.warn("No session key available, skipping additional connections", .{});
         return;
