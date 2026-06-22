@@ -259,9 +259,16 @@ pub const TunLinuxDevice = struct {
             return TunLinuxError.ConfigureFailed;
         };
 
-        if (result.Exited != 0) {
-            std.log.warn("ip addr command returned non-zero: {}", .{result.Exited});
-            // Continue anyway - address might already be set
+        switch (result) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.log.warn("ip addr command returned non-zero: {}", .{code});
+                    // Continue anyway - address might already be set
+                }
+            },
+            else => {
+                std.log.warn("ip addr command terminated abnormally", .{});
+            },
         }
 
         // Set MTU using ip link
@@ -338,8 +345,15 @@ pub const TunLinuxDevice = struct {
             return TunLinuxError.ConfigureFailed;
         };
 
-        if (result.Exited != 0) {
-            std.log.warn("ip -6 addr command returned non-zero: {}", .{result.Exited});
+        switch (result) {
+            .Exited => |code| {
+                if (code != 0) {
+                    std.log.warn("ip -6 addr command returned non-zero: {}", .{code});
+                }
+            },
+            else => {
+                std.log.warn("ip -6 addr command terminated abnormally", .{});
+            },
         }
     }
 

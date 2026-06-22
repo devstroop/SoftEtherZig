@@ -93,60 +93,20 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          set -euo pipefail
-
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config dpkg-dev
-
-          # Determine the multiarch triplet (e.g. x86_64-linux-gnu)
-          MULTIARCH="$(dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null || gcc -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)"
-          PC_DIR="/usr/lib/${MULTIARCH}/pkgconfig"
-          echo "Multiarch: ${MULTIARCH}"
-          echo "PC_DIR:    ${PC_DIR}"
-
-          # Create pkg-config aliases: libssl.pc → ssl.pc, libcrypto.pc → crypto.pc
-          # Zig's linkSystemLibrary("ssl") looks for module "ssl", but libssl-dev
-          # installs libssl.pc (module "libssl") — the symlinks bridge the gap.
+          sudo apt-get install -y libssl-dev pkg-config
+          # Create pkg-config aliases for zig's linkSystemLibrary("ssl").
+          # libssl-dev installs libssl.pc (module "libssl") but zig looks for
+          # module "ssl" — create symlinks so pkg-config finds them.
+          PC_DIR="/usr/lib/$(dpkg-architecture -q DEB_HOST_MULTIARCH)/pkgconfig"
           for pair in "libssl:ssl" "libcrypto:crypto"; do
             src="${pair%:*}.pc"
             dst="${pair#*:*}.pc"
             if [ -f "$PC_DIR/$src" ]; then
               sudo ln -sf "$PC_DIR/$src" "$PC_DIR/$dst"
-              echo "  Aliased $src → $dst"
-            else
-              echo "  WARNING: $PC_DIR/$src not found — skipping"
+              echo "Aliased $src → $dst"
             fi
           done
-
-          # Export PKG_CONFIG_PATH so the Zig compiler's pkg-config invocation
-          # finds the .pc files.
-          echo "PKG_CONFIG_PATH=${PC_DIR}" >> "$GITHUB_ENV"
-          echo "Exported PKG_CONFIG_PATH=${PC_DIR}"
-
-          # On Debian/Ubuntu, OpenSSL 3.x puts platform-specific config headers
-          # (e.g. openssl/opensslconf.h) in the multiarch include directory.
-          # Symlink them into the standard include tree so that -I/usr/include
-          # is sufficient and we don't need to add the entire multiarch include
-          # dir (which would pull in conflicting system glibc headers).
-          INC_DIR="/usr/include/${MULTIARCH}"
-          if [ -f "$INC_DIR/openssl/opensslconf.h" ] && [ ! -f "/usr/include/openssl/opensslconf.h" ]; then
-            sudo ln -sf "$INC_DIR/openssl/opensslconf.h" "/usr/include/openssl/opensslconf.h"
-            echo "Symlinked opensslconf.h from multiarch include dir"
-          fi
-          if [ -f "$INC_DIR/openssl/configuration.h" ] && [ ! -f "/usr/include/openssl/configuration.h" ]; then
-            sudo ln -sf "$INC_DIR/openssl/configuration.h" "/usr/include/openssl/configuration.h"
-            echo "Symlinked configuration.h from multiarch include dir"
-          fi
-
-          # Verify the include chain works
-          echo ""
-          echo "--- OpenSSL include verification ---"
-          if [ -f "/usr/include/openssl/opensslconf.h" ]; then
-            echo "  ✓ openssl/opensslconf.h is accessible from /usr/include"
-          else
-            echo "  ✗ openssl/opensslconf.h not found at /usr/include"
-            echo "    Checking multiarch: $(ls -la "$INC_DIR/openssl/" 2>/dev/null | head -5 || echo '(empty)')"
-          fi
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -290,12 +250,8 @@ jobs:
 
           BIN="zig-out/bin/vpnclient"
           [ "${{ runner.os }}" = "Windows" ] && BIN="${BIN}.exe"
-          # Linux: cap_net_admin is set via setcap above, so no sudo needed.
-          # macOS: needs sudo for TUN, but sudo -E to preserve env vars.
           SUDO=""
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            SUDO="sudo -E"
-          fi
+          [ "${{ matrix.needs_sudo }}" = "true" ] && SUDO="sudo"
 
           echo "::group::Platform info"
           uname -a
@@ -330,6 +286,7 @@ jobs:
           # Start vpnclient in daemon mode
           # The daemon runs its own data loop and stays connected
           # until signalled.
+          echo "Launching: $SUDO $BIN connect (env vars: SERVER=${SOFTETHER_SERVER}:${SOFTETHER_PORT:-443} HUB=${SOFTETHER_HUB:-VPN} USER=${SOFTETHER_USER})"
           $SUDO nohup "$BIN" connect \
             > /tmp/vpnclient.log 2>&1 &
           CLIENT_PID=$!
@@ -484,32 +441,296 @@ jobs:
           echo "| Username | ${{ env.SOFTETHER_USER }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Status | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Cleanup ─────────────────────────────────
-  cleanup_connect:
-    name: Cleanup stale routes
-    needs: [connect]
-    if: always()
+  # ── Interconnect iperf ──────────────────────────────────────────
+  # Opens two concurrent VPN sessions (devstroop1 & devstroop2)
+  # on the same Linux runner and measures throughput between them
+  # through the SoftEther hub.  Validates inter-client traffic
+  # flow and reveals any hub-side throughput gaps.
+  interconnect:
+    name: Interconnect iperf (hub throughput)
+    needs: [connect, setup]
+    if: ${{ fromJSON(needs.setup.outputs.num_creds) >= 2 }}
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config dpkg-dev
+          sudo apt-get install -y libssl-dev iperf3 pkg-config
+          PC_DIR="/usr/lib/$(dpkg-architecture -q DEB_HOST_MULTIARCH)/pkgconfig"
+          for pair in "libssl:ssl" "libcrypto:crypto"; do
+            src="${pair%:*}.pc"
+            dst="${pair#*:*}.pc"
+            if [ -f "$PC_DIR/$src" ]; then
+              sudo ln -sf "$PC_DIR/$src" "$PC_DIR/$dst"
+            fi
+          done
+
       - name: Build vpnclient
+        shell: bash
         env:
           ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zig-cache
         run: |
           zig build -Dtarget=x86_64-linux-gnu --release=fast
+
+      - name: Export server & client credentials
+        shell: bash
+        env:
+          VPN_CREDS: ${{ secrets.VPN_CREDS }}
+          NUM_CREDS: ${{ fromJSON(needs.setup.outputs.num_creds) }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${VPN_CREDS:-}" ]; then
+            echo "::error::Secret VPN_CREDS is not set!"
+            exit 1
+          fi
+
+          if [ "$NUM_CREDS" -lt 2 ]; then
+            echo "::warning::Need at least 2 credentials for interconnect (have $NUM_CREDS) — skipping"
+            exit 0
+          fi
+
+          # Single secret holds a JSON array.  Server = index 0, client = index 1.
+          # password_hash takes priority over password when both are present.
+          # The bash script below builds CLI flags from these:
+          #   vpnclient connect -s HOST -p PORT -H HUB -u USER [-P PASS | --password-hash HASH]
+          python3 -c "
+          import os, json
+          arr = json.loads(os.environ['VPN_CREDS'])
+
+          for role, idx in [('SERVER', 0), ('CLIENT', 1)]:
+              if idx >= len(arr):
+                  raise IndexError(f'index {idx} out of range (array has {len(arr)} entries)')
+              data = arr[idx]
+              required = ['server', 'username']
+              for field in required:
+                  if field not in data:
+                      raise KeyError(f'Entry {idx} missing required field: {field}')
+
+              mapping = {
+                  'server':   f'{role}_HOST',
+                  'port':     f'{role}_PORT',
+                  'hub':      f'{role}_HUB',
+                  'username': f'{role}_USER',
+              }
+              if 'password_hash' in data and data['password_hash']:
+                  mapping['password_hash'] = f'{role}_PASS_HASH'
+              elif 'password' in data and data['password']:
+                  mapping['password'] = f'{role}_PASS'
+
+              for key, env_name in mapping.items():
+                  if key in data and data[key] is not None:
+                      val = str(data[key])
+                      with open(os.environ['GITHUB_ENV'], 'a') as f:
+                          f.write(f'{env_name}={val}\n')
+          " 2>&1
+
+      - name: Run interconnect test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIN="zig-out/bin/vpnclient"
+          echo "=== Interconnect Throughput Test ==="
+          echo "Architecture: dual vpnclient instances on the same runner"
+          echo "Traffic flow: client → SoftEther hub → server"
+          echo ""
+
+          # Build CLI flag helpers from exported env vars.
+          # password_hash > password, one is optional.
+          server_auth_flag=""
+          if [ -n "${SERVER_PASS_HASH:-}" ]; then
+            server_auth_flag="--password-hash ${SERVER_PASS_HASH}"
+          elif [ -n "${SERVER_PASS:-}" ]; then
+            server_auth_flag="-P ${SERVER_PASS}"
+          fi
+          client_auth_flag=""
+          if [ -n "${CLIENT_PASS_HASH:-}" ]; then
+            client_auth_flag="--password-hash ${CLIENT_PASS_HASH}"
+          elif [ -n "${CLIENT_PASS:-}" ]; then
+            client_auth_flag="-P ${CLIENT_PASS}"
+          fi
+
+          SERVER_FLAGS="-s ${SERVER_HOST} -p ${SERVER_PORT:-443} -H ${SERVER_HUB:-VPN} -u ${SERVER_USER} ${server_auth_flag}"
+          CLIENT_FLAGS="-s ${CLIENT_HOST} -p ${CLIENT_PORT:-443} -H ${CLIENT_HUB:-VPN} -u ${CLIENT_USER} ${client_auth_flag}"
+
+          # ── Helper: kill all vpnclient processes ────────────────
+          cleanup() {
+            echo "Cleanup: terminating all vpnclient instances..."
+            sudo pkill -f "vpnclient" 2>/dev/null || true
+            sudo pkill -f "vpnclient" -9 2>/dev/null || true
+            sleep 2
+          }
+          trap cleanup EXIT
+
+          # ── Install iperf3 ──────────────────────────────────────
+          command -v iperf3 >/dev/null 2>&1 || sudo apt-get install -y iperf3
+
+          # ── Phase 1: Start server instance (devstroop1) ─────────
+          echo "=== Phase 1: Starting server instance (${SERVER_USER}) ==="
+          echo "Flags: $SERVER_FLAGS"
+
+          # Use a separate XDG_RUNTIME_DIR so the PID file doesn't collide
+          SERVER_RUNTIME_DIR="/tmp/vpn-server"
+          mkdir -p "$SERVER_RUNTIME_DIR"
+
+          XDG_RUNTIME_DIR="$SERVER_RUNTIME_DIR" \
+            sudo nohup "$BIN" connect $SERVER_FLAGS \
+            > /tmp/server-vpn.log 2>&1 &
+          SERVER_PID=$!
+          echo "Server vpnclient PID: $SERVER_PID"
+
+          # Wait for connection
+          SERVER_CONNECTED=false
+          for i in $(seq 1 35); do
+            if grep -qi "Connected successfully\|VPN IP:" /tmp/server-vpn.log 2>/dev/null; then
+              SERVER_CONNECTED=true
+              echo "✓ Server instance connected (attempt $i)"
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "✗ Server instance exited prematurely"
+              cat /tmp/server-vpn.log
+              break
+            fi
+            sleep 1
+          done
+
+          # Extract server VPN IP from log
+          SERVER_IP=$(grep -oP 'VPN IP:\s*\K[\d.]+' /tmp/server-vpn.log 2>/dev/null || echo "")
+          if [ -z "$SERVER_IP" ]; then
+            echo "Could not extract server VPN IP from log. Trying ifconfig..."
+            SERVER_IP=$(ip addr show 2>/dev/null | grep -E 'tun[0-9]+|tap[0-9]+|utun[0-9]+' -A2 \
+              | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1 || echo "")
+          fi
+          echo "Server VPN IP: ${SERVER_IP:-unknown}"
+
+          if [ "$SERVER_CONNECTED" = "false" ] || [ -z "$SERVER_IP" ]; then
+            echo "::warning::Server instance did not connect — skipping interconnect test"
+            cat /tmp/server-vpn.log
+            exit 0
+          fi
+
+          # ── Phase 2: Start iperf3 server on server instance ─────
+          echo ""
+          echo "=== Phase 2: Starting iperf3 server ==="
+          echo "Listening on $SERVER_IP:5201"
+
+          # Start iperf3 server.  It will listen on the VPN IP.
+          # We run it with sudo so it can bind to the VPN interface IP.
+          sudo iperf3 -s -B "$SERVER_IP" -p 5201 -D 2>&1
+          sleep 1
+
+          # Verify iperf3 server is running
+          if pgrep -x "iperf3" >/dev/null; then
+            echo "✓ iperf3 server is running"
+          else
+            echo "⚠ iperf3 server failed to start"
+          fi
+
+          # ── Phase 3: Start client instance (devstroop2) ─────────
+          echo ""
+          echo "=== Phase 3: Starting client instance (${CLIENT_USER}) ==="
+          echo "Flags: $CLIENT_FLAGS"
+
+          CLIENT_RUNTIME_DIR="/tmp/vpn-client"
+          mkdir -p "$CLIENT_RUNTIME_DIR"
+
+          XDG_RUNTIME_DIR="$CLIENT_RUNTIME_DIR" \
+            sudo nohup "$BIN" connect $CLIENT_FLAGS \
+            > /tmp/client-vpn.log 2>&1 &
+          CLIENT_PID=$!
+          echo "Client vpnclient PID: $CLIENT_PID"
+
+          # Wait for connection
+          CLIENT_CONNECTED=false
+          for i in $(seq 1 35); do
+            if grep -qi "Connected successfully\|VPN IP:" /tmp/client-vpn.log 2>/dev/null; then
+              CLIENT_CONNECTED=true
+              echo "✓ Client instance connected (attempt $i)"
+              break
+            fi
+            if ! kill -0 $CLIENT_PID 2>/dev/null; then
+              echo "✗ Client instance exited prematurely"
+              cat /tmp/client-vpn.log
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$CLIENT_CONNECTED" = "false" ]; then
+            echo "::warning::Client instance did not connect — skipping iperf test"
+            cat /tmp/client-vpn.log
+            exit 0
+          fi
+
+          # ── Phase 4: Run iperf3 throughput test ─────────────────
+          echo ""
+          echo "=== Phase 4: Throughput test ==="
+          echo "Client → Hub → Server"
+          echo "Server IP: $SERVER_IP"
+
+          # Run iperf3 in client mode, connecting to the server's VPN IP
+          # Test parameters:
+          #   -t 20        : 20 seconds duration
+          #   -P 4         : 4 parallel streams
+          #   -i 1         : report every 1 second
+          #   --bidir      : test both directions (upload & download)
+
+          echo ""
+          echo "--- iperf3 bidirectional test (20s, 4 streams) ---"
+          IPERF_OUTPUT=$(iperf3 -c "$SERVER_IP" -p 5201 -t 20 -P 4 -i 1 --bidir 2>&1 || true)
+          echo "$IPERF_OUTPUT"
+
+          # Extract best throughput values
+          SERVER_TO_CLIENT=$(echo "$IPERF_OUTPUT" \
+            | grep -E 'receiver|sender' \
+            | tail -2 \
+            | awk '{print $7, $8}' \
+            | tr '\n' ' ' || echo "N/A")
+          CLIENT_TO_SERVER=$(echo "$IPERF_OUTPUT" \
+            | grep -E 'sender' \
+            | head -1 \
+            | awk '{print $7, $8}' || echo "N/A")
+
+          # ── Phase 5: Report results ─────────────────────────────
+          echo ""
+          echo "=== Results ==="
+          echo ""
+          echo "--- Client → Server (upload) ---"
+          echo "$IPERF_OUTPUT" | grep -E '\[SUM\]|sender' | head -2
+          echo ""
+          echo "--- Server → Client (download) ---"
+          echo "$IPERF_OUTPUT" | grep -E '\[SUM\]|receiver' | tail -2
+
+          # Write summary
+          {
+            echo "## Interconnect Throughput (hub iperf)"
+            echo ""
+            echo "| Direction | Throughput |"
+            echo "|---|---|"
+            echo "| Client → Server (upload) | $(echo "$IPERF_OUTPUT" | grep -m1 '\- - -' -A1 | tail -1 | awk '{print $7, $8}' || echo N/A) |"
+            echo "| Server → Client (download) | $(echo "$IPERF_OUTPUT" | grep -m1 '\- - -' -A2 | tail -1 | awk '{print $7, $8}' || echo N/A) |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Cleanup
+        if: always()
+        shell: bash
         run: |
           BIN="zig-out/bin/vpnclient"
           if [ -f "$BIN" ]; then
-            sudo "$BIN" cleanup 2>&1 || true
+            echo "Running vpnclient cleanup on both instances..."
+            XDG_RUNTIME_DIR=/tmp/vpn-server sudo "$BIN" cleanup 2>&1 || true
+            XDG_RUNTIME_DIR=/tmp/vpn-client sudo "$BIN" cleanup 2>&1 || true
           fi
+          sudo pkill -f "iperf3" 2>/dev/null || true
