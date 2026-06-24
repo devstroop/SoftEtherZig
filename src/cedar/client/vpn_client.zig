@@ -2026,6 +2026,61 @@ pub const VpnClient = struct {
                         return error.ConnectionLost;
                     }
                 }
+
+                // iOS re-check: after draining, poll(0) to catch TLS data that
+                // arrived from the NWTCPConnection bridge during the drain cycle.
+                // The TCP bridge read pump fires serially (readMinimumLength →
+                // write socketpair → re-arm). Data can arrive between the drain
+                // loop exit and the outer poll(1ms). Without this re-check, each
+                // NWTCPConnection delivery takes TWO poll iterations (one to
+                // partially drain, one to catch the part that arrived during drain),
+                // halving effective throughput.
+                if (builtin.os.tag == .ios and tls_fd_count > 0) {
+                    const MAX_INBOUND_DRAIN: u32 = 256;
+                    var ios_retry: u32 = 0;
+                    while (ios_retry < 8) : (ios_retry += 1) {
+                        // Poll TLS fds with 0 timeout — no syscall if revents unchanged
+                        _ = std.posix.poll(poll_fds[0..@as(std.posix.nfds_t, @intCast(tls_fd_count))], 0) catch 0;
+                        const ios_fresh = (poll_fds[0].revents & std.posix.POLL.IN) != 0 or
+                            (self.tls_socket != null and
+                             (self.tls_socket.?.hasPending() or self.tls_socket.?.kernelRecvQueue() > 0));
+                        if (!ios_fresh) break;
+
+                        last_iter_had_work = true;
+                        var ios_drain: u32 = 0;
+                        var ios_dead = false;
+                        while (ios_drain < MAX_INBOUND_DRAIN) : (ios_drain += 1) {
+                            const ios_recv = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
+                                if (self.should_stop) { ios_dead = true; break; }
+                                if (err == error.ConnectionClosed or err == error.BrokenPipe) { ios_dead = true; break; }
+                                break;
+                            };
+                            for (recv_slices[0..ios_recv]) |block_data| {
+                                diag.bytes_in += block_data.len;
+                                diag.pkts_in += 1;
+                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                                if (self.tun_write_blocked) break;
+                            }
+                            if (ios_dead) break;
+                            if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
+                        }
+                        diag.drain_total += ios_drain;
+                        if (ios_drain > diag.drain_max) diag.drain_max = ios_drain;
+                        if (ios_drain == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
+                        if (self.tls_socket) |ts| {
+                            const pend = ts.pendingBytes();
+                            if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                            const nrd = ts.kernelRecvQueue();
+                            if (nrd > diag.nread_max) diag.nread_max = nrd;
+                            const nwr = ts.kernelSendQueue();
+                            if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
+                        }
+                        if (ios_dead) {
+                            self.disconnect_reason = .network_error;
+                            return error.ConnectionLost;
+                        }
+                    }
+                }
             }
 
             // INBOUND: Receive packets via UDP acceleration (if established)

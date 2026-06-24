@@ -699,31 +699,50 @@ pub const TlsSocket = struct {
         return if (p > 0) @intCast(p) else 0;
     }
 
-    /// DIAGNOSTIC (macOS): Returns bytes currently sitting in the kernel TCP
-    /// recv queue (i.e. arrived from network but not yet read by us). High
-    /// values mean we're not draining fast enough → server's advertised
-    /// window is shrinking → TCP backpressure.
+    /// DIAGNOSTIC: Returns bytes currently sitting in the kernel recv queue
+    /// (data arrived in kernel buffer but not yet consumed by OpenSSL).
+    /// Uses ioctl(FIONREAD) for portability across platforms and fd types
+    /// (real TCP sockets, AF_UNIX socketpairs, pipes, etc.).
+    ///
+    /// On macOS and Linux (real TCP fd): returns kernel TCP receive buffer
+    /// depth — encrypted bytes that arrived from network but haven't been
+    /// read by OpenSSL's BIO. High values mean we're not draining fast enough
+    /// → server's advertised window is shrinking → TCP backpressure.
+    ///
+    /// On iOS (AF_UNIX SOCK_STREAM socketpair via NWTCPConnection bridge):
+    /// returns bytes waiting in the socketpair recv buffer — encrypted TLS
+    /// data that was delivered by the TCP bridge but hasn't been consumed
+    /// by OpenSSL yet. The drain loop uses this as a secondary signal:
+    /// even when hasPending() is false (OpenSSL buffer empty), non-zero
+    /// kernelRecvQueue() keeps the drain loop running so it pulls fresh
+    /// data from the BIO instead of exiting and re-entering poll().
     pub fn kernelRecvQueue(self: *const TlsSocket) u32 {
-        if (comptime builtin.os.tag != .macos) return 0;
+        if (builtin.os.tag == .windows) return 0;
         var n: c_int = 0;
-        var len: u32 = @sizeOf(c_int);
-        // SO_NREAD = 0x1020 on macOS/Darwin
-        const SO_NREAD: u32 = 0x1020;
         const fd_int: c_int = @intCast(self.tcp_fd);
-        const rc = std.c.getsockopt(fd_int, std.posix.SOL.SOCKET, SO_NREAD, &n, &len);
+        // FIONREAD = 0x541B on Linux, 0x4004667f on Darwin (macOS/iOS) and other BSDs
+        const FIONREAD: u32 = switch (builtin.os.tag) {
+            .linux => 0x541B,
+            .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => 0x4004667f,
+            else => return 0,
+        };
+        const rc = std.c.ioctl(fd_int, FIONREAD, &n);
         if (rc != 0 or n < 0) return 0;
         return @intCast(n);
     }
 
-    /// DIAGNOSTIC (macOS): Returns bytes currently sitting in the kernel TCP
-    /// send queue (queued but not yet ACK'd / sent). High values mean we
-    /// can't push outbound fast enough → our send window is full → upload
+    /// DIAGNOSTIC (macOS/iOS): Returns bytes currently in the kernel send
+    /// queue (queued but not yet ACK'd / sent). High values mean we can't
+    /// push outbound fast enough → our send window is full → upload
     /// backpressure / risk of SSL_write deadlock.
+    ///
+    /// Uses SO_NWRITE (Darwin-specific socket option) which works on both
+    /// real TCP sockets and AF_UNIX socketpair fds.
     pub fn kernelSendQueue(self: *const TlsSocket) u32 {
-        if (comptime builtin.os.tag != .macos) return 0;
+        if (builtin.os.tag != .macos and builtin.os.tag != .ios) return 0;
         var n: c_int = 0;
         var len: u32 = @sizeOf(c_int);
-        // SO_NWRITE = 0x1024 on macOS/Darwin
+        // SO_NWRITE = 0x1024 on macOS/Darwin — works on real sockets and socketpairs
         const SO_NWRITE: u32 = 0x1024;
         const fd_int: c_int = @intCast(self.tcp_fd);
         const rc = std.c.getsockopt(fd_int, std.posix.SOL.SOCKET, SO_NWRITE, &n, &len);
