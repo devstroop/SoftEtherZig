@@ -1838,7 +1838,13 @@ pub const VpnClient = struct {
                 cm.hasPendingOutbound()
             else
                 false;
-            const poll_timeout_ms: i32 = if (last_iter_had_work and !any_needs_pollout)
+            // iOS: poll(0) starves the Swift packet pump (same process, shared CPU).
+            // The pump needs CPU time to read/write the socketpair bridge. Without
+            // CPU, bridge data accumulates → latency spikes to 650ms. poll(1ms)
+            // guarantees at least 1ms of idle CPU per iteration for the pump.
+            const poll_timeout_ms: i32 = if (builtin.os.tag == .ios)
+                @as(i32, 1)
+            else if (last_iter_had_work and !any_needs_pollout)
                 @as(i32, 0)
             else
                 @as(i32, 1);
@@ -1922,11 +1928,6 @@ pub const VpnClient = struct {
                             }
                         }
 
-                        // Stop draining when SSL has no more buffered data
-                        // AND kernel has nothing queued. Without the kernel
-                        // check, data that arrived in the TCP recv buffer but
-                        // hasn't been SSL_read() yet causes us to stop draining
-                        // prematurely → back to poll → macOS 10ms stall.
                         if (!conn.tls_socket.hasPending() and conn.tls_socket.kernelRecvQueue() == 0) break;
                     }
                     // DIAG: drain stats per connection (sum across conns this iter)
@@ -2006,11 +2007,6 @@ pub const VpnClient = struct {
                             if (self.tun_write_blocked) break;
                         }
 
-                        // Stop draining if TLS has no more buffered/decrypted data
-                        // AND kernel has nothing queued. Without the kernel check,
-                        // data sitting in the TCP recv buffer (before SSL_read()
-                        // pulls it in) causes us to stop draining early → back to
-                        // poll → macOS 10ms stall.
                         if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
                     }
                     // DIAG: capture drain metrics + queue depths
