@@ -1838,12 +1838,22 @@ pub const VpnClient = struct {
                 cm.hasPendingOutbound()
             else
                 false;
-            // iOS: poll(0) starves the Swift packet pump (same process, shared CPU).
-            // The pump needs CPU time to read/write the socketpair bridge. Without
-            // CPU, bridge data accumulates → latency spikes to 650ms. poll(1ms)
-            // guarantees at least 1ms of idle CPU per iteration for the pump.
+            // iOS data-ready adaptive poll: poll(0) when the TLS socket has
+            // pending data (hasPending or kernelRecvQueue > 0), so we process
+            // immediately without spending 1ms in poll(). When no data is
+            // available, poll(1ms) gives the Swift pumps CPU time. This is
+            // safe — poll(0) only fires when there's real work to do, so the
+            // pumps are only briefly starved during active data processing.
+            // After a kernel preemption (poll_us > 10ms), poll(0) catches up
+            // the backlog without waiting, preventing TCP cwnd collapse.
             const poll_timeout_ms: i32 = if (builtin.os.tag == .ios)
-                @as(i32, 1)
+                blk: {
+                    if (self.tls_socket != null and
+                        (self.tls_socket.?.hasPending() or
+                         self.tls_socket.?.kernelRecvQueue() > 0))
+                        break :blk @as(i32, 0);
+                    break :blk @as(i32, 1);
+                }
             else if (last_iter_had_work and !any_needs_pollout)
                 @as(i32, 0)
             else

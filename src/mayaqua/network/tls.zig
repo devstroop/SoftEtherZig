@@ -271,13 +271,53 @@ pub const TlsSocket = struct {
         // Resolve and connect TCP
         var tcp_fd: std.posix.socket_t = undefined;
 
-        // iOS NEPacketTunnelProvider escape hatch: when the host (Swift) has
-        // registered a dial callback, delegate the TCP connection to it. This
-        // bypasses NECP, which denies the extension's own POSIX connect().
-        // The host returns one end of a socketpair connected to its
-        // NWTCPConnection; OpenSSL runs TLS over the UNIX socket.
+        // iOS NECP bypass via POSIX socket + IP_BOUND_IF. When the host has
+        // bound to a physical interface (bind_interface_index != 0, set by
+        // softether_set_bind_interface from Swift), use tcpConnectWithTimeout
+        // which applies IP_BOUND_IF + sets a large 4MB SO_RCVBUF. This
+        // bypasses the NWConnection autotune that keeps iOS DL at 2-3 Mbps.
         var via_host_dial: bool = false;
-        if (external_tcp_dial) |dial| {
+        if (builtin.os.tag == .ios and bind_interface_index != 0) {
+            // Try direct POSIX socket with IP_BOUND_IF
+            var dns_ok = false;
+            var connect_ok = false;
+            if (std.net.getAddressList(allocator, hostname, port)) |addrs| {
+                defer addrs.deinit();
+                if (addrs.addrs.len > 0) {
+                    dns_ok = true;
+                    const address = addrs.addrs[0];
+                    const connect_result = tcpConnectWithTimeout(address, config.timeout_ms);
+                    if (connect_result) |fd| {
+                        tcp_fd = fd;
+                        const rcv_cap: u32 = 4 * 1024 * 1024;
+                        _ = std.posix.setsockopt(tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&rcv_cap)) catch {};
+                        std.log.info("TLS: direct POSIX socket + IP_BOUND_IF + 4MB RCVBUF", .{});
+                        connect_ok = true;
+                    } else |err| {
+                        std.log.warn("TLS: POSIX connect failed ({}), falling back to host dial", .{err});
+                        if (external_tcp_dial) |dial| {
+                            const c_host = try allocator.dupeZ(u8, hostname);
+                            defer allocator.free(c_host);
+                            const fd_int = dial(c_host.ptr, port);
+                            if (fd_int >= 0) { tcp_fd = @intCast(fd_int); via_host_dial = true; }
+                            else return TlsError.ConnectionFailed;
+                        } else return TlsError.ConnectionFailed;
+                    }
+                }
+            } else |_| {
+                std.log.warn("TLS: DNS resolution failed, falling back to host dial", .{});
+            }
+            if (!dns_ok and !connect_ok and !via_host_dial) {
+                // DNS failed or no addresses — use dial callback
+                if (external_tcp_dial) |dial| {
+                    const c_host = try allocator.dupeZ(u8, hostname);
+                    defer allocator.free(c_host);
+                    const fd_int = dial(c_host.ptr, port);
+                    if (fd_int >= 0) { tcp_fd = @intCast(fd_int); via_host_dial = true; }
+                    else return TlsError.ConnectionFailed;
+                } else return TlsError.ConnectionFailed;
+            }
+        } else if (external_tcp_dial) |dial| {
             const c_host = try allocator.dupeZ(u8, hostname);
             defer allocator.free(c_host);
             std.log.info("TLS: dialing {s}:{d} via host callback", .{ hostname, port });
