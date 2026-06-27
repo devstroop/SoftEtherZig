@@ -3,9 +3,11 @@
 // and provides an fd to read/write packets.
 //
 // ALL mobile platforms use direct synchronous writes (no ring buffer):
-// - iOS: AF_UNIX SOCK_DGRAM socketpair buffer is tiny (~2-4KB after sandbox
-//   clamping). A ring buffer + writer thread would batch drops rather than
-//   distribute them, making TCP retrans storms worse. Direct write is optimal.
+// - iOS: AF_UNIX SOCK_DGRAM socketpair buffer is set to 4MB by the Swift
+//   PacketTunnelProvider via SO_SNDBUF/SO_RCVBUF (subject to kernel
+//   kern.ipc.maxsockbuf clamping). A ring buffer + writer thread would batch
+//   drops rather than distribute them, making TCP retrans storms worse. Direct
+//   write is optimal.
 // - Android: VpnService TUN fd kernel buffer is 64KB+ — large enough that
 //   direct non-blocking writes don't block the data loop. The ring buffer
 //   adds a SECOND congestion point: writer thread stalls when TUN backs up,
