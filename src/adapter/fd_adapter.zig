@@ -58,6 +58,9 @@ pub const TunStats = struct {
 /// Used on iOS (NEPacketTunnelProvider) and Android (VpnService.Builder.establish())
 /// where the OS creates the TUN device and hands us the fd.
 ///
+/// On iOS with dual socketpairs, separate fds are used for reading (UL: Swift→Zig)
+/// and writing (DL: Zig→Swift). On Android/macOS, both use the same fd.
+///
 /// Both platforms use direct non-blocking posix.write() — one syscall, immediate.
 /// If the downstream buffer is full (EWOULDBLOCK), drops 1 packet. The data loop
 /// retries next iteration. Individual drops are handled gracefully by TCP congestion
@@ -65,8 +68,11 @@ pub const TunStats = struct {
 pub const FdAdapter = struct {
     allocator: std.mem.Allocator,
 
-    // File descriptor provided by the platform
-    fd: posix.fd_t,
+    // File descriptors for bidirectional I/O.
+    // On iOS with dual socketpairs: rx_fd = UL bridge (Swift→Zig), tx_fd = DL bridge (Zig→Swift).
+    // On single-fd platforms (Android, legacy iOS): rx_fd == tx_fd.
+    rx_fd: posix.fd_t, // read (UL: from platform)
+    tx_fd: posix.fd_t, // write (DL: to platform)
 
     // Device info
     device_name: [64]u8,
@@ -101,11 +107,19 @@ pub const FdAdapter = struct {
     tx_thread: ?std.Thread,
     tx_stop: bool,
 
-    /// Create a FdAdapter wrapping an existing file descriptor.
+    /// Create a FdAdapter wrapping an existing file descriptor (single fd for both directions).
     /// The fd should already be open and configured by the platform.
     /// `name` is a display label (e.g. "utun3" on iOS, "tun0" on Android).
+    /// On iOS, use initWithFds() for separate UL/DL socketpairs.
     pub fn initWithFd(allocator: std.mem.Allocator, fd: posix.fd_t, name: []const u8) FdAdapterError!*FdAdapter {
-        if (fd < 0) return FdAdapterError.InvalidFd;
+        return initWithFds(allocator, fd, fd, name);
+    }
+
+    /// Create a FdAdapter with separate read (UL) and write (DL) file descriptors.
+    /// On iOS with dual socketpairs: rx_fd = UL bridge fd (Swift→Zig), tx_fd = DL bridge fd (Zig→Swift).
+    /// On Android (single VpnService fd): pass the same fd for both.
+    pub fn initWithFds(allocator: std.mem.Allocator, rx_fd: posix.fd_t, tx_fd: posix.fd_t, name: []const u8) FdAdapterError!*FdAdapter {
+        if (rx_fd < 0 or tx_fd < 0) return FdAdapterError.InvalidFd;
 
         const device = allocator.create(FdAdapter) catch {
             return FdAdapterError.OpenFailed;
@@ -122,7 +136,8 @@ pub const FdAdapter = struct {
 
         device.* = .{
             .allocator = allocator,
-            .fd = fd,
+            .rx_fd = rx_fd,
+            .tx_fd = tx_fd,
             .device_name = name_buf,
             .device_name_len = len,
             .mac_address = mac,
@@ -146,14 +161,25 @@ pub const FdAdapter = struct {
 
         // Set non-blocking using C fcntl. O_NONBLOCK value differs per OS:
         // Darwin/iOS: 0x0004, Linux/Android: 0x0800
-        if (setNonBlocking(fd) < 0) {
+        if (setNonBlocking(rx_fd) < 0) {
             allocator.destroy(device);
             return FdAdapterError.OpenFailed;
         }
+        if (tx_fd != rx_fd) {
+            if (setNonBlocking(tx_fd) < 0) {
+                allocator.destroy(device);
+                return FdAdapterError.OpenFailed;
+            }
+        }
 
         // All mobile platforms: direct writes, no ring buffer, no writer thread.
-        const fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(fd) else @as(usize, @intCast(fd));
-        std.log.info("FdAdapter wrapping fd={d} name={s} (direct writes, no ring buffer)", .{ fd_val, name });
+        const rx_val: usize = if (builtin.os.tag == .windows) @intFromPtr(rx_fd) else @as(usize, @intCast(rx_fd));
+        const tx_val: usize = if (builtin.os.tag == .windows) @intFromPtr(tx_fd) else @as(usize, @intCast(tx_fd));
+        if (rx_fd == tx_fd) {
+            std.log.info("FdAdapter wrapping fd={d} name={s} (direct writes, no ring buffer)", .{ rx_val, name });
+        } else {
+            std.log.info("FdAdapter wrapping rx_fd={d} tx_fd={d} name={s} (dual socketpair)", .{ rx_val, tx_val, name });
+        }
 
         return device;
     }
@@ -168,17 +194,20 @@ pub const FdAdapter = struct {
         return 0;
     }
 
-    /// Replace the wrapped fd with a new one (e.g. after Android VpnService.Builder
-    /// reconfiguration with DHCP-assigned IP). Does NOT close the old fd — the
-    /// caller (platform) owns its lifecycle and will close the old PFD itself.
+    /// Replace the wrapped fds with new ones (e.g. after Android VpnService.Builder
+    /// reconfiguration with DHCP-assigned IP). Replaces both rx_fd and tx_fd.
+    /// Does NOT close the old fds — the caller (platform) owns their lifecycle.
     pub fn replaceFd(self: *FdAdapter, new_fd: posix.fd_t) FdAdapterError!void {
         if (new_fd < 0) return FdAdapterError.InvalidFd;
         if (setNonBlocking(new_fd) < 0) return FdAdapterError.OpenFailed;
-        const old_fd = self.fd;
-        @atomicStore(posix.fd_t, &self.fd, new_fd, .release);
-        const old_fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(old_fd) else @as(usize, @intCast(old_fd));
+        const old_rx = self.rx_fd;
+        const old_tx = self.tx_fd;
+        @atomicStore(posix.fd_t, &self.rx_fd, new_fd, .release);
+        @atomicStore(posix.fd_t, &self.tx_fd, new_fd, .release);
+        const old_rx_val: usize = if (builtin.os.tag == .windows) @intFromPtr(old_rx) else @as(usize, @intCast(old_rx));
         const new_fd_val: usize = if (builtin.os.tag == .windows) @intFromPtr(new_fd) else @as(usize, @intCast(new_fd));
-        std.log.info("FdAdapter swapped fd {d} -> {d}", .{ old_fd_val, new_fd_val });
+        _ = old_tx;
+        std.log.info("FdAdapter swapped rx_fd {d} -> {d} (tx_fd also updated)", .{ old_rx_val, new_fd_val });
     }
 
     /// Close the adapter. Does NOT close the fd (owned by the platform).
@@ -204,9 +233,9 @@ pub const FdAdapter = struct {
         return self.mac_address;
     }
 
-    /// Get file descriptor for polling
+    /// Get file descriptor for polling (always the rx/UL fd)
     pub fn getFd(self: *const FdAdapter) posix.fd_t {
-        return self.fd;
+        return self.rx_fd;
     }
 
     /// Check if adapter is open
@@ -226,11 +255,11 @@ pub const FdAdapter = struct {
         _ = self;
     }
 
-    /// Read a packet from the fd
+    /// Read a packet from the rx fd (UL from platform)
     pub fn read(self: *FdAdapter, buffer: []u8) !?usize {
         if (!self.is_open) return FdAdapterError.DeviceNotOpen;
 
-        const result = posix.read(self.fd, buffer);
+        const result = posix.read(self.rx_fd, buffer);
         if (result) |bytes_read| {
             if (bytes_read > 0) {
                 self.stats.recv_bytes += bytes_read;
@@ -244,7 +273,7 @@ pub const FdAdapter = struct {
         }
     }
 
-    /// Write a packet to the fd.
+    /// Write a packet to the tx fd (DL to platform).
     ///
     /// iOS and Android: direct non-blocking posix.write(). If the downstream
     /// buffer is full (EWOULDBLOCK), drops 1 packet. The data loop retries next
@@ -255,7 +284,7 @@ pub const FdAdapter = struct {
         if (data.len == 0) return 0;
 
         // Direct write on all mobile platforms — iOS and Android.
-        const written = posix.write(self.fd, data) catch |err| switch (err) {
+        const written = posix.write(self.tx_fd, data) catch |err| switch (err) {
             error.WouldBlock => {
                 @atomicStore(usize, &self.tx_drops, self.tx_drops + 1, .release);
                 return FdAdapterError.WriteFailed;

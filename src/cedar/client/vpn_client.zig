@@ -213,6 +213,14 @@ pub const ClientConfig = struct {
     // Mobile: external tunnel fd provided by platform (iOS/Android)
     // When set, the VPN client uses this fd instead of opening its own adapter.
     tunnel_fd: ?i32 = null,
+
+    // iOS dual socketpair: separate fds for UL (read) and DL (write) directions.
+    // When both are set (iOS only), the FdAdapter uses tunnel_rx_fd for reads
+    // (UL: Swift→Zig) and tunnel_tx_fd for writes (DL: Zig→Swift). This
+    // prevents upload from starving the download path by keeping them on
+    // independent kernel buffers. Falls back to tunnel_fd when not set.
+    tunnel_rx_fd: ?i32 = null,
+    tunnel_tx_fd: ?i32 = null,
 };
 
 /// IP version preference: null = try both, v4 = IPv4 only, v6 = IPv6 only
@@ -991,8 +999,16 @@ pub const VpnClient = struct {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
 
-        if (self.config.tunnel_fd) |fd| {
-            // Mobile: use the OS-provided tunnel fd
+        if (self.config.tunnel_rx_fd and self.config.tunnel_tx_fd) |rx_fd, tx_fd| {
+            // iOS: dual socketpairs — separate UL (rx) and DL (tx) fds.
+            // This prevents UL from starving DL by keeping each direction on
+            // its own kernel buffer and poll target.
+            ctx.openWithFds(rx_fd, tx_fd, "tun-mobile") catch |err| {
+                std.log.err("Failed to open tunnel with external fds rx_fd={d} tx_fd={d}: {}", .{ rx_fd, tx_fd, err });
+                return ClientError.AdapterConfigurationFailed;
+            };
+        } else if (self.config.tunnel_fd) |fd| {
+            // Mobile: use the OS-provided tunnel fd (legacy single-socketpair)
             ctx.openWithFd(fd, "tun-mobile") catch |err| {
                 std.log.err("Failed to open tunnel with external fd={d}: {}", .{ fd, err });
                 return ClientError.AdapterConfigurationFailed;
@@ -1824,9 +1840,21 @@ pub const VpnClient = struct {
 
             // TUN fd at index tls_fd_count
             const poll_tun_idx = tls_fd_count;
+            // iOS with dual socketpairs: DON'T poll the UL bridge fd for POLLIN
+            // — it keeps the data loop awake even when there's no DL, starving
+            // NWConnection's dispatch queue. UL is read non-blockingly in the
+            // outbound section after the main poll returns, so it's still
+            // processed every iteration — but the main poll can actually sleep
+            // when only UL is active, yielding CPU to NWConnection for DL.
+            const tun_poll_events: i16 = if (builtin.os.tag == .ios)
+                @as(i16, 0) // don't wake for UL; checked non-blockingly after poll
+            else if (builtin.os.tag == .windows)
+                @as(i16, 0)
+            else
+                std.posix.POLL.IN;
             poll_fds[poll_tun_idx] = .{
                 .fd = poll_tun_sock,
-                .events = if (builtin.os.tag == .windows) 0 else std.posix.POLL.IN,
+                .events = tun_poll_events,
                 .revents = 0,
             };
 

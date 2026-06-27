@@ -321,6 +321,22 @@ pub const VirtualAdapter = struct {
         };
     }
 
+    /// Open with separate read (UL) and write (DL) file descriptors.
+    /// Used on iOS with dual socketpairs to prevent UL from starving DL.
+    /// rx_fd = UL bridge fd (Swift → Zig), tx_fd = DL bridge fd (Zig → Swift).
+    /// Only available when PlatformDevice is FdAdapter.
+    pub fn openWithFds(self: *VirtualAdapter, rx_fd: i32, tx_fd: i32, name: []const u8) !void {
+        if (PlatformDevice != FdAdapter) {
+            return error.UnsupportedPlatform;
+        }
+        if (self.device != null) return;
+
+        self.device = FdAdapter.initWithFds(self.allocator, rx_fd, tx_fd, name) catch |err| {
+            std.log.err("Failed to wrap external fds rx_fd={d} tx_fd={d}: {}", .{ rx_fd, tx_fd, err });
+            return err;
+        };
+    }
+
     /// Close the virtual adapter and restore routing
     pub fn close(self: *VirtualAdapter) void {
         // Restore original routes

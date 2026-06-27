@@ -265,6 +265,15 @@ void softether_set_ipv6_exclude(softether_client_t client, const char* routes);
 void softether_set_tunnel_fd(softether_client_t client, int32_t fd);
 
 /**
+ * Set separate tunnel file descriptors for UL (read) and DL (write) directions.
+ * Used on iOS with dual socketpairs to prevent upload from starving download.
+ * dl_fd = DL bridge fd (Zig -> Swift, for writing decrypted packets to utun).
+ * ul_fd = UL bridge fd (Swift -> Zig, for reading upload packets from utun).
+ * Must be called before connect(). Overrides softether_set_tunnel_fd().
+ */
+void softether_set_tunnel_fds(softether_client_t client, int32_t dl_fd, int32_t ul_fd);
+
+/**
  * Replace the active TUN fd at runtime (mobile only).
  *
  * Used after DHCP completes and the platform re-creates the VpnService

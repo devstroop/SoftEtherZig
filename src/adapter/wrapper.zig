@@ -97,6 +97,24 @@ pub const AdapterWrapper = struct {
         }
     }
 
+    /// Open with separate rx (UL) and tx (DL) file descriptors (iOS dual socketpair).
+    pub fn openWithFds(self: *Self, rx_fd: i32, tx_fd: i32, name: []const u8) !void {
+        if (self.real_adapter) |*adapter| {
+            try adapter.openWithFds(rx_fd, tx_fd, name);
+            self.is_open = adapter.isOpen();
+
+            if (adapter.getName()) |n| {
+                const len = @min(n.len, self.device_name.len);
+                @memcpy(self.device_name[0..len], n[0..len]);
+                self.device_name_len = len;
+            }
+
+            if (adapter.getMac()) |m| {
+                self.mac = m;
+            }
+        }
+    }
+
     /// Close the adapter
     pub fn close(self: *Self) void {
         if (self.real_adapter) |*adapter| {

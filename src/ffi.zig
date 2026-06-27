@@ -808,6 +808,17 @@ export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: i32) void {
     c.config.tunnel_fd = fd;
 }
 
+/// Set separate tunnel file descriptors for UL (read) and DL (write) directions.
+/// Used on iOS with dual socketpairs to prevent upload from starving download.
+/// dl_fd = DL bridge fd (Zig → Swift, for writing decrypted packets to utun).
+/// ul_fd = UL bridge fd (Swift → Zig, for reading upload packets from utun).
+/// Must be called before connect(). Overrides softether_set_tunnel_fd().
+export fn softether_set_tunnel_fds(client: ?*VpnClient, dl_fd: i32, ul_fd: i32) void {
+    const c = client orelse return;
+    c.config.tunnel_rx_fd = ul_fd;
+    c.config.tunnel_tx_fd = dl_fd;
+}
+
 /// Replace the active TUN fd at runtime (mobile only). Used after DHCP
 /// completes and the platform re-creates the VpnService tunnel with the
 /// server-assigned IP/mask. Returns 0 on success, -1 on error.
