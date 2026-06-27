@@ -106,6 +106,7 @@ fn establishAdditionalConnections(client: *VpnClient) void {
         .verify_certificate = client.config.verify_certificate,
         .allow_self_signed = !client.config.verify_certificate,
         .timeout_ms = client.config.connect_timeout_ms,
+        .tcp_nodelay = client.config.tcp_nodelay,
         .client_cert_pem = switch (client.config.auth) {
             .certificate => |cert| cert.cert_data,
             else => null,
@@ -161,7 +162,7 @@ fn establishOne(
     const writer = makeProtoWriter(&new_sock);
     const reader = makeProtoReader(&new_sock);
 
-    softether_proto.uploadSignature(client.allocator, writer, host_for_http) catch |err| {
+    softether_proto.uploadSignature(client.allocator, writer, host_for_http, if (client.config.fingerprint) |*fp| fp else null) catch |err| {
         std.log.warn("Additional connection {d} signature failed: {}", .{ conn_index, err });
         new_sock.close();
         return;

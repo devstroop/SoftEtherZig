@@ -144,6 +144,34 @@ pub const AuthResult = struct {
     }
 };
 
+/// Protocol fingerprinting configuration.
+/// All fields are optional; when null, the protocol uses its built-in defaults.
+/// This allows callers to masquerade as different client versions for
+/// anti-fingerprinting purposes, avoiding detection by server administrators.
+pub const ProtocolFingerprint = struct {
+    client_str: ?[]const u8 = null,
+    client_ver: ?u32 = null,
+    client_build: ?u32 = null,
+    os_name: ?[]const u8 = null,
+    os_version: ?[]const u8 = null,
+    os_title: ?[]const u8 = null,
+    vpn_target: ?[]const u8 = null,
+    vpn_target_signature: ?[]const u8 = null,
+    content_type_signature: ?[]const u8 = null,
+    content_type_pack: ?[]const u8 = null,
+    max_rand_size: ?usize = null,
+    writer_retry_max: ?u32 = null,
+    writer_retry_sleep_ms: ?u32 = null,
+    /// Custom watermark data. When null, the built-in watermark is used.
+    /// Pass an empty slice to skip watermark upload entirely.
+    watermark: ?[]const u8 = null,
+    /// Hostname sent in auth pack (ClientHostname field).
+    /// When null, "zig-client" is used.
+    client_hostname: ?[]const u8 = null,
+    /// Unique ID sent in auth pack. When null, random bytes are generated.
+    unique_id: ?[20]u8 = null,
+};
+
 /// Session-level options passed through to the auth pack.
 pub const SessionOptions = struct {
     max_connection: u32 = 1,
@@ -151,7 +179,77 @@ pub const SessionOptions = struct {
     qos: bool = true,
     use_encrypt: bool = true,
     use_compress: bool = false,
+    /// Optional protocol fingerprint overrides for anti-fingerprinting.
+    /// When null, hardcoded Protocol constants and getOsInfo() are used.
+    fingerprint: ?*const ProtocolFingerprint = null,
 };
+
+/// Resolve client_str with fingerprint override.
+fn fpClientStr(fp: ?*const ProtocolFingerprint) []const u8 {
+    if (fp) |f| { if (f.client_str) |v| return v; }
+    return Protocol.client_str;
+}
+
+/// Resolve client_ver with fingerprint override.
+fn fpClientVer(fp: ?*const ProtocolFingerprint) u32 {
+    if (fp) |f| { if (f.client_ver) |v| return v; }
+    return Protocol.client_ver;
+}
+
+/// Resolve client_build with fingerprint override.
+fn fpClientBuild(fp: ?*const ProtocolFingerprint) u32 {
+    if (fp) |f| { if (f.client_build) |v| return v; }
+    return Protocol.client_build;
+}
+
+/// Resolve OS info with fingerprint override.
+fn fpOsInfo(fp: ?*const ProtocolFingerprint) OsInfo {
+    const base = getOsInfo();
+    if (fp) |f| {
+        return .{
+            .name = f.os_name orelse base.name,
+            .version = f.os_version orelse base.version,
+            .title = f.os_title orelse base.title,
+        };
+    }
+    return base;
+}
+
+/// Resolve max_rand_size with fingerprint override.
+fn fpMaxRandSize(fp: ?*const ProtocolFingerprint) usize {
+    if (fp) |f| { if (f.max_rand_size) |v| return v; }
+    return Protocol.max_rand_size;
+}
+
+/// Resolve vpn_target with fingerprint override.
+fn fpTarget(fp: ?*const ProtocolFingerprint) []const u8 {
+    if (fp) |f| { if (f.vpn_target) |v| return v; }
+    return Protocol.vpn_target;
+}
+
+/// Resolve vpn_target_signature with fingerprint override.
+fn fpTargetSignature(fp: ?*const ProtocolFingerprint) []const u8 {
+    if (fp) |f| { if (f.vpn_target_signature) |v| return v; }
+    return Protocol.vpn_target_signature;
+}
+
+/// Resolve content_type_signature with fingerprint override.
+fn fpContentTypeSignature(fp: ?*const ProtocolFingerprint) []const u8 {
+    if (fp) |f| { if (f.content_type_signature) |v| return v; }
+    return Protocol.content_type_signature;
+}
+
+/// Resolve content_type_pack with fingerprint override.
+fn fpContentTypePack(fp: ?*const ProtocolFingerprint) []const u8 {
+    if (fp) |f| { if (f.content_type_pack) |v| return v; }
+    return Protocol.content_type_pack;
+}
+
+/// Resolve client_hostname with fingerprint override.
+fn fpClientHostname(fp: ?*const ProtocolFingerprint) []const u8 {
+    if (fp) |f| { if (f.client_hostname) |v| return v; }
+    return "zig-client";
+}
 
 /// Authentication type enum
 pub const AuthType = enum(u32) {
@@ -211,16 +309,18 @@ pub const Reader = struct {
 };
 
 /// Build HTTP header for signature upload
-fn buildSignatureHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) ![]u8 {
+fn buildSignatureHttpHeader(allocator: Allocator, host: []const u8, body_len: usize, fingerprint: ?*const ProtocolFingerprint) ![]u8 {
     var list = std.ArrayListUnmanaged(u8){};
     errdefer list.deinit(allocator);
 
     const writer = list.writer(allocator);
+    const target = fpTargetSignature(fingerprint);
+    const content_type = fpContentTypeSignature(fingerprint);
 
     // Signature uses connect.cgi endpoint and simple headers like C code
-    try writer.print("POST {s} HTTP/1.1\r\n", .{Protocol.vpn_target_signature});
+    try writer.print("POST {s} HTTP/1.1\r\n", .{target});
     try writer.print("Host: {s}\r\n", .{host});
-    try writer.print("Content-Type: {s}\r\n", .{Protocol.content_type_signature});
+    try writer.print("Content-Type: {s}\r\n", .{content_type});
     try writer.writeAll("Connection: Keep-Alive\r\n");
     try writer.print("Content-Length: {d}\r\n", .{body_len});
     try writer.writeAll("\r\n");
@@ -229,11 +329,13 @@ fn buildSignatureHttpHeader(allocator: Allocator, host: []const u8, body_len: us
 }
 
 /// Build HTTP header for Pack data
-fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) ![]u8 {
+fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize, fingerprint: ?*const ProtocolFingerprint) ![]u8 {
     var list = std.ArrayListUnmanaged(u8){};
     errdefer list.deinit(allocator);
 
     const writer = list.writer(allocator);
+    const target = fpTarget(fingerprint);
+    const content_type = fpContentTypePack(fingerprint);
 
     // Generate HTTP Date string like C code: "Sat, 20 Dec 2025 13:31:23 GMT"
     const wday = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
@@ -259,7 +361,7 @@ fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) 
 
     // Pack data uses full keep-alive headers like C code
     // Order: Date, Host, Keep-Alive, Connection, Content-Type, Content-Length (matches C code)
-    try writer.print("POST {s} HTTP/1.1\r\n", .{Protocol.vpn_target});
+    try writer.print("POST {s} HTTP/1.1\r\n", .{target});
     try writer.print("Date: {s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT\r\n", .{
         wday[weekday_idx],
         day,
@@ -272,7 +374,7 @@ fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize) 
     try writer.print("Host: {s}\r\n", .{host});
     try writer.writeAll("Keep-Alive: timeout=15; max=19\r\n");
     try writer.writeAll("Connection: Keep-Alive\r\n");
-    try writer.print("Content-Type: {s}\r\n", .{Protocol.content_type_pack});
+    try writer.print("Content-Type: {s}\r\n", .{content_type});
     try writer.print("Content-Length: {d}\r\n", .{body_len});
     try writer.writeAll("\r\n");
 
@@ -285,8 +387,9 @@ pub fn sendHttpPost(
     writer: Writer,
     host: []const u8,
     body: []const u8,
+    fingerprint: ?*const ProtocolFingerprint,
 ) !void {
-    const header = try buildPackHttpHeader(allocator, host, body.len);
+    const header = try buildPackHttpHeader(allocator, host, body.len, fingerprint);
     defer allocator.free(header);
 
     try writer.writeAll(header);
@@ -299,15 +402,19 @@ pub fn uploadSignature(
     allocator: Allocator,
     writer: Writer,
     host: []const u8,
+    fingerprint: ?*const ProtocolFingerprint,
 ) !void {
     // Send the full WaterMark GIF signature — servers validate this to confirm
     // the client speaks the SoftEther VPN protocol. "VPNCONNECT" is only accepted
     // by a subset of servers and most production servers reject it.
-    const body = WaterMark;
+    const body = if (fingerprint) |fp| blk: {
+        if (fp.watermark) |wm| break :blk wm;
+        break :blk WaterMark;
+    } else WaterMark;
     const body_len = body.len;
 
     // Build HTTP header
-    const header = try buildSignatureHttpHeader(allocator, host, body_len);
+    const header = try buildSignatureHttpHeader(allocator, host, body_len, fingerprint);
     defer allocator.free(header);
 
     // Send header
@@ -423,13 +530,13 @@ pub fn downloadHello(
 }
 
 /// Build Hello Pack for client
-pub fn buildClientHello(allocator: Allocator) ![]u8 {
+pub fn buildClientHello(allocator: Allocator, fingerprint: ?*const ProtocolFingerprint) ![]u8 {
     var hello_pack = Pack.init(allocator);
     defer hello_pack.deinit();
 
-    try hello_pack.addStr("client_str", Protocol.client_str);
-    try hello_pack.addInt("client_ver", Protocol.client_ver);
-    try hello_pack.addInt("client_build", Protocol.client_build);
+    try hello_pack.addStr("client_str", fpClientStr(fingerprint));
+    try hello_pack.addInt("client_ver", fpClientVer(fingerprint));
+    try hello_pack.addInt("client_build", fpClientBuild(fingerprint));
 
     return hello_pack.toBytes(allocator);
 }
@@ -498,41 +605,33 @@ pub fn buildPasswordAuth(
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
+    const fp = opts.fingerprint;
+
+    _ = server_ip;
+    _ = server_hostname;
+
     // Add authentication fields (method must be "login", not "auth")
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
     try auth_pack.addStr("username", username);
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.password));
 
-    // Compute secure password
-    // First hash the password with SHA-0
+    // Compute secure password with server random
     const password_hash = auth_mod.hashPassword(password, username);
-
-    // Debug: Print password hash
-    std.log.debug("Password hash: {x}", .{password_hash});
-
-    // Then compute secure password with server random
     const secure_pass = auth_mod.computeSecurePassword(&password_hash, server_random);
-
-    // Debug: Print secure password and server random
-    std.log.debug("Server random: {x}", .{server_random.*});
-    std.log.debug("Secure password: {x}", .{secure_pass});
-
     try auth_pack.addData("secure_password", &secure_pass);
 
     // PackAddClientVersion fields
-    try auth_pack.addStr("client_str", Protocol.client_str);
-    try auth_pack.addInt("client_ver", Protocol.client_ver);
-    try auth_pack.addInt("client_build", Protocol.client_build);
+    try auth_pack.addStr("client_str", fpClientStr(fp));
+    try auth_pack.addInt("client_ver", fpClientVer(fp));
+    try auth_pack.addInt("client_build", fpClientBuild(fp));
 
-    // Protocol (0 = TCP, 1 = UDP) - C adds this BEFORE hello/version/build
     try auth_pack.addInt("protocol", 0);
 
-    // Version fields (C adds AFTER protocol)
-    try auth_pack.addStr("hello", Protocol.client_str);
-    try auth_pack.addInt("version", Protocol.client_ver);
-    try auth_pack.addInt("build", Protocol.client_build);
-    try auth_pack.addInt("client_id", 0); // Cedar client ID
+    try auth_pack.addStr("hello", fpClientStr(fp));
+    try auth_pack.addInt("version", fpClientVer(fp));
+    try auth_pack.addInt("build", fpClientBuild(fp));
+    try auth_pack.addInt("client_id", 0);
 
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
@@ -540,60 +639,48 @@ pub fn buildPasswordAuth(
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
-    // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
-    // QoS flag
     try auth_pack.addBool("qos", opts.qos);
-
-    // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
-
-    // UDP recovery support
     try auth_pack.addBool("support_udp_recovery", udp_accel);
 
-    // Unique ID (machine identifier) - GenerateMachineUniqueHash in C
     var unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
-    // RUDP bulk max version
     try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
     try addUdpAccelFields(&auth_pack, bulk_keys);
 
-    // Cedar->UniqueId is SEPARATE from unique_id in C
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&cedar_unique_id);
 
-    // Add NodeInfo fields (required by server)
-    const os_info_anon = getOsInfo();
-    try auth_pack.addStr("ClientProductName", Protocol.client_str);
+    const os_info = fpOsInfo(fp);
+    try auth_pack.addStr("ClientProductName", fpClientStr(fp));
     try auth_pack.addStr("ServerProductName", "");
-    try auth_pack.addStr("ClientOsName", os_info_anon.name);
-    try auth_pack.addStr("ClientOsVer", os_info_anon.version);
+    try auth_pack.addStr("ClientOsName", os_info.name);
+    try auth_pack.addStr("ClientOsVer", os_info.version);
     try auth_pack.addStr("ClientOsProductId", "");
-    try auth_pack.addStr("ClientHostname", "zig-client");
-    try auth_pack.addStr("ServerHostname", server_hostname);
+    try auth_pack.addStr("ClientHostname", fpClientHostname(fp));
+    try auth_pack.addStr("ServerHostname", "");
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
-    try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
-    try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
+    try auth_pack.addInt("ClientProductVer", fpClientVer(fp));
+    try auth_pack.addInt("ClientProductBuild", fpClientBuild(fp));
     try auth_pack.addInt("ServerProductVer", 0);
     try auth_pack.addInt("ServerProductBuild", 0);
-    // Add IP addresses like C's PackAddIp32 (adds 4 elements each)
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
-    try addPackIp32(&auth_pack, "ServerIpAddress", server_ip);
+    try addPackIp32(&auth_pack, "ServerIpAddress", 0);
     try auth_pack.addData("ServerIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ServerPort2", 0);
     try addPackIp32(&auth_pack, "ProxyIpAddress", 0);
     try auth_pack.addData("ProxyIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ProxyPort", 0);
 
-    // Add WinVer fields (required by server)
     try auth_pack.addBool("V_IsWindows", false);
     try auth_pack.addBool("V_IsNT", false);
     try auth_pack.addBool("V_IsServer", false);
@@ -602,20 +689,17 @@ pub fn buildPasswordAuth(
     try auth_pack.addInt("V_VerMinor", 0);
     try auth_pack.addInt("V_Build", 0);
     try auth_pack.addInt("V_ServicePack", 0);
-    try auth_pack.addStr("V_Title", os_info_anon.title);
+    try auth_pack.addStr("V_Title", os_info.title);
 
-    // Add pencore dummy value (random padding for anti-fingerprinting)
-    var pencore_buf: [1000]u8 = undefined;
-    const pencore_size = crypto.random.intRangeAtMost(usize, 0, 1000);
+    var pencore_buf: [2048]u8 = undefined;
+    const pencore_size = crypto.random.intRangeAtMost(usize, 0, fpMaxRandSize(fp));
     crypto.random.bytes(pencore_buf[0..pencore_size]);
     try auth_pack.addData("pencore", pencore_buf[0..pencore_size]);
 
     return auth_pack.toBytes(allocator);
 }
 
-/// Build Auth Pack with plaintext password (authtype=2).
-/// Used when connecting to older SoftEther servers or VPN Gate relays
-/// that require plaintext password authentication instead of hashed.
+/// Build Auth Pack with PLAIN password authentication (raw, no hashing)
 pub fn buildPlainsPasswordAuth(
     allocator: Allocator,
     username: []const u8,
@@ -631,25 +715,24 @@ pub fn buildPlainsPasswordAuth(
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
-    // Authentication fields — plaintext, no hashing
+    const fp = opts.fingerprint;
+
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
     try auth_pack.addStr("username", username);
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.plain_password));
     try auth_pack.addStr("password", password);
 
-    // Protocol metadata
-    try auth_pack.addStr("client_str", Protocol.client_str);
-    try auth_pack.addInt("client_ver", Protocol.client_ver);
-    try auth_pack.addInt("client_build", Protocol.client_build);
+    try auth_pack.addStr("client_str", fpClientStr(fp));
+    try auth_pack.addInt("client_ver", fpClientVer(fp));
+    try auth_pack.addInt("client_build", fpClientBuild(fp));
     try auth_pack.addInt("protocol", 0);
 
-    try auth_pack.addStr("hello", Protocol.client_str);
-    try auth_pack.addInt("version", Protocol.client_ver);
-    try auth_pack.addInt("build", Protocol.client_build);
+    try auth_pack.addStr("hello", fpClientStr(fp));
+    try auth_pack.addInt("version", fpClientVer(fp));
+    try auth_pack.addInt("build", fpClientBuild(fp));
     try auth_pack.addInt("client_id", 0);
 
-    // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
     try auth_pack.addBool("use_compress", opts.use_compress);
@@ -662,7 +745,6 @@ pub fn buildPlainsPasswordAuth(
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
     try auth_pack.addBool("support_udp_recovery", false);
 
-    // Unique client ID
     const unique_id: [Protocol.sha1_size]u8 = [1]u8{0} ** Protocol.sha1_size;
     try auth_pack.addData("unique_id", &unique_id);
 
@@ -672,23 +754,21 @@ pub fn buildPlainsPasswordAuth(
         try auth_pack.addInt("rudp_bulk_max_version", 0);
     }
 
-    // OS info
-    const os_info_anon = getOsInfo();
-    try auth_pack.addStr("ClientProductName", Protocol.client_str);
+    const os_info_anon = fpOsInfo(fp);
+    try auth_pack.addStr("ClientProductName", fpClientStr(fp));
     try auth_pack.addStr("ServerProductName", "");
     try auth_pack.addStr("ClientOsName", os_info_anon.name);
     try auth_pack.addStr("ClientOsVer", os_info_anon.version);
     try auth_pack.addStr("ClientOsProductId", "");
-    try auth_pack.addStr("ClientHostname", "zig-client");
+    try auth_pack.addStr("ClientHostname", fpClientHostname(fp));
     try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &unique_id);
-    try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
-    try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
+    try auth_pack.addInt("ClientProductVer", fpClientVer(fp));
+    try auth_pack.addInt("ClientProductBuild", fpClientBuild(fp));
     try auth_pack.addInt("ServerProductVer", 0);
     try auth_pack.addInt("ServerProductBuild", 0);
 
-    // Network info
     try auth_pack.addBool("ClientIpAddress@ipv6_bool", false);
     try auth_pack.addData("ClientIpAddress@ipv6_array", &[_]u8{0} ** 16);
     try auth_pack.addInt("ClientIpAddress@ipv6_scope_id", 0);
@@ -710,7 +790,6 @@ pub fn buildPlainsPasswordAuth(
     try auth_pack.addData("ProxyIpAddress6", &[_]u8{0} ** 16);
     try auth_pack.addInt("ProxyPort", 0);
 
-    // OS version
     try auth_pack.addInt("V_IsWindows", 0);
     try auth_pack.addInt("V_IsNT", 0);
     try auth_pack.addInt("V_IsServer", 0);
@@ -721,8 +800,8 @@ pub fn buildPlainsPasswordAuth(
     try auth_pack.addInt("V_ServicePack", 0);
     try auth_pack.addStr("V_Title", os_info_anon.title);
 
-    var pencore_buf2: [1000]u8 = undefined;
-    const pencore_size2 = crypto.random.intRangeAtMost(usize, 0, 1000);
+    var pencore_buf2: [2048]u8 = undefined;
+    const pencore_size2 = crypto.random.intRangeAtMost(usize, 0, fpMaxRandSize(fp));
     crypto.random.bytes(pencore_buf2[0..pencore_size2]);
     try auth_pack.addData("pencore", pencore_buf2[0..pencore_size2]);
 
@@ -745,13 +824,13 @@ pub fn buildPasswordAuthWithHash(
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
-    // Add authentication fields (method must be "login", not "auth")
+    const fp = opts.fingerprint;
+
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
     try auth_pack.addStr("username", username);
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.password));
 
-    // Decode base64 password hash
     const base64_decoder = std.base64.standard.Decoder;
     var password_hash: [Protocol.sha1_size]u8 = undefined;
     base64_decoder.decode(&password_hash, password_hash_base64) catch {
@@ -759,81 +838,65 @@ pub fn buildPasswordAuthWithHash(
         return error.InvalidBase64;
     };
 
-    // Debug: Print decoded password hash
     std.log.info("Pre-hashed password (decoded): {x}", .{password_hash});
 
-    // Compute secure password with server random
     const secure_pass = auth_mod.computeSecurePassword(&password_hash, server_random);
 
-    // Debug: Print secure password and server random
     std.log.debug("Server random: {x}", .{server_random.*});
     std.log.debug("Secure password: {x}", .{secure_pass});
 
     try auth_pack.addData("secure_password", &secure_pass);
 
-    // PackAddClientVersion fields
-    try auth_pack.addStr("client_str", Protocol.client_str);
-    try auth_pack.addInt("client_ver", Protocol.client_ver);
-    try auth_pack.addInt("client_build", Protocol.client_build);
+    try auth_pack.addStr("client_str", fpClientStr(fp));
+    try auth_pack.addInt("client_ver", fpClientVer(fp));
+    try auth_pack.addInt("client_build", fpClientBuild(fp));
 
-    // Protocol (0 = TCP, 1 = UDP) - C adds this BEFORE hello/version/build
     try auth_pack.addInt("protocol", 0);
 
-    // Version fields (C adds AFTER protocol)
-    try auth_pack.addStr("hello", Protocol.client_str);
-    try auth_pack.addInt("version", Protocol.client_ver);
-    try auth_pack.addInt("build", Protocol.client_build);
-    try auth_pack.addInt("client_id", 0); // Cedar client ID
+    try auth_pack.addStr("hello", fpClientStr(fp));
+    try auth_pack.addInt("version", fpClientVer(fp));
+    try auth_pack.addInt("build", fpClientBuild(fp));
+    try auth_pack.addInt("client_id", 0);
 
-    // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
-    // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
-    // QoS flag
     try auth_pack.addBool("qos", opts.qos);
 
-    // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
-    // UDP recovery support
     try auth_pack.addBool("support_udp_recovery", udp_accel);
 
-    // Unique ID (machine identifier) - GenerateMachineUniqueHash in C
     var unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
-    // RUDP bulk max version
     try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
     try addUdpAccelFields(&auth_pack, bulk_keys);
 
-    // Cedar->UniqueId is SEPARATE from unique_id in C
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&cedar_unique_id);
 
-    // Add NodeInfo fields (required by server)
-    const os_info2 = getOsInfo();
-    try auth_pack.addStr("ClientProductName", Protocol.client_str);
+    const os_info2 = fpOsInfo(fp);
+    try auth_pack.addStr("ClientProductName", fpClientStr(fp));
     try auth_pack.addStr("ServerProductName", "");
     try auth_pack.addStr("ClientOsName", os_info2.name);
     try auth_pack.addStr("ClientOsVer", os_info2.version);
     try auth_pack.addStr("ClientOsProductId", "");
-    try auth_pack.addStr("ClientHostname", "zig-client");
+    try auth_pack.addStr("ClientHostname", fpClientHostname(fp));
     try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
-    try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
-    try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
+    try auth_pack.addInt("ClientProductVer", fpClientVer(fp));
+    try auth_pack.addInt("ClientProductBuild", fpClientBuild(fp));
     try auth_pack.addInt("ServerProductVer", 0);
     try auth_pack.addInt("ServerProductBuild", 0);
-    // Add IP addresses like C's PackAddIp32 (adds 4 elements each)
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
@@ -844,7 +907,6 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addData("ProxyIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ProxyPort", 0);
 
-    // Add WinVer fields (required by server)
     try auth_pack.addBool("V_IsWindows", false);
     try auth_pack.addBool("V_IsNT", false);
     try auth_pack.addBool("V_IsServer", false);
@@ -855,9 +917,8 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addInt("V_ServicePack", 0);
     try auth_pack.addStr("V_Title", os_info2.title);
 
-    // Add pencore dummy value (random padding for anti-fingerprinting)
-    var pencore_buf2: [1000]u8 = undefined;
-    const pencore_size2 = crypto.random.intRangeAtMost(usize, 0, 1000);
+    var pencore_buf2: [2048]u8 = undefined;
+    const pencore_size2 = crypto.random.intRangeAtMost(usize, 0, fpMaxRandSize(fp));
     crypto.random.bytes(pencore_buf2[0..pencore_size2]);
     try auth_pack.addData("pencore", pencore_buf2[0..pencore_size2]);
 
@@ -874,63 +935,54 @@ pub fn buildAnonymousAuth(
     bulk_keys: ?*const UdpBulkKeys,
     opts: SessionOptions,
 ) ![]u8 {
-    _ = server_ip;
-    _ = server_hostname;
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
-    // Add authentication fields (method must be "login", not "auth")
+    const fp = opts.fingerprint;
+
+    _ = server_ip;
+    _ = server_hostname;
+
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
     try auth_pack.addStr("username", "anonymous");
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.anonymous));
 
-    // PackAddClientVersion fields
-    try auth_pack.addStr("client_str", Protocol.client_str);
-    try auth_pack.addInt("client_ver", Protocol.client_ver);
-    try auth_pack.addInt("client_build", Protocol.client_build);
+    try auth_pack.addStr("client_str", fpClientStr(fp));
+    try auth_pack.addInt("client_ver", fpClientVer(fp));
+    try auth_pack.addInt("client_build", fpClientBuild(fp));
 
-    // Protocol (0 = TCP) - C adds this BEFORE hello/version/build
     try auth_pack.addInt("protocol", 0);
 
-    // Version fields (C adds AFTER protocol)
-    try auth_pack.addStr("hello", Protocol.client_str);
-    try auth_pack.addInt("version", Protocol.client_ver);
-    try auth_pack.addInt("build", Protocol.client_build);
+    try auth_pack.addStr("hello", fpClientStr(fp));
+    try auth_pack.addInt("version", fpClientVer(fp));
+    try auth_pack.addInt("build", fpClientBuild(fp));
     try auth_pack.addInt("client_id", 0);
 
-    // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
-    // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
-    // QoS flag
     try auth_pack.addBool("qos", opts.qos);
 
-    // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
-    // UDP recovery support
     try auth_pack.addBool("support_udp_recovery", udp_accel);
 
-    // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
-    // RUDP bulk max version
     try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
     try addUdpAccelFields(&auth_pack, bulk_keys);
 
-    // Add pencore dummy value (random padding for anti-fingerprinting)
-    var pencore_buf3: [1000]u8 = undefined;
-    const pencore_size3 = crypto.random.intRangeAtMost(usize, 0, 1000);
+    var pencore_buf3: [2048]u8 = undefined;
+    const pencore_size3 = crypto.random.intRangeAtMost(usize, 0, fpMaxRandSize(fp));
     crypto.random.bytes(pencore_buf3[0..pencore_size3]);
     try auth_pack.addData("pencore", pencore_buf3[0..pencore_size3]);
 
@@ -954,15 +1006,14 @@ pub fn buildCertificateAuth(
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
-    // Extract CN for username
+    const fp = opts.fingerprint;
+
     const username = auth_mod.extractCertCommonName(allocator, cert_pem) catch "certificate_user";
     defer if (!mem.eql(u8, username, "certificate_user")) allocator.free(username);
 
-    // DER-encode the certificate
     const cert_der = try auth_mod.certPemToDer(allocator, cert_pem);
     defer allocator.free(cert_der);
 
-    // Sign the server random with client's private key
     const signature = try auth_mod.signWithPrivateKey(allocator, key_pem, server_random);
     defer allocator.free(signature);
 
@@ -970,65 +1021,52 @@ pub fn buildCertificateAuth(
         username, cert_der.len, signature.len,
     });
 
-    // Auth fields
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
     try auth_pack.addStr("username", username);
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.certificate));
 
-    // Certificate data (DER-encoded X.509)
     try auth_pack.addData("cert", cert_der);
-
-    // Signature of server random
     try auth_pack.addData("sign", signature);
 
-    // Client info (same pattern as password auth)
-    try auth_pack.addStr("client_str", "SoftEther VPN Client (Zig)");
-    try auth_pack.addInt("client_ver", 500);
-    try auth_pack.addInt("client_build", 1);
+    try auth_pack.addStr("client_str", fpClientStr(fp));
+    try auth_pack.addInt("client_ver", fpClientVer(fp));
+    try auth_pack.addInt("client_build", fpClientBuild(fp));
 
-    // Protocol type: 0 = TCP, 1 = UDP
     try auth_pack.addInt("protocol", 0);
 
-    // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
-    // Mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
-    // QoS
     try auth_pack.addBool("qos", opts.qos);
 
-    // UDP acceleration
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
     try auth_pack.addBool("support_udp_recovery", udp_accel);
 
-    // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
-    // RUDP bulk version
     try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
     try addUdpAccelFields(&auth_pack, bulk_keys);
 
-    // Add NodeInfo fields (same pattern as other auth builders)
-    const os_info_cert = getOsInfo();
-    try auth_pack.addStr("ClientProductName", Protocol.client_str);
+    const os_info_cert = fpOsInfo(fp);
+    try auth_pack.addStr("ClientProductName", fpClientStr(fp));
     try auth_pack.addStr("ServerProductName", "");
     try auth_pack.addStr("ClientOsName", os_info_cert.name);
     try auth_pack.addStr("ClientOsVer", os_info_cert.version);
     try auth_pack.addStr("ClientOsProductId", "");
-    try auth_pack.addStr("ClientHostname", "zig-client");
+    try auth_pack.addStr("ClientHostname", fpClientHostname(fp));
     try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
-    try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
-    try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
+    try auth_pack.addInt("ClientProductVer", fpClientVer(fp));
+    try auth_pack.addInt("ClientProductBuild", fpClientBuild(fp));
     try auth_pack.addInt("ServerProductVer", 0);
     try auth_pack.addInt("ServerProductBuild", 0);
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
@@ -1041,7 +1079,6 @@ pub fn buildCertificateAuth(
     try auth_pack.addData("ProxyIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ProxyPort", 0);
 
-    // WinVer fields (required by server)
     try auth_pack.addBool("V_IsWindows", false);
     try auth_pack.addBool("V_IsNT", false);
     try auth_pack.addBool("V_IsServer", false);
@@ -1052,9 +1089,8 @@ pub fn buildCertificateAuth(
     try auth_pack.addInt("V_ServicePack", 0);
     try auth_pack.addStr("V_Title", os_info_cert.title);
 
-    // Anti-fingerprinting padding
-    var pencore_buf_c: [1000]u8 = undefined;
-    const pencore_size_c = crypto.random.intRangeAtMost(usize, 0, 1000);
+    var pencore_buf_c: [2048]u8 = undefined;
+    const pencore_size_c = crypto.random.intRangeAtMost(usize, 0, fpMaxRandSize(fp));
     crypto.random.bytes(pencore_buf_c[0..pencore_size_c]);
     try auth_pack.addData("pencore", pencore_buf_c[0..pencore_size_c]);
 
@@ -1081,78 +1117,65 @@ pub fn buildTicketAuth(
     var auth_pack = Pack.init(allocator);
     defer auth_pack.deinit();
 
-    // Add authentication fields
+    const fp = opts.fingerprint;
+
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
     try auth_pack.addStr("username", username);
     try auth_pack.addInt("authtype", @intFromEnum(AuthType.ticket));
 
-    // Add ticket instead of secure_password
     try auth_pack.addData("ticket", ticket);
 
-    // PackAddClientVersion fields
-    try auth_pack.addStr("client_str", Protocol.client_str);
-    try auth_pack.addInt("client_ver", Protocol.client_ver);
-    try auth_pack.addInt("client_build", Protocol.client_build);
+    try auth_pack.addStr("client_str", fpClientStr(fp));
+    try auth_pack.addInt("client_ver", fpClientVer(fp));
+    try auth_pack.addInt("client_build", fpClientBuild(fp));
 
-    // Protocol (0 = TCP)
     try auth_pack.addInt("protocol", 0);
 
-    // Version fields
-    try auth_pack.addStr("hello", Protocol.client_str);
-    try auth_pack.addInt("version", Protocol.client_ver);
-    try auth_pack.addInt("build", Protocol.client_build);
+    try auth_pack.addStr("hello", fpClientStr(fp));
+    try auth_pack.addInt("version", fpClientVer(fp));
+    try auth_pack.addInt("build", fpClientBuild(fp));
     try auth_pack.addInt("client_id", 0);
 
-    // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
-    // Bridge/monitor mode flags
     try auth_pack.addBool("require_bridge_routing_mode", false);
     try auth_pack.addBool("require_monitor_mode", false);
 
-    // QoS flag
     try auth_pack.addBool("qos", opts.qos);
 
-    // Bulk transfer support (UDP acceleration)
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
 
-    // UDP recovery support
     try auth_pack.addBool("support_udp_recovery", udp_accel);
 
-    // Unique ID
     var unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&unique_id);
     try auth_pack.addData("unique_id", &unique_id);
 
-    // RUDP bulk max version
     try auth_pack.addInt("rudp_bulk_max_version", if (udp_accel) @as(i32, 2) else @as(i32, 0));
     try addUdpAccelFields(&auth_pack, bulk_keys);
 
-    // Cedar->UniqueId
     var cedar_unique_id: [Protocol.sha1_size]u8 = undefined;
     std.crypto.random.bytes(&cedar_unique_id);
 
-    // Add NodeInfo fields
-    const os_info3 = getOsInfo();
-    try auth_pack.addStr("ClientProductName", Protocol.client_str);
+    const os_info3 = fpOsInfo(fp);
+    try auth_pack.addStr("ClientProductName", fpClientStr(fp));
     try auth_pack.addStr("ServerProductName", "");
     try auth_pack.addStr("ClientOsName", os_info3.name);
     try auth_pack.addStr("ClientOsVer", os_info3.version);
     try auth_pack.addStr("ClientOsProductId", "");
-    try auth_pack.addStr("ClientHostname", "zig-client");
+    try auth_pack.addStr("ClientHostname", fpClientHostname(fp));
     try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
-    try auth_pack.addInt("ClientProductVer", Protocol.client_ver);
-    try auth_pack.addInt("ClientProductBuild", Protocol.client_build);
+    try auth_pack.addInt("ClientProductVer", fpClientVer(fp));
+    try auth_pack.addInt("ClientProductBuild", fpClientBuild(fp));
     try auth_pack.addInt("ServerProductVer", 0);
     try auth_pack.addInt("ServerProductBuild", 0);
-    // Add IP addresses like C's PackAddIp32 (adds 4 elements each)
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
@@ -1163,7 +1186,6 @@ pub fn buildTicketAuth(
     try auth_pack.addData("ProxyIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ProxyPort", 0);
 
-    // Add WinVer fields
     try auth_pack.addBool("V_IsWindows", false);
     try auth_pack.addBool("V_IsNT", false);
     try auth_pack.addBool("V_IsServer", false);
@@ -1174,9 +1196,8 @@ pub fn buildTicketAuth(
     try auth_pack.addInt("V_ServicePack", 0);
     try auth_pack.addStr("V_Title", os_info3.title);
 
-    // Add pencore dummy value
-    var pencore_buf: [1000]u8 = undefined;
-    const pencore_size = crypto.random.intRangeAtMost(usize, 0, 1000);
+    var pencore_buf: [2048]u8 = undefined;
+    const pencore_size = crypto.random.intRangeAtMost(usize, 0, fpMaxRandSize(fp));
     crypto.random.bytes(pencore_buf[0..pencore_size]);
     try auth_pack.addData("pencore", pencore_buf[0..pencore_size]);
 
@@ -1190,9 +1211,10 @@ pub fn uploadAuth(
     reader: Reader,
     host: []const u8,
     auth_pack_data: []const u8,
+    fingerprint: ?*const ProtocolFingerprint,
 ) !AuthResult {
     // Build HTTP header for auth pack
-    const header = try buildPackHttpHeader(allocator, host, auth_pack_data.len);
+    const header = try buildPackHttpHeader(allocator, host, auth_pack_data.len, fingerprint);
     defer allocator.free(header);
 
     // Debug: List all elements being sent
@@ -1464,7 +1486,7 @@ pub fn performHandshake(
     udp_accel: bool,
 ) !struct { hello: HelloResponse, auth: AuthResult } {
     // Step 1: Upload signature
-    try uploadSignature(allocator, writer, host);
+    try uploadSignature(allocator, writer, host, null);
 
     // Step 2: Download Hello
     var hello = try downloadHello(allocator, reader);
@@ -1478,7 +1500,7 @@ pub fn performHandshake(
         try buildAnonymousAuth(allocator, hub_name, 0, "", udp_accel, null, default_opts);
     defer allocator.free(auth_data);
 
-    var auth = try uploadAuth(allocator, writer, reader, host, auth_data);
+    var auth = try uploadAuth(allocator, writer, reader, host, auth_data, null);
     errdefer auth.deinit(allocator);
 
     return .{ .hello = hello, .auth = auth };
@@ -1523,7 +1545,7 @@ pub fn uploadAdditionalConnect(
     const pack_data = try buildAdditionalConnectPack(allocator, session_key);
     defer allocator.free(pack_data);
 
-    try sendHttpPost(allocator, writer, host, pack_data);
+    try sendHttpPost(allocator, writer, host, pack_data, null);
 
     // Read HTTP response header
     var resp_header_buf: [4096]u8 = undefined;
@@ -1599,7 +1621,7 @@ test "WaterMark is correct size" {
 test "buildClientHello creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const hello_data = try buildClientHello(allocator);
+    const hello_data = try buildClientHello(allocator, null);
     defer allocator.free(hello_data);
 
     // Parse it back
@@ -1622,6 +1644,8 @@ test "buildPasswordAuth creates valid Pack" {
         "testpass",
         "VPN",
         &random,
+        0,
+        "",
         false, // udp_accel
         null,
         .{},
@@ -1642,7 +1666,7 @@ test "buildPasswordAuth creates valid Pack" {
 test "buildAnonymousAuth creates valid Pack" {
     const allocator = std.testing.allocator;
 
-    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", false, null, .{});
+    const auth_data = try buildAnonymousAuth(allocator, "PUBLIC", 0, "", false, null, .{});
     defer allocator.free(auth_data);
 
     var auth_pack = try Pack.fromBytes(allocator, auth_data);

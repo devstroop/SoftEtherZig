@@ -114,11 +114,24 @@ pub const TlsConfig = struct {
     /// Proxy configuration. When set, the TCP connection is established through
     /// the proxy before the TLS handshake. Supports HTTP CONNECT, SOCKS4, SOCKS5.
     proxy: ?ProxyConfig = null,
+
+    /// Network interface index to bind outbound sockets to (Darwin IP_BOUND_IF).
+    /// Overrides the global bind_interface_index when set to non-null.
+    bind_interface_index: ?c_uint = null,
+
+    /// Host-provided TCP dial function for this specific connection.
+    /// Overrides the global external_tcp_dial when set.
+    external_tcp_dial: ?ExternalTcpDialFn = null,
+
+    /// Enable TCP_NODELAY (disable Nagle's algorithm) for low latency.
+    /// True by default — SoftEther VPN benefits from immediate packet delivery.
+    /// Set to false for bulk-throughput workloads where Nagle's buffering helps.
+    tcp_nodelay: bool = true,
 };
 
 /// TCP connect with configurable timeout using non-blocking socket + poll.
 /// Avoids the OS default 75s SYN timeout that causes apparent freezes.
-fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socket_t {
+fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32, bind_if_idx: ?c_uint) !std.posix.socket_t {
     const fd = try std.posix.socket(address.any.family, std.posix.SOCK.STREAM, 0);
     errdefer {
         if (builtin.os.tag == .windows) {
@@ -132,15 +145,16 @@ fn tcpConnectWithTimeout(address: net.Address, timeout_ms: u32) !std.posix.socke
     // NEPacketTunnelProvider extensions, otherwise the kernel's NECP layer routes
     // the extension's outbound socket through the (not-yet-established) tunnel
     // and we get instant ECONNREFUSED.
-    if ((builtin.os.tag == .ios or builtin.os.tag == .macos) and bind_interface_index != 0) {
-        const idx_bytes = std.mem.asBytes(&bind_interface_index);
+    const effective_bind_if = bind_if_idx orelse bind_interface_index;
+    if ((builtin.os.tag == .ios or builtin.os.tag == .macos) and effective_bind_if != 0) {
+        const idx_bytes = std.mem.asBytes(&effective_bind_if);
         if (address.any.family == std.posix.AF.INET6) {
             std.posix.setsockopt(fd, DARWIN_IPPROTO_IPV6, DARWIN_IPV6_BOUND_IF, idx_bytes) catch |err| {
-                std.log.warn("TLS: IPV6_BOUND_IF(idx={d}) failed: {}", .{ bind_interface_index, err });
+                std.log.warn("TLS: IPV6_BOUND_IF(idx={d}) failed: {}", .{ effective_bind_if, err });
             };
         } else {
             std.posix.setsockopt(fd, DARWIN_IPPROTO_IP, DARWIN_IP_BOUND_IF, idx_bytes) catch |err| {
-                std.log.warn("TLS: IP_BOUND_IF(idx={d}) failed: {}", .{ bind_interface_index, err });
+                std.log.warn("TLS: IP_BOUND_IF(idx={d}) failed: {}", .{ effective_bind_if, err });
             };
         }
     }
@@ -277,7 +291,7 @@ pub const TlsSocket = struct {
         // which applies IP_BOUND_IF + sets a large 4MB SO_RCVBUF. This
         // bypasses the NWConnection autotune that keeps iOS DL at 2-3 Mbps.
         var via_host_dial: bool = false;
-        if (builtin.os.tag == .ios and bind_interface_index != 0) {
+        if (builtin.os.tag == .ios and (config.bind_interface_index orelse bind_interface_index) != 0) {
             // Try direct POSIX socket with IP_BOUND_IF
             var dns_ok = false;
             var connect_ok = false;
@@ -286,7 +300,7 @@ pub const TlsSocket = struct {
                 if (addrs.addrs.len > 0) {
                     dns_ok = true;
                     const address = addrs.addrs[0];
-                    const connect_result = tcpConnectWithTimeout(address, config.timeout_ms);
+                    const connect_result = tcpConnectWithTimeout(address, config.timeout_ms, config.bind_interface_index);
                     if (connect_result) |fd| {
                         tcp_fd = fd;
                         const rcv_cap: u32 = 4 * 1024 * 1024;
@@ -295,7 +309,7 @@ pub const TlsSocket = struct {
                         connect_ok = true;
                     } else |err| {
                         std.log.warn("TLS: POSIX connect failed ({}), falling back to host dial", .{err});
-                        if (external_tcp_dial) |dial| {
+                        if (config.external_tcp_dial orelse external_tcp_dial) |dial| {
                             const c_host = try allocator.dupeZ(u8, hostname);
                             defer allocator.free(c_host);
                             const fd_int = dial(c_host.ptr, port);
@@ -309,7 +323,7 @@ pub const TlsSocket = struct {
             }
             if (!dns_ok and !connect_ok and !via_host_dial) {
                 // DNS failed or no addresses — use dial callback
-                if (external_tcp_dial) |dial| {
+                if (config.external_tcp_dial orelse external_tcp_dial) |dial| {
                     const c_host = try allocator.dupeZ(u8, hostname);
                     defer allocator.free(c_host);
                     const fd_int = dial(c_host.ptr, port);
@@ -317,7 +331,7 @@ pub const TlsSocket = struct {
                     else return TlsError.ConnectionFailed;
                 } else return TlsError.ConnectionFailed;
             }
-        } else if (external_tcp_dial) |dial| {
+        } else if (config.external_tcp_dial orelse external_tcp_dial) |dial| {
             const c_host = try allocator.dupeZ(u8, hostname);
             defer allocator.free(c_host);
             std.log.info("TLS: dialing {s}:{d} via host callback", .{ hostname, port });
@@ -343,7 +357,7 @@ pub const TlsSocket = struct {
         // First try to parse as IP address
         if (net.Address.resolveIp(hostname, port)) |address| {
             std.log.debug("TLS: Resolved IP address directly: {s}:{d}", .{ hostname, port });
-            const connect_result = tcpConnectWithTimeout(address, config.timeout_ms);
+            const connect_result = tcpConnectWithTimeout(address, config.timeout_ms, config.bind_interface_index);
             if (connect_result) |fd| {
                 tcp_fd = fd;
             } else |err| {
@@ -352,7 +366,7 @@ pub const TlsSocket = struct {
                     route_heal.repairStaleHostRoute(allocator, hostname, port))
                 {
                     std.log.info("TLS: Retrying {s}:{d} after stale-route repair", .{ hostname, port });
-                    tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms) catch |retry_err| {
+                    tcp_fd = tcpConnectWithTimeout(address, config.timeout_ms, config.bind_interface_index) catch |retry_err| {
                         logConnectError(retry_err, hostname, port);
                         return TlsError.ConnectionFailed;
                     };
@@ -385,7 +399,7 @@ pub const TlsSocket = struct {
             var last_err: anyerror = error.ConnectionRefused;
             var connected_idx: ?usize = null;
             for (cached_addrs, 0..) |addr, i| {
-                const result = tcpConnectWithTimeout(addr, config.timeout_ms);
+                const result = tcpConnectWithTimeout(addr, config.timeout_ms, config.bind_interface_index);
                 if (result) |fd| {
                     tcp_fd = fd;
                     connected_idx = i;
@@ -404,7 +418,7 @@ pub const TlsSocket = struct {
                 {
                     std.log.info("TLS: Retrying {s}:{d} after stale-route repair", .{ hostname, port });
                     for (cached_addrs, 0..) |addr, retry_i| {
-                        const retry_result = tcpConnectWithTimeout(addr, config.timeout_ms);
+                        const retry_result = tcpConnectWithTimeout(addr, config.timeout_ms, config.bind_interface_index);
                         if (retry_result) |fd| {
                             tcp_fd = fd;
                             connected_idx = retry_i;
@@ -437,7 +451,7 @@ pub const TlsSocket = struct {
         // Skip on host-dialed sockets (AF_UNIX socketpair from iOS NEPacketTunnel
         // bridge) — TCP_NODELAY is invalid on AF_UNIX (returns ENOPROTOOPT) and
         // Nagle is handled by NWTCPConnection on the host side.
-        if (!via_host_dial) {
+        if (!via_host_dial and config.tcp_nodelay) {
             const nodelay: u32 = 1;
             const IPPROTO_TCP = 6;
             const TCP_NODELAY = 1;

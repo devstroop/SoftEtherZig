@@ -45,10 +45,14 @@ pub const ConfigFile = struct {
     // Proxy
     proxy: ?[]const u8 = null,
 
+    /// TCP_NODELAY (disable Nagle's algorithm)
+    tcp_nodelay: ?bool = null,
+
     // Timeouts (milliseconds)
     connect_timeout_ms: ?u32 = null,
     read_timeout_ms: ?u32 = null,
     keepalive_interval_ms: ?u32 = null,
+    garp_interval_ms: ?u32 = null,
 
     // Logging
     log_level: ?[]const u8 = null,
@@ -281,10 +285,14 @@ pub const ConfigManager = struct {
             if (self.config.proxy) |s| cli_args.proxy = try alloc.dupe(u8, s);
         }
 
+        // TCP_NODELAY
+        if (self.config.tcp_nodelay) |v| cli_args.tcp_nodelay = v;
+
         // Timeouts
         if (self.config.connect_timeout_ms) |v| cli_args.connect_timeout_ms = v;
         if (self.config.read_timeout_ms) |v| cli_args.read_timeout_ms = v;
         if (self.config.keepalive_interval_ms) |v| cli_args.keepalive_interval_ms = v;
+        if (self.config.garp_interval_ms) |v| cli_args.garp_interval_ms = v;
 
         // Log level
         if (self.config.log_level) |ll| {
@@ -322,10 +330,12 @@ pub const ConfigManager = struct {
         cfg.udp_accel = cli_args.udp_accel;
         cfg.max_connections = cli_args.max_connections;
         cfg.mtu = cli_args.mtu;
-        cfg.proxy = cli_args.proxy;
-        cfg.connect_timeout_ms = cli_args.connect_timeout_ms;
+    cfg.proxy = cli_args.proxy;
+    cfg.tcp_nodelay = cli_args.tcp_nodelay;
+    cfg.connect_timeout_ms = cli_args.connect_timeout_ms;
         cfg.read_timeout_ms = cli_args.read_timeout_ms;
         cfg.keepalive_interval_ms = cli_args.keepalive_interval_ms;
+        cfg.garp_interval_ms = cli_args.garp_interval_ms;
 
         cfg.reconnect = .{
             .enabled = cli_args.reconnect,

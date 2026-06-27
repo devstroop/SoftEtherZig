@@ -96,6 +96,8 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .connect_timeout_ms = args.connect_timeout_ms,
         .read_timeout_ms = args.read_timeout_ms,
         .keepalive_interval_ms = args.keepalive_interval_ms,
+        .garp_interval_ms = args.garp_interval_ms,
+        .tcp_nodelay = args.tcp_nodelay,
         .proxy = if (args.proxy) |proxy_str| try parseProxyUrl(proxy_str) else null,
     };
 }

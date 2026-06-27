@@ -95,6 +95,8 @@ pub const DataLoopConfig = struct {
     dhcp_retry_interval_ms: i64 = 3000,
     /// Maximum DHCP retries
     max_dhcp_retries: u32 = 5,
+    /// Maximum DHCPv6 retries (DHCPv6 is less critical, SLAAC may still work)
+    max_dhcpv6_retries: u32 = 3,
     /// Enable full tunnel routing
     default_route: bool = true,
     /// Initial delay before DHCP discover (ms)
@@ -177,7 +179,7 @@ pub const DataLoopState = struct {
     // Assigned addresses
     our_ip: u32 = 0,
     our_gateway: u32 = 0,
-    gateway_mac: [6]u8 = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff },
+    gateway_mac: ?[6]u8 = null,
     server_ip: u32 = 0,
 
     // MAC address

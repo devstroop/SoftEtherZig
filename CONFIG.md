@@ -32,28 +32,37 @@ Every config property must be present in **all six layers** to be maintainable.
 | 13 | mtu | `--mtu` | `SOFTETHER_MTU` | `"mtu"` | ✅ | `softether_set_mtu` | `mtu` | — |
 | 14 | ip_version | `--ip-version` | `SOFTETHER_IP_VERSION` | `"ip_version"` | ✅ | `softether_set_ip_version` | `ip_version` | — |
 | 15 | skip_tls_verify | `--skip-tls-verify` | `SOFTETHER_SKIP_TLS_VERIFY` | `"skip_tls_verify"` | ✅ (inverted) | `softether_set_verify_certificate` | `verify_certificate` | — |
-| 16 | default_route | ❌ missing | — | `"routing.default_route"` | ✅ | `softether_set_default_route` | `routing.default_route` | — |
-| 17 | accept_pushed_routes | — | — | `"routing.accept_pushed_routes"` | ✅ | `softether_set_accept_pushed_routes` | `routing.accept_pushed_routes` | — |
-| 18 | enable_custom_routes | — | — | `"routing.enable_custom_routes"` | ✅ | `softether_set_enable_custom_routes` | `routing.enable_custom_routes` | — |
+| 16 | default_route | `--full-tunnel` / `--no-full-tunnel` | `SOFTETHER_FULL_TUNNEL` | `"routing.default_route"` | ✅ | `softether_set_default_route` | `routing.default_route` | — |
+| 17 | accept_pushed_routes | `--accept-pushed-routes` / `--no-accept-pushed-routes` | `SOFTETHER_ACCEPT_PUSHED_ROUTES` | `"routing.accept_pushed_routes"` | ✅ | `softether_set_accept_pushed_routes` | `routing.accept_pushed_routes` | — |
+| 18 | enable_custom_routes | `--enable-custom-routes` / `--no-enable-custom-routes` | `SOFTETHER_ENABLE_CUSTOM_ROUTES` | `"routing.enable_custom_routes"` | ✅ | `softether_set_enable_custom_routes` | `routing.enable_custom_routes` | — |
 | 19 | ipv4_include | `--ipv4-include` | — | `"routing.ipv4_include"` | ✅ | `softether_set_ipv4_include` | `routing.ipv4_include` | — |
 | 20 | ipv4_exclude | `--ipv4-exclude` | — | `"routing.ipv4_exclude"` | ✅ | `softether_set_ipv4_exclude` | `routing.ipv4_exclude` | — |
 | 21 | ipv6_include | `--ipv6-include` | — | `"routing.ipv6_include"` | ✅ | `softether_set_ipv6_include` | `routing.ipv6_include` | — |
 | 22 | ipv6_exclude | `--ipv6-exclude` | — | `"routing.ipv6_exclude"` | ✅ | `softether_set_ipv6_exclude` | `routing.ipv6_exclude` | — |
-| 23 | static_ipv4 | `--static-ipv4` | — | `"static_ip.ipv4_address"` | ✅ | **❌ missing** | `static_ip.ipv4_address` | — |
-| 24 | static_ipv4_netmask | `--static-ipv4-netmask` | — | `"static_ip.ipv4_netmask"` | ✅ | **❌ missing** | `static_ip.ipv4_netmask` | — |
-| 25 | static_ipv4_gateway | `--static-ipv4-gateway` | — | `"static_ip.ipv4_gateway"` | ✅ | **❌ missing** | `static_ip.ipv4_gateway` | — |
-| 26 | static_ipv6 | `--static-ipv6` | — | `"static_ip.ipv6_address"` | ✅ | **❌ missing** | `static_ip.ipv6_address` | — |
-| 27 | static_ipv6_prefix | `--static-ipv6-prefix` | — | `"static_ip.ipv6_prefix"` | ✅ | **❌ missing** | `static_ip.ipv6_prefix_len` | — |
-| 28 | static_ipv6_gateway | `--static-ipv6-gateway` | — | `"static_ip.ipv6_gateway"` | ✅ | **❌ missing** | `static_ip.ipv6_gateway` | — |
-| 29 | dns_servers | `--dns-server` (multi) | — | `"static_ip.dns_servers"` | ✅ | **❌ missing** | `static_ip.dns_servers` | — |
+| 23 | static_ipv4 | `--static-ipv4` | — | `"static_ip.ipv4_address"` | ✅ | `softether_set_static_ipv4` | `static_ip.ipv4_address` | — |
+| 24 | static_ipv4_netmask | `--static-ipv4-netmask` | — | `"static_ip.ipv4_netmask"` | ✅ | `softether_set_static_ipv4_netmask` | `static_ip.ipv4_netmask` | — |
+| 25 | static_ipv4_gateway | `--static-ipv4-gateway` | — | `"static_ip.ipv4_gateway"` | ✅ | `softether_set_static_ipv4_gateway` | `static_ip.ipv4_gateway` | — |
+| 26 | static_ipv6 | `--static-ipv6` | — | `"static_ip.ipv6_address"` | ✅ | `softether_set_static_ipv6` | `static_ip.ipv6_address` | — |
+| 27 | static_ipv6_prefix | `--static-ipv6-prefix` | — | `"static_ip.ipv6_prefix"` | ✅ | `softether_set_static_ipv6_prefix` | `static_ip.ipv6_prefix_len` | — |
+| 28 | static_ipv6_gateway | `--static-ipv6-gateway` | — | `"static_ip.ipv6_gateway"` | ✅ | `softether_set_static_ipv6_gateway` | `static_ip.ipv6_gateway` | — |
+| 29 | dns_servers | `--dns-server` (multi) | — | `"static_ip.dns_servers"` | ✅ | `softether_set_dns_servers` | `static_ip.dns_servers` | — |
 | 30 | reconnect | `--reconnect` / `--no-reconnect` | — | `"reconnect.enabled"` | ✅ | `softether_set_reconnect` | `reconnect.enabled` | — |
 | 31 | max_retries | `--max-retries` | — | `"reconnect.max_attempts"` | ✅ | `softether_set_reconnect` arg | `reconnect.max_attempts` | — |
 | 32 | proxy | `--proxy` | `SOFTETHER_PROXY` | `"proxy"` | ✅ | `softether_set_proxy` | `proxy` | — |
 | 33 | connect_timeout_ms | `--connect-timeout` | `SOFTETHER_CONNECT_TIMEOUT` | `"connect_timeout_ms"` | ✅ | `softether_set_connect_timeout` | `connect_timeout_ms` | — |
 | 34 | read_timeout_ms | `--read-timeout` | `SOFTETHER_READ_TIMEOUT` | `"read_timeout_ms"` | ✅ | `softether_set_read_timeout` | `read_timeout_ms` | — |
 | 35 | keepalive_interval_ms | `--keepalive-interval` | `SOFTETHER_KEEPALIVE_INTERVAL` | `"keepalive_interval_ms"` | ✅ | `softether_set_keepalive_interval` | `keepalive_interval_ms` | — |
-| 36 | log_level | `--log-level` | `SOFTETHER_LOG_LEVEL` | `"log_level"` | runtime only | **❌ missing** | **❌ (runtime)** | — |
+| 36 | log_level | `--log-level` | `SOFTETHER_LOG_LEVEL` | `"log_level"` | runtime only | `softether_set_log_level` | **❌ (runtime)** | — |
 | 37 | tunnel_fd | — | — | — | — | `softether_set_tunnel_fd` | `tunnel_fd` | — |
+| 38 | tcp_nodelay | `--tcp-nodelay` / `--no-tcp-nodelay` | `SOFTETHER_TCP_NODELAY` | `"tcp_nodelay"` | ✅ | `softether_set_tcp_nodelay` | `tcp_nodelay` | — |
+| 38 | client_str | — | — | `"fingerprint.client_str"` | ✅ | `softether_set_client_str` | `fingerprint.client_str` | — |
+| 39 | client_ver | — | — | `"fingerprint.client_ver"` | ✅ | `softether_set_client_ver` | `fingerprint.client_ver` | — |
+| 40 | client_build | — | — | `"fingerprint.client_build"` | ✅ | `softether_set_client_build` | `fingerprint.client_build` | — |
+| 41 | os_name | — | — | `"fingerprint.os_name"` | ✅ | `softether_set_os_info` | `fingerprint.os_name` | — |
+| 42 | os_version | — | — | `"fingerprint.os_version"` | ✅ | `softether_set_os_info` | `fingerprint.os_version` | — |
+| 43 | os_title | — | — | `"fingerprint.os_title"` | ✅ | `softether_set_os_info` | `fingerprint.os_title` | — |
+| 44 | watermark | — | — | `"fingerprint.watermark_b64"` | ✅ | — | `fingerprint.watermark` | — |
+| 45 | client_hostname | — | — | `"fingerprint.client_hostname"` | ✅ | — | `fingerprint.client_hostname` | — |
 
 ## Env Vars Reference
 
@@ -81,7 +90,10 @@ SOFTETHER_CONNECT_TIMEOUT    → parseInt (ms)
 SOFTETHER_READ_TIMEOUT       → parseInt (ms)
 SOFTETHER_KEEPALIVE_INTERVAL → parseInt (ms)
 SOFTETHER_PROXY
-```
+SOFTETHER_TCP_NODELAY         → isTrue(1|true|yes)
+SOFTETHER_FULL_TUNNEL            → isTrue(1|true|yes)
+SOFTETHER_ACCEPT_PUSHED_ROUTES   → isTrue(1|true|yes)
+SOFTETHER_ENABLE_CUSTOM_ROUTES   → isTrue(1|true|yes)
 
 Priority: CLI flag > env var > config file > code default.
 
@@ -105,8 +117,4 @@ The SoftEther VPN server uses these field names in the auth handshake
 
 ## Gaps (not equally placed)
 
-Priority order for filling:
-
-1. **Static IP sub-fields** — no FFI setters for `softether_set_static_ipv4()`, etc. Add once a mobile host needs to set a static IP at runtime rather than via config file.
-2. **log_level** — no FFI setter. Currently runtime-only via `--log-level` CLI flag or `SOFTETHER_LOG_LEVEL` env var.
-3. **Missing CLI flags** — `--full-tunnel`, `--accept-pushed-routes`, `--enable-custom-routes` are not parsed in CLI arg parser. Use config file or FFI setters instead. Add to `src/cli/args.zig`.
+All gaps resolved — every property has complete coverage across all six layers.

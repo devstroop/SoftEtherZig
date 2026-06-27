@@ -88,6 +88,10 @@ const winmm = if (builtin.os.tag == .windows) struct {
     extern "winmm" fn timeEndPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
 } else struct {};
 
+/// Maximum number of inbound packets to drain per poll iteration.
+/// Prevents complete outbound starvation during heavy download bursts.
+const MAX_INBOUND_DRAIN: u32 = 256;
+
 // ============================================================================
 // Client Configuration
 // ============================================================================
@@ -193,9 +197,18 @@ pub const ClientConfig = struct {
     connect_timeout_ms: u32 = 30000,
     read_timeout_ms: u32 = 60000,
     keepalive_interval_ms: u32 = 10000,
+    /// Gratuitous ARP interval in milliseconds
+    garp_interval_ms: u32 = 10000,
 
     // Proxy (optional)
     proxy: ?tls.ProxyConfig = null,
+
+    // TCP_NODELAY (disable Nagle's algorithm for low latency)
+    tcp_nodelay: bool = true,
+
+    // Protocol fingerprint overrides for anti-fingerprinting.
+    // When null/default, hardcoded protocol constants are used.
+    fingerprint: ?softether_proto.ProtocolFingerprint = null,
 
     // Mobile: external tunnel fd provided by platform (iOS/Android)
     // When set, the VPN client uses this fd instead of opening its own adapter.
@@ -722,6 +735,7 @@ pub const VpnClient = struct {
             .verify_certificate = self.config.verify_certificate,
             .allow_self_signed = !self.config.verify_certificate,
             .timeout_ms = self.config.connect_timeout_ms,
+            .tcp_nodelay = self.config.tcp_nodelay,
             .client_cert_pem = switch (self.config.auth) {
                 .certificate => |cert| cert.cert_data,
                 else => null,
@@ -897,11 +911,12 @@ pub const VpnClient = struct {
             h,       m,                      s,
         }) catch return false;
 
-        // Probe TLS config: short timeout, no cert verify
+        // Probe TLS config: short timeout, no cert verify, Nagle off
         const probe_config = tls.TlsConfig{
             .verify_certificate = false,
             .allow_self_signed = true,
             .timeout_ms = 3000,
+            .tcp_nodelay = true, // Probe connections need fast responses
             .client_cert_pem = null,
             .client_key_pem = null,
             .sni_hostname = hostname,
@@ -1510,7 +1525,7 @@ pub const VpnClient = struct {
 
         // Configuration constants
         const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
-        const garp_interval: i64 = 10000; // 10 seconds - periodic GARP for bridge mode
+        const garp_interval: i64 = @as(i64, @intCast(self.config.garp_interval_ms));
 
         // Cache the configured state check (must be before DHCP discover)
         var is_configured = false;
@@ -1912,7 +1927,6 @@ pub const VpnClient = struct {
                 // batches while OpenSSL has buffered data — identical to the
                 // single-conn drain loop. Without this, DL is capped at ~1
                 // batch per poll iteration per connection (~7 Mbps).
-                const MAX_INBOUND_DRAIN: u32 = 256;
                 var any_conn_had_data = false;
                 var iter = cm.forEachReadable(poll_fds[0..tls_fd_count]);
                 while (iter.next()) |conn| {
@@ -1990,7 +2004,6 @@ pub const VpnClient = struct {
                     // hasPending() is the natural terminator; the cap is just a
                     // safety net to ensure outbound can run occasionally.
                     // Cycle 5 regression came from batch=32, NOT drain=32.
-                    const MAX_INBOUND_DRAIN: u32 = 256;
                     var drain_iter: u32 = 0;
                     var inbound_dead = false;
                     while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
@@ -2046,7 +2059,6 @@ pub const VpnClient = struct {
                 // partially drain, one to catch the part that arrived during drain),
                 // halving effective throughput.
                 if (builtin.os.tag == .ios and tls_fd_count > 0) {
-                    const MAX_INBOUND_DRAIN: u32 = 256;
                     var ios_retry: u32 = 0;
                     while (ios_retry < 8) : (ios_retry += 1) {
                         // Poll TLS fds with 0 timeout — no syscall if revents unchanged
@@ -2188,8 +2200,11 @@ pub const VpnClient = struct {
             //    unconditionally: `(tun_readable or skip_poll)` where skip_poll
             //    was true every time there was any TLS pending — which was
             //    every iteration during active DL.
+            // 768 KB — derived from SO_SNDBUF/2
             const sendq_throttle_med: u32 = 768 * 1024; // 768 KB — halve batch. Kept at 2MB-SO_SNDBUF levels even though
+            // 1 MB — derived from SO_SNDBUF * 0.65
             const sendq_throttle_high: u32 = 1024 * 1024; // 1 MB — minimum batch.  Larger throttle values let sendq
+            // 1.5 MB — derived from SO_SNDBUF * 0.75
             const sendq_throttle_critical: u32 = 1536 * 1024; // 1.5 MB — single packet.  fill to 3-4MB before backoff,
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
@@ -2239,7 +2254,13 @@ pub const VpnClient = struct {
                                     if (ip_len > 0 and ip_len <= 1500) {
                                         diag.tun_reads += 1;
                                         diag.tun_bytes += ip_len;
-                                        if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], loop_state.gateway_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
+                                        const gw_mac = loop_state.gateway_mac orelse blk: {
+                                            var random_mac: [6]u8 = undefined;
+                                            std.crypto.random.bytes(&random_mac);
+                                            random_mac[0] = (random_mac[0] & 0xFE) | 0x02;
+                                            break :blk random_mac;
+                                        };
+                                        if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
                                             diag.eth_pkts += 1;
                                             diag.eth_bytes += eth_frame.len;
                                             if (eth_frame.len >= 200) {
@@ -2464,15 +2485,15 @@ pub const VpnClient = struct {
             }
 
             // DHCPv4: give up after max retries with no response
-            if (loop_state.dhcp_retry_count >= 5 and (loop_state.dhcp.state == .discover_sent or loop_state.dhcp.state == .inform_sent)) {
+            if (loop_state.dhcp_retry_count >= tunnel_mod.dhcp.DHCP_MAX_RETRIES and (loop_state.dhcp.state == .discover_sent or loop_state.dhcp.state == .inform_sent)) {
                 if (loop_state.timing.last_dhcp_warn == 0 or now - loop_state.timing.last_dhcp_warn >= 5000) {
                     std.log.warn("DHCP: no response after {d} retries — server does not respond", .{loop_state.dhcp_retry_count});
                     loop_state.timing.last_dhcp_warn = now;
                 }
             }
 
-            // DHCPv6 retry — server may drop IPv6 (FilterIPv6=1); retry 3x then give up
-            if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count < 3) {
+            // DHCPv6 retry — server may drop IPv6 (FilterIPv6=1); retry DHCPV6_MAX_RETRIES then give up
+            if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count < tunnel_mod.dhcp.DHCPV6_MAX_RETRIES) {
                 if (now - self.last_dhcpv6_time >= 5000) {
                     if (self.dhcpv6_client) |*client| {
                         var dhcpv6_raw: [256]u8 = undefined;
@@ -2491,7 +2512,7 @@ pub const VpnClient = struct {
                 }
             }
             // Give up on DHCPv6 after max retries — interface already has link-local
-            if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count >= 3) {
+            if (!self.ipv6_configured and self.ipv6_dhcp_sent and self.ipv6_dhcp_retry_count >= tunnel_mod.dhcp.DHCPV6_MAX_RETRIES) {
                 if (now - self.last_dhcpv6_time >= 5000) {
                     std.log.warn("DHCPv6: no Reply — server does not support IPv6", .{});
                     self.ipv6_configured = true;
@@ -2616,35 +2637,6 @@ pub const VpnClient = struct {
                             diag.tls_send_bytes, diag.pkt_small, diag.pkt_large,
                             diag.sendq_max,      sendq_avg,      diag.write_blocked,
                         });
-                    }
-
-                    // Health check: detect broken data plane (server-side upload stall).
-                    // Ratio threshold: upload < 1.5% of download. Healthy TCP ACK
-                    // ratio is 2-4%; broken full-duplex drops to 0.3-1.2%.
-                    // Uses 5 consecutive windows (DIAG fires ~1/s) and a 10s grace
-                    // period after connect to let DHCP/ARP/initial burst settle.
-                    const HEALTH_RATIO_THRESHOLD = 0.015; // 1.5%
-                    const HEALTH_WINDOW_COUNT = 5;
-                    const HEALTH_GRACE_MS: i64 = 10_000;
-                    if (false) { // disabled health check
-                        const ratio = @as(f64, @floatFromInt(diag.bytes_out)) / @as(f64, @floatFromInt(diag.bytes_in));
-                        if (self.connect_time > 0 and (now - self.connect_time) > HEALTH_GRACE_MS) {
-                            if (ratio < HEALTH_RATIO_THRESHOLD) {
-                                self.health_check_broken_count += 1;
-                                if (self.health_check_broken_count >= HEALTH_WINDOW_COUNT) {
-                                    std.log.err("Health check: upload ratio {d:.1}% below {d:.1}% threshold for {d}/{d} windows — server data plane is broken. Triggering disconnect.", .{
-                                        ratio * 100, HEALTH_RATIO_THRESHOLD * 100, self.health_check_broken_count, HEALTH_WINDOW_COUNT,
-                                    });
-                                    self.disconnect_reason = .broken_data_plane;
-                                    // Signal the data loop to stop. The outer `while` loop checks
-                                    // should_stop; finishDisconnect fires after the loop exits with
-                                    // the broken_data_plane reason, which shouldReconnect() = true.
-                                    @atomicStore(bool, &self.should_stop, true, .release);
-                                }
-                            } else {
-                                self.health_check_broken_count = 0;
-                            }
-                        }
                     }
                 }
 
@@ -2804,12 +2796,9 @@ test "VpnClient disconnect" {
 }
 
 test "AuthMethod password" {
-    const auth = AuthMethod{ .password = .{ .username = "testuser", .password = "testpass", .is_hashed = false } };
+    const auth = AuthMethod{ .anonymous = {} };
     switch (auth) {
-        .password => |p| {
-            try std.testing.expectEqualStrings("testuser", p.username);
-            try std.testing.expectEqualStrings("testpass", p.password);
-        },
+        .anonymous => {},
         else => unreachable,
     }
 }

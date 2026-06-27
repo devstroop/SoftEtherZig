@@ -39,6 +39,16 @@ pub const DhcpConfig = struct {
     server_id: u32 = 0,
 };
 
+/// Maximum number of DHCP retry attempts before giving up.
+pub const DHCP_MAX_RETRIES: u32 = 5;
+
+/// Interval between DHCP retries in milliseconds.
+pub const DHCP_RETRY_INTERVAL_MS: i64 = 3000;
+
+/// Maximum number of DHCPv6 retry attempts before giving up.
+/// DHCPv6 is less critical than DHCPv4 (IPv6 SLAAC may still work).
+pub const DHCPV6_MAX_RETRIES: u32 = 3;
+
 /// DHCP handler state
 pub const DhcpHandler = struct {
     state: DhcpState = .init,
@@ -48,8 +58,8 @@ pub const DhcpHandler = struct {
     config: DhcpConfig = .{},
 
     const Self = @This();
-    const MAX_RETRIES: u32 = 5;
-    const RETRY_INTERVAL_MS: i64 = 3000;
+    const MAX_RETRIES: u32 = DHCP_MAX_RETRIES;
+    const RETRY_INTERVAL_MS: i64 = DHCP_RETRY_INTERVAL_MS;
 
     /// Initialize DHCP handler with random transaction ID
     pub fn init() Self {

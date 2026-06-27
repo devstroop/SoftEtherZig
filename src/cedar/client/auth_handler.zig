@@ -48,7 +48,7 @@ pub fn run(client: *VpnClient) !void {
     std.log.debug("Uploading protocol signature...", .{});
 
     // Step 1: Upload signature (WaterMark)
-    softether_proto.uploadSignature(client.allocator, writer, host_for_http) catch |err| {
+    softether_proto.uploadSignature(client.allocator, writer, host_for_http, if (client.config.fingerprint) |*fp| fp else null) catch |err| {
         std.log.err("Failed to upload signature: {}", .{err});
         return ClientError.ProtocolError;
     };
@@ -94,6 +94,7 @@ pub fn run(client: *VpnClient) !void {
         .qos = client.config.qos,
         .use_encrypt = client.config.use_encrypt,
         .use_compress = client.config.use_compress,
+        .fingerprint = if (client.config.fingerprint) |*fp| fp else null,
     };
 
     const auth_data = switch (client.config.auth) {
@@ -172,6 +173,7 @@ pub fn run(client: *VpnClient) !void {
         reader,
         host_for_http,
         auth_data,
+        if (client.config.fingerprint) |*fp| fp else null,
     ) catch |err| {
         std.log.err("Failed to upload auth: {}", .{err});
         return ClientError.AuthenticationFailed;
@@ -243,7 +245,7 @@ fn runRedirect(
     var current_ip_buf: [48]u8 = undefined;
     const current_host = if (client.server_ip) |addr| formatAddress(addr, &current_ip_buf) else client.config.server_host;
 
-    softether_proto.sendHttpPost(client.allocator, ack_writer, current_host, empty_data) catch {
+    softether_proto.sendHttpPost(client.allocator, ack_writer, current_host, empty_data, null) catch {
         std.log.err("Failed to send redirect ack", .{});
         return ClientError.ProtocolError;
     };
@@ -295,6 +297,7 @@ fn runRedirect(
             .verify_certificate = client.config.verify_certificate,
             .allow_self_signed = !client.config.verify_certificate,
             .timeout_ms = client.config.connect_timeout_ms,
+            .tcp_nodelay = client.config.tcp_nodelay,
             .client_cert_pem = switch (client.config.auth) {
                 .certificate => |cert| cert.cert_data,
                 else => null,
@@ -385,7 +388,7 @@ fn runRedirect(
     const redirect_host = formatAddress(actual_addr, &redirect_ip_buf);
 
     // Upload signature to redirect server
-    softether_proto.uploadSignature(client.allocator, redirect_writer, redirect_host) catch |err| {
+    softether_proto.uploadSignature(client.allocator, redirect_writer, redirect_host, if (client.config.fingerprint) |*fp| fp else null) catch |err| {
         std.log.err("Failed to upload signature to redirect server: {}", .{err});
         return ClientError.AuthenticationFailed;
     };
@@ -421,6 +424,7 @@ fn runRedirect(
         redirect_reader,
         redirect_host,
         ticket_auth_data,
+        if (client.config.fingerprint) |*fp| fp else null,
     ) catch |err| {
         std.log.err("Failed to upload ticket auth: {}", .{err});
         return ClientError.AuthenticationFailed;

@@ -25,6 +25,9 @@ pub const UTUN_OPT_IFNAME: u32 = 2;
 /// _IOWR('N', 3, struct ctl_info) = 0xC0644E03
 pub const CTLIOCGINFO: u32 = 0xC0644E03;
 
+/// Maximum utun unit number to try when opening a device.
+pub const MAX_UTUN_UNITS: u32 = 16;
+
 /// utun control name
 pub const UTUN_CONTROL_NAME = "com.apple.net.utun_control";
 
@@ -278,7 +281,7 @@ pub const UtunDevice = struct {
         var unit_number: u32 = 0;
         var found = false;
 
-        while (unit_number < 16) : (unit_number += 1) {
+        while (unit_number < MAX_UTUN_UNITS) : (unit_number += 1) {
             fd = posix.socket(AF_SYSTEM, posix.SOCK.DGRAM, SYSPROTO_CONTROL) catch {
                 continue;
             };

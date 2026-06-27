@@ -236,6 +236,37 @@ pub const CEventCallback = ?*const fn (event_type: CEventType, new_state: CState
 // Client Lifecycle
 // ============================================================================
 
+/// Shared defaults for all FFI create paths.
+/// Centralized to prevent drift between softether_create, softether_create_anonymous,
+/// and softether_create_certificate.
+fn defaultClientConfig() ClientConfig {
+    return .{
+        .server_host = "",
+        .server_port = 443,
+        .hub_name = "",
+        .auth = .{ .anonymous = {} },
+        .max_connections = 1,
+        .use_compress = false,
+        .use_encrypt = true,
+        .udp_acceleration = false,
+        .half_connection = false,
+        .qos = true,
+        .mtu = 1400,
+        .verify_certificate = true,
+        .ip_version = null,
+        .routing = .{},
+        .reconnect = .{},
+        .static_ip = null,
+        .connect_timeout_ms = 30000,
+        .read_timeout_ms = 60000,
+        .keepalive_interval_ms = 10000,
+        .proxy = null,
+        .tcp_nodelay = true,
+        .verbose = false,
+        .tunnel_fd = null,
+    };
+}
+
 /// Create a new VPN client with password authentication.
 /// Returns null on failure. Caller must call softether_destroy() when done.
 ///
@@ -266,25 +297,14 @@ export fn softether_create(
     const username_slice = ffi_allocator.dupe(u8, username_in) catch return null;
     const password_slice = ffi_allocator.dupe(u8, password_in) catch return null;
 
-    const config = ClientConfig{
-        .server_host = server_slice,
-        .server_port = port,
-        .hub_name = hub_slice,
-        .auth = .{ .password = .{
-            .username = username_slice,
-            .password = password_slice,
-        } },
-        // Explicit defaults — don't rely on struct defaults (ReleaseFast may not apply them)
-        .max_connections = 1,
-        .use_compress = false,
-        .use_encrypt = true,
-        .udp_acceleration = false,
-        .half_connection = false,
-        .qos = true,
-        .mtu = 1400,
-        .verify_certificate = true,
-        .ip_version = null,
-    };
+    var config = defaultClientConfig();
+    config.server_host = server_slice;
+    config.server_port = port;
+    config.hub_name = hub_slice;
+    config.auth = .{ .password = .{
+        .username = username_slice,
+        .password = password_slice,
+    } };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
     ptr.* = VpnClient.init(ffi_allocator, config);
@@ -308,21 +328,11 @@ export fn softether_create_anonymous(
     const server_slice = ffi_allocator.dupe(u8, server_in) catch return null;
     const hub_slice = ffi_allocator.dupe(u8, hub_in) catch return null;
 
-    const config = ClientConfig{
-        .server_host = server_slice,
-        .server_port = port,
-        .hub_name = hub_slice,
-        .auth = .{ .anonymous = {} },
-        .max_connections = 1,
-        .use_compress = false,
-        .use_encrypt = true,
-        .udp_acceleration = false,
-        .half_connection = false,
-        .qos = true,
-        .mtu = 1400,
-        .verify_certificate = true,
-        .ip_version = null,
-    };
+    var config = defaultClientConfig();
+    config.server_host = server_slice;
+    config.server_port = port;
+    config.hub_name = hub_slice;
+    config.auth = .{ .anonymous = {} };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
     ptr.* = VpnClient.init(ffi_allocator, config);
@@ -353,24 +363,14 @@ export fn softether_create_certificate(
     const cert_slice = ffi_allocator.dupe(u8, cert_pem[0..cert_pem_len]) catch return null;
     const key_slice = ffi_allocator.dupe(u8, key_pem[0..key_pem_len]) catch return null;
 
-    const config = ClientConfig{
-        .server_host = server_slice,
-        .server_port = port,
-        .hub_name = hub_slice,
-        .auth = .{ .certificate = .{
-            .cert_data = cert_slice,
-            .key_data = key_slice,
-        } },
-        .max_connections = 1,
-        .use_compress = false,
-        .use_encrypt = true,
-        .udp_acceleration = false,
-        .half_connection = false,
-        .qos = true,
-        .mtu = 1400,
-        .verify_certificate = true,
-        .ip_version = null,
-    };
+    var config = defaultClientConfig();
+    config.server_host = server_slice;
+    config.server_port = port;
+    config.hub_name = hub_slice;
+    config.auth = .{ .certificate = .{
+        .cert_data = cert_slice,
+        .key_data = key_slice,
+    } };
 
     const ptr = ffi_allocator.create(VpnClient) catch return null;
     ptr.* = VpnClient.init(ffi_allocator, config);
@@ -630,6 +630,13 @@ export fn softether_set_connect_timeout(client: ?*VpnClient, ms: u32) void {
     c.config.connect_timeout_ms = ms;
 }
 
+/// Set TCP_NODELAY (disable Nagle's algorithm for low latency).
+/// Must be called before connect(). Default: true.
+export fn softether_set_tcp_nodelay(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.tcp_nodelay = enabled;
+}
+
 /// Set read timeout in milliseconds. Must be called before connect().
 export fn softether_set_read_timeout(client: ?*VpnClient, ms: u32) void {
     const c = client orelse return;
@@ -640,6 +647,13 @@ export fn softether_set_read_timeout(client: ?*VpnClient, ms: u32) void {
 export fn softether_set_keepalive_interval(client: ?*VpnClient, ms: u32) void {
     const c = client orelse return;
     c.config.keepalive_interval_ms = ms;
+}
+
+/// Set the gratuitous ARP interval in milliseconds.
+/// Must be called before connect().
+export fn softether_set_garp_interval(client: ?*VpnClient, ms: u32) void {
+    const c = client orelse return;
+    c.config.garp_interval_ms = ms;
 }
 
 /// Set IP version preference. Must be called before connect().
@@ -804,6 +818,173 @@ export fn softether_replace_tun_fd(client: ?*VpnClient, fd: i32) c_int {
         return -1;
     };
     return 0;
+}
+
+// ============================================================================
+// Static IP configuration setters
+// ============================================================================
+
+/// Set static IPv4 address. Must be called before connect().
+export fn softether_set_static_ipv4(client: ?*VpnClient, addr: [*:0]const u8) void {
+    const c = client orelse return;
+    const s = std.mem.span(addr);
+    if (s.len == 0) {
+        if (c.config.static_ip) |*si| si.ipv4_address = null;
+        return;
+    }
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+    c.config.static_ip.?.ipv4_address = ffi_allocator.dupe(u8, s) catch return;
+}
+
+/// Set static IPv4 netmask. Must be called before connect().
+export fn softether_set_static_ipv4_netmask(client: ?*VpnClient, addr: [*:0]const u8) void {
+    const c = client orelse return;
+    const s = std.mem.span(addr);
+    if (s.len == 0) {
+        if (c.config.static_ip) |*si| si.ipv4_netmask = null;
+        return;
+    }
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+    c.config.static_ip.?.ipv4_netmask = ffi_allocator.dupe(u8, s) catch return;
+}
+
+/// Set static IPv4 gateway. Must be called before connect().
+export fn softether_set_static_ipv4_gateway(client: ?*VpnClient, addr: [*:0]const u8) void {
+    const c = client orelse return;
+    const s = std.mem.span(addr);
+    if (s.len == 0) {
+        if (c.config.static_ip) |*si| si.ipv4_gateway = null;
+        return;
+    }
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+    c.config.static_ip.?.ipv4_gateway = ffi_allocator.dupe(u8, s) catch return;
+}
+
+/// Set static IPv6 address. Must be called before connect().
+export fn softether_set_static_ipv6(client: ?*VpnClient, addr: [*:0]const u8) void {
+    const c = client orelse return;
+    const s = std.mem.span(addr);
+    if (s.len == 0) {
+        if (c.config.static_ip) |*si| si.ipv6_address = null;
+        return;
+    }
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+    c.config.static_ip.?.ipv6_address = ffi_allocator.dupe(u8, s) catch return;
+}
+
+/// Set static IPv6 prefix length. Must be called before connect().
+export fn softether_set_static_ipv6_prefix(client: ?*VpnClient, prefix: u8) void {
+    const c = client orelse return;
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+    c.config.static_ip.?.ipv6_prefix_len = prefix;
+}
+
+/// Set static IPv6 gateway. Must be called before connect().
+export fn softether_set_static_ipv6_gateway(client: ?*VpnClient, addr: [*:0]const u8) void {
+    const c = client orelse return;
+    const s = std.mem.span(addr);
+    if (s.len == 0) {
+        if (c.config.static_ip) |*si| si.ipv6_gateway = null;
+        return;
+    }
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+    c.config.static_ip.?.ipv6_gateway = ffi_allocator.dupe(u8, s) catch return;
+}
+
+/// Set DNS servers (comma-separated). Must be called before connect().
+export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8) void {
+    const c = client orelse return;
+    const servers_in = std.mem.span(servers);
+    if (servers_in.len == 0) {
+        if (c.config.static_ip) |*si| si.dns_servers = null;
+        return;
+    }
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, servers_in, ',');
+    while (it.next()) |part| {
+        if (std.mem.trim(u8, part, " ").len > 0) count += 1;
+    }
+    if (count == 0) {
+        c.config.static_ip.?.dns_servers = null;
+        return;
+    }
+
+    const slices = ffi_allocator.alloc([]const u8, count) catch return;
+    var idx: usize = 0;
+    var it2 = std.mem.splitScalar(u8, servers_in, ',');
+    while (it2.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " ");
+        if (trimmed.len > 0) {
+            slices[idx] = ffi_allocator.dupe(u8, trimmed) catch return;
+            idx += 1;
+        }
+    }
+    c.config.static_ip.?.dns_servers = slices;
+}
+
+/// Set log level (0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace).
+/// Currently a no-op; Zig's log levels are compile-time. The setter exists
+/// for FFI API completeness and logs the requested level.
+export fn softether_set_log_level(client: ?*VpnClient, level: c_int) void {
+    _ = client;
+    std.log.info("softether_set_log_level: requested level {d} (compile-time only, no-op)", .{level});
+}
+
+// ============================================================================
+// Protocol Fingerprint Configuration Setters
+// ============================================================================
+
+/// Override the client identification string sent to the server.
+/// Pass NULL or "" to restore the default ("SoftEther VPN Client").
+export fn softether_set_client_str(client: ?*VpnClient, str: [*:0]const u8) void {
+    const c = client orelse return;
+    const s = std.mem.span(str);
+    if (c.config.fingerprint == null) c.config.fingerprint = .{};
+    if (s.len == 0) { c.config.fingerprint.?.client_str = null; return; }
+    c.config.fingerprint.?.client_str = ffi_allocator.dupe(u8, s) catch return;
+}
+
+/// Override the client version number sent to the server.
+/// Pass 0 to restore the default (444).
+export fn softether_set_client_ver(client: ?*VpnClient, ver: u32) void {
+    const c = client orelse return;
+    if (ver == 0) {
+        if (c.config.fingerprint) |*fp| fp.client_ver = null;
+        return;
+    }
+    if (c.config.fingerprint == null) c.config.fingerprint = .{};
+    c.config.fingerprint.?.client_ver = ver;
+}
+
+/// Override the client build number sent to the server.
+/// Pass 0 to restore the default (9807).
+export fn softether_set_client_build(client: ?*VpnClient, build: u32) void {
+    const c = client orelse return;
+    if (build == 0) {
+        if (c.config.fingerprint) |*fp| fp.client_build = null;
+        return;
+    }
+    if (c.config.fingerprint == null) c.config.fingerprint = .{};
+    c.config.fingerprint.?.client_build = build;
+}
+
+/// Override OS name, version, and title sent to the server.
+/// All three must be non-NULL to take effect; pass NULL to clear.
+export fn softether_set_os_info(client: ?*VpnClient, name: [*:0]const u8, version: [*:0]const u8, title: [*:0]const u8) void {
+    const c = client orelse return;
+    const name_s = std.mem.span(name);
+    const ver_s = std.mem.span(version);
+    const title_s = std.mem.span(title);
+    if (name_s.len == 0 or ver_s.len == 0 or title_s.len == 0) {
+        if (c.config.fingerprint) |*fp| { fp.os_name = null; fp.os_version = null; fp.os_title = null; }
+        return;
+    }
+    if (c.config.fingerprint == null) c.config.fingerprint = .{};
+    c.config.fingerprint.?.os_name = ffi_allocator.dupe(u8, name_s) catch return;
+    c.config.fingerprint.?.os_version = ffi_allocator.dupe(u8, ver_s) catch return;
+    c.config.fingerprint.?.os_title = ffi_allocator.dupe(u8, title_s) catch return;
 }
 
 // ============================================================================

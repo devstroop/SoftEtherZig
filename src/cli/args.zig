@@ -80,9 +80,13 @@ pub const CliArgs = struct {
     connect_timeout_ms: u32 = 30000,
     read_timeout_ms: u32 = 60000,
     keepalive_interval_ms: u32 = 10000,
+    garp_interval_ms: u32 = 10000,
 
     // Proxy
     proxy: ?[]const u8 = null,
+
+    // TCP_NODELAY (default: enabled for low latency)
+    tcp_nodelay: bool = true,
 
     // Allocator for dynamic data
     allocator: ?Allocator = null,
@@ -325,6 +329,10 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "--proxy")) {
                 i += 1;
                 self.args.proxy = try self.requireValue(argv, i, "--proxy");
+            } else if (std.mem.eql(u8, arg, "--tcp-nodelay")) {
+                self.args.tcp_nodelay = true;
+            } else if (std.mem.eql(u8, arg, "--no-tcp-nodelay")) {
+                self.args.tcp_nodelay = false;
             } else if (arg.len > 0 and arg[0] == '-') {
                 return ParseError.UnknownArgument;
             }
@@ -421,8 +429,23 @@ pub const ArgParser = struct {
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_KEEPALIVE_INTERVAL")) |v| {
             self.args.keepalive_interval_ms = std.fmt.parseInt(u32, v, 10) catch self.args.keepalive_interval_ms;
         } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_GARP_INTERVAL")) |v| {
+            self.args.garp_interval_ms = std.fmt.parseInt(u32, v, 10) catch self.args.garp_interval_ms;
+        } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PROXY")) |v| {
             if (self.args.proxy == null) self.args.proxy = v;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_TCP_NODELAY")) |v| {
+            self.args.tcp_nodelay = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_FULL_TUNNEL")) |v| {
+            self.args.default_route = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ACCEPT_PUSHED_ROUTES")) |v| {
+            self.args.accept_pushed_routes = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ENABLE_CUSTOM_ROUTES")) |v| {
+            self.args.enable_custom_routes = isTrue(v);
         } else |_| {}
     }
 };

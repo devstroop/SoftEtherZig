@@ -265,7 +265,7 @@ pub const RouteManager = struct {
             return err;
         };
 
-        std.log.info("[ROUTING] ✅ Full-tunnel routing configured successfully", .{});
+        std.log.info("[ROUTING] Default routing through tunnel configured successfully", .{});
         self.state.routes_configured = true;
 
         // Disable IPv6 on the physical interface using the service name captured
@@ -462,8 +462,6 @@ fn getDefaultGatewayMacOS(allocator: std.mem.Allocator) !u32 {
 
 /// Add a route to the routing table
 pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]const u8) !void {
-    var cmd_buf: [256]u8 = undefined;
-
     const dest_str = formatIpv4(destination);
     const gw_str = formatIpv4(gateway);
 
@@ -474,35 +472,30 @@ pub fn addRoute(destination: u32, netmask: u32, gateway: u32, interface: ?[]cons
         prefix += 1;
     }
 
+    var cidr_buf: [32]u8 = undefined;
+    const cidr_str = std.fmt.bufPrint(&cidr_buf, "{s}/{d}", .{ trimNull(&dest_str), prefix }) catch return RouteError.CommandFailed;
+
     if (builtin.os.tag == .linux) {
-        // Linux uses 'ip route' command
-        const cmd = if (destination == 0 and netmask == 0)
-            if (interface) |iface|
-                std.fmt.bufPrint(&cmd_buf, "ip route add default via {s} dev {s}", .{ trimNull(&gw_str), iface }) catch return RouteError.CommandFailed
-            else
-                std.fmt.bufPrint(&cmd_buf, "ip route add default via {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
-        else if (interface) |iface|
-            std.fmt.bufPrint(&cmd_buf, "ip route add {s}/{d} dev {s}", .{
-                trimNull(&dest_str), prefix, iface,
-            }) catch return RouteError.CommandFailed
-        else
-            std.fmt.bufPrint(&cmd_buf, "ip route add {s}/{d} via {s}", .{
-                trimNull(&dest_str), prefix, trimNull(&gw_str),
-            }) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        if (destination == 0 and netmask == 0) {
+            if (interface) |iface| {
+                if (!runCommandArgv(&[_][]const u8{ "ip", "route", "add", "default", "via", trimNull(&gw_str), "dev", iface })) return RouteError.CommandFailed;
+            } else {
+                if (!runCommandArgv(&[_][]const u8{ "ip", "route", "add", "default", "via", trimNull(&gw_str) })) return RouteError.CommandFailed;
+            }
+        } else if (interface) |iface| {
+            if (!runCommandArgv(&[_][]const u8{ "ip", "route", "add", cidr_str, "dev", iface })) return RouteError.CommandFailed;
+        } else {
+            if (!runCommandArgv(&[_][]const u8{ "ip", "route", "add", cidr_str, "via", trimNull(&gw_str) })) return RouteError.CommandFailed;
+        }
     } else {
         // macOS uses 'route' command
-        const cmd = if (destination == 0 and netmask == 0)
-            std.fmt.bufPrint(&cmd_buf, "route add default {s}", .{trimNull(&gw_str)}) catch return RouteError.CommandFailed
-        else if (interface) |iface|
-            std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} -interface {s}", .{
-                trimNull(&dest_str), prefix, iface,
-            }) catch return RouteError.CommandFailed
-        else
-            std.fmt.bufPrint(&cmd_buf, "route add -net {s}/{d} {s}", .{
-                trimNull(&dest_str), prefix, trimNull(&gw_str),
-            }) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        if (destination == 0 and netmask == 0) {
+            if (!runCommandArgv(&[_][]const u8{ "route", "add", "default", trimNull(&gw_str) })) return RouteError.CommandFailed;
+        } else if (interface) |iface| {
+            if (!runCommandArgv(&[_][]const u8{ "route", "add", "-net", cidr_str, "-interface", iface })) return RouteError.CommandFailed;
+        } else {
+            if (!runCommandArgv(&[_][]const u8{ "route", "add", "-net", cidr_str, trimNull(&gw_str) })) return RouteError.CommandFailed;
+        }
     }
 }
 
@@ -517,50 +510,41 @@ pub fn addHostRoute(host: u32, gateway: u32) !void {
     // Clean up any stale host route from a previous crashed session
     deleteHostRoute(host) catch {};
 
-    var cmd_buf: [256]u8 = undefined;
-
     const host_str = formatIpv4(host);
     const gw_str = formatIpv4(gateway);
 
     if (builtin.os.tag == .linux) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route add {s}/32 via {s}", .{
-            trimNull(&host_str), trimNull(&gw_str),
-        }) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        var cidr_buf: [32]u8 = undefined;
+        const cidr_str = std.fmt.bufPrint(&cidr_buf, "{s}/32", .{trimNull(&host_str)}) catch return RouteError.CommandFailed;
+        if (!runCommandArgv(&[_][]const u8{ "ip", "route", "add", cidr_str, "via", trimNull(&gw_str) })) return RouteError.CommandFailed;
     } else {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route add -host {s} {s}", .{
-            trimNull(&host_str), trimNull(&gw_str),
-        }) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        if (!runCommandArgv(&[_][]const u8{ "route", "add", "-host", trimNull(&host_str), trimNull(&gw_str) })) return RouteError.CommandFailed;
     }
 }
 
 /// Delete a host route (the /32 VPN-server bypass route added by addHostRoute)
 pub fn deleteHostRoute(host: u32) !void {
-    var cmd_buf: [256]u8 = undefined;
     const host_str = formatIpv4(host);
     if (builtin.os.tag == .linux) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route del {s}/32 2>/dev/null", .{trimNull(&host_str)}) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        var cidr_buf: [32]u8 = undefined;
+        const cidr_str = std.fmt.bufPrint(&cidr_buf, "{s}/32", .{trimNull(&host_str)}) catch return RouteError.CommandFailed;
+        _ = runCommandArgv(&[_][]const u8{ "ip", "route", "del", cidr_str });
     } else {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route delete -host {s} 2>/dev/null", .{trimNull(&host_str)}) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "route", "delete", "-host", trimNull(&host_str) });
     }
 }
 
 /// Delete the default route
 pub fn deleteDefaultRoute() !void {
     if (builtin.os.tag == .linux) {
-        _ = runCommand("ip route del default");
+        _ = runCommandArgv(&[_][]const u8{ "ip", "route", "del", "default" });
     } else {
-        _ = runCommand("route delete default");
+        _ = runCommandArgv(&[_][]const u8{ "route", "delete", "default" });
     }
 }
 
 /// Delete a specific route
 pub fn deleteRoute(destination: u32, netmask: u32) !void {
-    var cmd_buf: [256]u8 = undefined;
-
     const dest_str = formatIpv4(destination);
 
     var prefix: u8 = 0;
@@ -569,16 +553,13 @@ pub fn deleteRoute(destination: u32, netmask: u32) !void {
         prefix += 1;
     }
 
+    var cidr_buf: [32]u8 = undefined;
+    const cidr_str = std.fmt.bufPrint(&cidr_buf, "{s}/{d}", .{ trimNull(&dest_str), prefix }) catch return RouteError.CommandFailed;
+
     if (builtin.os.tag == .linux) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip route del {s}/{d}", .{
-            trimNull(&dest_str), prefix,
-        }) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "ip", "route", "del", cidr_str });
     } else {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route delete -net {s}/{d}", .{
-            trimNull(&dest_str), prefix,
-        }) catch return RouteError.CommandFailed;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "route", "delete", "-net", cidr_str });
     }
 }
 
@@ -588,43 +569,38 @@ pub fn deleteRoute(destination: u32, netmask: u32) !void {
 
 /// Add an IPv6 default route through a gateway
 pub fn addIpv6DefaultRoute(gateway: []const u8) !void {
-    var cmd_buf: [256]u8 = undefined;
-
     if (builtin.os.tag == .linux) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route add default via {s}", .{gateway}) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        if (!runCommandArgv(&[_][]const u8{ "ip", "-6", "route", "add", "default", "via", gateway })) return RouteError.CommandFailed;
     } else if (builtin.os.tag == .macos) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 add default {s}", .{gateway}) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        if (!runCommandArgv(&[_][]const u8{ "route", "-A", "inet6", "add", "default", gateway })) return RouteError.CommandFailed;
     }
 }
 
 /// Add an IPv6 host route (for VPN server leak prevention)
 pub fn addIpv6HostRoute(host: []const u8, gateway: []const u8) !void {
-    var cmd_buf: [256]u8 = undefined;
-
     if (builtin.os.tag == .linux) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route add {s}/128 via {s}", .{ host, gateway }) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        // "ip -6 route add <host>/128 via <gateway>"
+        // Build the CIDR string locally to avoid shell interpretation
+        var cidr_buf: [128]u8 = undefined;
+        const cidr = std.fmt.bufPrint(&cidr_buf, "{s}/128", .{host}) catch return RouteError.CommandFailed;
+        if (!runCommandArgv(&[_][]const u8{ "ip", "-6", "route", "add", cidr, "via", gateway })) return RouteError.CommandFailed;
     } else if (builtin.os.tag == .macos) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 add {s} {s}", .{ host, gateway }) catch return RouteError.CommandFailed;
-        if (!runCommand(cmd)) return RouteError.CommandFailed;
+        if (!runCommandArgv(&[_][]const u8{ "route", "-A", "inet6", "add", host, gateway })) return RouteError.CommandFailed;
     }
 }
 
 /// Delete the IPv6 default route
 pub fn deleteIpv6DefaultRoute() void {
     if (builtin.os.tag == .linux) {
-        _ = runCommand("ip -6 route del default 2>/dev/null");
+        _ = runCommandArgv(&[_][]const u8{ "ip", "-6", "route", "del", "default" });
     } else if (builtin.os.tag == .macos) {
-        _ = runCommand("route -A inet6 delete default 2>/dev/null");
+        _ = runCommandArgv(&[_][]const u8{ "route", "-A", "inet6", "delete", "default" });
     }
 }
 
 /// Add multiple IPv6 routes through a gateway (split-tunnel).
 /// `routes_str` is a newline-separated list of IPv6 CIDR notations.
 pub fn addIpv6Routes(gateway: []const u8, routes_str: []const u8) !void {
-    var cmd_buf: [512]u8 = undefined;
     var iter = std.mem.splitScalar(u8, routes_str, '\n');
     while (iter.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \r\t");
@@ -637,19 +613,11 @@ pub fn addIpv6Routes(gateway: []const u8, routes_str: []const u8) !void {
         }
 
         if (builtin.os.tag == .linux) {
-            const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route add {s} via {s}", .{ trimmed, gateway }) catch {
-                std.log.warn("[ROUTING] IPv6 route command too long: {s}", .{trimmed});
-                continue;
-            };
-            if (!runCommand(cmd)) {
+            if (!runCommandArgv(&[_][]const u8{ "ip", "-6", "route", "add", trimmed, "via", gateway })) {
                 std.log.warn("[ROUTING] Failed to add IPv6 route: {s}", .{trimmed});
             }
         } else if (builtin.os.tag == .macos) {
-            const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 add {s} {s}", .{ trimmed, gateway }) catch {
-                std.log.warn("[ROUTING] IPv6 route command too long: {s}", .{trimmed});
-                continue;
-            };
-            if (!runCommand(cmd)) {
+            if (!runCommandArgv(&[_][]const u8{ "route", "-A", "inet6", "add", trimmed, gateway })) {
                 std.log.warn("[ROUTING] Failed to add IPv6 route: {s}", .{trimmed});
             }
         }
@@ -658,14 +626,10 @@ pub fn addIpv6Routes(gateway: []const u8, routes_str: []const u8) !void {
 
 /// Delete a specific IPv6 route
 pub fn deleteIpv6Route(prefix: []const u8) void {
-    var cmd_buf: [256]u8 = undefined;
-
     if (builtin.os.tag == .linux) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "ip -6 route del {s}", .{prefix}) catch return;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "ip", "-6", "route", "del", prefix });
     } else if (builtin.os.tag == .macos) {
-        const cmd = std.fmt.bufPrint(&cmd_buf, "route -A inet6 delete {s}", .{prefix}) catch return;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "route", "-A", "inet6", "delete", prefix });
     }
 }
 
@@ -673,7 +637,15 @@ pub fn deleteIpv6Route(prefix: []const u8) void {
 // DNS Configuration
 // ============================================
 
-const DNS_BACKUP_PATH = "/tmp/softether-resolv.conf.bak";
+/// Generate a randomized DNS backup path to avoid race conditions
+/// between concurrent VPN instances. Uses process PID for uniqueness.
+fn getDnsBackupPath() [128]u8 {
+    var buf: [128]u8 = undefined;
+    const pid = std.posix.getpid();
+    const len = std.fmt.bufPrint(&buf, "/tmp/softether-resolv-{d}.bak", .{pid}) catch unreachable;
+    @memset(buf[len..], 0);
+    return buf;
+}
 
 /// Configure DNS servers for the VPN interface.
 /// On macOS: uses networksetup with the given interface.
@@ -683,7 +655,9 @@ pub fn configureDns(interface: []const u8, dns_servers: []const u32) !void {
 
     if (builtin.os.tag == .linux) {
         // Backup current resolv.conf before overwriting
-        _ = runCommand("cp /etc/resolv.conf " ++ DNS_BACKUP_PATH ++ " 2>/dev/null");
+        var dns_bp = getDnsBackupPath();
+        const backup_path = trimNull(&dns_bp);
+        _ = runCommandArgv(&[_][]const u8{ "cp", "/etc/resolv.conf", backup_path });
 
         // Write new resolv.conf with VPN DNS servers
         var file = std.fs.createFileAbsolute("/etc/resolv.conf", .{}) catch {
@@ -702,22 +676,19 @@ pub fn configureDns(interface: []const u8, dns_servers: []const u32) !void {
         _ = file.write(buf[0..pos]) catch {};
         std.log.info("[ROUTING] DNS configured via /etc/resolv.conf", .{});
     } else if (builtin.os.tag == .macos) {
-        var cmd_buf: [512]u8 = undefined;
-        var pos: usize = 0;
-
-        const prefix = std.fmt.bufPrint(&cmd_buf, "networksetup -setdnsservers {s}", .{interface}) catch return;
-        pos += prefix.len;
-
-        for (dns_servers) |dns| {
-            const dns_str = formatIpv4(dns);
-            cmd_buf[pos] = ' ';
-            pos += 1;
-            const trimmed = trimNull(&dns_str);
-            @memcpy(cmd_buf[pos..][0..trimmed.len], trimmed);
-            pos += trimmed.len;
+        // Build argv list: networksetup -setdnsservers <interface> <dns1> [dns2...]
+        var ip_strs: [16][16]u8 = undefined;
+        var argv: [16][]const u8 = undefined;
+        var argc: usize = 0;
+        argv[argc] = "networksetup"; argc += 1;
+        argv[argc] = "-setdnsservers"; argc += 1;
+        argv[argc] = interface; argc += 1;
+        for (dns_servers, 0..) |dns, i| {
+            if (argc >= argv.len) break;
+            ip_strs[i] = formatIpv4(dns);
+            argv[argc] = trimNull(&ip_strs[i]); argc += 1;
         }
-
-        _ = runCommand(cmd_buf[0..pos]);
+        _ = runCommandArgv(argv[0..argc]);
     }
 }
 
@@ -727,12 +698,26 @@ pub fn configureDns(interface: []const u8, dns_servers: []const u32) !void {
 pub fn clearDns() !void {
     if (builtin.os.tag == .linux) {
         // Restore from backup created by configureDns
-        if (runCommand("cp " ++ DNS_BACKUP_PATH ++ " /etc/resolv.conf 2>/dev/null")) {
-            _ = runCommand("rm -f " ++ DNS_BACKUP_PATH);
+        var dns_bp_restore = getDnsBackupPath();
+        const backup_restore = trimNull(&dns_bp_restore);
+        if (runCommandArgv(&[_][]const u8{ "cp", backup_restore, "/etc/resolv.conf" })) {
+            _ = runCommandArgv(&[_][]const u8{ "rm", "-f", backup_restore });
             std.log.info("[ROUTING] DNS restored from backup", .{});
         }
     } else if (builtin.os.tag == .macos) {
-        _ = runCommand("networksetup -setdnsservers Wi-Fi Empty");
+        // Detect primary network service dynamically instead of hardcoded "Wi-Fi"
+        var iface_buf: [64]u8 = undefined;
+        var svc_buf: [256]u8 = undefined;
+        if (getDefaultInterfaceMacOS(std.heap.page_allocator, &iface_buf)) |iface| {
+            if (getNetworkServiceForInterface(std.heap.page_allocator, iface, &svc_buf)) |svc| {
+                _ = runCommandArgv(&[_][]const u8{ "networksetup", "-setdnsservers", svc, "Empty" });
+                return;
+            }
+        }
+        // Fallback: try common interface names
+        for ([_][]const u8{ "Wi-Fi", "Ethernet", "USB 10/100/1000 LAN", "Thunderbolt Bridge" }) |fallback| {
+            if (runCommandArgv(&[_][]const u8{ "networksetup", "-setdnsservers", fallback, "Empty" })) return;
+        }
     }
 }
 
@@ -818,14 +803,12 @@ pub fn getDefaultInterfaceMacOS(allocator: std.mem.Allocator, buf: []u8) ?[]u8 {
 /// Runs as root via the privileged channel (route commands already need root).
 pub fn disableIpv6OnService(service: []const u8) void {
     if (builtin.os.tag == .macos) {
-        var cmd_buf: [512]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6off \"{s}\"", .{service}) catch return;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "networksetup", "-setv6off", service });
         std.log.info("[ROUTING] IPv6 disabled on service \"{s}\" (leak prevention)", .{service});
     } else if (builtin.os.tag == .linux) {
-        var cmd_buf: [128]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "sh -c 'echo 1 > /proc/sys/net/ipv6/conf/{s}/disable_ipv6'", .{service}) catch return;
-        _ = runCommand(cmd);
+        var buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "net.ipv6.conf.{s}.disable_ipv6=1", .{service}) catch return;
+        _ = runCommandArgv(&[_][]const u8{ "sysctl", "-w", key });
         std.log.info("[ROUTING] IPv6 disabled on interface \"{s}\" (leak prevention)", .{service});
     }
 }
@@ -833,16 +816,41 @@ pub fn disableIpv6OnService(service: []const u8) void {
 /// Re-enable IPv6 on a network service after VPN disconnect.
 pub fn enableIpv6OnService(service: []const u8) void {
     if (builtin.os.tag == .macos) {
-        var cmd_buf: [512]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "networksetup -setv6automatic \"{s}\"", .{service}) catch return;
-        _ = runCommand(cmd);
+        _ = runCommandArgv(&[_][]const u8{ "networksetup", "-setv6automatic", service });
         std.log.info("[ROUTING] IPv6 re-enabled on service \"{s}\"", .{service});
     } else if (builtin.os.tag == .linux) {
-        var cmd_buf: [128]u8 = undefined;
-        const cmd = std.fmt.bufPrint(&cmd_buf, "sh -c 'echo 0 > /proc/sys/net/ipv6/conf/{s}/disable_ipv6'", .{service}) catch return;
-        _ = runCommand(cmd);
+        var buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "net.ipv6.conf.{s}.disable_ipv6=0", .{service}) catch return;
+        _ = runCommandArgv(&[_][]const u8{ "sysctl", "-w", key });
         std.log.info("[ROUTING] IPv6 re-enabled on interface \"{s}\"", .{service});
     }
+}
+
+/// Run a command using argv-based execution (no shell interpretation).
+/// Safer than runCommand() for commands with controlled arguments.
+fn runCommandArgv(argv: []const []const u8) bool {
+    if (builtin.os.tag == .macos) {
+        const escalate = @import("utun_escalate.zig");
+        var cmd_buf: [2048]u8 = undefined;
+        var pos: usize = 0;
+        for (argv, 0..) |arg, i| {
+            if (i > 0) {
+                cmd_buf[pos] = ' ';
+                pos += 1;
+            }
+            @memcpy(cmd_buf[pos..][0..arg.len], arg);
+            pos += arg.len;
+        }
+        if (escalate.runPrivilegedCommand(cmd_buf[0..pos])) return true;
+    }
+    var child = std.process.Child.init(argv, std.heap.page_allocator);
+    child.stderr_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    const term = child.spawnAndWait() catch return false;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 /// Run a shell command (helper function).

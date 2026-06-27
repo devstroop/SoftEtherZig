@@ -91,7 +91,7 @@ for cfg in "${CONFIGS[@]}"; do
       printf "%s\t-\t-\t-\t-\t-\t-\t-\tFAIL\n" "$name" > "$ts_log"
       continue 2
     fi
-    if grep -q "\[ROUTING\] ✅ Full-tunnel routing configured successfully" "$log" 2>/dev/null; then
+    if grep -q "\[ROUTING\] Default routing through tunnel configured successfully" "$log" 2>/dev/null; then
       break
     fi
     sleep 1
