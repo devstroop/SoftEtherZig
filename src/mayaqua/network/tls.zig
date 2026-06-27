@@ -277,6 +277,20 @@ pub const TlsSocket = struct {
     pending_outbound: []const u8 = "",
     needs_pollout: bool = false,
 
+    /// Read-ahead buffer for batched SSL_read. When a read() call finds this
+    /// buffer empty, it issues one large SSL_read (up to READ_BUF_SIZE) to fill
+    /// it, then serves subsequent small reads from the buffer without another
+    /// SSL_read call. This reduces the number of SSL_read calls from ~19 per
+    /// 9-packet batch (one for each 4-byte header + data chunk) to ~1 per batch,
+    /// dramatically improving throughput on high-latency TLS connections.
+    read_buf: []u8 = "",
+    read_buf_available: usize = 0,
+    read_buf_offset: usize = 0,
+
+    /// Size of the read-ahead buffer. 64KB = 4× TLS max record size (16KB),
+    /// allowing up to 4 full TLS records to be batched in one SSL_read call.
+    const READ_BUF_SIZE: usize = 64 * 1024;
+
     /// Connect to hostname:port with TLS
     pub fn connect(allocator: Allocator, hostname: []const u8, port: u16, config: TlsConfig) !TlsSocket {
         // Initialize OpenSSL (idempotent in modern OpenSSL)
@@ -642,6 +656,11 @@ pub const TlsSocket = struct {
             std.log.info("TLS connected with {s}", .{std.mem.span(v)});
         }
 
+        // Allocate read-ahead buffer. 64KB = 4× TLS max record size, allowing
+        // up to 4 full TLS records to be batched in one SSL_read call.
+        const read_buf = try allocator.alloc(u8, READ_BUF_SIZE);
+        errdefer allocator.free(read_buf);
+
         return TlsSocket{
             .allocator = allocator,
             .tcp_fd = tcp_fd,
@@ -650,6 +669,7 @@ pub const TlsSocket = struct {
             .config = config,
             .hostname_buf = hostname_buf,
             .connected = true,
+            .read_buf = read_buf,
         };
     }
 
@@ -684,38 +704,51 @@ pub const TlsSocket = struct {
         }
 
         self.allocator.free(self.hostname_buf);
+        if (self.read_buf.len > 0) {
+            self.allocator.free(self.read_buf);
+            self.read_buf = "";
+        }
     }
 
-    /// Read data from the TLS connection.
+    /// Read data from the TLS connection with read-ahead buffering.
+    ///
+    /// When the internal read buffer has data, serves from there without calling
+    /// SSL_read. When empty, issues one large SSL_read (up to READ_BUF_SIZE) to
+    /// refill the buffer, then serves the requested bytes. This reduces the number
+    /// of SSL_read calls from ~19 per 9-packet batch to ~1 per batch.
     ///
     /// Semantics:
     ///   N > 0          : received N bytes
     ///   0              : peer closed gracefully (TLS close_notify)
-    ///   error.WouldBlock : non-blocking socket has no data right now (caller retry)
+    ///   error.WouldBlock : no data right now (non-blocking, caller retry)
     ///   error.BrokenPipe : hard TLS / TCP error; connection lost
-    ///
-    /// On a blocking socket, WouldBlock should not occur. After calling
-    /// setNonBlocking() (data plane), callers MUST handle WouldBlock as a
-    /// normal "no data yet" signal, not an error.
     pub fn read(self: *TlsSocket, buffer: []u8) !usize {
         if (!self.connected) return error.BrokenPipe;
-
         const ssl = self.ssl orelse return error.BrokenPipe;
-        const ret = c.SSL_read(ssl, buffer.ptr, @intCast(buffer.len));
 
+        // Serve from read-ahead buffer if data available.
+        if (self.read_buf_available > 0) {
+            const to_copy = @min(buffer.len, self.read_buf_available);
+            @memcpy(buffer[0..to_copy], self.read_buf[self.read_buf_offset..][0..to_copy]);
+            self.read_buf_offset += to_copy;
+            self.read_buf_available -= to_copy;
+            return to_copy;
+        }
+
+        // Buffer empty: do one large SSL_read to refill.
+        const ret = c.SSL_read(ssl, self.read_buf.ptr, @intCast(self.read_buf.len));
         if (ret <= 0) {
-            const err = c.SSL_get_error(ssl, ret);
-            switch (err) {
+            const err_no = c.SSL_get_error(ssl, ret);
+            switch (err_no) {
                 c.SSL_ERROR_ZERO_RETURN => {
                     self.connected = false;
                     return 0;
                 },
                 c.SSL_ERROR_WANT_READ, c.SSL_ERROR_WANT_WRITE => {
-                    // Non-blocking socket: nothing available right now.
                     return error.WouldBlock;
                 },
                 else => {
-                    std.log.err("TlsSocket.read: SSL_get_error={d} ret={d} errno={d}", .{ err, ret, std.c._errno().* });
+                    std.log.err("TlsSocket.read: SSL_get_error={d} ret={d} errno={d}", .{ err_no, ret, std.c._errno().* });
                     logOpenSslErrors();
                     self.connected = false;
                     return error.BrokenPipe;
@@ -723,7 +756,17 @@ pub const TlsSocket = struct {
             }
         }
 
-        return @intCast(ret);
+        const nread = @as(usize, @intCast(ret));
+        if (nread == 0) return error.BrokenPipe;
+
+        // Refill buffer, then serve the requested bytes from it.
+        self.read_buf_offset = 0;
+        self.read_buf_available = nread;
+        const to_copy = @min(buffer.len, nread);
+        @memcpy(buffer[0..to_copy], self.read_buf[0..to_copy]);
+        self.read_buf_offset += to_copy;
+        self.read_buf_available -= to_copy;
+        return to_copy;
     }
 
     /// Read with built-in poll-on-WouldBlock retry, for control-plane use
@@ -759,12 +802,10 @@ pub const TlsSocket = struct {
     }
 
     /// Check if OpenSSL has buffered decrypted application data invisible to poll().
-    /// SSL records may contain multiple application messages; SSL_read can leave
-    /// some buffered in the SSL object even when the kernel TCP buffer is empty
-    /// (poll() will report POLL.IN unset). Without this check the data loop
-    /// sleeps in poll while the next batch of bytes is already decrypted and
-    /// waiting — a major source of stalls under bursty inbound traffic.
+    /// Also checks the internal read-ahead buffer so the drain loop doesn't exit
+    /// early when there's still data to process.
     pub fn hasPending(self: *TlsSocket) bool {
+        if (self.read_buf_available > 0) return true;
         const ssl = self.ssl orelse return false;
         return c.SSL_pending(ssl) > 0;
     }
