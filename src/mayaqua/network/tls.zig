@@ -460,8 +460,31 @@ pub const TlsSocket = struct {
             };
         }
 
-        // CYCLE 11 (TURN 16b): TCP_NOTSENT_LOWAT REMOVED — see clearTimeouts() comment.
-        // Bufferbloat is bounded by SO_SNDBUF=512KB cap (set in clearTimeouts post-handshake).
+        // TCP_NOTSENT_LOWAT: limits unsent data in the kernel send buffer so that
+        // ACKs for DL data don't get queued behind large amounts of UL data on a
+        // single TCP connection carrying bidirectional VPN traffic. Without this,
+        // nwrite_max reaches 1.3+ MB during concurrent UL/DL, and the server never
+        // sees DL ACKs fast enough to grow its congestion window — DL collapses to
+        // ~1 Mbps even though UL runs at 50 Mbps.
+        //
+        // Choice of 128KB:
+        //   - At 50 Mbps UL, 128KB = ~20ms of data → DL ACK delay ~20ms
+        //   - Without NOTSENT_LOWAT, 1.3MB = ~200ms delay → DL ACKs arrive too late
+        //   - The kernel's TCP stack is sized for bulk-throughput, not interleaved
+        //     bidirectional flows. NOTSENT_LOWAT re-prioritizes ACKs inside the
+        //     kernel's output queue without application-level changes.
+        //   - SO_SNDBUF (2MB) still caps the total send buffer; NOTSENT_LOWAT just
+        //     makes SSL_write/EAGAIN return sooner when the pipeline is full.
+        //
+        // Darwin constant: <netinet/tcp.h> TCP_NOTSENT_LOWAT = 0x200.
+        if (!via_host_dial) {
+            const notsent_lowat: u32 = 128 * 1024; // 128 KB
+            const TCP_NOTSENT_LOWAT: u32 = 0x200;
+            const IPPROTO_TCP: u32 = 6;
+            std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, std.mem.asBytes(&notsent_lowat)) catch |err| {
+                std.log.warn("Failed to set TCP_NOTSENT_LOWAT: {}", .{err});
+            };
+        }
 
         // On Windows, disable delayed ACKs — default 200ms ACK delay adds latency
         if (builtin.os.tag == .windows) {
