@@ -999,14 +999,16 @@ pub const VpnClient = struct {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
 
-        if (self.config.tunnel_rx_fd and self.config.tunnel_tx_fd) |rx_fd, tx_fd| {
-            // iOS: dual socketpairs — separate UL (rx) and DL (tx) fds.
-            // This prevents UL from starving DL by keeping each direction on
-            // its own kernel buffer and poll target.
-            ctx.openWithFds(rx_fd, tx_fd, "tun-mobile") catch |err| {
-                std.log.err("Failed to open tunnel with external fds rx_fd={d} tx_fd={d}: {}", .{ rx_fd, tx_fd, err });
-                return ClientError.AdapterConfigurationFailed;
-            };
+        if (self.config.tunnel_rx_fd) |rx_fd| {
+            if (self.config.tunnel_tx_fd) |tx_fd| {
+                // iOS: dual socketpairs — separate UL (rx) and DL (tx) fds.
+                // This prevents UL from starving DL by keeping each direction on
+                // its own kernel buffer and poll target.
+                ctx.openWithFds(rx_fd, tx_fd, "tun-mobile") catch |err| {
+                    std.log.err("Failed to open tunnel with external fds rx_fd={d} tx_fd={d}: {}", .{ rx_fd, tx_fd, err });
+                    return ClientError.AdapterConfigurationFailed;
+                };
+            }
         } else if (self.config.tunnel_fd) |fd| {
             // Mobile: use the OS-provided tunnel fd (legacy single-socketpair)
             ctx.openWithFd(fd, "tun-mobile") catch |err| {
