@@ -2329,8 +2329,15 @@ pub const VpnClient = struct {
                         // One idle iteration at ~1ms gives the kernel time to
                         // transmit ~15KB of queued data (at 12 Mbps line rate),
                         // which is enough to let a few DL ACKs through.
-                        const sendq_critical = sendq >= sendq_throttle_critical;
-                        if (builtin.os.tag == .ios and sendq_critical and batch_limit_base == 1) {
+                        //
+                        // When DL is active (had_inbound_this_iter), use a tighter
+                        // threshold (sendq_throttle_high = 320KB) so that ACKs
+                        // clear faster during concurrent UL/DL. The 384KB critical
+                        // threshold is for UL-only — without DL to worry about,
+                        // the buffer can run deeper without starving ACKs.
+                        const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_high else sendq_throttle_critical;
+                        const sendq_critical = sendq >= ios_skip_threshold;
+                        if (builtin.os.tag == .ios and sendq_critical) {
                             // Skip UL — let kernel drain. Track as stalled for DIAG.
                             last_iter_had_work = false;
                         } else {
@@ -2425,16 +2432,52 @@ pub const VpnClient = struct {
             // set, the loop depends ENTIRELY on POLLOUT to retry — but POLLOUT
             // requires a TCP ACK, the ACK requires inbound processing... the
             // circular deadlock. This unconditional retry breaks the cycle.
+            //
+            // iOS (TCP_NOTSENT_LOWAT unsupported): skip the fallback retry
+            // when sendq is critically deep. Retrying would add more data to
+            // the send buffer, keeping DL ACKs buried. The next iteration's
+            // pre-inbound and mid-loop retries will handle the pending data
+            // once the kernel has drained enough to fire POLLOUT.
             // ============================================================
-            if (single_sock) |ss| {
-                if (ss.needs_pollout) {
-                    if (try ss.retryPendingWrite()) last_iter_had_work = true;
+            if (builtin.os.tag == .ios) {
+                var fb_sendq: u32 = 0;
+                if (single_sock) |ss| {
+                    fb_sendq = @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32)));
+                } else if (self.conn_manager) |cm| {
+                    for (cm.connections[0..cm.count]) |maybe_conn| {
+                        if (maybe_conn) |conn| {
+                            const sq: u32 = @intCast(@min(conn.tls_socket.kernelSendQueue(), std.math.maxInt(u32)));
+                            if (sq > fb_sendq) fb_sendq = sq;
+                        }
+                    }
                 }
-            } else if (self.conn_manager) |*cm| {
-                for (cm.connections[0..cm.count]) |*slot| {
-                    if (slot.*) |*conn| {
-                        if (conn.tls_socket.needs_pollout) {
-                            if (try conn.tls_socket.retryPendingWrite()) last_iter_had_work = true;
+                const fb_critical = fb_sendq >= sendq_throttle_critical;
+                if (!fb_critical) {
+                    if (single_sock) |ss| {
+                        if (ss.needs_pollout) {
+                            if (try ss.retryPendingWrite()) last_iter_had_work = true;
+                        }
+                    } else if (self.conn_manager) |*cm| {
+                        for (cm.connections[0..cm.count]) |*slot| {
+                            if (slot.*) |*conn| {
+                                if (conn.tls_socket.needs_pollout) {
+                                    if (try conn.tls_socket.retryPendingWrite()) last_iter_had_work = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (single_sock) |ss| {
+                    if (ss.needs_pollout) {
+                        if (try ss.retryPendingWrite()) last_iter_had_work = true;
+                    }
+                } else if (self.conn_manager) |*cm| {
+                    for (cm.connections[0..cm.count]) |*slot| {
+                        if (slot.*) |*conn| {
+                            if (conn.tls_socket.needs_pollout) {
+                                if (try conn.tls_socket.retryPendingWrite()) last_iter_had_work = true;
+                            }
                         }
                     }
                 }
