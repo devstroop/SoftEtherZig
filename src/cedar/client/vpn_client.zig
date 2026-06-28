@@ -1598,6 +1598,10 @@ pub const VpnClient = struct {
             drain_max: u32 = 0,
             drain_cap_hits: u64 = 0,
             ssl_pending_max: u32 = 0,
+            /// Tracks the read-ahead buffer depth (inside TlsSocket, between
+            /// OpenSSL SSL_read and the application). Non-zero proves the 64KB
+            /// buffer is actively batching TLS records.
+            buf_avail_max: u32 = 0,
             nread_max: u32 = 0,
             nwrite_max: u32 = 0,
             tcp_drops_pkts: u64 = 0,
@@ -1943,6 +1947,19 @@ pub const VpnClient = struct {
             // Decay pending bytes for load balancing (multi-connection)
             if (self.conn_manager) |*cm| cm.decayPendingBytes();
 
+            // === Track inbound activity for fair scheduling ===
+            // When DL data was just drained, the server clearly has DL to send.
+            // We SHOULD prioritize reading it on the next iteration, but the
+            // outbound section that follows may take long enough (reading a full
+            // batch of UL from the TUN socketpair + TLS encrypt + send) that
+            // new DL data arrives and sits idle in the kernel receive buffer.
+            // By capping this iteration's outbound batch when we just drained
+            // inbound, the next poll() runs sooner and catches the new DL data.
+            // Without this, a full 64-packet UL batch at ~16KB/iter costs 600μs
+            // of UL processing — enough for 3-4 TLS records (48KB+ of DL) to
+            // accumulate in the kernel without being consumed.
+            var had_inbound_this_iter = false;
+
             // Drive UDP acceleration timers (probing, keepalive, timeout)
             if (self.udp_accel) |*ua| ua.tick();
 
@@ -1991,12 +2008,17 @@ pub const VpnClient = struct {
                     // SSL pending / kernel queue stats for this conn
                     const pend = conn.tls_socket.pendingBytes();
                     if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                    const bavail = conn.tls_socket.readBufAvailable();
+                    if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                     const nrd = conn.tls_socket.kernelRecvQueue();
                     if (nrd > diag.nread_max) diag.nread_max = nrd;
                     const nwr = conn.tls_socket.kernelSendQueue();
                     if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
                 }
-                if (any_conn_had_data) last_iter_had_work = true;
+                if (any_conn_had_data) {
+                    last_iter_had_work = true;
+                    had_inbound_this_iter = true;
+                }
 
                 // Cleanup dead connections
                 if (cm.cleanupDead()) {
@@ -2027,6 +2049,7 @@ pub const VpnClient = struct {
                 if (tls_readable) {
                     // Cycle 6 adaptive poll: signal work to outer loop
                     last_iter_had_work = true;
+                    had_inbound_this_iter = true;
                     // Cycle 6: raise cap 8→64. DIAG showed cap=8 was being
                     // hit EVERY iteration with ssl_pend_max=15KB still buffered
                     // — we were forfeiting decrypted data, kernel rcvbuf would
@@ -2069,6 +2092,8 @@ pub const VpnClient = struct {
                     if (self.tls_socket) |ts| {
                         const pend = ts.pendingBytes();
                         if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                        const bavail = ts.readBufAvailable();
+                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                         const nrd = ts.kernelRecvQueue();
                         if (nrd > diag.nread_max) diag.nread_max = nrd;
                         const nwr = ts.kernelSendQueue();
@@ -2122,6 +2147,8 @@ pub const VpnClient = struct {
                         if (self.tls_socket) |ts| {
                             const pend = ts.pendingBytes();
                             if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                            const bavail = ts.readBufAvailable();
+                            if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                             const nrd = ts.kernelRecvQueue();
                             if (nrd > diag.nread_max) diag.nread_max = nrd;
                             const nwr = ts.kernelSendQueue();
@@ -2230,12 +2257,16 @@ pub const VpnClient = struct {
             //    unconditionally: `(tun_readable or skip_poll)` where skip_poll
             //    was true every time there was any TLS pending — which was
             //    every iteration during active DL.
-            // 768 KB — derived from SO_SNDBUF/2
-            const sendq_throttle_med: u32 = 768 * 1024; // 768 KB — halve batch. Kept at 2MB-SO_SNDBUF levels even though
-            // 1 MB — derived from SO_SNDBUF * 0.65
-            const sendq_throttle_high: u32 = 1024 * 1024; // 1 MB — minimum batch.  Larger throttle values let sendq
-            // 1.5 MB — derived from SO_SNDBUF * 0.75
-            const sendq_throttle_critical: u32 = 1536 * 1024; // 1.5 MB — single packet.  fill to 3-4MB before backoff,
+            // 768 KB — derived from SO_SNDBUF/2. On iOS with 512KB
+            // SO_SNDBUF (TCP_NOTSENT_LOWAT unsupported), scale thresholds
+            // proportionally: 30% = 153KB, 50% = 256KB, 75% = 384KB.
+            // These keep the kernel output queue shallow enough that DL
+            // TCP ACKs are not meaningfully delayed behind queued UL data.
+            const sendq_throttle_med: u32 = if (builtin.os.tag == .ios) 192 * 1024 else 768 * 1024;
+            // 1 MB / 320KB — derived from SO_SNDBUF * 0.65
+            const sendq_throttle_high: u32 = if (builtin.os.tag == .ios) 320 * 1024 else 1024 * 1024;
+            // 1.5 MB / 384KB — derived from SO_SNDBUF * 0.75
+            const sendq_throttle_critical: u32 = if (builtin.os.tag == .ios) 384 * 1024 else 1536 * 1024;
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
@@ -2264,7 +2295,7 @@ pub const VpnClient = struct {
                             }
                             if (sq_count > 0) sendq = @intCast(@min(sq_sum / sq_count, std.math.maxInt(u32)));
                         }
-                        const batch_limit: usize = if (sendq >= sendq_throttle_critical)
+                        const batch_limit_base: usize = if (sendq >= sendq_throttle_critical)
                             @min(OUTBOUND_BATCH, 1)
                         else if (!is_multi and sendq >= sendq_throttle_high)
                             @min(OUTBOUND_BATCH, 4)
@@ -2272,8 +2303,39 @@ pub const VpnClient = struct {
                             OUTBOUND_BATCH / 2
                         else
                             OUTBOUND_BATCH;
+                        // Fair scheduling: when inbound data was just processed,
+                        // cap the outbound batch to prevent UL processing from
+                        // delaying the next inbound poll cycle. New DL data may
+                        // arrive (in the kernel TCP buffer) during outbound
+                        // processing; a smaller outbound batch means the next
+                        // poll() runs sooner and catches it. Without this cap,
+                        // a 64-packet UL batch at 50 Mbps takes ~3-4ms of
+                        // encrypt+send, during which 50+ KB of DL can arrive
+                        // and sit idle.
+                        const batch_limit: usize = if (had_inbound_this_iter)
+                            @min(batch_limit_base, 16)   // light outbound when DL is active
+                        else
+                            batch_limit_base;
 
-                        var outbound_blocks: [64][]const u8 = undefined;
+                        // iOS send-buffer backpressure: when TCP_NOTSENT_LOWAT is
+                        // unavailable (iOS direct POSIX sockets don't support it),
+                        // the kernel output queue can fill with UL data, delaying
+                        // DL TCP ACKs behind it. When the sendq is critically deep,
+                        // skip the outbound section entirely for this iteration so
+                        // the kernel can drain without new data being queued.
+                        // Without this, the throttle at batch=1 still adds 1 packet
+                        // (up to ~15KB) per iteration, keeping the send buffer near
+                        // the ceiling forever — DL ACKs never get a clear channel.
+                        // One idle iteration at ~1ms gives the kernel time to
+                        // transmit ~15KB of queued data (at 12 Mbps line rate),
+                        // which is enough to let a few DL ACKs through.
+                        const sendq_critical = sendq >= sendq_throttle_critical;
+                        if (builtin.os.tag == .ios and sendq_critical and batch_limit_base == 1) {
+                            // Skip UL — let kernel drain. Track as stalled for DIAG.
+                            last_iter_had_work = false;
+                        } else {
+                            // Normal outbound path: read UL from TUN, bundle, send.
+                            var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
                         var outbound_bytes: usize = 0;
 
@@ -2349,6 +2411,7 @@ pub const VpnClient = struct {
                             }
                             self.stats.recordSent(outbound_bytes);
                         }
+                        } // end else (non-skip outbound path)
                     }
                 }
             }
@@ -2648,9 +2711,10 @@ pub const VpnClient = struct {
                         @as(f64, @floatFromInt(diag.sendq_sum)) / @as(f64, @floatFromInt(diag.sendq_samples))
                     else
                         0.0;
-                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B nread_max={d}B nwrite_max={d}B tcp_drop={d}p fda_drop={d}p tun_eagain={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d} stalled={d}", .{
+                    std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B buf_avail_max={d}B nread_max={d}B nwrite_max={d}B tcp_drop={d}p fda_drop={d}p tun_eagain={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d} stalled={d}", .{
                         mbps_in,             diag.pkts_in,        mbps_out,             diag.pkts_out,
                         drain_avg,           diag.drain_max,      diag.drain_cap_hits,  diag.ssl_pending_max,
+                        diag.buf_avail_max,
                         diag.nread_max,      diag.nwrite_max,     diag.tcp_drops_pkts,  diag.tx_drops_delta,
                         diag.tun_eagain,     diag.poll_iters,     iter_avg_us,          diag.iter_us_max,
                         diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,

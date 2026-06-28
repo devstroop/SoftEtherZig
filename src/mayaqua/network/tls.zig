@@ -306,7 +306,17 @@ pub const TlsSocket = struct {
         // bypasses the NWConnection autotune that keeps iOS DL at 2-3 Mbps.
         var via_host_dial: bool = false;
         if (builtin.os.tag == .ios and (config.bind_interface_index orelse bind_interface_index) != 0) {
-            // Try direct POSIX socket with IP_BOUND_IF
+            // Try direct POSIX socket with IP_BOUND_IF. The bind-interface
+            // selection comes from Swift's activePhysicalInterfaceName()
+            // which prefers en0 (Wi-Fi) over other en* / pdp_ip* interfaces.
+            // When the active interface cannot reach the server IP (e.g.,
+            // en2 = USB tethering has no route), connect fails with
+            // NetworkUnreachable. In that case we retry ONCE without
+            // IP_BOUND_IF before falling back to the host dial callback —
+            // this gives the kernel routing table a chance to pick the
+            // correct egress interface (which works when NECP doesn't
+            // actively block it, i.e. the service side has established
+            // that the flow is for the tunnel provider itself).
             var dns_ok = false;
             var connect_ok = false;
             if (std.net.getAddressList(allocator, hostname, port)) |addrs| {
@@ -322,14 +332,26 @@ pub const TlsSocket = struct {
                         std.log.info("TLS: direct POSIX socket + IP_BOUND_IF + 4MB RCVBUF", .{});
                         connect_ok = true;
                     } else |err| {
-                        std.log.warn("TLS: POSIX connect failed ({}), falling back to host dial", .{err});
-                        if (config.external_tcp_dial orelse external_tcp_dial) |dial| {
-                            const c_host = try allocator.dupeZ(u8, hostname);
-                            defer allocator.free(c_host);
-                            const fd_int = dial(c_host.ptr, port);
-                            if (fd_int >= 0) { tcp_fd = @intCast(fd_int); via_host_dial = true; }
-                            else return TlsError.ConnectionFailed;
-                        } else return TlsError.ConnectionFailed;
+                        // Retry once without IP_BOUND_IF — the kernel
+                        // routing table may find a path that the bound
+                        // interface doesn't have.
+                        const retry_result = tcpConnectWithTimeout(address, config.timeout_ms, null);
+                        if (retry_result) |fd| {
+                            tcp_fd = fd;
+                            const rcv_cap: u32 = 4 * 1024 * 1024;
+                            _ = std.posix.setsockopt(tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&rcv_cap)) catch {};
+                            std.log.info("TLS: POSIX retry OK without IP_BOUND_IF (initial {})", .{err});
+                            connect_ok = true;
+                        } else |retry_err| {
+                            std.log.warn("TLS: POSIX connect failed ({}), retry without IP_BOUND_IF also failed ({}), falling back to host dial", .{ err, retry_err });
+                            if (config.external_tcp_dial orelse external_tcp_dial) |dial| {
+                                const c_host = try allocator.dupeZ(u8, hostname);
+                                defer allocator.free(c_host);
+                                const fd_int = dial(c_host.ptr, port);
+                                if (fd_int >= 0) { tcp_fd = @intCast(fd_int); via_host_dial = true; }
+                                else return TlsError.ConnectionFailed;
+                            } else return TlsError.ConnectionFailed;
+                        }
                     }
                 }
             } else |_| {
@@ -817,6 +839,15 @@ pub const TlsSocket = struct {
         return if (p > 0) @intCast(p) else 0;
     }
 
+    /// DIAGNOSTIC: Returns bytes currently in the read-ahead buffer (decrypted
+    /// data that has been read from OpenSSL but not yet consumed by the caller).
+    /// Non-zero values prove the 64KB buffer is actively batching SSL_read calls,
+    /// reducing per-packet TLS decryption overhead. Sampled in DIAG as `buf_avail`
+    /// alongside `ssl_pend` and `nread` to validate the buffer code path.
+    pub fn readBufAvailable(self: *const TlsSocket) u32 {
+        return @intCast(self.read_buf_available);
+    }
+
     /// DIAGNOSTIC: Returns bytes currently sitting in the kernel recv queue
     /// (data arrived in kernel buffer but not yet consumed by OpenSSL).
     /// Uses ioctl(FIONREAD) for portability across platforms and fd types
@@ -1089,7 +1120,18 @@ pub const TlsSocket = struct {
         //     needs_pollout poll timeout, so 4MB no longer causes permanent
         //     DL collapse — but the bufferbloat-induced cwnd sawtooth remains.
         //   - Kernel does NOT double SO_SNDBUF on macOS (measured via SO_NWRITE).
-        const snd_cap: u32 = 2 * 1024 * 1024;
+        //
+        // iOS special case: TCP_NOTSENT_LOWAT is NOT supported on iOS direct
+        // POSIX sockets (returns error.InvalidProtocolOption). Without it,
+        // DL TCP ACKs can be queued behind ~1MB of UL data in the kernel send
+        // buffer, delaying server ACK delivery and collapsing DL throughput.
+        // Reducing SO_SNDBUF to 512KB on iOS bounds the queueing delay to
+        // ~80ms at 50 Mbps UL (vs ~320ms at 2MB), giving the server enough
+        // ACK clock to maintain DL congestion window. The 512KB cap limits
+        // UL BDP to ~25 Mbps at 166ms RTT — acceptable since UL already
+        // hits 48-53 Mbps through the dual socketpair + Swift pump (the
+        // actual bottleneck is the tunnel protocol's compression/crypto).
+        const snd_cap: u32 = if (builtin.target.os.tag == .ios) 512 * 1024 else 2 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the
