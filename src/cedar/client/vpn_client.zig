@@ -2264,11 +2264,11 @@ pub const VpnClient = struct {
             // proportionally: 30% = 153KB, 50% = 256KB, 75% = 384KB.
             // These keep the kernel output queue shallow enough that DL
             // TCP ACKs are not meaningfully delayed behind queued UL data.
-            const sendq_throttle_med: u32 = if (builtin.os.tag == .ios) 192 * 1024 else 768 * 1024;
+            const sendq_throttle_med: u32 = 768 * 1024;
             // 1 MB / 320KB — derived from SO_SNDBUF * 0.65
-            const sendq_throttle_high: u32 = if (builtin.os.tag == .ios) 320 * 1024 else 1024 * 1024;
+            const sendq_throttle_high: u32 = 1024 * 1024;
             // 1.5 MB / 384KB — derived from SO_SNDBUF * 0.75
-            const sendq_throttle_critical: u32 = if (builtin.os.tag == .ios) 384 * 1024 else 1536 * 1024;
+            const sendq_throttle_critical: u32 = 1536 * 1024;
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
@@ -2337,6 +2337,10 @@ pub const VpnClient = struct {
                         // clear faster during concurrent UL/DL. The 384KB critical
                         // threshold is for UL-only — without DL to worry about,
                         // the buffer can run deeper without starving ACKs.
+                        const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_high else sendq_throttle_critical;
+                        if (builtin.os.tag == .ios and sendq >= ios_skip_threshold) {
+                            last_iter_had_work = false;
+                        } else {
                             // Normal outbound path: read UL from TUN, bundle, send.
                             var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
@@ -2413,6 +2417,7 @@ pub const VpnClient = struct {
                                 for (outbound_blocks[0..udp_sent_count]) |b| diag.bytes_out += b.len;
                             }
                             self.stats.recordSent(outbound_bytes);
+                        }
                         }
                     }
                 }
