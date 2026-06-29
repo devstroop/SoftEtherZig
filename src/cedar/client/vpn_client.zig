@@ -1895,23 +1895,25 @@ pub const VpnClient = struct {
             // pumps are only briefly starved during active data processing.
             // After a kernel preemption (poll_us > 10ms), poll(0) catches up
             // the backlog without waiting, preventing TCP cwnd collapse.
-            const poll_timeout_ms: i32 = if (builtin.os.tag == .ios) blk: {
-                // In half-connection mode, UL and DL are on separate TCP
-                // stacks with independent TLS contexts. There is no DL-ACK
-                // starvation risk across connections. Use a longer poll
-                // timeout (10ms) to reduce CPU wakes — each 1ms poll is a
-                // CPU wake, and at 800 iters/sec the 45K/300s limit is hit
-                // in ~34 seconds. 10ms drops iters to ~90/sec (~110 wakes
-                // incl. backpressure cooldown), well under the 150/sec limit.
-                if (self.config.half_connection) break :blk @as(i32, 10);
-                // Single-connection (shared TCP): 1ms poll is critical for
-                // timely DL-ACK processing.
-                if (self.tls_socket != null and
-                    (self.tls_socket.?.hasPending() or
-                        self.tls_socket.?.kernelRecvQueue() > 0))
-                    break :blk @as(i32, 0);
-                break :blk @as(i32, 1);
-            } else if (last_iter_had_work and !any_needs_pollout)
+            const poll_timeout_ms: i32 = if (builtin.os.tag == .ios)
+                blk: {
+                    // In half-connection mode, UL and DL are on separate TCP
+                    // stacks with independent TLS contexts. There is no DL-ACK
+                    // starvation risk across connections. Use a longer poll
+                    // timeout (10ms) to reduce CPU wakes — each 1ms poll is a
+                    // CPU wake, and at 800 iters/sec the 45K/300s limit is hit
+                    // in ~34 seconds. 10ms drops iters to ~90/sec (~110 wakes
+                    // incl. backpressure cooldown), well under the 150/sec limit.
+                    if (self.config.half_connection) break :blk @as(i32, 10);
+                    // Single-connection (shared TCP): 1ms poll is critical for
+                    // timely DL-ACK processing.
+                    if (self.tls_socket != null and
+                        (self.tls_socket.?.hasPending() or
+                         self.tls_socket.?.kernelRecvQueue() > 0))
+                        break :blk @as(i32, 0);
+                    break :blk @as(i32, 1);
+                }
+            else if (last_iter_had_work and !any_needs_pollout)
                 @as(i32, 0)
             else
                 @as(i32, 1);
@@ -2128,7 +2130,7 @@ pub const VpnClient = struct {
                         _ = std.posix.poll(poll_fds[0..@as(std.posix.nfds_t, @intCast(tls_fd_count))], 0) catch 0;
                         const ios_fresh = (poll_fds[0].revents & std.posix.POLL.IN) != 0 or
                             (self.tls_socket != null and
-                                (self.tls_socket.?.hasPending() or self.tls_socket.?.kernelRecvQueue() > 0));
+                             (self.tls_socket.?.hasPending() or self.tls_socket.?.kernelRecvQueue() > 0));
                         if (!ios_fresh) break;
 
                         last_iter_had_work = true;
@@ -2136,14 +2138,8 @@ pub const VpnClient = struct {
                         var ios_dead = false;
                         while (ios_drain < MAX_INBOUND_DRAIN) : (ios_drain += 1) {
                             const ios_recv = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
-                                if (self.should_stop) {
-                                    ios_dead = true;
-                                    break;
-                                }
-                                if (err == error.ConnectionClosed or err == error.BrokenPipe) {
-                                    ios_dead = true;
-                                    break;
-                                }
+                                if (self.should_stop) { ios_dead = true; break; }
+                                if (err == error.ConnectionClosed or err == error.BrokenPipe) { ios_dead = true; break; }
                                 break;
                             };
                             for (recv_slices[0..ios_recv]) |block_data| {
@@ -2327,7 +2323,7 @@ pub const VpnClient = struct {
                         // encrypt+send, during which 50+ KB of DL can arrive
                         // and sit idle.
                         const batch_limit: usize = if (had_inbound_this_iter)
-                            @min(batch_limit_base, 16) // light outbound when DL is active
+                            @min(batch_limit_base, 16)   // light outbound when DL is active
                         else
                             batch_limit_base;
 
@@ -2357,108 +2353,81 @@ pub const VpnClient = struct {
                         } else {
                             // Normal outbound path: read UL from TUN, bundle, send.
                             var outbound_blocks: [64][]const u8 = undefined;
-                            var outbound_count: usize = 0;
-                            var outbound_bytes: usize = 0;
+                        var outbound_count: usize = 0;
+                        var outbound_bytes: usize = 0;
 
-                            while (outbound_count < batch_limit) {
-                                diag.tun_read_attempts += 1;
-                                if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
-                                    if (maybe_len) |ip_len| {
-                                        if (ip_len > 0 and ip_len <= 1500) {
-                                            diag.tun_reads += 1;
-                                            diag.tun_bytes += ip_len;
-                                            const gw_mac = loop_state.gateway_mac orelse blk: {
-                                                var random_mac: [6]u8 = undefined;
-                                                std.crypto.random.bytes(&random_mac);
-                                                random_mac[0] = (random_mac[0] & 0xFE) | 0x02;
-                                                break :blk random_mac;
-                                            };
-                                            if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
-                                                diag.eth_pkts += 1;
-                                                diag.eth_bytes += eth_frame.len;
-                                                if (eth_frame.len >= 200) {
-                                                    diag.pkt_large += 1;
-                                                } else {
-                                                    diag.pkt_small += 1;
-                                                }
-                                                outbound_blocks[outbound_count] = eth_frame;
-                                                outbound_bytes += eth_frame.len;
-                                                outbound_count += 1;
+                        while (outbound_count < batch_limit) {
+                            diag.tun_read_attempts += 1;
+                            if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
+                                if (maybe_len) |ip_len| {
+                                    if (ip_len > 0 and ip_len <= 1500) {
+                                        diag.tun_reads += 1;
+                                        diag.tun_bytes += ip_len;
+                                        const gw_mac = loop_state.gateway_mac orelse blk: {
+                                            var random_mac: [6]u8 = undefined;
+                                            std.crypto.random.bytes(&random_mac);
+                                            random_mac[0] = (random_mac[0] & 0xFE) | 0x02;
+                                            break :blk random_mac;
+                                        };
+                                        if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
+                                            diag.eth_pkts += 1;
+                                            diag.eth_bytes += eth_frame.len;
+                                            if (eth_frame.len >= 200) {
+                                                diag.pkt_large += 1;
+                                            } else {
+                                                diag.pkt_small += 1;
                                             }
-                                        }
-                                    } else break; // No more packets available
-                                } else |_| break;
-                            }
-
-                            if (outbound_count > 0) {
-                                // Try UDP first, track how many succeeded
-                                var udp_sent_count: usize = 0;
-                                if (self.udp_accel) |*ua| {
-                                    for (outbound_blocks[0..outbound_count]) |frame| {
-                                        if (!(ua.sendData(frame) catch false)) break;
-                                        udp_sent_count += 1;
-                                    }
-                                }
-                                // Send remaining packets (not sent via UDP) over TCP.
-                                // Safety net: if send fails (WouldBlock), count as dropped.
-                                // The sendq-based throttle should prevent this edge case.
-                                if (udp_sent_count < outbound_count) {
-                                    var tls_send_ok = true;
-                                    var send_bytes: usize = 0;
-                                    for (outbound_blocks[udp_sent_count..outbound_count]) |b| send_bytes += b.len;
-                                    diag.tls_send_calls += 1;
-                                    diag.tls_send_bytes += send_bytes;
-                                    send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
-                                        error.ConnectionClosed, error.BrokenPipe => {
-                                            std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
-                                            self.disconnect_reason = .network_error;
-                                            return error.ConnectionLost;
-                                        },
-                                        else => {
-                                            tls_send_ok = false;
-                                        },
-                                    };
-                                    if (tls_send_ok) {
-                                        diag.pkts_out += outbound_count - udp_sent_count;
-                                        for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
-                                    } else {
-                                        diag.tcp_drops_pkts += outbound_count - udp_sent_count;
-                                    }
-                                }
-                                // DIAG: count UDP-sent too
-                                if (udp_sent_count > 0) {
-                                    diag.pkts_out += udp_sent_count;
-                                    for (outbound_blocks[0..udp_sent_count]) |b| diag.bytes_out += b.len;
-                                }
-                                self.stats.recordSent(outbound_bytes);
-                            }
-                            // iOS app-level pacing: without TCP_NOTSENT_LOWAT, DL TCP ACKs
-                            // queue behind UL data in the kernel send buffer. After sending
-                            // an UL batch, check if DL data is pending in the TLS socket and
-                            // process it immediately — preventing the server's cwnd from
-                            // collapsing due to delayed ACKs. This is the userspace
-                            // equivalent of the missing kernel feature.
-                            if (builtin.os.tag == .ios) {
-                                if (single_sock) |ss| {
-                                    if (ss.hasPending() or ss.kernelRecvQueue() > 0) {
-                                        if (single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch)) |recv_count| {
-                                            for (recv_slices[0..recv_count]) |block_data| {
-                                                diag.bytes_in += block_data.len;
-                                                diag.pkts_in += 1;
-                                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
-                                                if (self.tun_write_blocked) break;
-                                            }
-                                            last_iter_had_work = true;
-                                        } else |err| {
-                                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
-                                                self.disconnect_reason = .network_error;
-                                                return error.ConnectionLost;
-                                            }
-                                            // WouldBlock or other non-fatal: skip
+                                            outbound_blocks[outbound_count] = eth_frame;
+                                            outbound_bytes += eth_frame.len;
+                                            outbound_count += 1;
                                         }
                                     }
+                                } else break; // No more packets available
+                            } else |_| break;
+                        }
+
+                        if (outbound_count > 0) {
+                            // Try UDP first, track how many succeeded
+                            var udp_sent_count: usize = 0;
+                            if (self.udp_accel) |*ua| {
+                                for (outbound_blocks[0..outbound_count]) |frame| {
+                                    if (!(ua.sendData(frame) catch false)) break;
+                                    udp_sent_count += 1;
                                 }
                             }
+                            // Send remaining packets (not sent via UDP) over TCP.
+                            // Safety net: if send fails (WouldBlock), count as dropped.
+                            // The sendq-based throttle should prevent this edge case.
+                            if (udp_sent_count < outbound_count) {
+                                var tls_send_ok = true;
+                                var send_bytes: usize = 0;
+                                for (outbound_blocks[udp_sent_count..outbound_count]) |b| send_bytes += b.len;
+                                diag.tls_send_calls += 1;
+                                diag.tls_send_bytes += send_bytes;
+                                send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
+                                    error.ConnectionClosed, error.BrokenPipe => {
+                                        std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
+                                        self.disconnect_reason = .network_error;
+                                        return error.ConnectionLost;
+                                    },
+                                    else => {
+                                        tls_send_ok = false;
+                                    },
+                                };
+                                if (tls_send_ok) {
+                                    diag.pkts_out += outbound_count - udp_sent_count;
+                                    for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
+                                } else {
+                                    diag.tcp_drops_pkts += outbound_count - udp_sent_count;
+                                }
+                            }
+                            // DIAG: count UDP-sent too
+                            if (udp_sent_count > 0) {
+                                diag.pkts_out += udp_sent_count;
+                                for (outbound_blocks[0..udp_sent_count]) |b| diag.bytes_out += b.len;
+                            }
+                            self.stats.recordSent(outbound_bytes);
+                        }
                         } // end else (non-skip outbound path)
                     }
                 }
@@ -2796,13 +2765,13 @@ pub const VpnClient = struct {
                     else
                         0.0;
                     std.log.info("DIAG dl={d:.1}Mbps({d}p) ul={d:.1}Mbps({d}p) drain[avg={d:.2} max={d} caps={d}] ssl_pend_max={d}B buf_avail_max={d}B nread_max={d}B nwrite_max={d}B tcp_drop={d}p fda_drop={d}p tun_eagain={d}p iters={d} iter_us[avg={d:.0} max={d}] slow[10ms={d} 50ms={d} 100ms={d}] poll_us[max={d}] sendq[max={d} avg={d:.0}] write_blocked={d} stalled={d}", .{
-                        mbps_in,             diag.pkts_in,        mbps_out,            diag.pkts_out,
-                        drain_avg,           diag.drain_max,      diag.drain_cap_hits, diag.ssl_pending_max,
-                        diag.buf_avail_max,  diag.nread_max,      diag.nwrite_max,     diag.tcp_drops_pkts,
-                        diag.tx_drops_delta, diag.tun_eagain,     diag.poll_iters,     iter_avg_us,
-                        diag.iter_us_max,    diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms,
-                        diag.poll_us_max,    diag.sendq_max,      sendq_avg,           diag.write_blocked,
-                        diag.stalled_iters,
+                        mbps_in,             diag.pkts_in,        mbps_out,             diag.pkts_out,
+                        drain_avg,           diag.drain_max,      diag.drain_cap_hits,  diag.ssl_pending_max,
+                        diag.buf_avail_max,
+                        diag.nread_max,      diag.nwrite_max,     diag.tcp_drops_pkts,  diag.tx_drops_delta,
+                        diag.tun_eagain,     diag.poll_iters,     iter_avg_us,          diag.iter_us_max,
+                        diag.iter_slow_10ms, diag.iter_slow_50ms, diag.iter_slow_100ms, diag.poll_us_max,
+                        diag.sendq_max,      sendq_avg,           diag.write_blocked,   diag.stalled_iters,
                     });
                     // TX-path trace: where do upload bytes go? Tracks TUN→Ethernet→TLS.
                     // When upload is stalled (ul < 0.5 Mbps, dl > 1 Mbps), this reveals
