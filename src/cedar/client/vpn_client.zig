@@ -1897,6 +1897,16 @@ pub const VpnClient = struct {
             // the backlog without waiting, preventing TCP cwnd collapse.
             const poll_timeout_ms: i32 = if (builtin.os.tag == .ios)
                 blk: {
+                    // In half-connection mode, UL and DL are on separate TCP
+                    // stacks with independent TLS contexts. There is no DL-ACK
+                    // starvation risk across connections. Use a longer poll
+                    // timeout (10ms) to reduce CPU wakes — each 1ms poll is a
+                    // CPU wake, and at 800 iters/sec the 45K/300s limit is hit
+                    // in ~34 seconds. 10ms drops iters to ~90/sec (~110 wakes
+                    // incl. backpressure cooldown), well under the 150/sec limit.
+                    if (self.config.half_connection) break :blk @as(i32, 10);
+                    // Single-connection (shared TCP): 1ms poll is critical for
+                    // timely DL-ACK processing.
                     if (self.tls_socket != null and
                         (self.tls_socket.?.hasPending() or
                          self.tls_socket.?.kernelRecvQueue() > 0))
