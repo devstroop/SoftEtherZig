@@ -1846,15 +1846,7 @@ pub const VpnClient = struct {
 
             // TUN fd at index tls_fd_count
             const poll_tun_idx = tls_fd_count;
-            // iOS with dual socketpairs: DON'T poll the UL bridge fd for POLLIN
-            // — it keeps the data loop awake even when there's no DL, starving
-            // NWConnection's dispatch queue. UL is read non-blockingly in the
-            // outbound section after the main poll returns, so it's still
-            // processed every iteration — but the main poll can actually sleep
-            // when only UL is active, yielding CPU to NWConnection for DL.
-            const tun_poll_events: i16 = if (builtin.os.tag == .ios)
-                @as(i16, 0) // don't wake for UL; checked non-blockingly after poll
-            else if (builtin.os.tag == .windows)
+            const tun_poll_events: i16 = if (builtin.os.tag == .windows)
                 @as(i16, 0)
             else
                 std.posix.POLL.IN;
