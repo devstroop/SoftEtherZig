@@ -2337,12 +2337,7 @@ pub const VpnClient = struct {
                         // clear faster during concurrent UL/DL. The 384KB critical
                         // threshold is for UL-only — without DL to worry about,
                         // the buffer can run deeper without starving ACKs.
-                        const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_high else sendq_throttle_critical;
-                        const sendq_critical = sendq >= ios_skip_threshold;
-                        if (builtin.os.tag == .ios and sendq_critical) {
-                            // Skip UL — let kernel drain. Track as stalled for DIAG.
-                            last_iter_had_work = false;
-                        } else {
+                        _ = sendq; // batch_limit throttling above is sufficient
                             // Normal outbound path: read UL from TUN, bundle, send.
                             var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
@@ -2420,7 +2415,6 @@ pub const VpnClient = struct {
                             }
                             self.stats.recordSent(outbound_bytes);
                         }
-                        } // end else (non-skip outbound path)
                     }
                 }
             }
