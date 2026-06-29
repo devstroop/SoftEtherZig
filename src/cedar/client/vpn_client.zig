@@ -2337,7 +2337,6 @@ pub const VpnClient = struct {
                         // clear faster during concurrent UL/DL. The 384KB critical
                         // threshold is for UL-only — without DL to worry about,
                         // the buffer can run deeper without starving ACKs.
-                        _ = sendq; // batch_limit throttling above is sufficient
                             // Normal outbound path: read UL from TUN, bundle, send.
                             var outbound_blocks: [64][]const u8 = undefined;
                         var outbound_count: usize = 0;
