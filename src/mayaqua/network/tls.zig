@@ -1131,7 +1131,7 @@ pub const TlsSocket = struct {
         // UL BDP to ~25 Mbps at 166ms RTT — acceptable since UL already
         // hits 48-53 Mbps through the dual socketpair + Swift pump (the
         // actual bottleneck is the tunnel protocol's compression/crypto).
-        const snd_cap: u32 = if (builtin.target.os.tag == .ios) 512 * 1024 else 2 * 1024 * 1024;
+        const snd_cap: u32 = 2 * 1024 * 1024;
         std.posix.setsockopt(self.tcp_fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&snd_cap)) catch {};
 
         // SO_RCVBUF: forces a large advertised RWND from the start so the
