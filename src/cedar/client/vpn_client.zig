@@ -1658,7 +1658,7 @@ pub const VpnClient = struct {
         // Cycle 6 adaptive poll: track if last iter did work
         var last_iter_had_work: bool = false;
         var skip_ul_poll: bool = false;   // suppress UL bridge poll when sendq saturated
-        var idle_iterations: u32 = 0;    // consecutive idle-poll count — escalate after 5
+        var idle_iterations: u32 = 0;    // consecutive idle-poll count — escalate after 30
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -1906,7 +1906,7 @@ pub const VpnClient = struct {
                 // arrival, UL work) resets the counter.
                 if (!last_iter_had_work and !any_needs_pollout) {
                     idle_iterations += 1;
-                    if (idle_iterations >= 5) break :blk @as(i32, 50);
+                    if (idle_iterations >= 30) break :blk @as(i32, 50);
                 } else {
                     idle_iterations = 0;
                 }
