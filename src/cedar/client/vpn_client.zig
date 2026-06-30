@@ -1657,6 +1657,7 @@ pub const VpnClient = struct {
         var diag_last_ms: i64 = std.time.milliTimestamp();
         // Cycle 6 adaptive poll: track if last iter did work
         var last_iter_had_work: bool = false;
+        var skip_ul_poll: bool = false;   // suppress UL bridge poll when sendq saturated
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -1852,7 +1853,7 @@ pub const VpnClient = struct {
                 std.posix.POLL.IN;
             poll_fds[poll_tun_idx] = .{
                 .fd = poll_tun_sock,
-                .events = tun_poll_events,
+                .events = if (skip_ul_poll) 0 else tun_poll_events,
                 .revents = 0,
             };
 
@@ -2268,11 +2269,11 @@ pub const VpnClient = struct {
             // proportionally: 30% = 153KB, 50% = 256KB, 75% = 384KB.
             // These keep the kernel output queue shallow enough that DL
             // TCP ACKs are not meaningfully delayed behind queued UL data.
-            const sendq_throttle_med: u32 = 768 * 1024;
+            const sendq_throttle_med: u32 = 192 * 1024;
             // 1 MB / 320KB — derived from SO_SNDBUF * 0.65
-            const sendq_throttle_high: u32 = 1024 * 1024;
+            const sendq_throttle_high: u32 = 320 * 1024;
             // 1.5 MB / 384KB — derived from SO_SNDBUF * 0.75
-            const sendq_throttle_critical: u32 = 1536 * 1024;
+            const sendq_throttle_critical: u32 = 384 * 1024;
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
@@ -2336,20 +2337,15 @@ pub const VpnClient = struct {
                         // transmit ~15KB of queued data (at 12 Mbps line rate),
                         // which is enough to let a few DL ACKs through.
                         //
-                        // When DL is active (had_inbound_this_iter), use a tighter
-                        // threshold (sendq_throttle_high = 320KB) so that ACKs
-                        // clear faster during concurrent UL/DL. The 384KB critical
-                        // threshold is for UL-only — without DL to worry about,
-                        // the buffer can run deeper without starving ACKs.
-                        // Dynamic skip: aggressive when DL is trying to get through,
-                        // conservative when UL-only. DL-active uses med (768KB)
-                        // to clear ACKs fast. UL-only uses critical (1.5MB) to
-                        // avoid wasting drain windows when DL is idle.
+                        // Dynamic skip: DL-active uses med (192KB) to clear ACKs
+                        // fast. UL-only uses critical (384KB) — keep sendq shallow.
                         const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_med else sendq_throttle_critical;
                         if (builtin.os.tag == .ios and sendq >= ios_skip_threshold) {
                             last_iter_had_work = false;
+                            skip_ul_poll = true;
                         } else {
                             // Normal outbound path: read UL from TUN, bundle, send.
+                            skip_ul_poll = false;
                             var outbound_blocks: [64][]const u8 = undefined;
                             var outbound_count: usize = 0;
                             var outbound_bytes: usize = 0;
