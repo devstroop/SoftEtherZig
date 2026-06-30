@@ -1717,10 +1717,12 @@ pub const VpnClient = struct {
         self.ipv6_dhcp_retry_count = 0;
         self.last_dhcpv6_time = 0;
 
-        // Send DHCPv6 Solicit. Skip if static IPv6 is configured in the config
-        // (user-supplied IPv6 is authoritative, no need to solicit from server).
+        // Send DHCPv6 Solicit. Skip if:
+        // - static IPv6 is configured (authoritative, no DHCP needed)
+        // - ip_version is set to IPv4-only (user disabled IPv6 in config)
         const has_static_ipv6 = if (self.config.static_ip) |s| s.ipv6_address != null else false;
-        if (!has_static_ipv6) {
+        const is_ipv4_only = self.config.ip_version == .v4;
+        if (!has_static_ipv6 and !is_ipv4_only) {
             self.dhcpv6_client = Dhcpv6Client.init(self.allocator, mac);
             var dhcpv6_raw: [256]u8 = undefined;
             if (self.dhcpv6_client) |*client| {
