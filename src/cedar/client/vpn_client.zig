@@ -1889,16 +1889,13 @@ pub const VpnClient = struct {
             // After a kernel preemption (poll_us > 10ms), poll(0) catches up
             // the backlog without waiting, preventing TCP cwnd collapse.
             const poll_timeout_ms: i32 = if (builtin.os.tag == .ios) blk: {
-                // In half-connection mode, UL and DL are on separate TCP
-                // stacks with independent TLS contexts. There is no DL-ACK
-                // starvation risk across connections. Use a longer poll
-                // timeout (10ms) to reduce CPU wakes — each 1ms poll is a
-                // CPU wake, and at 800 iters/sec the 45K/300s limit is hit
-                // in ~34 seconds. 10ms drops iters to ~90/sec (~110 wakes
-                // incl. backpressure cooldown), well under the 150/sec limit.
-                if (self.config.half_connection) break :blk @as(i32, 10);
-                // Single-connection (shared TCP): 1ms poll is critical for
-                // timely DL-ACK processing.
+                // Adaptive poll for all connection modes: poll(0) when
+                // TLS has pending data (process immediately), poll(1ms)
+                // otherwise. Half-connection mode keeps CPU low through
+                // per-direction poll isolation — the C2S socket only
+                // enters poll when needs_pollout is true, preventing the
+                // 23k iter/sec spin on a readable bridge during UL
+                // saturation. No need for a fixed 10ms penalty.
                 if (self.tls_socket != null and
                     (self.tls_socket.?.hasPending() or
                         self.tls_socket.?.kernelRecvQueue() > 0))
@@ -2019,6 +2016,7 @@ pub const VpnClient = struct {
                 if (any_conn_had_data) {
                     last_iter_had_work = true;
                     had_inbound_this_iter = true;
+                    skip_ul_poll = false;  // DL arriving - restore UL bridge poll
                 }
 
                 // Cleanup dead connections
@@ -2051,6 +2049,7 @@ pub const VpnClient = struct {
                     // Cycle 6 adaptive poll: signal work to outer loop
                     last_iter_had_work = true;
                     had_inbound_this_iter = true;
+                    skip_ul_poll = false;  // DL arriving - restore UL bridge poll
                     // Cycle 6: raise cap 8→64. DIAG showed cap=8 was being
                     // hit EVERY iteration with ssl_pend_max=15KB still buffered
                     // — we were forfeiting decrypted data, kernel rcvbuf would
@@ -2269,11 +2268,12 @@ pub const VpnClient = struct {
             // proportionally: 30% = 153KB, 50% = 256KB, 75% = 384KB.
             // These keep the kernel output queue shallow enough that DL
             // TCP ACKs are not meaningfully delayed behind queued UL data.
-            const sendq_throttle_med: u32 = 192 * 1024;
+            const sendq_throttle_med: u32 = 768 * 1024;
             // 1 MB / 320KB — derived from SO_SNDBUF * 0.65
-            const sendq_throttle_high: u32 = 320 * 1024;
+            const sendq_throttle_high: u32 = 1024 * 1024;
             // 1.5 MB / 384KB — derived from SO_SNDBUF * 0.75
-            const sendq_throttle_critical: u32 = 384 * 1024;
+            const sendq_throttle_critical: u32 = 1536 * 1024;
+            const sendq_throttle_drop: u32 = 1024 * 1024;  // hard drop above this — prevents kernel saturation
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
@@ -2337,8 +2337,8 @@ pub const VpnClient = struct {
                         // transmit ~15KB of queued data (at 12 Mbps line rate),
                         // which is enough to let a few DL ACKs through.
                         //
-                        // Dynamic skip: DL-active uses med (192KB) to clear ACKs
-                        // fast. UL-only uses critical (384KB) — keep sendq shallow.
+                        // Dynamic skip: DL-active uses med (768KB) to clear ACKs
+                        // fast. UL-only uses critical (1.5MB) — keep sendq shallow.
                         const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_med else sendq_throttle_critical;
                         if (builtin.os.tag == .ios and sendq >= ios_skip_threshold) {
                             last_iter_had_work = false;
@@ -2390,9 +2390,14 @@ pub const VpnClient = struct {
                                     }
                                 }
                                 // Send remaining packets (not sent via UDP) over TCP.
-                                // Safety net: if send fails (WouldBlock), count as dropped.
-                                // The sendq-based throttle should prevent this edge case.
-                                if (udp_sent_count < outbound_count) {
+                                // iOS kernel queue drop gate: when sendq + pending data would
+                                // exceed the drop threshold, discard BEFORE reaching kernel.
+                                // Matches original SoftEther SendFifo drop-on-full policy.
+                                const drop_threshold: u32 = if (is_multi) sendq_throttle_drop / @max(self.config.max_connections, 1) else sendq_throttle_drop;
+                                if (builtin.os.tag == .ios and sendq + outbound_bytes > drop_threshold) {
+                                    diag.tcp_drops_pkts += outbound_count - udp_sent_count;
+                                    skip_ul_poll = true;
+                                } else if (udp_sent_count < outbound_count) {
                                     var tls_send_ok = true;
                                     var send_bytes: usize = 0;
                                     for (outbound_blocks[udp_sent_count..outbound_count]) |b| send_bytes += b.len;
