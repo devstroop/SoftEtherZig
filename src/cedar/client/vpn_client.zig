@@ -1658,6 +1658,7 @@ pub const VpnClient = struct {
         // Cycle 6 adaptive poll: track if last iter did work
         var last_iter_had_work: bool = false;
         var skip_ul_poll: bool = false;   // suppress UL bridge poll when sendq saturated
+        var idle_iterations: u32 = 0;    // consecutive idle-poll count — escalate after 5
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -1896,12 +1897,17 @@ pub const VpnClient = struct {
                 // enters poll when needs_pollout is true, preventing the
                 // 23k iter/sec spin on a readable bridge during UL
                 // saturation. No need for a fixed 10ms penalty.
-                // When sendq is saturated and UL bridge is suppressed,
-                // the only fd in the poll set is the TLS socket. If DL
-                // data arrives, poll() returns immediately regardless of
-                // timeout. A 50ms idle poll reduces CPU wakes from
-                // ~1000/sec to ~20/sec without impacting DL latency.
-                if (skip_ul_poll) break :blk @as(i32, 50);
+                // Count consecutive idle-poll iterations. When the event
+                // loop does no productive I/O for 5+ iterations, the
+                // workload is idle — escalate to 50ms poll to reduce CPU
+                // wakes from ~1000/sec to ~20/sec. Any I/O (DL data
+                // arrival, UL work) resets the counter.
+                if (!last_iter_had_work and !any_needs_pollout) {
+                    idle_iterations += 1;
+                    if (idle_iterations >= 5) break :blk @as(i32, 50);
+                } else {
+                    idle_iterations = 0;
+                }
                 if (self.tls_socket != null and
                     (self.tls_socket.?.hasPending() or
                         self.tls_socket.?.kernelRecvQueue() > 0))
