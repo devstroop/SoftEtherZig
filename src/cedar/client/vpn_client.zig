@@ -1896,6 +1896,12 @@ pub const VpnClient = struct {
                 // enters poll when needs_pollout is true, preventing the
                 // 23k iter/sec spin on a readable bridge during UL
                 // saturation. No need for a fixed 10ms penalty.
+                // When sendq is saturated and UL bridge is suppressed,
+                // the only fd in the poll set is the TLS socket. If DL
+                // data arrives, poll() returns immediately regardless of
+                // timeout. A 50ms idle poll reduces CPU wakes from
+                // ~1000/sec to ~20/sec without impacting DL latency.
+                if (skip_ul_poll) break :blk @as(i32, 50);
                 if (self.tls_socket != null and
                     (self.tls_socket.?.hasPending() or
                         self.tls_socket.?.kernelRecvQueue() > 0))

@@ -189,8 +189,11 @@ pub const ConnectionManager = struct {
         return null;
     }
 
-    /// Build poll fd array for recv-capable connections.
-    /// Returns number of fds written. Populates poll_conn_map internally.
+    /// Build poll fd array for recv-capable TCP connections.
+    /// Returns the count of TCP fds written (NOT total poll fd count).
+    /// Callers place TUN (+0) and UDP (+1) fds after this offset in the
+    /// same array: `poll_fds[tls_fd_count + 0] = TUN, [+1] = UDP`.
+    /// Populates poll_conn_map internally for reverse lookup.
     pub fn buildPollFds(self: *ConnectionManager, out_fds: []std.posix.pollfd) usize {
         var count: usize = 0;
         for (&self.connections, 0..) |*slot, i| {
