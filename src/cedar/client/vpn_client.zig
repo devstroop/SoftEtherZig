@@ -1977,6 +1977,10 @@ pub const VpnClient = struct {
                 while (iter.next()) |conn| {
                     var drain_iter: u32 = 0;
                     while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
+                        // Sample read-buffer peak BEFORE draining — batched SSL_read
+                        // fills 64KB in one syscall; this captures it before consumption.
+                        const bavail = conn.tls_socket.readBufAvailable();
+                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                         const recv_count = conn.tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
                             if (self.should_stop) break;
                             if (err == error.ConnectionClosed or err == error.BrokenPipe) {
@@ -2006,8 +2010,6 @@ pub const VpnClient = struct {
                     // SSL pending / kernel queue stats for this conn
                     const pend = conn.tls_socket.pendingBytes();
                     if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
-                    const bavail = conn.tls_socket.readBufAvailable();
-                    if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                     const nrd = conn.tls_socket.kernelRecvQueue();
                     if (nrd > diag.nread_max) diag.nread_max = nrd;
                     const nwr = conn.tls_socket.kernelSendQueue();
@@ -2060,6 +2062,8 @@ pub const VpnClient = struct {
                     var drain_iter: u32 = 0;
                     var inbound_dead = false;
                     while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
+                        const bavail = if (self.tls_socket) |ts| ts.readBufAvailable() else @as(u32, 0);
+                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                         const recv_count = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
                             if (self.should_stop) {
                                 inbound_dead = true;
@@ -2092,8 +2096,6 @@ pub const VpnClient = struct {
                     if (self.tls_socket) |ts| {
                         const pend = ts.pendingBytes();
                         if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
-                        const bavail = ts.readBufAvailable();
-                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                         const nrd = ts.kernelRecvQueue();
                         if (nrd > diag.nread_max) diag.nread_max = nrd;
                         const nwr = ts.kernelSendQueue();
@@ -2127,6 +2129,8 @@ pub const VpnClient = struct {
                         var ios_drain: u32 = 0;
                         var ios_dead = false;
                         while (ios_drain < MAX_INBOUND_DRAIN) : (ios_drain += 1) {
+                            const bavail = if (self.tls_socket) |ts| ts.readBufAvailable() else @as(u32, 0);
+                            if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                             const ios_recv = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
                                 if (self.should_stop) {
                                     ios_dead = true;
@@ -2153,8 +2157,6 @@ pub const VpnClient = struct {
                         if (self.tls_socket) |ts| {
                             const pend = ts.pendingBytes();
                             if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
-                            const bavail = ts.readBufAvailable();
-                            if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
                             const nrd = ts.kernelRecvQueue();
                             if (nrd > diag.nread_max) diag.nread_max = nrd;
                             const nwr = ts.kernelSendQueue();
