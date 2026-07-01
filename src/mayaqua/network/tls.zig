@@ -348,8 +348,10 @@ pub const TlsSocket = struct {
                                 const c_host = try allocator.dupeZ(u8, hostname);
                                 defer allocator.free(c_host);
                                 const fd_int = dial(c_host.ptr, port);
-                                if (fd_int >= 0) { tcp_fd = @intCast(fd_int); via_host_dial = true; }
-                                else return TlsError.ConnectionFailed;
+                                if (fd_int >= 0) {
+                                    tcp_fd = @intCast(fd_int);
+                                    via_host_dial = true;
+                                } else return TlsError.ConnectionFailed;
                             } else return TlsError.ConnectionFailed;
                         }
                     }
@@ -363,8 +365,10 @@ pub const TlsSocket = struct {
                     const c_host = try allocator.dupeZ(u8, hostname);
                     defer allocator.free(c_host);
                     const fd_int = dial(c_host.ptr, port);
-                    if (fd_int >= 0) { tcp_fd = @intCast(fd_int); via_host_dial = true; }
-                    else return TlsError.ConnectionFailed;
+                    if (fd_int >= 0) {
+                        tcp_fd = @intCast(fd_int);
+                        via_host_dial = true;
+                    } else return TlsError.ConnectionFailed;
                 } else return TlsError.ConnectionFailed;
             }
         } else if (config.external_tcp_dial orelse external_tcp_dial) |dial| {

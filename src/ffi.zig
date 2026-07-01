@@ -677,7 +677,7 @@ export fn softether_set_plain_password(client: ?*VpnClient) void {
         c.config.auth = .{ .plain_password = .{
             .username = pw.username,
             .password = pw.password,
-        }};
+        } };
     }
 }
 
@@ -953,7 +953,10 @@ export fn softether_set_client_str(client: ?*VpnClient, str: [*:0]const u8) void
     const c = client orelse return;
     const s = std.mem.span(str);
     if (c.config.fingerprint == null) c.config.fingerprint = .{};
-    if (s.len == 0) { c.config.fingerprint.?.client_str = null; return; }
+    if (s.len == 0) {
+        c.config.fingerprint.?.client_str = null;
+        return;
+    }
     c.config.fingerprint.?.client_str = ffi_allocator.dupe(u8, s) catch return;
 }
 
@@ -989,7 +992,11 @@ export fn softether_set_os_info(client: ?*VpnClient, name: [*:0]const u8, versio
     const ver_s = std.mem.span(version);
     const title_s = std.mem.span(title);
     if (name_s.len == 0 or ver_s.len == 0 or title_s.len == 0) {
-        if (c.config.fingerprint) |*fp| { fp.os_name = null; fp.os_version = null; fp.os_title = null; }
+        if (c.config.fingerprint) |*fp| {
+            fp.os_name = null;
+            fp.os_version = null;
+            fp.os_title = null;
+        }
         return;
     }
     if (c.config.fingerprint == null) c.config.fingerprint = .{};
