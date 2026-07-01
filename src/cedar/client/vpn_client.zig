@@ -1657,8 +1657,8 @@ pub const VpnClient = struct {
         var diag_last_ms: i64 = std.time.milliTimestamp();
         // Cycle 6 adaptive poll: track if last iter did work
         var last_iter_had_work: bool = false;
-        var skip_ul_poll: bool = false;   // suppress UL bridge poll when sendq saturated
-        var idle_iterations: u32 = 0;    // consecutive idle-poll count — escalate after 30
+        var skip_ul_poll: bool = false; // suppress UL bridge poll when sendq saturated
+        var idle_iterations: u32 = 0; // consecutive idle-poll count — escalate after 30
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -1914,11 +1914,11 @@ pub const VpnClient = struct {
                     (self.tls_socket.?.hasPending() or
                         self.tls_socket.?.kernelRecvQueue() > 0))
                     break :blk @as(i32, 0);
-                break :blk @as(i32, 1);
+                break :blk @as(i32, 10);
             } else if (last_iter_had_work and !any_needs_pollout)
                 @as(i32, 0)
             else
-                @as(i32, 1);
+                @as(i32, 10);
             // Reset — inbound/outbound sections below will set it true on work.
             last_iter_had_work = false;
 
@@ -2032,7 +2032,7 @@ pub const VpnClient = struct {
                 if (any_conn_had_data) {
                     last_iter_had_work = true;
                     had_inbound_this_iter = true;
-                    skip_ul_poll = false;  // DL arriving - restore UL bridge poll
+                    skip_ul_poll = false; // DL arriving - restore UL bridge poll
                 }
 
                 // Cleanup dead connections
@@ -2065,7 +2065,7 @@ pub const VpnClient = struct {
                     // Cycle 6 adaptive poll: signal work to outer loop
                     last_iter_had_work = true;
                     had_inbound_this_iter = true;
-                    skip_ul_poll = false;  // DL arriving - restore UL bridge poll
+                    skip_ul_poll = false; // DL arriving - restore UL bridge poll
                     // Cycle 6: raise cap 8→64. DIAG showed cap=8 was being
                     // hit EVERY iteration with ssl_pend_max=15KB still buffered
                     // — we were forfeiting decrypted data, kernel rcvbuf would
@@ -2289,7 +2289,7 @@ pub const VpnClient = struct {
             const sendq_throttle_high: u32 = 1024 * 1024;
             // 1.5 MB / 384KB — derived from SO_SNDBUF * 0.75
             const sendq_throttle_critical: u32 = 1536 * 1024;
-            const sendq_throttle_drop: u32 = 1024 * 1024;  // hard drop above this — prevents kernel saturation
+            const sendq_throttle_drop: u32 = 1024 * 1024; // hard drop above this — prevents kernel saturation
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
