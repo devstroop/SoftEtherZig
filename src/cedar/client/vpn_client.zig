@@ -330,8 +330,7 @@ pub const VpnClient = struct {
     auth_session_key: ?[20]u8,
     auth_hello_random: ?[20]u8,
 
-    last_keepalive_sent: i64,
-    last_keepalive_recv: i64,
+    // (keepalive tracking uses loop_state.timing.last_keepalive in runDataLoop)
 
     const Self = @This();
 
@@ -372,13 +371,12 @@ pub const VpnClient = struct {
             .auth_credentials = null,
             .auth_session_key = null,
             .auth_hello_random = null,
-            .last_keepalive_sent = 0,
-            .last_keepalive_recv = 0,
+            // keepalive tracking uses loop_state.timing
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.disconnect() catch {};
+        self.disconnect() catch |e| std.log.debug("deinit disconnect failed: {}", .{e});
         // Ensure the data loop thread is joined (should already be done by
         // performDisconnect, but be safe in case connect spawned it without
         // a subsequent disconnect).
@@ -1233,7 +1231,7 @@ pub const VpnClient = struct {
                     const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid.*, requested_ip, response.config.server_id, &req_buf) catch 0;
                     if (req_size > 0) {
                         const blocks = [_][]const u8{req_buf[0..req_size]};
-                        send_helper.get().sendBlocks(&blocks) catch {};
+                        send_helper.get().sendBlocks(&blocks) catch |e| std.log.debug("sendBlocks (control) failed: {}", .{e});
                         loop_state.dhcp.state = .request_sent;
                         // Stash REQUEST params on the handler's config for retry path
                         // (no ACK in 3s → resend REQUEST using same offered IP/server_id).
@@ -1542,7 +1540,7 @@ pub const VpnClient = struct {
         std.crypto.random.bytes(std.mem.asBytes(&dhcp_xid));
 
         // Configuration constants
-        const keepalive_interval: i64 = 5000; // 5 seconds (server timeout is 20s)
+        const keepalive_interval: i64 = @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000); // from config (min 1s)
         const garp_interval: i64 = @as(i64, @intCast(self.config.garp_interval_ms));
 
         // Cache the configured state check (must be before DHCP discover)
@@ -1665,7 +1663,7 @@ pub const VpnClient = struct {
             const garp_size = adapter_mod.buildGratuitousArp(mac, 0, &arp_buf) catch 0;
             if (garp_size > 0) {
                 const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                send_helper.get().sendBlocks(&blocks) catch {};
+                send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (GARP) failed: {}", .{e});
                 std.log.debug("Sent initial Gratuitous ARP (announcing MAC)", .{});
             }
         }
@@ -1687,7 +1685,7 @@ pub const VpnClient = struct {
             const dhcp_inform_size = adapter_mod.buildDhcpInform(mac, dhcp_xid, static_ip_be, &dhcp_buf_arr) catch 0;
             if (dhcp_inform_size > 0) {
                 const blocks = [_][]const u8{dhcp_buf_arr[0..dhcp_inform_size]};
-                send_helper.get().sendBlocks(&blocks) catch {};
+                send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (DHCP) failed: {}", .{e});
                 std.log.debug("Sent DHCP INFORM (xid=0x{x:0>8}) for static IP", .{dhcp_xid});
             }
             // Brief pause so INFORM is sent before DISCOVER
@@ -1906,7 +1904,12 @@ pub const VpnClient = struct {
                 // arrival, UL work) resets the counter.
                 if (!last_iter_had_work and !any_needs_pollout) {
                     idle_iterations += 1;
-                    if (idle_iterations >= 30) break :blk @as(i32, 50);
+                    // When skip_ul_poll is true, the UL bridge has events=0
+                    // so poll can't wake on UL data arriving at the TUN.
+                    // Cap idle escalation to 10ms to limit the UL blackout
+                    // window during speed test transitions.
+                    const idle_max_ms: i32 = if (skip_ul_poll) 10 else 50;
+                    if (idle_iterations >= 30) break :blk @as(i32, idle_max_ms);
                 } else {
                     idle_iterations = 0;
                 }
@@ -2194,7 +2197,7 @@ pub const VpnClient = struct {
                             if (ethertype_udp == 0x0800 or ethertype_udp == 0x86DD) {
                                 if (adapter.real_adapter) |*real| {
                                     if (real.device) |dev| {
-                                        _ = dev.write(udp_data[14..]) catch {};
+                                        _ = dev.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
                                     }
                                 }
                             }
@@ -2532,7 +2535,8 @@ pub const VpnClient = struct {
                         std.log.warn("STALLED: needs_pollout=true for 1000 iterations — possible deadlock", .{});
                     }
                     if (diag.stalled_iters > 0 and diag.stalled_iters % 10000 == 0) {
-                        std.log.warn("STALLED: needs_pollout=true for {d} iterations — deadlock confirmed", .{diag.stalled_iters});
+                        std.log.err("STALLED: needs_pollout=true for {d} iterations — deadlock confirmed, initiating disconnect", .{diag.stalled_iters});
+                        @atomicStore(bool, &self.should_stop, true, .seq_cst);
                     }
                 }
             }
@@ -2548,7 +2552,7 @@ pub const VpnClient = struct {
                 const reply_size = adapter_mod.buildArpReply(mac, loop_state.our_ip, loop_state.arp_reply_target_mac, loop_state.arp_reply_target_ip, &arp_buf) catch 0;
                 if (reply_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..reply_size]};
-                    send_helper.get().sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (ARP) failed: {}", .{e});
                     const ip = tunnel_mod.formatIpForLog(loop_state.arp_reply_target_ip);
                     std.log.debug("Sent ARP Reply to {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
                 }
@@ -2560,7 +2564,7 @@ pub const VpnClient = struct {
                 const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
                 if (garp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                    send_helper.get().sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (GARP) failed: {}", .{e});
                     loop_state.timing.last_garp_time = now;
                     const ip = tunnel_mod.formatIpForLog(loop_state.our_ip);
                     std.log.debug("Sent Gratuitous ARP (IP={d}.{d}.{d}.{d})", .{ ip.a, ip.b, ip.c, ip.d });
@@ -2573,7 +2577,7 @@ pub const VpnClient = struct {
                 const arp_size = adapter_mod.buildArpRequest(mac, loop_state.our_ip, loop_state.our_gateway, &arp_buf) catch 0;
                 if (arp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..arp_size]};
-                    send_helper.get().sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (ARP) failed: {}", .{e});
                     const ip = tunnel_mod.formatIpForLog(loop_state.our_gateway);
                     std.log.debug("Sent ARP Request for gateway {d}.{d}.{d}.{d}", .{ ip.a, ip.b, ip.c, ip.d });
                 }
@@ -2584,7 +2588,7 @@ pub const VpnClient = struct {
                 const garp_size = adapter_mod.buildGratuitousArp(mac, loop_state.our_ip, &arp_buf) catch 0;
                 if (garp_size > 0) {
                     const blocks = [_][]const u8{arp_buf[0..garp_size]};
-                    send_helper.get().sendBlocks(&blocks) catch {};
+                    send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (GARP) failed: {}", .{e});
                     loop_state.timing.last_garp_time = now;
                 }
             }
@@ -2612,7 +2616,7 @@ pub const VpnClient = struct {
                     const dhcp_size = adapter_mod.buildDhcpDiscover(mac, dhcp_xid, &dhcp_buf) catch 0;
                     if (dhcp_size > 0) {
                         const blocks = [_][]const u8{dhcp_buf[0..dhcp_size]};
-                        send_helper.get().sendBlocks(&blocks) catch {};
+                        send_helper.get().sendBlocks(&blocks) catch |e| std.log.warn("sendBlocks (DHCP) failed: {}", .{e});
                         loop_state.timing.last_dhcp_time = now;
                         loop_state.dhcp_retry_count += 1;
                     }
@@ -2621,7 +2625,7 @@ pub const VpnClient = struct {
                     const req_size = adapter_mod.buildDhcpRequest(mac, dhcp_xid, loop_state.dhcp.config.ip_address, loop_state.dhcp.config.server_id, &req_buf) catch 0;
                     if (req_size > 0) {
                         const blocks = [_][]const u8{req_buf[0..req_size]};
-                        send_helper.get().sendBlocks(&blocks) catch {};
+                        send_helper.get().sendBlocks(&blocks) catch |e| std.log.debug("sendBlocks (control) failed: {}", .{e});
                         loop_state.timing.last_dhcp_time = now;
                         loop_state.dhcp_retry_count += 1;
                         std.log.info("DHCP REQUEST retry #{d}", .{loop_state.dhcp_retry_count});
@@ -2636,7 +2640,7 @@ pub const VpnClient = struct {
                         const inform_size = adapter_mod.buildDhcpInform(mac, dhcp_xid, static_ip_be, &inform_buf) catch 0;
                         if (inform_size > 0) {
                             const blocks = [_][]const u8{inform_buf[0..inform_size]};
-                            send_helper.get().sendBlocks(&blocks) catch {};
+                            send_helper.get().sendBlocks(&blocks) catch |e| std.log.debug("sendBlocks (control) failed: {}", .{e});
                             loop_state.timing.last_dhcp_time = now;
                             loop_state.dhcp_retry_count += 1;
                             std.log.info("DHCP INFORM retry #{d}", .{loop_state.dhcp_retry_count});
@@ -2664,7 +2668,7 @@ pub const VpnClient = struct {
                             const frame_len = adapter_mod.buildDhcpv6Frame(mac, dhcpv6_raw[0..dv6_len], &dv6_frame) catch 0;
                             if (frame_len > 0) {
                                 const blocks = [_][]const u8{dv6_frame[0..frame_len]};
-                                send_helper.get().sendBlocks(&blocks) catch {};
+                                send_helper.get().sendBlocks(&blocks) catch |e| std.log.debug("sendBlocks (control) failed: {}", .{e});
                                 self.last_dhcpv6_time = now;
                                 self.ipv6_dhcp_retry_count += 1;
                             }

@@ -140,7 +140,7 @@ test "uploadSignature emits WaterMark with valid HTTP framing" {
     var transport = ScriptedTransport{ .allocator = allocator };
     defer transport.deinit();
 
-    try proto.uploadSignature(allocator, transport.writer(), "vpn.example.com");
+    try proto.uploadSignature(allocator, transport.writer(), "vpn.example.com", null);
 
     const out = transport.client_out.items;
 
@@ -254,7 +254,7 @@ test "uploadAuth success returns session key and server overrides" {
     const auth_pack_bytes = try stub_auth.toBytes(allocator);
     defer allocator.free(auth_pack_bytes);
 
-    var result = try proto.uploadAuth(allocator, transport.writer(), transport.reader(), "vpn.example.com", auth_pack_bytes);
+    var result = try proto.uploadAuth(allocator, transport.writer(), transport.reader(), "vpn.example.com", auth_pack_bytes, null);
     defer result.deinit(allocator);
 
     try testing.expect(result.success);
@@ -291,7 +291,7 @@ test "uploadAuth surfaces auth failure with error code" {
     const auth_pack_bytes = try stub_auth.toBytes(allocator);
     defer allocator.free(auth_pack_bytes);
 
-    var result = try proto.uploadAuth(allocator, transport.writer(), transport.reader(), "vpn.example.com", auth_pack_bytes);
+    var result = try proto.uploadAuth(allocator, transport.writer(), transport.reader(), "vpn.example.com", auth_pack_bytes, null);
     defer result.deinit(allocator);
 
     try testing.expect(!result.success);
@@ -327,7 +327,7 @@ test "uploadAuth detects server redirect to cluster member" {
     const auth_pack_bytes = try stub_auth.toBytes(allocator);
     defer allocator.free(auth_pack_bytes);
 
-    var result = try proto.uploadAuth(allocator, transport.writer(), transport.reader(), "vpn.example.com", auth_pack_bytes);
+    var result = try proto.uploadAuth(allocator, transport.writer(), transport.reader(), "vpn.example.com", auth_pack_bytes, null);
     defer result.deinit(allocator);
 
     try testing.expect(result.success);
@@ -498,6 +498,7 @@ test "cert auth full handshake against scripted server" {
         transport.reader(),
         "vpn.example.com",
         auth_pack_bytes,
+        null,
     );
     defer result.deinit(allocator);
 
