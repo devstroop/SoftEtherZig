@@ -213,6 +213,11 @@ void softether_set_half_connection(softether_client_t client, bool enabled);
 /** Enable VoIP / QoS packet prioritization. */
 void softether_set_qos(softether_client_t client, bool enabled);
 
+/** Switch to plain password auth (authtype=2) instead of hashed.
+ *  Must be called BEFORE connect(). If not called, the client uses
+ *  the default hashed-password auth (authtype=1). */
+void softether_set_plain_password(softether_client_t client);
+
 /** Enable UDP acceleration (requires server-side `use_udp_acceleration`).
  *  Out-of-range or unsupported values are ignored. */
 void softether_set_udp_acceleration(softether_client_t client, bool enabled);
