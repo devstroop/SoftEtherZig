@@ -1937,7 +1937,7 @@ pub const VpnClient = struct {
                         self.tls_socket.?.kernelRecvQueue() > 0))
                     break :blk @as(i32, 0);
                 break :blk @as(i32, 10);
-            } else if (last_iter_had_work and !any_needs_pollout)
+            } else if (last_iter_had_work)
                 @as(i32, 0)
             else
                 @as(i32, 1); // 1ms on desktop — no CPU wake limit (iOS uses 10ms above)
