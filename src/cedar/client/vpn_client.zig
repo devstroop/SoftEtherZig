@@ -301,6 +301,7 @@ pub const VpnClient = struct {
     last_error: ?ClientError,
 
     server_ip: ?net.Address = null,
+    cached_server_ip: ?net.Address = null,
     assigned_ip: u32,
     assigned_mask: u32,
     gateway_ip: u32,
@@ -356,6 +357,7 @@ pub const VpnClient = struct {
             .reconnect_backoff_ms = config.reconnect.min_backoff_ms,
             .last_error = null,
             .server_ip = null,
+            .cached_server_ip = null,
             .assigned_ip = 0,
             .assigned_mask = 0,
             .gateway_ip = 0,
@@ -669,10 +671,18 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.resolving_dns);
-        self.server_ip = self.resolveDns() catch {
-            self.disconnect_reason = .network_error;
-            return ClientError.DnsResolutionFailed;
-        };
+        // Use cached DNS result if available (speeds up reconnects)
+        if (self.cached_server_ip != null) {
+            self.server_ip = self.cached_server_ip;
+            std.log.debug("Using cached DNS: {}", .{self.server_ip.?});
+        } else {
+            self.server_ip = self.resolveDns() catch {
+                self.disconnect_reason = .network_error;
+                return ClientError.DnsResolutionFailed;
+            };
+            // Cache for next reconnect
+            self.cached_server_ip = self.server_ip;
+        }
         self.effective_server_ip = self.server_ip;
         self.effective_server_port = self.config.server_port;
 
