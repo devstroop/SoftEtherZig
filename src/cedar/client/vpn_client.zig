@@ -1930,7 +1930,7 @@ pub const VpnClient = struct {
             } else if (last_iter_had_work and !any_needs_pollout)
                 @as(i32, 0)
             else
-                @as(i32, 10);
+                @as(i32, 1); // 1ms on desktop — no CPU wake limit (iOS uses 10ms above)
             // Reset — inbound/outbound sections below will set it true on work.
             last_iter_had_work = false;
 
