@@ -521,8 +521,11 @@ pub const VpnClient = struct {
 
         // Null out the thread handle before cleanup so a concurrent
         // disconnect() won't try to join us.
-        self.data_loop_thread = null;
-        @atomicStore(bool, &self.data_loop_running, false, .release);
+        // === CLEANUP FIRST (before signaling completion) ===
+        // Do NOT move these after the signal flags — performDisconnect
+        // reads data_loop_running to decide whether to join and clean up.
+        // If we signal first then cleanup, both threads free the same
+        // resources concurrently → double-free → heap corruption.
 
         // Stop UDP acceleration
         if (self.udp_accel) |*ua| {
@@ -547,6 +550,12 @@ pub const VpnClient = struct {
         }
 
         self.state = .disconnected;
+
+        // === SIGNAL DONE (last thing — after all cleanup) ===
+        // Main thread's performDisconnect monitors data_loop_running.
+        // By the time it reads false, all resources are already freed.
+        self.data_loop_thread = null;
+        @atomicStore(bool, &self.data_loop_running, false, .release);
 
         // === Fire disconnect events + auto-reconnect ===
         // The disconnect_reason is already set (by health check or error path).
