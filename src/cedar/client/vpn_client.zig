@@ -175,7 +175,7 @@ pub const ClientConfig = struct {
     use_encrypt: bool = true,
     udp_acceleration: bool = false,
     half_connection: bool = false,
-    qos: bool = true,
+    qos: bool = false,
     mtu: u16 = 1400,
 
     /// Emit non-standard diagnostic logs (per-second DIAG throughput/queue
