@@ -1972,11 +1972,6 @@ pub const VpnClient = struct {
                 @as(i32, 1); // 1ms on desktop — no CPU wake limit (iOS uses 10ms above)
             // Reset — inbound/outbound sections below will set it true on work.
             last_iter_had_work = false;
-            // Reset TUN write-blocked flag each iteration so a previous
-            // EAGAIN/EWOULDBLOCK doesn't permanently cap DL throughput at
-            // 1 packet per drain loop (WORX-33). The flag is re-set if
-            // dev.write() fails again this iteration.
-            self.tun_write_blocked = false;
 
             const poll_t0 = std.time.microTimestamp();
             _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
