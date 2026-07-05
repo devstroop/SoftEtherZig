@@ -92,6 +92,11 @@ const winmm = if (builtin.os.tag == .windows) struct {
 /// Prevents complete outbound starvation during heavy download bursts.
 const MAX_INBOUND_DRAIN: u32 = 256;
 
+/// Maximum number of IP packets to batch before flushing to the TUN device.
+/// Reduces per-packet overhead by coalescing the ethertype check and adapter
+/// null checks into one perfunctor call per batch rather than per packet.
+const TUN_WRITE_BATCH: usize = 64;
+
 // ============================================================================
 // Client Configuration
 // ============================================================================
@@ -674,7 +679,7 @@ pub const VpnClient = struct {
         // Use cached DNS result if available (speeds up reconnects)
         if (self.cached_server_ip != null) {
             self.server_ip = self.cached_server_ip;
-            std.log.debug("Using cached DNS: {}", .{self.server_ip.?});
+            std.log.debug("Using cached DNS: {any}", .{self.server_ip.?});
         } else {
             self.server_ip = self.resolveDns() catch {
                 self.disconnect_reason = .network_error;
@@ -1423,6 +1428,23 @@ pub const VpnClient = struct {
         self.stats.recordReceived(block_data.len);
     }
 
+    /// Flush a batch of IP packet payloads to the TUN device.
+    /// Each element in `batch` is a slice of the IP packet (without Ethernet header).
+    /// Stops on first write error and sets tun_write_blocked.
+    fn flushTunWriteBatch(self: *Self, adapter: *AdapterWrapper, batch: []const []const u8) void {
+        if (adapter.real_adapter) |*real| {
+            if (real.device) |dev| {
+                for (batch) |data| {
+                    _ = dev.write(data) catch {
+                        self.tun_write_blocked = true;
+                        self.tun_eagain_count += 1;
+                        return;
+                    };
+                }
+            }
+        }
+    }
+
     // Forward declare SendTunnelHelper type for use in processInboundBlock signature
     const SendTunnelHelper = struct {
         cm_ptr: ?*ConnectionManager,
@@ -1676,6 +1698,13 @@ pub const VpnClient = struct {
         var last_iter_had_work: bool = false;
         var skip_ul_poll: bool = false; // suppress UL bridge poll when sendq saturated
         var idle_iterations: u32 = 0; // consecutive idle-poll count — escalate after 30
+
+        // TUN write batching: batch IP packets and flush to reduce per-packet overhead.
+        // Each slot holds an IP payload slice (no Ethernet header). Batching means the
+        // ethertype check, adapter null checks, and is_configured test happen once per
+        // packet in the caller rather than via processInboundBlock's full dispatch.
+        var tun_write_batch: [TUN_WRITE_BATCH][]const u8 = undefined;
+        var tun_write_batch_count: usize = 0;
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -2030,10 +2059,36 @@ pub const VpnClient = struct {
                         if (recv_count > 0) {
                             any_conn_had_data = true;
                             for (recv_slices[0..recv_count]) |block_data| {
+                                if (self.tun_write_blocked) break;
                                 diag.bytes_in += block_data.len;
                                 diag.pkts_in += 1;
+                                // Fast path: batch IP writes to TUN when configured
+                                if (is_configured and block_data.len > 14) {
+                                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+                                    if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                                        tun_write_batch[tun_write_batch_count] = block_data[14..];
+                                        tun_write_batch_count += 1;
+                                        if (tun_write_batch_count >= tun_write_batch.len) {
+                                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                            tun_write_batch_count = 0;
+                                            if (self.tun_write_blocked) break;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // Control or not configured: flush batched IPs first (ordering),
+                                // then dispatch through the full state machine (ARP, DHCP, etc.)
+                                if (tun_write_batch_count > 0) {
+                                    self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                    tun_write_batch_count = 0;
+                                }
                                 self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
                                 if (self.tun_write_blocked) break;
+                            }
+                            // Flush any remaining batched IP packets before yielding to outbound
+                            if (tun_write_batch_count > 0) {
+                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                tun_write_batch_count = 0;
                             }
                         }
 
@@ -2117,10 +2172,36 @@ pub const VpnClient = struct {
                         };
 
                         for (recv_slices[0..recv_count]) |block_data| {
+                            if (self.tun_write_blocked) break;
                             diag.bytes_in += block_data.len;
                             diag.pkts_in += 1;
+                            // Fast path: batch IP writes to TUN when configured
+                            if (is_configured and block_data.len > 14) {
+                                const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+                                if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                                    tun_write_batch[tun_write_batch_count] = block_data[14..];
+                                    tun_write_batch_count += 1;
+                                    if (tun_write_batch_count >= tun_write_batch.len) {
+                                        self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                        tun_write_batch_count = 0;
+                                        if (self.tun_write_blocked) break;
+                                    }
+                                    continue;
+                                }
+                            }
+                            // Control or not configured: flush batched IPs first (ordering),
+                            // then dispatch through the full state machine (ARP, DHCP, etc.)
+                            if (tun_write_batch_count > 0) {
+                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                tun_write_batch_count = 0;
+                            }
                             self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
                             if (self.tun_write_blocked) break;
+                        }
+                        // Flush any remaining batched IP packets before yielding
+                        if (tun_write_batch_count > 0) {
+                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                            tun_write_batch_count = 0;
                         }
 
                         if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
@@ -2179,10 +2260,36 @@ pub const VpnClient = struct {
                                 break;
                             };
                             for (recv_slices[0..ios_recv]) |block_data| {
+                                if (self.tun_write_blocked) break;
                                 diag.bytes_in += block_data.len;
                                 diag.pkts_in += 1;
+                                // Fast path: batch IP writes to TUN when configured
+                                if (is_configured and block_data.len > 14) {
+                                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+                                    if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                                        tun_write_batch[tun_write_batch_count] = block_data[14..];
+                                        tun_write_batch_count += 1;
+                                        if (tun_write_batch_count >= tun_write_batch.len) {
+                                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                            tun_write_batch_count = 0;
+                                            if (self.tun_write_blocked) break;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // Control or not configured: flush batched IPs first (ordering),
+                                // then dispatch through the full state machine (ARP, DHCP, etc.)
+                                if (tun_write_batch_count > 0) {
+                                    self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                    tun_write_batch_count = 0;
+                                }
                                 self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
                                 if (self.tun_write_blocked) break;
+                            }
+                            // Flush any remaining batched IP packets before yielding
+                            if (tun_write_batch_count > 0) {
+                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                tun_write_batch_count = 0;
                             }
                             if (ios_dead) break;
                             if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
