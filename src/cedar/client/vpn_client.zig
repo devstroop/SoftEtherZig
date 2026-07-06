@@ -2082,6 +2082,7 @@ pub const VpnClient = struct {
                                     if (ethertype == 0x0800 or ethertype == 0x86DD) {
                                         tun_write_batch[tun_write_batch_count] = block_data[14..];
                                         tun_write_batch_count += 1;
+                                        self.stats.recordReceived(block_data.len);
                                         if (tun_write_batch_count >= tun_write_batch.len) {
                                             self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
                                             tun_write_batch_count = 0;
@@ -2195,6 +2196,7 @@ pub const VpnClient = struct {
                                 if (ethertype == 0x0800 or ethertype == 0x86DD) {
                                     tun_write_batch[tun_write_batch_count] = block_data[14..];
                                     tun_write_batch_count += 1;
+                                    self.stats.recordReceived(block_data.len);
                                     if (tun_write_batch_count >= tun_write_batch.len) {
                                         self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
                                         tun_write_batch_count = 0;
@@ -2283,6 +2285,7 @@ pub const VpnClient = struct {
                                     if (ethertype == 0x0800 or ethertype == 0x86DD) {
                                         tun_write_batch[tun_write_batch_count] = block_data[14..];
                                         tun_write_batch_count += 1;
+                                        self.stats.recordReceived(block_data.len);
                                         if (tun_write_batch_count >= tun_write_batch.len) {
                                             self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
                                             tun_write_batch_count = 0;
