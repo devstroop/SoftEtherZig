@@ -310,6 +310,8 @@ pub const VpnClient = struct {
     assigned_ip: u32,
     assigned_mask: u32,
     gateway_ip: u32,
+    assigned_dns1: u32,
+    assigned_dns2: u32,
     gateway_mac: ?[6]u8,
 
     // IPv6 state
@@ -366,6 +368,8 @@ pub const VpnClient = struct {
             .assigned_ip = 0,
             .assigned_mask = 0,
             .gateway_ip = 0,
+            .assigned_dns1 = 0,
+            .assigned_dns2 = 0,
             .gateway_mac = null,
             .dhcpv6_client = null,
             .ipv6_assigned_addr = [_]u8{0} ** 16,
@@ -454,6 +458,14 @@ pub const VpnClient = struct {
     /// DHCP-supplied subnet mask (host byte order). 0 until DHCP completes.
     pub fn getAssignedMask(self: *const Self) u32 {
         return self.assigned_mask;
+    }
+
+    pub fn getAssignedDns1(self: *const Self) u32 {
+        return self.assigned_dns1;
+    }
+
+    pub fn getAssignedDns2(self: *const Self) u32 {
+        return self.assigned_dns2;
     }
 
     pub fn getDeviceName(self: *const Self) ?[]const u8 {
@@ -1276,6 +1288,8 @@ pub const VpnClient = struct {
                     self.assigned_ip = loop_state.our_ip;
                     self.gateway_ip = loop_state.our_gateway;
                     self.assigned_mask = response.config.subnet_mask;
+                    self.assigned_dns1 = response.config.dns1;
+                    self.assigned_dns2 = response.config.dns2;
 
                     {
                         const m = tunnel_mod.formatIpForLog(response.config.subnet_mask);

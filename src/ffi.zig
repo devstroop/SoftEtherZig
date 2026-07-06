@@ -489,6 +489,18 @@ export fn softether_get_gateway_ip(client: ?*const VpnClient) u32 {
 }
 
 /// Get assigned subnet mask (host byte order u32, 0 if not assigned).
+/// Get first DHCP-assigned DNS server (host byte order u32, 0 if none).
+export fn softether_get_assigned_dns1(client: ?*const VpnClient) u32 {
+    const c = client orelse return 0;
+    return c.getAssignedDns1();
+}
+
+/// Get second DHCP-assigned DNS server (host byte order u32, 0 if none).
+export fn softether_get_assigned_dns2(client: ?*const VpnClient) u32 {
+    const c = client orelse return 0;
+    return c.getAssignedDns2();
+}
+
 export fn softether_get_assigned_mask(client: ?*const VpnClient) u32 {
     const c = client orelse return 0;
     return c.getAssignedMask();

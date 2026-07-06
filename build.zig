@@ -423,6 +423,13 @@ pub fn build(b: *std.Build) void {
     linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
     addZlib(shared_lib, b);
 
+    // JNI bridge for Android out-of-process VpnService.
+    // Compiled into libsoftether.so so System.loadLibrary("softether") registers
+    // native methods via JNI_OnLoad. JNI headers come from the NDK sysroot.
+    if (is_android) {
+        shared_lib.addCSourceFile(.{ .file = b.path("src/jni_bridge.c"), .flags = &.{} });
+    }
+
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
 
     const shared_lib_step = b.step("shared-lib", "Build shared library (libsoftether.dylib/.so/.dll)");
