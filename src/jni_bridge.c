@@ -20,6 +20,14 @@ typedef struct {
     uint32_t _padding;
 } CStats;
 
+// Compile-time guard: CStats layout must match
+// SoftetherVpnService.CStatsResult.fromBytes (Kotlin reads 5 × Long + 1 × Int
+// in LITTLE_ENDIAN order = 44 bytes of payload). The trailing u32 padding
+// brings sizeof to 48 — Kotlin naturally ignores it.
+#include <assert.h>
+static_assert(sizeof(CStats) == 48,
+    "CStats binary layout changed — update Kotlin CStatsResult.fromBytes");
+
 VpnClient* softether_create(const char* server, unsigned short port, const char* hub,
                             const char* username, const char* password);
 VpnClient* softether_create_anonymous(const char* server, unsigned short port, const char* hub);
@@ -205,18 +213,61 @@ Java_com_worxvpn_vpnclient_SoftetherVpnService_nativeCreate(
     auth_type = json_get_int(json, "authType", 0);
 
     if (auth_type == 2) {
-        char cert_pem_buf[8192], key_pem_buf[8192];
-        json_get_string(json, "certPem", cert_pem_buf, sizeof(cert_pem_buf));
-        json_get_string(json, "keyPem", key_pem_buf, sizeof(key_pem_buf));
-        if (strlen(cert_pem_buf) > 0 && strlen(key_pem_buf) > 0) {
+        // Heap-allocate cert/key buffers sized to the actual JSON value length.
+        // PEM certs (especially RSA-4096 chains) can exceed stack-allocated 8KB.
+        // A scan pass counts unescaped chars so we allocate exactly.
+        char *cert_pem = NULL, *key_pem = NULL;
+        const char *cert_raw = find_key(json, "certPem");
+        if (cert_raw) {
+            cert_raw = skip_ws(cert_raw);
+            if (*cert_raw == '"') cert_raw++;
+            size_t cert_len = 0;
+            const char *p = cert_raw;
+            while (*p && *p != '"') { if (*p == '\\' && p[1]) { p += 2; } else { p++; } cert_len++; }
+            cert_pem = (char*)malloc(cert_len + 1);
+            if (cert_pem) {
+                size_t i = 0; p = cert_raw;
+                while (*p && *p != '"' && i < cert_len) {
+                    if (*p == '\\' && p[1]) {
+                        p++;
+                        cert_pem[i++] = (*p == '"' || *p == '\\') ? *p : *p;
+                    } else { cert_pem[i++] = *p; }
+                    p++;
+                }
+                cert_pem[i] = '\0';
+            }
+        }
+        const char *key_raw = find_key(json, "keyPem");
+        if (key_raw) {
+            key_raw = skip_ws(key_raw);
+            if (*key_raw == '"') key_raw++;
+            size_t key_len = 0;
+            const char *p = key_raw;
+            while (*p && *p != '"') { if (*p == '\\' && p[1]) { p += 2; } else { p++; } key_len++; }
+            key_pem = (char*)malloc(key_len + 1);
+            if (key_pem) {
+                size_t i = 0; p = key_raw;
+                while (*p && *p != '"' && i < key_len) {
+                    if (*p == '\\' && p[1]) {
+                        p++;
+                        key_pem[i++] = (*p == '"' || *p == '\\') ? *p : *p;
+                    } else { key_pem[i++] = *p; }
+                    p++;
+                }
+                key_pem[i] = '\0';
+            }
+        }
+        if (cert_pem && key_pem && strlen(cert_pem) > 0 && strlen(key_pem) > 0) {
             client = softether_create_certificate(
                 server, (unsigned short)port, hub,
-                (const unsigned char*)cert_pem_buf, (unsigned int)strlen(cert_pem_buf),
-                (const unsigned char*)key_pem_buf, (unsigned int)strlen(key_pem_buf)
+                (const unsigned char*)cert_pem, (unsigned int)strlen(cert_pem),
+                (const unsigned char*)key_pem, (unsigned int)strlen(key_pem)
             );
         } else {
             client = NULL;
         }
+        free(cert_pem);
+        free(key_pem);
     } else if (auth_type == 3 || strlen(username) == 0) {
         client = softether_create_anonymous(server, (unsigned short)port, hub);
     } else {
