@@ -18,8 +18,8 @@ pub const ConfigBuildError = error{
 
 /// Build a ClientConfig from CLI arguments
 pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.ClientConfig {
-    // Validate required fields
-    const server = args.server orelse return error.MissingServer;
+    // Validate required fields — address takes priority, fallback to deprecated server
+    const server_address = args.address orelse args.server orelse return error.MissingServer;
     const hub = args.hub orelse return error.MissingHub;
 
     // Build auth method
@@ -76,7 +76,8 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         null;
 
     return .{
-        .server_host = server,
+        .server_address = server_address,
+        .server_hostname = args.hostname,
         .server_port = args.port,
         .hub_name = hub,
         .auth = auth,
@@ -202,7 +203,7 @@ test "buildClientConfig valid" {
     };
     const config = try buildClientConfig(&args);
 
-    try std.testing.expectEqualStrings("test.example.com", config.server_host);
+    try std.testing.expectEqualStrings("test.example.com", config.server_address);
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
     try std.testing.expect(config.proxy == null);
 }

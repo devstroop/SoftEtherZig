@@ -20,6 +20,12 @@ pub const CliArgs = struct {
     config_file: ?[]const u8 = null,
 
     // Server settings
+    /// Pre-resolved IP address (mandatory — DNS is caller's responsibility)
+    address: ?[]const u8 = null,
+    /// Optional hostname for TLS/SNI, HTTP Host, certificate validation
+    hostname: ?[]const u8 = null,
+    /// Deprecated: use `address` instead. If set and `address` is null,
+    /// `address` is populated from `server` (caller must ensure it's an IP).
     server: ?[]const u8 = null,
     port: u16 = 443,
     hub: ?[]const u8 = null,

@@ -241,7 +241,7 @@ pub const CEventCallback = ?*const fn (event_type: CEventType, new_state: CState
 /// and softether_create_certificate.
 fn defaultClientConfig() ClientConfig {
     return .{
-        .server_host = "",
+        .server_address = "",
         .server_port = 443,
         .hub_name = "",
         .auth = .{ .anonymous = {} },
@@ -298,7 +298,7 @@ export fn softether_create(
     const password_slice = ffi_allocator.dupe(u8, password_in) catch return null;
 
     var config = defaultClientConfig();
-    config.server_host = server_slice;
+    config.server_address = server_slice;
     config.server_port = port;
     config.hub_name = hub_slice;
     config.auth = .{ .password = .{
@@ -329,7 +329,7 @@ export fn softether_create_anonymous(
     const hub_slice = ffi_allocator.dupe(u8, hub_in) catch return null;
 
     var config = defaultClientConfig();
-    config.server_host = server_slice;
+    config.server_address = server_slice;
     config.server_port = port;
     config.hub_name = hub_slice;
     config.auth = .{ .anonymous = {} };
@@ -364,7 +364,7 @@ export fn softether_create_certificate(
     const key_slice = ffi_allocator.dupe(u8, key_pem[0..key_pem_len]) catch return null;
 
     var config = defaultClientConfig();
-    config.server_host = server_slice;
+    config.server_address = server_slice;
     config.server_port = port;
     config.hub_name = hub_slice;
     config.auth = .{ .certificate = .{
@@ -915,6 +915,20 @@ export fn softether_set_static_ipv6_gateway(client: ?*VpnClient, addr: [*:0]cons
 }
 
 /// Set DNS servers (comma-separated). Must be called before connect().
+/// Set the optional hostname for TLS/SNI, HTTP Host headers, and protocol
+/// semantics. When set, the library uses this for SNI instead of the address.
+/// Pass an empty string to clear (nulls out server_hostname).
+export fn softether_set_hostname(client: ?*VpnClient, hostname: [*:0]const u8) void {
+    const c = client orelse return;
+    const host_in = std.mem.span(hostname);
+    if (host_in.len == 0) {
+        c.config.server_hostname = null;
+        return;
+    }
+    const host_slice = ffi_allocator.dupe(u8, host_in) catch return;
+    c.config.server_hostname = host_slice;
+}
+
 export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8) void {
     const c = client orelse return;
     const servers_in = std.mem.span(servers);
@@ -1140,7 +1154,7 @@ test "ffi callback context routes to per-client user_data" {
     var marker_b: u32 = 0xBBBB;
 
     var client_a = VpnClient.init(std.testing.allocator, .{
-        .server_host = "a",
+        .server_address = "a",
         .server_port = 443,
         .hub_name = "h",
         .auth = .{ .anonymous = {} },
@@ -1148,7 +1162,7 @@ test "ffi callback context routes to per-client user_data" {
     defer client_a.deinit();
 
     var client_b = VpnClient.init(std.testing.allocator, .{
-        .server_host = "b",
+        .server_address = "b",
         .server_port = 443,
         .hub_name = "h",
         .auth = .{ .anonymous = {} },
@@ -1185,7 +1199,7 @@ test "ffi callback context replaced cleanly on re-register" {
     };
 
     var c = VpnClient.init(std.testing.allocator, .{
-        .server_host = "x",
+        .server_address = "x",
         .server_port = 443,
         .hub_name = "h",
         .auth = .{ .anonymous = {} },

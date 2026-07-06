@@ -2,7 +2,8 @@
   "comment": "SoftEther VPN Client Configuration File",
   "description": "Copy this file to ~/.config/softether-zig/config.json and edit as needed",
   
-  "server": "vpn.example.com",
+  "address": "192.168.1.1",
+  "hostname": "vpn.example.com",
   "port": 443,
   "hub": "VPN",
   "username": "myuser",

@@ -81,6 +81,7 @@ void softether_set_static_ipv6(VpnClient* client, const char* addr);
 void softether_set_static_ipv6_prefix(VpnClient* client, unsigned char prefix);
 void softether_set_static_ipv6_gateway(VpnClient* client, const char* addr);
 void softether_set_dns_servers(VpnClient* client, const char* servers);
+void softether_set_hostname(VpnClient* client, const char* hostname);
 void softether_set_client_str(VpnClient* client, const char* str);
 void softether_set_client_ver(VpnClient* client, unsigned int ver);
 void softether_set_client_build(VpnClient* client, unsigned int build);
@@ -201,11 +202,16 @@ Java_com_worxvpn_vpnclient_SoftetherVpnService_nativeCreate(
     const char* json = (*env)->GetStringUTFChars(env, configJson, NULL);
     if (!json) return 0;
 
-    char server[256], hub[256], username[256], password[256];
+    char server[256], hub[256], username[256], password[256], hostname[256];
     int port, auth_type;
     VpnClient* client = NULL;
 
-    json_get_string(json, "server", server, sizeof(server));
+    // Prefer "address" (pre-resolved IP), fallback to "server" for backward compat
+    json_get_string(json, "address", server, sizeof(server));
+    if (server[0] == '\0') {
+        json_get_string(json, "server", server, sizeof(server));
+    }
+    json_get_string(json, "hostname", hostname, sizeof(hostname));
     port = json_get_int(json, "port", 443);
     json_get_string(json, "hub", hub, sizeof(hub));
     json_get_string(json, "username", username, sizeof(username));
@@ -279,6 +285,11 @@ Java_com_worxvpn_vpnclient_SoftetherVpnService_nativeCreate(
     if (!client) {
         (*env)->ReleaseStringUTFChars(env, configJson, json);
         return 0;
+    }
+
+    // Set optional hostname for TLS/SNI
+    if (hostname[0] != '\0') {
+        softether_set_hostname(client, hostname);
     }
 
     softether_set_encryption(client, json_get_bool(json, "useEncryption", 1));

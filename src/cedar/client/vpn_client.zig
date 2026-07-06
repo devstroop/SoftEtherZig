@@ -164,7 +164,13 @@ pub const RoutingConfig = struct {
 /// VPN Client configuration
 pub const ClientConfig = struct {
     // Server settings
-    server_host: []const u8,
+    /// Pre-resolved IP address used for the TCP/UDP connection. DNS resolution
+    /// is the caller's responsibility — the library connects directly to this.
+    server_address: []const u8,
+    /// Optional original hostname. Retained for TLS/SNI, HTTP Host headers,
+    /// certificate validation, logging, and protocol semantics (e.g. cluster
+    /// redirect SNI). When null, `server_address` is used as the fallback.
+    server_hostname: ?[]const u8 = null,
     server_port: u16 = 443,
     hub_name: []const u8,
 
@@ -306,7 +312,6 @@ pub const VpnClient = struct {
     last_error: ?ClientError,
 
     server_ip: ?net.Address = null,
-    cached_server_ip: ?net.Address = null,
     assigned_ip: u32,
     assigned_mask: u32,
     gateway_ip: u32,
@@ -364,7 +369,6 @@ pub const VpnClient = struct {
             .reconnect_backoff_ms = config.reconnect.min_backoff_ms,
             .last_error = null,
             .server_ip = null,
-            .cached_server_ip = null,
             .assigned_ip = 0,
             .assigned_mask = 0,
             .gateway_ip = 0,
@@ -502,8 +506,6 @@ pub const VpnClient = struct {
         self.last_error = null;
         self.stats = .{};
         self.stats.connect_time_ms = std.time.milliTimestamp();
-
-        self.transitionState(.resolving_dns);
 
         self.performConnection() catch |err| {
             self.last_error = err;
@@ -687,19 +689,14 @@ pub const VpnClient = struct {
             }
         }
 
-        self.transitionState(.resolving_dns);
-        // Use cached DNS result if available (speeds up reconnects)
-        if (self.cached_server_ip != null) {
-            self.server_ip = self.cached_server_ip;
-            std.log.debug("Using cached DNS: {any}", .{self.server_ip.?});
-        } else {
-            self.server_ip = self.resolveDns() catch {
+        // Parse pre-resolved address directly — DNS is the caller's
+        // responsibility and has already been resolved before connect().
+        self.server_ip = net.Address.parseIp4(self.config.server_address, self.config.server_port) catch
+            (net.Address.parseIp6(self.config.server_address, self.config.server_port) catch {
+                std.log.err("server_address is not a valid IP: {s}", .{self.config.server_address});
                 self.disconnect_reason = .network_error;
-                return ClientError.DnsResolutionFailed;
-            };
-            // Cache for next reconnect
-            self.cached_server_ip = self.server_ip;
-        }
+                return ClientError.ConnectionFailed;
+            });
         self.effective_server_ip = self.server_ip;
         self.effective_server_port = self.config.server_port;
 
@@ -736,7 +733,7 @@ pub const VpnClient = struct {
         // upload traffic (broken data-plane). If ALL nodes fail the probe,
         // fall back to the first resolved IP with a warning.
         probe_done: {
-            const host = self.config.server_host;
+            const host = self.config.server_hostname orelse self.config.server_address;
             const port = self.config.server_port;
             // Only probe when hostname is not already an IP literal
             const is_ip_literal = if (net.Address.parseIp4(host, port)) |_| true else |_| if (net.Address.parseIp6(host, port)) |_| true else |_| false;
@@ -778,6 +775,7 @@ pub const VpnClient = struct {
             .allow_self_signed = !self.config.verify_certificate,
             .timeout_ms = self.config.connect_timeout_ms,
             .tcp_nodelay = self.config.tcp_nodelay,
+            .sni_hostname = self.config.server_hostname,
             .client_cert_pem = switch (self.config.auth) {
                 .certificate => |cert| cert.cert_data,
                 else => null,
@@ -791,7 +789,7 @@ pub const VpnClient = struct {
 
         self.tls_socket = tls.TlsSocket.connect(
             self.allocator,
-            self.config.server_host,
+            self.config.server_address,
             self.config.server_port,
             tls_config,
         ) catch {
@@ -903,32 +901,6 @@ pub const VpnClient = struct {
         // Fire disconnected event and reconnection check OUTSIDE the mutex.
         // disconnect() calls us with the mutex held, then fires these after
         // releasing it. deinit() calls us directly (no event needed).
-    }
-
-    fn resolveDns(self: *Self) !net.Address {
-        const host = self.config.server_host;
-
-        // First try parsing as IP address (fast path)
-        if (net.Address.parseIp4(host, self.config.server_port)) |addr| {
-            return addr;
-        } else |_| {}
-
-        if (net.Address.parseIp6(host, self.config.server_port)) |addr| {
-            return addr;
-        } else |_| {}
-
-        // Real DNS resolution using std.net
-        const addrs = net.getAddressList(self.allocator, host, self.config.server_port) catch {
-            return ClientError.DnsResolutionFailed;
-        };
-        defer addrs.deinit();
-
-        // Return first address (IPv4 or IPv6)
-        if (addrs.addrs.len > 0) {
-            return addrs.addrs[0];
-        }
-
-        return ClientError.DnsResolutionFailed;
     }
 
     /// Cluster server probe: quick TLS + HTTP GET to verify the target
@@ -3005,9 +2977,9 @@ pub const VpnClient = struct {
 pub const ClientConfigBuilder = struct {
     config: ClientConfig,
 
-    pub fn init(host: []const u8, hub: []const u8) ClientConfigBuilder {
+    pub fn init(address: []const u8, hub: []const u8) ClientConfigBuilder {
         return .{ .config = .{
-            .server_host = host,
+            .server_address = address,
             .hub_name = hub,
             .auth = .{ .anonymous = {} },
         } };
@@ -3055,7 +3027,7 @@ pub const ClientConfigBuilder = struct {
 
 test "ClientConfig defaults" {
     const config = ClientConfig{
-        .server_host = "vpn.example.com",
+        .server_address = "vpn.example.com",
         .hub_name = "DEFAULT",
         .auth = .{ .anonymous = {} },
     };
@@ -3068,7 +3040,7 @@ test "ClientConfig defaults" {
 test "ClientConfigBuilder" {
     var builder = ClientConfigBuilder.init("10.0.0.1", "VPN");
     const config = builder.setPort(8443).setPasswordAuth("user", "pass").setDefaultRoute(true).setEncryption(true).build();
-    try std.testing.expectEqualStrings("10.0.0.1", config.server_host);
+    try std.testing.expectEqualStrings("10.0.0.1", config.server_address);
     try std.testing.expectEqualStrings("VPN", config.hub_name);
     try std.testing.expectEqual(@as(u16, 8443), config.server_port);
 }
@@ -3081,7 +3053,7 @@ test "ClientConfigBuilder with static IP" {
 }
 
 test "VpnClient initialization" {
-    const config = ClientConfig{ .server_host = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
+    const config = ClientConfig{ .server_address = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
     var client = VpnClient.init(std.testing.allocator, config);
     defer client.deinit();
     try std.testing.expectEqual(ClientState.disconnected, client.getState());
@@ -3089,7 +3061,7 @@ test "VpnClient initialization" {
 }
 
 test "VpnClient connect with valid IP" {
-    const config = ClientConfig{ .server_host = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
+    const config = ClientConfig{ .server_address = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
     var client = VpnClient.init(std.testing.allocator, config);
     defer client.deinit();
     client.connect() catch {};
@@ -3097,7 +3069,7 @@ test "VpnClient connect with valid IP" {
 }
 
 test "VpnClient disconnect" {
-    const config = ClientConfig{ .server_host = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
+    const config = ClientConfig{ .server_address = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
     var client = VpnClient.init(std.testing.allocator, config);
     defer client.deinit();
     try client.disconnect();

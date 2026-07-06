@@ -183,7 +183,7 @@ pub fn run(state: *AppState) !void {
     vpn.setEventCallback(events_mod.handleVpnEvent, state);
 
     // Connect with progress display (S-040)
-    cli.display.info(&state.display, "Connecting to {s}:{d}...", .{ config.server_host, config.server_port });
+    cli.display.info(&state.display, "Connecting to {s}:{d}...", .{ config.server_hostname orelse config.server_address, config.server_port });
 
     // Spawn connect in a thread so we can show progress
     const connect_thread = std.Thread.spawn(.{}, struct {

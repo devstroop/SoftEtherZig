@@ -13,6 +13,11 @@ const args_mod = @import("args.zig");
 /// Full configuration file structure
 pub const ConfigFile = struct {
     // Server settings
+    /// Pre-resolved IP address (preferred over deprecated `server`)
+    address: ?[]const u8 = null,
+    /// Optional hostname for TLS/SNI
+    hostname: ?[]const u8 = null,
+    /// Deprecated: use `address` instead
     server: ?[]const u8 = null,
     port: ?u16 = null,
     hub: ?[]const u8 = null,
@@ -193,8 +198,15 @@ pub const ConfigManager = struct {
     pub fn mergeWithArgs(self: *const Self, cli_args: *args_mod.CliArgs) !void {
         const alloc = cli_args.allocator orelse return;
 
-        // Server settings
-        if (cli_args.server == null) {
+        // Server settings — address/hostname take priority, fallback to deprecated server
+        if (cli_args.address == null) {
+            if (self.config.address) |s| cli_args.address = try alloc.dupe(u8, s);
+        }
+        if (cli_args.hostname == null) {
+            if (self.config.hostname) |s| cli_args.hostname = try alloc.dupe(u8, s);
+        }
+        // Deprecated: fallback to `server` when `address` is still null
+        if (cli_args.address == null and cli_args.server == null) {
             if (self.config.server) |s| cli_args.server = try alloc.dupe(u8, s);
         }
         if (cli_args.port == 443 and self.config.port != null) cli_args.port = self.config.port.?;
@@ -330,9 +342,9 @@ pub const ConfigManager = struct {
         cfg.udp_accel = cli_args.udp_accel;
         cfg.max_connections = cli_args.max_connections;
         cfg.mtu = cli_args.mtu;
-    cfg.proxy = cli_args.proxy;
-    cfg.tcp_nodelay = cli_args.tcp_nodelay;
-    cfg.connect_timeout_ms = cli_args.connect_timeout_ms;
+        cfg.proxy = cli_args.proxy;
+        cfg.tcp_nodelay = cli_args.tcp_nodelay;
+        cfg.connect_timeout_ms = cli_args.connect_timeout_ms;
         cfg.read_timeout_ms = cli_args.read_timeout_ms;
         cfg.keepalive_interval_ms = cli_args.keepalive_interval_ms;
         cfg.garp_interval_ms = cli_args.garp_interval_ms;

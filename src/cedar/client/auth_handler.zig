@@ -43,7 +43,7 @@ pub fn run(client: *VpnClient) !void {
 
     // Format server IP as string for HTTP Host header (like C code does)
     var ip_str_buf: [48]u8 = undefined;
-    const host_for_http = if (client.server_ip) |addr| formatAddress(addr, &ip_str_buf) else client.config.server_host;
+    const host_for_http = if (client.server_ip) |addr| formatAddress(addr, &ip_str_buf) else client.config.server_address;
 
     std.log.debug("Uploading protocol signature...", .{});
 
@@ -86,7 +86,7 @@ pub fn run(client: *VpnClient) !void {
     else
         0;
     var ip_buf: [48]u8 = undefined;
-    const server_hostname = if (client.server_ip) |addr| formatAddress(addr, &ip_buf) else client.config.server_host;
+    const server_hostname = if (client.server_ip) |addr| formatAddress(addr, &ip_buf) else client.config.server_address;
 
     const session_opts = softether_proto.SessionOptions{
         .max_connection = client.config.max_connections,
@@ -243,7 +243,7 @@ fn runRedirect(
 
     // Get current host for HTTP header
     var current_ip_buf: [48]u8 = undefined;
-    const current_host = if (client.server_ip) |addr| formatAddress(addr, &current_ip_buf) else client.config.server_host;
+    const current_host = if (client.server_ip) |addr| formatAddress(addr, &current_ip_buf) else client.config.server_address;
 
     softether_proto.sendHttpPost(client.allocator, ack_writer, current_host, empty_data, null) catch {
         std.log.err("Failed to send redirect ack", .{});
@@ -309,7 +309,7 @@ fn runRedirect(
             // Use the original server hostname for SNI, not the
             // redirect IP literal. Load balancers routing on SNI
             // will drop connections with an IP as SNI.
-            .sni_hostname = client.config.server_host,
+            .sni_hostname = client.config.server_hostname orelse client.config.server_address,
             .proxy = client.config.proxy,
         };
 
@@ -514,7 +514,7 @@ fn startUdpAcceleration(client: *VpnClient, auth_result: softether_proto.AuthRes
 
     // Use server IP for UDP
     var server_ip_buf: [48]u8 = undefined;
-    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else client.config.server_host;
+    const server_ip_str = if (client.server_ip) |addr| formatAddress(addr, &server_ip_buf) else client.config.server_address;
 
     const udp_config = udp_accel_mod.UdpAccelConfig{
         .server_ip = server_ip_str,
