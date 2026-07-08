@@ -606,6 +606,11 @@ pub const VpnClient = struct {
             self.mutex.unlock();
             return;
         }
+        if (!old_state.canTransitionTo(.disconnecting)) {
+            std.log.warn("disconnect: invalid transition from {s}", .{@tagName(old_state)});
+            self.mutex.unlock();
+            return;
+        }
         self.state = .disconnecting;
         self.mutex.unlock();
 
@@ -669,6 +674,10 @@ pub const VpnClient = struct {
     fn transitionState(self: *Self, new_state: ClientState) void {
         const old_state = self.state;
         if (!old_state.canTransitionTo(new_state)) {
+            std.log.warn("Invalid state transition: {s} -> {s}", .{
+                @tagName(old_state),
+                @tagName(new_state),
+            });
             return;
         }
         self.state = new_state;
