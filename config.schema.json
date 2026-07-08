@@ -4,10 +4,15 @@
   "description": "Configuration file schema for SoftEtherZig VPN Client",
   "type": "object",
   "properties": {
-    "server": {
+    "address": {
       "type": "string",
-      "description": "VPN server hostname or IP address",
-      "examples": ["vpn.example.com", "192.168.1.1"]
+      "description": "Pre-resolved IP address for the VPN server (required — DNS is caller's responsibility)",
+      "examples": ["192.168.1.1", "10.0.0.1"]
+    },
+    "hostname": {
+      "type": "string",
+      "description": "Optional original hostname for TLS/SNI, HTTP Host headers, and certificate validation",
+      "examples": ["vpn.example.com"]
     },
     "port": {
       "type": "integer",
@@ -245,7 +250,7 @@
   "additionalProperties": true,
   "examples": [
     {
-      "server": "vpn.example.com",
+      "address": "192.168.1.1",
       "port": 443,
       "hub": "VPN",
       "username": "myuser",
@@ -253,7 +258,7 @@
       "use_compress": true
     },
     {
-      "server": "vpn.example.com",
+      "address": "192.168.1.1",
       "hub": "VPN",
       "username": "myuser",
       "password_hash": "hash",

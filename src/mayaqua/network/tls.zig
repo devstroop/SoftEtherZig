@@ -516,13 +516,15 @@ pub const TlsSocket = struct {
         //   - SO_SNDBUF (2MB) still caps the total send buffer; NOTSENT_LOWAT just
         //     makes SSL_write/EAGAIN return sooner when the pipeline is full.
         //
-        // Darwin constant: <netinet/tcp.h> TCP_NOTSENT_LOWAT = 0x200.
-        if (!via_host_dial) {
+        // Darwin-only: <netinet/tcp.h> TCP_NOTSENT_LOWAT = 0x200.
+        // On Linux the same numeric value maps to TCP_FASTOPEN, causing EOPNOTSUPP.
+        // On some Zig 0.15 builds this may also fail with ENOPROTOOPT — non-fatal.
+        if (!via_host_dial and builtin.os.tag == .macos) {
             const notsent_lowat: u32 = 128 * 1024; // 128 KB
             const TCP_NOTSENT_LOWAT: u32 = 0x200;
             const IPPROTO_TCP: u32 = 6;
             std.posix.setsockopt(tcp_fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, std.mem.asBytes(&notsent_lowat)) catch |err| {
-                std.log.warn("Failed to set TCP_NOTSENT_LOWAT: {}", .{err});
+                std.log.debug("TCP_NOTSENT_LOWAT not available: {} (non-fatal)", .{err});
             };
         }
 

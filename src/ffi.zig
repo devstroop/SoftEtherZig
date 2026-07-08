@@ -188,22 +188,20 @@ pub const CStats = extern struct {
 /// Connection state (C-compatible enum)
 pub const CState = enum(c_int) {
     disconnected = 0,
-    resolving_dns = 1,
-    connecting_tcp = 2,
-    ssl_handshake = 3,
-    authenticating = 4,
-    establishing_session = 5,
-    configuring_adapter = 6,
-    connected = 7,
-    reconnecting = 8,
-    disconnecting = 9,
-    error_state = 10,
+    connecting_tcp = 1,
+    ssl_handshake = 2,
+    authenticating = 3,
+    establishing_session = 4,
+    configuring_adapter = 5,
+    connected = 6,
+    reconnecting = 7,
+    disconnecting = 8,
+    error_state = 9,
 };
 
 fn mapState(state: ClientState) CState {
     return switch (state) {
         .disconnected => .disconnected,
-        .resolving_dns => .resolving_dns,
         .connecting_tcp => .connecting_tcp,
         .ssl_handshake => .ssl_handshake,
         .authenticating => .authenticating,
@@ -241,7 +239,7 @@ pub const CEventCallback = ?*const fn (event_type: CEventType, new_state: CState
 /// and softether_create_certificate.
 fn defaultClientConfig() ClientConfig {
     return .{
-        .server_host = "",
+        .server_address = "",
         .server_port = 443,
         .hub_name = "",
         .auth = .{ .anonymous = {} },
@@ -275,13 +273,13 @@ fn defaultClientConfig() ClientConfig {
 /// only keeps the buffer alive for the duration of THIS call, so duping is
 /// mandatory on iOS / macOS Swift hosts).
 export fn softether_create(
-    server: [*:0]const u8,
+    address: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
     username: [*:0]const u8,
     password: [*:0]const u8,
 ) ?*VpnClient {
-    const server_in = std.mem.span(server);
+    const server_in = std.mem.span(address);
     const hub_in = std.mem.span(hub);
     const username_in = std.mem.span(username);
     const password_in = std.mem.span(password);
@@ -298,7 +296,7 @@ export fn softether_create(
     const password_slice = ffi_allocator.dupe(u8, password_in) catch return null;
 
     var config = defaultClientConfig();
-    config.server_host = server_slice;
+    config.server_address = server_slice;
     config.server_port = port;
     config.hub_name = hub_slice;
     config.auth = .{ .password = .{
@@ -314,11 +312,11 @@ export fn softether_create(
 /// Create a new VPN client with anonymous authentication.
 /// Strings are duped into FFI-owned memory (see softether_create for rationale).
 export fn softether_create_anonymous(
-    server: [*:0]const u8,
+    address: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
 ) ?*VpnClient {
-    const server_in = std.mem.span(server);
+    const server_in = std.mem.span(address);
     const hub_in = std.mem.span(hub);
 
     if (server_in.len == 0 or hub_in.len == 0) {
@@ -329,7 +327,7 @@ export fn softether_create_anonymous(
     const hub_slice = ffi_allocator.dupe(u8, hub_in) catch return null;
 
     var config = defaultClientConfig();
-    config.server_host = server_slice;
+    config.server_address = server_slice;
     config.server_port = port;
     config.hub_name = hub_slice;
     config.auth = .{ .anonymous = {} };
@@ -343,7 +341,7 @@ export fn softether_create_anonymous(
 /// PEM data is passed as pointer+length since PEM may contain embedded nulls.
 /// All inputs are duped into FFI-owned memory (see softether_create).
 export fn softether_create_certificate(
-    server: [*:0]const u8,
+    address: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
     cert_pem: [*]const u8,
@@ -351,7 +349,7 @@ export fn softether_create_certificate(
     key_pem: [*]const u8,
     key_pem_len: u32,
 ) ?*VpnClient {
-    const server_in = std.mem.span(server);
+    const server_in = std.mem.span(address);
     const hub_in = std.mem.span(hub);
 
     if (server_in.len == 0 or hub_in.len == 0 or cert_pem_len == 0 or key_pem_len == 0) {
@@ -364,7 +362,7 @@ export fn softether_create_certificate(
     const key_slice = ffi_allocator.dupe(u8, key_pem[0..key_pem_len]) catch return null;
 
     var config = defaultClientConfig();
-    config.server_host = server_slice;
+    config.server_address = server_slice;
     config.server_port = port;
     config.hub_name = hub_slice;
     config.auth = .{ .certificate = .{
@@ -915,6 +913,20 @@ export fn softether_set_static_ipv6_gateway(client: ?*VpnClient, addr: [*:0]cons
 }
 
 /// Set DNS servers (comma-separated). Must be called before connect().
+/// Set the optional hostname for TLS/SNI, HTTP Host headers, and protocol
+/// semantics. When set, the library uses this for SNI instead of the address.
+/// Pass an empty string to clear (nulls out server_hostname).
+export fn softether_set_hostname(client: ?*VpnClient, hostname: [*:0]const u8) void {
+    const c = client orelse return;
+    const host_in = std.mem.span(hostname);
+    if (host_in.len == 0) {
+        c.config.server_hostname = null;
+        return;
+    }
+    const host_slice = ffi_allocator.dupe(u8, host_in) catch return;
+    c.config.server_hostname = host_slice;
+}
+
 export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8) void {
     const c = client orelse return;
     const servers_in = std.mem.span(servers);
@@ -1140,7 +1152,7 @@ test "ffi callback context routes to per-client user_data" {
     var marker_b: u32 = 0xBBBB;
 
     var client_a = VpnClient.init(std.testing.allocator, .{
-        .server_host = "a",
+        .server_address = "a",
         .server_port = 443,
         .hub_name = "h",
         .auth = .{ .anonymous = {} },
@@ -1148,7 +1160,7 @@ test "ffi callback context routes to per-client user_data" {
     defer client_a.deinit();
 
     var client_b = VpnClient.init(std.testing.allocator, .{
-        .server_host = "b",
+        .server_address = "b",
         .server_port = 443,
         .hub_name = "h",
         .auth = .{ .anonymous = {} },
@@ -1185,7 +1197,7 @@ test "ffi callback context replaced cleanly on re-register" {
     };
 
     var c = VpnClient.init(std.testing.allocator, .{
-        .server_host = "x",
+        .server_address = "x",
         .server_port = 443,
         .hub_name = "h",
         .auth = .{ .anonymous = {} },

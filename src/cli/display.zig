@@ -290,7 +290,7 @@ pub const ProgressBar = struct {
 
 pub const ConnectionStatus = struct {
     state: []const u8,
-    server: []const u8,
+    address: []const u8,
     port: u16,
     hub: []const u8,
     device_name: []const u8,
@@ -325,7 +325,7 @@ pub fn displayConnectionStatus(ctx: *DisplayContext, status: *const ConnectionSt
         ctx.printColored(.yellow, "{s}\n", .{status.state});
     }
 
-    ctx.print("  Server:       {s}:{d}\n", .{ status.server, status.port });
+    ctx.print("  Address:      {s}:{d}\n", .{ status.address, status.port });
     ctx.print("  Hub:          {s}\n", .{status.hub});
     ctx.print("  Device:       {s}\n", .{status.device_name});
 
@@ -377,7 +377,8 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
 
     ctx.printColored(.bold, "CONNECT OPTIONS:\n", .{});
     ctx.print("    -c, --config <FILE>     Load configuration from JSON file\n", .{});
-    ctx.print("    -s, --server <HOST>     VPN server hostname\n", .{});
+    ctx.print("    -a, --address <IP>      Pre-resolved server IP address\n", .{});
+    ctx.print("    --hostname <NAME>       Original hostname for TLS/SNI\n", .{});
     ctx.print("    -p, --port <PORT>       VPN server port (default: 443)\n", .{});
     ctx.print("    -H, --hub <HUB>         Virtual hub name\n", .{});
     ctx.print("    -u, --user <USERNAME>   Username for authentication\n", .{});
@@ -424,7 +425,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient passhash -u myuser -p mypassword\n", .{});
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient connect --config config.json\n", .{});
-    ctx.print("    vpnclient connect -s vpn.example.com -H VPN -u user -P pass\n", .{});
+    ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.newline();
 }
 

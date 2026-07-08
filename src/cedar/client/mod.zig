@@ -122,12 +122,12 @@ pub const classifyPacket = packet_processor.classifyPacket;
 /// Create a simple VPN client with password authentication
 pub fn createPasswordClient(
     allocator: std.mem.Allocator,
-    host: []const u8,
+    address: []const u8,
     hub: []const u8,
     username: []const u8,
     password: []const u8,
 ) VpnClient {
-    var builder = ClientConfigBuilder.init(host, hub);
+    var builder = ClientConfigBuilder.init(address, hub);
     const config = builder
         .setPasswordAuth(username, password)
         .setDefaultRoute(true)
@@ -139,11 +139,11 @@ pub fn createPasswordClient(
 /// Create a VPN client with anonymous authentication
 pub fn createAnonymousClient(
     allocator: std.mem.Allocator,
-    host: []const u8,
+    address: []const u8,
     hub: []const u8,
 ) VpnClient {
     const config = ClientConfig{
-        .server_host = host,
+        .server_address = address,
         .hub_name = hub,
         .auth = .{ .anonymous = {} },
     };

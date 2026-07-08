@@ -32,7 +32,7 @@ fn createSession(client: *VpnClient) void {
             .certificate => "certificate",
         };
         const options = SessionOptions{
-            .host = client.config.server_host,
+            .host = client.config.server_address,
             .port = client.config.server_port,
             .hub = client.config.hub_name,
             .username = username,
@@ -115,7 +115,7 @@ fn establishAdditionalConnections(client: *VpnClient) void {
             .certificate => |cert| cert.key_data,
             else => null,
         },
-        .sni_hostname = client.config.server_host,
+        .sni_hostname = client.config.server_hostname orelse client.config.server_address,
         .proxy = client.config.proxy,
     };
 
@@ -123,7 +123,7 @@ fn establishAdditionalConnections(client: *VpnClient) void {
     const host_for_http = if (client.effective_server_ip) |addr|
         formatAddress(addr, &ip_str_buf)
     else
-        client.config.server_host;
+        client.config.server_address;
 
     var established: u8 = 1;
     var i: u8 = 1;

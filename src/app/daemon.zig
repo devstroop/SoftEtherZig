@@ -97,13 +97,12 @@ const ConnectPhase = struct {
 
 fn stateToPhase(state: client.ClientState) ?ConnectPhase {
     return switch (state) {
-        .resolving_dns => .{ .name = "Resolving DNS", .number = 1, .total = 7 },
-        .connecting_tcp => .{ .name = "Connecting", .number = 2, .total = 7 },
-        .ssl_handshake => .{ .name = "TLS Handshake", .number = 3, .total = 7 },
-        .authenticating => .{ .name = "Authenticating", .number = 4, .total = 7 },
-        .establishing_session => .{ .name = "Establishing Session", .number = 5, .total = 7 },
-        .configuring_adapter => .{ .name = "Configuring Network", .number = 6, .total = 7 },
-        .connected => .{ .name = "Connected", .number = 7, .total = 7 },
+        .connecting_tcp => .{ .name = "Connecting", .number = 1, .total = 6 },
+        .ssl_handshake => .{ .name = "TLS Handshake", .number = 2, .total = 6 },
+        .authenticating => .{ .name = "Authenticating", .number = 3, .total = 6 },
+        .establishing_session => .{ .name = "Establishing Session", .number = 4, .total = 6 },
+        .configuring_adapter => .{ .name = "Configuring Network", .number = 5, .total = 6 },
+        .connected => .{ .name = "Connected", .number = 6, .total = 6 },
         else => null,
     };
 }
@@ -183,7 +182,7 @@ pub fn run(state: *AppState) !void {
     vpn.setEventCallback(events_mod.handleVpnEvent, state);
 
     // Connect with progress display (S-040)
-    cli.display.info(&state.display, "Connecting to {s}:{d}...", .{ config.server_host, config.server_port });
+    cli.display.info(&state.display, "Connecting to {s}:{d}...", .{ config.server_hostname orelse config.server_address, config.server_port });
 
     // Spawn connect in a thread so we can show progress
     const connect_thread = std.Thread.spawn(.{}, struct {

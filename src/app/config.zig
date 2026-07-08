@@ -10,7 +10,7 @@ const client = @import("../cedar/client/mod.zig");
 const tls = @import("../mayaqua/network/tls.zig");
 
 pub const ConfigBuildError = error{
-    MissingServer,
+    MissingAddress,
     MissingHub,
     MissingPassword,
     InvalidProxyUrl,
@@ -18,8 +18,8 @@ pub const ConfigBuildError = error{
 
 /// Build a ClientConfig from CLI arguments
 pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.ClientConfig {
-    // Validate required fields
-    const server = args.server orelse return error.MissingServer;
+    // Validate required fields — address is mandatory
+    const server_address = args.address orelse return error.MissingAddress;
     const hub = args.hub orelse return error.MissingHub;
 
     // Build auth method
@@ -76,7 +76,8 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         null;
 
     return .{
-        .server_host = server,
+        .server_address = server_address,
+        .server_hostname = args.hostname,
         .server_port = args.port,
         .hub_name = hub,
         .auth = auth,
@@ -194,7 +195,7 @@ pub fn parseProxyUrl(url: []const u8) ConfigBuildError!tls.ProxyConfig {
 
 test "buildClientConfig valid" {
     var args = cli.CliArgs{
-        .server = "test.example.com",
+        .address = "192.168.1.1",
         .hub = "VPN",
         .username = "user",
         .password = "pass",
@@ -202,7 +203,7 @@ test "buildClientConfig valid" {
     };
     const config = try buildClientConfig(&args);
 
-    try std.testing.expectEqualStrings("test.example.com", config.server_host);
+    try std.testing.expectEqualStrings("192.168.1.1", config.server_address);
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
     try std.testing.expect(config.proxy == null);
 }
@@ -273,7 +274,7 @@ test "parseProxyUrl empty" {
     try std.testing.expectError(error.InvalidProxyUrl, parseProxyUrl(""));
 }
 
-test "buildClientConfig missing server" {
+test "buildClientConfig missing address" {
     var args = cli.CliArgs{
         .hub = "VPN",
         .username = "user",
@@ -281,12 +282,12 @@ test "buildClientConfig missing server" {
     };
     defer args.deinit();
 
-    try std.testing.expectError(error.MissingServer, buildClientConfig(&args));
+    try std.testing.expectError(error.MissingAddress, buildClientConfig(&args));
 }
 
 test "buildClientConfig missing hub" {
     var args = cli.CliArgs{
-        .server = "test.com",
+        .address = "192.168.1.1",
         .username = "user",
         .password = "pass",
     };
@@ -297,7 +298,7 @@ test "buildClientConfig missing hub" {
 
 test "buildClientConfig anonymous auth" {
     var args = cli.CliArgs{
-        .server = "test.com",
+        .address = "192.168.1.1",
         .hub = "VPN",
     };
     defer args.deinit();
@@ -308,7 +309,7 @@ test "buildClientConfig anonymous auth" {
 
 test "buildClientConfig password hash" {
     var args = cli.CliArgs{
-        .server = "test.com",
+        .address = "192.168.1.1",
         .hub = "VPN",
         .username = "user",
         .password_hash = "base64hash==",

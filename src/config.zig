@@ -93,7 +93,7 @@ pub const ConfigBuilder = struct {
     static_ip: ?StaticIpConfig = null,
     routing: RoutingConfig = .{}, // Routing configuration
 
-    /// Set VPN server address and port
+    /// Set VPN address and port
     pub fn setServer(self: *ConfigBuilder, name: []const u8, port: u16) *ConfigBuilder {
         self.server_name = name;
         self.server_port = port;
@@ -198,7 +198,7 @@ test "config builder chaining" {
 
 /// JSON configuration schema
 pub const JsonConfig = struct {
-    server: ?[]const u8 = null,
+    address: ?[]const u8 = null,
     port: ?u16 = null,
     hub: ?[]const u8 = null,
     username: ?[]const u8 = null,
@@ -317,9 +317,9 @@ pub fn mergeConfigs(
 ) !ConfigBuilder {
     var builder = ConfigBuilder{};
 
-    // Server configuration
-    if (pickOpt([]const u8, cli_config.server, env_config.server, file_config.server, null)) |server| {
-        builder.server_name = server;
+    // Address configuration
+    if (pickOpt([]const u8, cli_config.address, env_config.address, file_config.address, null)) |addr| {
+        builder.server_name = addr;
     }
     builder.server_port = pickVal(u16, cli_config.port, env_config.port, file_config.port, 443);
 
@@ -420,7 +420,7 @@ test "load from file - nonexistent file" {
     const allocator = std.testing.allocator;
     const config = try loadFromFile(allocator, "/nonexistent/config.json");
     defer config.deinit();
-    try std.testing.expect(config.value.server == null);
+    try std.testing.expect(config.value.address == null);
 }
 
 test "expand path with tilde" {

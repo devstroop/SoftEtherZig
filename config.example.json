@@ -2,7 +2,8 @@
   "comment": "SoftEther VPN Client Configuration File",
   "description": "Copy this file to ~/.config/softether-zig/config.json and edit as needed",
   
-  "server": "vpn.example.com",
+  "address": "192.168.1.1",
+  "hostname": "vpn.example.com",
   "port": 443,
   "hub": "VPN",
   "username": "myuser",
@@ -49,6 +50,8 @@
     "Generate password hash with: ./zig-out/bin/vpnclient passhash --user username --password password",
     "Command-line arguments override environment variables",
     "Environment variables override this config file",
+    "Use --address/-a for pre-resolved IP (DNS is caller's responsibility)",
+    "Use --hostname for TLS/SNI when connecting to an IP directly",
     "Set password_hash to null to use password (not recommended)",
     "skip_tls_verify: true = skip certificate verification (INSECURE)",
     "max_connection: number of parallel TCP connections (1-32)",
