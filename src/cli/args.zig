@@ -24,9 +24,6 @@ pub const CliArgs = struct {
     address: ?[]const u8 = null,
     /// Optional hostname for TLS/SNI, HTTP Host, certificate validation
     hostname: ?[]const u8 = null,
-    /// Deprecated: use `address` instead. If set and `address` is null,
-    /// `address` is populated from `server` (caller must ensure it's an IP).
-    server: ?[]const u8 = null,
     port: u16 = 443,
     hub: ?[]const u8 = null,
 
@@ -204,9 +201,12 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
                 i += 1;
                 self.args.config_file = try self.requireValue(argv, i, "--config");
-            } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--server")) {
+            } else if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--address")) {
                 i += 1;
-                self.args.server = try self.requireValue(argv, i, "--server");
+                self.args.address = try self.requireValue(argv, i, "--address");
+            } else if (std.mem.eql(u8, arg, "--hostname")) {
+                i += 1;
+                self.args.hostname = try self.requireValue(argv, i, "--hostname");
             } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--port");
@@ -373,8 +373,8 @@ pub const ArgParser = struct {
                 return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "yes");
             }
         }.check;
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_SERVER")) |v| {
-            if (self.args.server == null) self.args.server = v;
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ADDRESS")) |v| {
+            if (self.args.address == null) self.args.address = v;
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PORT")) |v| {
             if (self.args.port == 443) {
@@ -481,8 +481,8 @@ pub fn validate(args: *const CliArgs, allocator: Allocator) !ValidationResult {
         };
     }
 
-    // Check required fields
-    if (args.server == null) try missing.append(allocator, "server");
+    // Check required fields — address is mandatory
+    if (args.address == null) try missing.append(allocator, "address");
     if (args.hub == null) try missing.append(allocator, "hub");
     if (args.username == null) try missing.append(allocator, "username");
     if (args.password == null and args.password_hash == null) {
@@ -521,15 +521,15 @@ test "ArgParser basic flags" {
     try std.testing.expect(!args.version);
 }
 
-test "ArgParser server options" {
+test "ArgParser address options" {
     var parser = ArgParser.init(std.testing.allocator);
     defer parser.deinit();
 
-    const argv = [_][]const u8{ "vpnclient", "-s", "vpn.example.com", "-p", "8443", "-H", "VPN" };
+    const argv = [_][]const u8{ "vpnclient", "-a", "192.168.1.1", "-p", "8443", "-H", "VPN" };
     var args = try parser.parse(&argv);
     defer args.deinit();
 
-    try std.testing.expectEqualStrings("vpn.example.com", args.server.?);
+    try std.testing.expectEqualStrings("192.168.1.1", args.address.?);
     try std.testing.expectEqual(@as(u16, 8443), args.port);
     try std.testing.expectEqualStrings("VPN", args.hub.?);
 }
@@ -581,7 +581,7 @@ test "ArgParser missing value" {
     var parser = ArgParser.init(std.testing.allocator);
     defer parser.deinit();
 
-    const argv = [_][]const u8{ "vpnclient", "-s" };
+    const argv = [_][]const u8{ "vpnclient", "-a" };
     const result = parser.parse(&argv);
 
     try std.testing.expectError(ParseError.MissingValue, result);
@@ -593,7 +593,7 @@ test "LogLevel fromString" {
     try std.testing.expect(LogLevel.fromString("invalid") == null);
 }
 
-test "validate missing server" {
+test "validate missing address" {
     const args = CliArgs{};
     const result = try validate(&args, std.testing.allocator);
     defer std.testing.allocator.free(result.missing_fields);

@@ -638,7 +638,7 @@ pub const Session = struct {
     traffic: TrafficStats,
 
     /// Connection options
-    server_host: [256]u8,
+    server_address: [256]u8,
     server_port: u16,
     hub_name: [256]u8,
     username: [256]u8,
@@ -685,7 +685,7 @@ pub const Session = struct {
             .policy = .{},
             .node_info = NodeInfo.create(),
             .traffic = .{},
-            .server_host = [_]u8{0} ** 256,
+            .server_address = [_]u8{0} ** 256,
             .server_port = options.port,
             .hub_name = [_]u8{0} ** 256,
             .username = [_]u8{0} ** 256,
@@ -711,8 +711,8 @@ pub const Session = struct {
         };
 
         // Copy strings
-        const host_len = @min(options.host.len, sess.server_host.len - 1);
-        @memcpy(sess.server_host[0..host_len], options.host[0..host_len]);
+        const host_len = @min(options.host.len, sess.server_address.len - 1);
+        @memcpy(sess.server_address[0..host_len], options.host[0..host_len]);
 
         const hub_len = @min(options.hub.len, sess.hub_name.len - 1);
         @memcpy(sess.hub_name[0..hub_len], options.hub[0..hub_len]);

@@ -14,11 +14,6 @@
       "description": "Optional original hostname for TLS/SNI, HTTP Host headers, and certificate validation",
       "examples": ["vpn.example.com"]
     },
-    "server": {
-      "type": "string",
-      "description": "DEPRECATED: use 'address' instead. If 'address' is not set, 'server' is used as fallback (must be an IP address).",
-      "examples": ["vpn.example.com", "192.168.1.1"]
-    },
     "port": {
       "type": "integer",
       "description": "VPN server port",
@@ -255,7 +250,7 @@
   "additionalProperties": true,
   "examples": [
     {
-      "server": "vpn.example.com",
+      "address": "192.168.1.1",
       "port": 443,
       "hub": "VPN",
       "username": "myuser",
@@ -263,7 +258,7 @@
       "use_compress": true
     },
     {
-      "server": "vpn.example.com",
+      "address": "192.168.1.1",
       "hub": "VPN",
       "username": "myuser",
       "password_hash": "hash",

@@ -119,7 +119,7 @@ pub const CommandHistory = struct {
 
 pub const ShellState = struct {
     connected: bool = false,
-    server: ?[]const u8 = null,
+    address: ?[]const u8 = null,
     hub: ?[]const u8 = null,
     username: ?[]const u8 = null,
     device_name: ?[]const u8 = null,
@@ -268,7 +268,7 @@ pub const Shell = struct {
         self.display_ctx.newline();
         if (self.state.connected) {
             display.success(&self.display_ctx, "Connected", .{});
-            if (self.state.server) |s| self.display_ctx.print("  Server: {s}\n", .{s});
+            if (self.state.address) |s| self.display_ctx.print("  Address: {s}\n", .{s});
             if (self.state.hub) |h| self.display_ctx.print("  Hub: {s}\n", .{h});
             if (self.state.device_name) |d| self.display_ctx.print("  Device: {s}\n", .{d});
         } else {
@@ -359,7 +359,7 @@ pub const Shell = struct {
         self.display_ctx.newline();
         self.display_ctx.printColored(.bold, "Current Configuration\n", .{});
         self.display_ctx.hr();
-        if (self.state.server) |s| self.display_ctx.print("  server = {s}\n", .{s});
+        if (self.state.address) |s| self.display_ctx.print("  address = {s}\n", .{s});
         if (self.state.hub) |h| self.display_ctx.print("  hub = {s}\n", .{h});
         if (self.state.username) |u| self.display_ctx.print("  username = {s}\n", .{u});
         self.display_ctx.newline();
@@ -382,9 +382,9 @@ pub const Shell = struct {
         }
 
         // Handle known keys
-        if (std.mem.eql(u8, key, "server")) {
-            self.state.server = value;
-            display.success(&self.display_ctx, "Set server = {s}", .{value});
+        if (std.mem.eql(u8, key, "address")) {
+            self.state.address = value;
+            display.success(&self.display_ctx, "Set address = {s}", .{value});
         } else if (std.mem.eql(u8, key, "hub")) {
             self.state.hub = value;
             display.success(&self.display_ctx, "Set hub = {s}", .{value});
@@ -407,9 +407,9 @@ pub const Shell = struct {
     }
 
     /// Update state from external source
-    pub fn updateState(self: *Self, connected: bool, server: ?[]const u8, hub: ?[]const u8) void {
+    pub fn updateState(self: *Self, connected: bool, address: ?[]const u8, hub: ?[]const u8) void {
         self.state.connected = connected;
-        self.state.server = server;
+        self.state.address = address;
         self.state.hub = hub;
     }
 };
@@ -492,5 +492,5 @@ test "Shell init" {
 test "ShellState defaults" {
     const state = ShellState{};
     try std.testing.expect(!state.connected);
-    try std.testing.expect(state.server == null);
+    try std.testing.expect(state.address == null);
 }

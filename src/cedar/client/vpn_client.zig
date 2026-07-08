@@ -739,9 +739,9 @@ pub const VpnClient = struct {
             const is_ip_literal = if (net.Address.parseIp4(host, port)) |_| true else |_| if (net.Address.parseIp6(host, port)) |_| true else |_| false;
             if (!is_ip_literal) {
                 // Resolve all IPs and probe each; pick the first healthy one.
-                // If DNS or all probes fail, keep the address from resolveDns.
+                // If DNS or all probes fail, keep the address from startup resolution.
                 const addrs = net.getAddressList(self.allocator, host, port) catch {
-                    // DNS failed — skip probing, keep resolveDns result
+                    // DNS failed — skip probing, keep startup resolution result
                     break :probe_done;
                 };
                 defer addrs.deinit();

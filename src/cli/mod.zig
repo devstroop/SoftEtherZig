@@ -115,13 +115,32 @@ test "parseArgs simple" {
     try std.testing.expect(parsed_args.help);
 }
 
-test "parseArgs server" {
-    const argv = [_][]const u8{ "vpnclient", "-s", "test.com", "-H", "VPN" };
+test "parseArgs address" {
+    const argv = [_][]const u8{ "vpnclient", "-a", "192.168.1.1", "-H", "VPN" };
     var parsed_args = try parseArgs(std.testing.allocator, &argv);
     defer parsed_args.deinit();
 
-    try std.testing.expectEqualStrings("test.com", parsed_args.server.?);
+    try std.testing.expectEqualStrings("192.168.1.1", parsed_args.address.?);
     try std.testing.expectEqualStrings("VPN", parsed_args.hub.?);
+}
+
+test "parseArgs address and hostname" {
+    const argv = [_][]const u8{ "vpnclient", "-a", "1.2.3.4", "--hostname", "vpn.example.com", "-H", "VPN" };
+    var parsed_args = try parseArgs(std.testing.allocator, &argv);
+    defer parsed_args.deinit();
+
+    try std.testing.expectEqualStrings("1.2.3.4", parsed_args.address.?);
+    try std.testing.expectEqualStrings("vpn.example.com", parsed_args.hostname.?);
+    try std.testing.expectEqualStrings("VPN", parsed_args.hub.?);
+}
+
+test "parseArgs address long form" {
+    const argv = [_][]const u8{ "vpnclient", "--address", "10.0.0.1", "--port", "8443" };
+    var parsed_args = try parseArgs(std.testing.allocator, &argv);
+    defer parsed_args.deinit();
+
+    try std.testing.expectEqualStrings("10.0.0.1", parsed_args.address.?);
+    try std.testing.expectEqual(@as(u16, 8443), parsed_args.port);
 }
 
 test "module imports" {

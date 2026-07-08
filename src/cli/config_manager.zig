@@ -13,12 +13,10 @@ const args_mod = @import("args.zig");
 /// Full configuration file structure
 pub const ConfigFile = struct {
     // Server settings
-    /// Pre-resolved IP address (preferred over deprecated `server`)
+    /// Pre-resolved IP address
     address: ?[]const u8 = null,
     /// Optional hostname for TLS/SNI
     hostname: ?[]const u8 = null,
-    /// Deprecated: use `address` instead
-    server: ?[]const u8 = null,
     port: ?u16 = null,
     hub: ?[]const u8 = null,
 
@@ -198,16 +196,12 @@ pub const ConfigManager = struct {
     pub fn mergeWithArgs(self: *const Self, cli_args: *args_mod.CliArgs) !void {
         const alloc = cli_args.allocator orelse return;
 
-        // Server settings — address/hostname take priority, fallback to deprecated server
+        // Server settings — address/hostname from config file
         if (cli_args.address == null) {
             if (self.config.address) |s| cli_args.address = try alloc.dupe(u8, s);
         }
         if (cli_args.hostname == null) {
             if (self.config.hostname) |s| cli_args.hostname = try alloc.dupe(u8, s);
-        }
-        // Deprecated: fallback to `server` when `address` is still null
-        if (cli_args.address == null and cli_args.server == null) {
-            if (self.config.server) |s| cli_args.server = try alloc.dupe(u8, s);
         }
         if (cli_args.port == 443 and self.config.port != null) cli_args.port = self.config.port.?;
         if (cli_args.hub == null) {
@@ -328,7 +322,8 @@ pub const ConfigManager = struct {
         _ = allocator;
         var cfg = ConfigFile{};
 
-        cfg.server = cli_args.server;
+        cfg.address = cli_args.address;
+        cfg.hostname = cli_args.hostname;
         cfg.port = cli_args.port;
         cfg.hub = cli_args.hub;
         cfg.username = cli_args.username;
@@ -430,7 +425,7 @@ test "ConfigManager init" {
     var mgr = ConfigManager.init(std.testing.allocator);
     defer mgr.deinit();
 
-    try std.testing.expect(mgr.config.server == null);
+    try std.testing.expect(mgr.config.address == null);
     try std.testing.expect(mgr.config_path == null);
 }
 
@@ -440,7 +435,7 @@ test "ConfigManager loadFromString" {
 
     const json =
         \\{
-        \\  "server": "vpn.example.com",
+        \\  "address": "192.168.1.1",
         \\  "port": 8443,
         \\  "hub": "VPN",
         \\  "username": "testuser"
@@ -449,7 +444,7 @@ test "ConfigManager loadFromString" {
 
     try mgr.loadFromString(json);
 
-    try std.testing.expectEqualStrings("vpn.example.com", mgr.config.server.?);
+    try std.testing.expectEqualStrings("192.168.1.1", mgr.config.address.?);
     try std.testing.expectEqual(@as(u16, 8443), mgr.config.port.?);
     try std.testing.expectEqualStrings("VPN", mgr.config.hub.?);
     try std.testing.expectEqualStrings("testuser", mgr.config.username.?);
@@ -461,7 +456,7 @@ test "ConfigManager loadFromString with reconnect" {
 
     const json =
         \\{
-        \\  "server": "test.com",
+        \\  "address": "192.168.1.1",
         \\  "reconnect": {
         \\    "enabled": true,
         \\    "max_attempts": 5
@@ -482,7 +477,7 @@ test "ConfigManager mergeWithArgs" {
 
     const json =
         \\{
-        \\  "server": "config-server.com",
+        \\  "address": "192.168.1.1",
         \\  "port": 8443,
         \\  "hub": "ConfigHub"
         \\}
@@ -490,7 +485,7 @@ test "ConfigManager mergeWithArgs" {
     try mgr.loadFromString(json);
 
     var cli_args = args_mod.CliArgs{
-        .server = try std.testing.allocator.dupe(u8, "cli-server.com"), // CLI should take priority
+        .address = try std.testing.allocator.dupe(u8, "10.0.0.1"), // CLI should take priority
         .port = 443, // Default, should be overridden
         .allocator = std.testing.allocator,
     };
@@ -499,7 +494,7 @@ test "ConfigManager mergeWithArgs" {
     try mgr.mergeWithArgs(&cli_args);
 
     // CLI takes priority
-    try std.testing.expectEqualStrings("cli-server.com", cli_args.server.?);
+    try std.testing.expectEqualStrings("10.0.0.1", cli_args.address.?);
     // Config file value used since CLI was default
     try std.testing.expectEqual(@as(u16, 8443), cli_args.port);
     // Config file value used
@@ -508,7 +503,7 @@ test "ConfigManager mergeWithArgs" {
 
 test "ConfigManager fromArgs" {
     var cli_args = args_mod.CliArgs{
-        .server = "test.com",
+        .address = "192.168.1.1",
         .port = 443,
         .hub = "TEST",
         .reconnect = true,
@@ -517,14 +512,14 @@ test "ConfigManager fromArgs" {
 
     const cfg = ConfigManager.fromArgs(std.testing.allocator, &cli_args);
 
-    try std.testing.expectEqualStrings("test.com", cfg.server.?);
+    try std.testing.expectEqualStrings("192.168.1.1", cfg.address.?);
     try std.testing.expect(cfg.reconnect.?.enabled.?);
     try std.testing.expectEqual(@as(u32, 10), cfg.reconnect.?.max_attempts.?);
 }
 
 test "validateConfig valid" {
     const cfg = ConfigFile{
-        .server = "test.com",
+        .address = "192.168.1.1",
         .port = 443,
         .max_connections = 4,
     };

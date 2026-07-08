@@ -188,22 +188,20 @@ pub const CStats = extern struct {
 /// Connection state (C-compatible enum)
 pub const CState = enum(c_int) {
     disconnected = 0,
-    resolving_dns = 1,
-    connecting_tcp = 2,
-    ssl_handshake = 3,
-    authenticating = 4,
-    establishing_session = 5,
-    configuring_adapter = 6,
-    connected = 7,
-    reconnecting = 8,
-    disconnecting = 9,
-    error_state = 10,
+    connecting_tcp = 1,
+    ssl_handshake = 2,
+    authenticating = 3,
+    establishing_session = 4,
+    configuring_adapter = 5,
+    connected = 6,
+    reconnecting = 7,
+    disconnecting = 8,
+    error_state = 9,
 };
 
 fn mapState(state: ClientState) CState {
     return switch (state) {
         .disconnected => .disconnected,
-        .resolving_dns => .resolving_dns,
         .connecting_tcp => .connecting_tcp,
         .ssl_handshake => .ssl_handshake,
         .authenticating => .authenticating,
@@ -275,13 +273,13 @@ fn defaultClientConfig() ClientConfig {
 /// only keeps the buffer alive for the duration of THIS call, so duping is
 /// mandatory on iOS / macOS Swift hosts).
 export fn softether_create(
-    server: [*:0]const u8,
+    address: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
     username: [*:0]const u8,
     password: [*:0]const u8,
 ) ?*VpnClient {
-    const server_in = std.mem.span(server);
+    const server_in = std.mem.span(address);
     const hub_in = std.mem.span(hub);
     const username_in = std.mem.span(username);
     const password_in = std.mem.span(password);
@@ -314,11 +312,11 @@ export fn softether_create(
 /// Create a new VPN client with anonymous authentication.
 /// Strings are duped into FFI-owned memory (see softether_create for rationale).
 export fn softether_create_anonymous(
-    server: [*:0]const u8,
+    address: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
 ) ?*VpnClient {
-    const server_in = std.mem.span(server);
+    const server_in = std.mem.span(address);
     const hub_in = std.mem.span(hub);
 
     if (server_in.len == 0 or hub_in.len == 0) {
@@ -343,7 +341,7 @@ export fn softether_create_anonymous(
 /// PEM data is passed as pointer+length since PEM may contain embedded nulls.
 /// All inputs are duped into FFI-owned memory (see softether_create).
 export fn softether_create_certificate(
-    server: [*:0]const u8,
+    address: [*:0]const u8,
     port: u16,
     hub: [*:0]const u8,
     cert_pem: [*]const u8,
@@ -351,7 +349,7 @@ export fn softether_create_certificate(
     key_pem: [*]const u8,
     key_pem_len: u32,
 ) ?*VpnClient {
-    const server_in = std.mem.span(server);
+    const server_in = std.mem.span(address);
     const hub_in = std.mem.span(hub);
 
     if (server_in.len == 0 or hub_in.len == 0 or cert_pem_len == 0 or key_pem_len == 0) {

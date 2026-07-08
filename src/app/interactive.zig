@@ -37,7 +37,7 @@ fn onGetStatus() ?cli.display.ConnectionStatus {
     if (!g_vpn.isConnected() and !g_vpn.isConnecting()) {
         return cli.display.ConnectionStatus{
             .state = "Disconnected",
-            .server = g_config.server_hostname orelse g_config.server_address,
+            .address = g_config.server_hostname orelse g_config.server_address,
             .port = g_config.server_port,
             .hub = g_config.hub_name,
             .device_name = if (g_vpn.getDeviceName()) |d| d else "none",
@@ -58,7 +58,7 @@ fn onGetStatus() ?cli.display.ConnectionStatus {
 
     return cli.display.ConnectionStatus{
         .state = if (g_vpn.isConnected()) "Connected" else "Connecting",
-        .server = g_config.server_hostname orelse g_config.server_address,
+        .address = g_config.server_hostname orelse g_config.server_address,
         .port = g_config.server_port,
         .hub = g_config.hub_name,
         .device_name = if (g_vpn.getDeviceName()) |d| d else "none",
