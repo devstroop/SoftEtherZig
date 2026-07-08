@@ -770,6 +770,7 @@ pub const VpnClient = struct {
         self.transitionState(.ssl_handshake);
 
         // Establish TLS connection to VPN server
+        const tls_start = std.time.milliTimestamp();
         const tls_config = tls.TlsConfig{
             .verify_certificate = self.config.verify_certificate,
             .allow_self_signed = !self.config.verify_certificate,
@@ -796,6 +797,8 @@ pub const VpnClient = struct {
             self.disconnect_reason = .network_error;
             return ClientError.ConnectionFailed;
         };
+        const tls_elapsed = std.time.milliTimestamp() - tls_start;
+        std.log.info("TLS connect: {d}ms", .{tls_elapsed});
 
         if (@atomicLoad(bool, &self.should_stop, .acquire)) {
             self.disconnect_reason = .user_requested;
@@ -803,6 +806,7 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.authenticating);
+        const auth_start = std.time.milliTimestamp();
         auth_handler.run(self) catch |err| {
             // Preserve the error type from auth_handler. When runRedirect
             // returns ConnectionFailed (redirect backend unreachable), we
@@ -821,6 +825,8 @@ pub const VpnClient = struct {
             self.disconnect_reason = .auth_failed;
             return ClientError.AuthenticationFailed;
         };
+        const auth_elapsed = std.time.milliTimestamp() - auth_start;
+        std.log.info("Auth handshake: {d}ms", .{auth_elapsed});
 
         if (@atomicLoad(bool, &self.should_stop, .acquire)) {
             self.disconnect_reason = .user_requested;
@@ -828,7 +834,10 @@ pub const VpnClient = struct {
         }
 
         self.transitionState(.establishing_session);
+        const session_start = std.time.milliTimestamp();
         session_setup.run(self);
+        const session_elapsed = std.time.milliTimestamp() - session_start;
+        std.log.info("Session setup: {d}ms", .{session_elapsed});
 
         if (@atomicLoad(bool, &self.should_stop, .acquire)) {
             self.disconnect_reason = .user_requested;
@@ -842,6 +851,8 @@ pub const VpnClient = struct {
         };
 
         self.transitionState(.connected);
+        const connect_total = std.time.milliTimestamp() - self.stats.connect_time_ms;
+        std.log.info("Connected in {d}ms (tls={d} auth={d} session={d})", .{ connect_total, tls_elapsed, auth_elapsed, session_elapsed });
         self.stats.connect_time_ms = std.time.milliTimestamp();
         self.connect_time = std.time.milliTimestamp();
 
