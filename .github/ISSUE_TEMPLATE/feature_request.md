@@ -1,20 +1,35 @@
 ---
-name: Feature request
-about: Suggest an idea for this project
-title: ''
-labels: ''
-assignees: ''
-
+name: Feature Request
+about: Suggest a new feature or enhancement for libsoftether
+labels: ["enhancement"]
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## Problem
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+What problem does this feature solve? Is it related to a limitation, workaround, or missing capability?
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## Proposed Solution
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+Describe what you'd like to see. Include API sketches if relevant:
+
+```zig
+// Example: new setter function
+export fn softether_set_new_option(client: ?*VpnClient, value: bool) void { ... }
+```
+
+## Alternatives Considered
+
+Any workarounds or alternative approaches you've tried.
+
+## Platform Scope
+
+Which platforms should this target?
+
+- [ ] All (C ABI — FFI consumers)
+- [ ] CLI (`vpnclient`)
+- [ ] Flutter / Dart FFI bindings
+- [ ] Specific platforms only: `...`
+
+## Additional Context
+
+Links to related issues, SoftEther documentation, or protocol specs.
