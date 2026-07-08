@@ -55,16 +55,15 @@ typedef enum {
 
 typedef enum {
     SOFTETHER_STATE_DISCONNECTED       = 0,
-    SOFTETHER_STATE_RESOLVING_DNS      = 1,
-    SOFTETHER_STATE_CONNECTING_TCP     = 2,
-    SOFTETHER_STATE_SSL_HANDSHAKE      = 3,
-    SOFTETHER_STATE_AUTHENTICATING     = 4,
-    SOFTETHER_STATE_ESTABLISHING       = 5,
-    SOFTETHER_STATE_CONFIGURING        = 6,
-    SOFTETHER_STATE_CONNECTED          = 7,
-    SOFTETHER_STATE_RECONNECTING       = 8,
-    SOFTETHER_STATE_DISCONNECTING      = 9,
-    SOFTETHER_STATE_ERROR              = 10,
+    SOFTETHER_STATE_CONNECTING_TCP     = 1,
+    SOFTETHER_STATE_SSL_HANDSHAKE      = 2,
+    SOFTETHER_STATE_AUTHENTICATING     = 3,
+    SOFTETHER_STATE_ESTABLISHING       = 4,
+    SOFTETHER_STATE_CONFIGURING        = 5,
+    SOFTETHER_STATE_CONNECTED          = 6,
+    SOFTETHER_STATE_RECONNECTING       = 7,
+    SOFTETHER_STATE_DISCONNECTING      = 8,
+    SOFTETHER_STATE_ERROR              = 9,
 } softether_state_t;
 
 typedef enum {
@@ -209,6 +208,9 @@ void softether_set_max_connections(softether_client_t client, uint8_t count);
 
 /** Enable half-connection mode (separate upload/download TCP sockets). */
 void softether_set_half_connection(softether_client_t client, bool enabled);
+
+/** Set optional hostname for TLS/SNI. Pass empty string to clear. */
+void softether_set_hostname(softether_client_t client, const char* hostname);
 
 /** Enable VoIP / QoS packet prioritization. */
 void softether_set_qos(softether_client_t client, bool enabled);
