@@ -372,9 +372,6 @@ void softether_set_tcp_dial_callback(softether_tcp_dial_callback_t cb);
 /** Get library version string. Returns pointer to static string. */
 const char* softether_version(void);
 
-/** Get application version string (synced with pubspec.yaml). Returns pointer to static string. */
-const char* softether_app_version(void);
-
 #ifdef __cplusplus
 }
 #endif
