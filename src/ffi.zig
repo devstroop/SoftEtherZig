@@ -166,6 +166,15 @@ fn mapClientError(err: ClientError) SoftetherError {
         ClientError.SessionEstablishmentFailed => .session_failed,
         ClientError.OutOfMemory => .out_of_memory,
         ClientError.OperationCancelled => .operation_cancelled,
+        // SslHandshakeFailed → protocol_error: the Zig TLS layer aborted
+        // the handshake (cert mismatch, version mismatch, cipher failure).
+        // The UI's _classifyError will show "Protocol mismatch" advice
+        // which is actionable — the "Internal error" fallback is not.
+        ClientError.SslHandshakeFailed => .protocol_error,
+        // NetworkError → connection_failed: the TCP socket or I/O
+        // sub-system reported a non-timeout error (connection refused,
+        // host unreachable, connection reset by peer).
+        ClientError.NetworkError => .connection_failed,
         else => .internal_error,
     };
 }
