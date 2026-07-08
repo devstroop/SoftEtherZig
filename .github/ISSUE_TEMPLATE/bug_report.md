@@ -1,38 +1,56 @@
 ---
-name: Bug report
-about: Create a report to help us improve
-title: ''
-labels: ''
-assignees: ''
-
+name: Bug Report
+about: Report a bug in libsoftether (build, runtime, protocol, FFI)
+labels: ["bug"]
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Description
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+A clear and concise description of the bug.
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## Steps to Reproduce
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+1. Build with: `zig build shared-lib -Dtarget=...`
+2. Run: `...`
+3. Observe: `...`
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+## Expected Behavior
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+What you expected to happen.
 
-**Additional context**
-Add any other context about the problem here.
+## Actual Behavior
+
+What actually happened. Include full error output if applicable.
+
+## Environment
+
+| Field | Value |
+|-------|-------|
+| OS / Arch | e.g. `macOS 14.5 ARM64`, `Windows x64`, `Ubuntu 22.04 x86_64` |
+| Zig version | e.g. `0.15.2` (`zig version`) |
+| OpenSSL version | e.g. `3.3.1` (`openssl version`) |
+| Build command | e.g. `zig build shared-lib -Dtarget=aarch64-linux-android` |
+| Build mode | `Debug` / `ReleaseFast` |
+| Client type | CLI (`vpnclient`) / FFI (Flutter / Dart) |
+
+## Logs / Backtrace
+
+If the bug involves a crash or unexpected error, include relevant logs:
+
+```
+# CLI: run with verbose output
+# FFI: check host app logs (Logcat, Console.app, flutter run output)
+```
+
+## Server Info (if connection bug)
+
+| Field | Value |
+|-------|-------|
+| Server version | e.g. `SoftEther VPN Server 4.43 build 9799` |
+| Server OS | |
+| Auth type | Password / Certificate / Anonymous |
+| Connection mode | Full / Half-duplex |
+
+## Additional Context
+
+Any other context, screenshots, or packet captures.
