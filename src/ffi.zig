@@ -1052,7 +1052,10 @@ fn ffiDispatchEvent(event: client_mod.ClientEvent, ud: ?*anyopaque) void {
         .disconnected => .disconnected,
         .stats_updated => .stats_updated,
         .error_occurred => .error_occurred,
-        else => return,
+        else => {
+            std.log.warn("ffiDispatchEvent: unhandled event type (new variant added?)", .{});
+            return;
+        },
     };
     const state: CState = switch (event) {
         .state_changed => |sc| mapState(sc.new_state),
