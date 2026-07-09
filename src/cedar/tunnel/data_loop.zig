@@ -97,7 +97,7 @@ pub const DataLoopConfig = struct {
     max_dhcp_retries: u32 = 5,
     /// Maximum DHCPv6 retries (DHCPv6 is less critical, SLAAC may still work)
     max_dhcpv6_retries: u32 = 3,
-    /// Enable full tunnel routing
+    /// Enable default route
     default_route: bool = true,
     /// Initial delay before DHCP discover (ms)
     initial_delay_ms: u32 = 300,
