@@ -1097,7 +1097,7 @@ pub const VpnClient = struct {
             if (self.server_ip) |srv| {
                 if (srv.any.family == std.posix.AF.INET) {
                     const server_ip_be = @byteSwap(srv.in.sa.addr);
-                    // Default Route (Full Tunnel) — base routing
+                    // Default Route (All traffic through tunnel) — base routing
                     if (self.config.routing.default_route) {
                         ctx.configureFullTunnel(self.gateway_ip, server_ip_be);
                     }
@@ -1328,7 +1328,7 @@ pub const VpnClient = struct {
                     }
 
                     if (self.gateway_ip != 0) {
-                        // Default Route (Full Tunnel) — only controls whether VPN
+                        // Default Route (All traffic through tunnel) — only controls whether VPN
                         // becomes the default gateway. Independent of Advanced Routing.
                         if (self.config.routing.default_route) {
                             const gw = tunnel_mod.formatIpForLog(loop_state.our_gateway);
