@@ -424,7 +424,7 @@ pub fn build(b: *std.Build) void {
     addZlib(shared_lib, b);
 
     // jni_bridge.c removed — moved to android/app/src/main/cpp/ (app-layer binding, not engine code).
-    // Compiled into libsoftether_jni.so via CMake, loaded after libsoftether.so.
+    // Compiled into softether_jni.so via CMake, loaded after libsoftether.so.
 
     const install_shared_lib = b.addInstallArtifact(shared_lib, .{});
 
