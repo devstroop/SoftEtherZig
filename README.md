@@ -5,6 +5,7 @@ A SoftEther VPN client written in Zig — standalone CLI + embeddable C library 
 [![CI](https://github.com/devstroop/SoftEtherZig/actions/workflows/ci.yml/badge.svg)](https://github.com/devstroop/SoftEtherZig/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/devstroop/SoftEtherZig)](https://github.com/devstroop/SoftEtherZig/releases/latest)
 [![Zig](https://img.shields.io/badge/Zig-0.15+-orange)](https://ziglang.org/)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20iOS%20%7C%20Android-informational)](#platforms)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Overview
