@@ -1,13 +1,14 @@
 #!/bin/bash
-# Cross-compile OpenSSL 3.6.0 for Android (arm64-v8a + armeabi-v7a)
+# Cross-compile OpenSSL 3.6.0 for Android (arm64-v8a + armeabi-v7a + x86_64)
 # Requires: Android NDK 25+ (for the sysroot and clang toolchain)
 #
 # Usage:
-#   ./scripts/build_openssl_android.sh [--arch arm64|armv7|all]
+#   ./scripts/build_openssl_android.sh [--arch arm64|armv7|x86_64|all]
 #
 # Output:
 #   deps/openssl-android/arm64-v8a/{lib,include}
 #   deps/openssl-android/armeabi-v7a/{lib,include}
+#   deps/openssl-android/x86_64/{lib,include}
 set -e
 
 OPENSSL_VERSION="3.6.0"
@@ -56,7 +57,7 @@ for arg in "$@"; do
 done
 
 if [[ "$ARCHES" == "all" ]]; then
-    ARCHES="arm64 armv7"
+    ARCHES="arm64 armv7 x86_64"
 fi
 
 # Download OpenSSL source once
@@ -81,8 +82,12 @@ build_arch() {
             OPENSSL_TARGET="android-arm"
             ABI_DIR="armeabi-v7a"
             ;;
+        x86_64)
+            OPENSSL_TARGET="android-x86_64"
+            ABI_DIR="x86_64"
+            ;;
         *)
-            echo "ERROR: Unknown arch '$ARCH' (use arm64 or armv7)"
+            echo "ERROR: Unknown arch '$ARCH' (use arm64, armv7, x86_64)"
             exit 1
             ;;
     esac
