@@ -186,19 +186,25 @@ pub const SessionOptions = struct {
 
 /// Resolve client_str with fingerprint override.
 fn fpClientStr(fp: ?*const ProtocolFingerprint) []const u8 {
-    if (fp) |f| { if (f.client_str) |v| return v; }
+    if (fp) |f| {
+        if (f.client_str) |v| return v;
+    }
     return Protocol.client_str;
 }
 
 /// Resolve client_ver with fingerprint override.
 fn fpClientVer(fp: ?*const ProtocolFingerprint) u32 {
-    if (fp) |f| { if (f.client_ver) |v| return v; }
+    if (fp) |f| {
+        if (f.client_ver) |v| return v;
+    }
     return Protocol.client_ver;
 }
 
 /// Resolve client_build with fingerprint override.
 fn fpClientBuild(fp: ?*const ProtocolFingerprint) u32 {
-    if (fp) |f| { if (f.client_build) |v| return v; }
+    if (fp) |f| {
+        if (f.client_build) |v| return v;
+    }
     return Protocol.client_build;
 }
 
@@ -217,37 +223,49 @@ fn fpOsInfo(fp: ?*const ProtocolFingerprint) OsInfo {
 
 /// Resolve max_rand_size with fingerprint override.
 fn fpMaxRandSize(fp: ?*const ProtocolFingerprint) usize {
-    if (fp) |f| { if (f.max_rand_size) |v| return v; }
+    if (fp) |f| {
+        if (f.max_rand_size) |v| return v;
+    }
     return Protocol.max_rand_size;
 }
 
 /// Resolve vpn_target with fingerprint override.
 fn fpTarget(fp: ?*const ProtocolFingerprint) []const u8 {
-    if (fp) |f| { if (f.vpn_target) |v| return v; }
+    if (fp) |f| {
+        if (f.vpn_target) |v| return v;
+    }
     return Protocol.vpn_target;
 }
 
 /// Resolve vpn_target_signature with fingerprint override.
 fn fpTargetSignature(fp: ?*const ProtocolFingerprint) []const u8 {
-    if (fp) |f| { if (f.vpn_target_signature) |v| return v; }
+    if (fp) |f| {
+        if (f.vpn_target_signature) |v| return v;
+    }
     return Protocol.vpn_target_signature;
 }
 
 /// Resolve content_type_signature with fingerprint override.
 fn fpContentTypeSignature(fp: ?*const ProtocolFingerprint) []const u8 {
-    if (fp) |f| { if (f.content_type_signature) |v| return v; }
+    if (fp) |f| {
+        if (f.content_type_signature) |v| return v;
+    }
     return Protocol.content_type_signature;
 }
 
 /// Resolve content_type_pack with fingerprint override.
 fn fpContentTypePack(fp: ?*const ProtocolFingerprint) []const u8 {
-    if (fp) |f| { if (f.content_type_pack) |v| return v; }
+    if (fp) |f| {
+        if (f.content_type_pack) |v| return v;
+    }
     return Protocol.content_type_pack;
 }
 
 /// Resolve client_hostname with fingerprint override.
 fn fpClientHostname(fp: ?*const ProtocolFingerprint) []const u8 {
-    if (fp) |f| { if (f.client_hostname) |v| return v; }
+    if (fp) |f| {
+        if (f.client_hostname) |v| return v;
+    }
     return "zig-client";
 }
 
@@ -607,9 +625,6 @@ pub fn buildPasswordAuth(
 
     const fp = opts.fingerprint;
 
-    _ = server_ip;
-    _ = server_hostname;
-
     // Add authentication fields (method must be "login", not "auth")
     try auth_pack.addStr("method", "login");
     try auth_pack.addStr("hubname", hub_name);
@@ -664,7 +679,7 @@ pub fn buildPasswordAuth(
     try auth_pack.addStr("ClientOsVer", os_info.version);
     try auth_pack.addStr("ClientOsProductId", "");
     try auth_pack.addStr("ClientHostname", fpClientHostname(fp));
-    try auth_pack.addStr("ServerHostname", "");
+    try auth_pack.addStr("ServerHostname", server_hostname);
     try auth_pack.addStr("ProxyHostname", "");
     try auth_pack.addData("UniqueId", &cedar_unique_id);
     try auth_pack.addInt("ClientProductVer", fpClientVer(fp));
@@ -674,7 +689,7 @@ pub fn buildPasswordAuth(
     try addPackIp32(&auth_pack, "ClientIpAddress", 0);
     try auth_pack.addData("ClientIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ClientPort", 0);
-    try addPackIp32(&auth_pack, "ServerIpAddress", 0);
+    try addPackIp32(&auth_pack, "ServerIpAddress", server_ip);
     try auth_pack.addData("ServerIpAddress6", &([_]u8{0} ** 16));
     try auth_pack.addInt("ServerPort2", 0);
     try addPackIp32(&auth_pack, "ProxyIpAddress", 0);
