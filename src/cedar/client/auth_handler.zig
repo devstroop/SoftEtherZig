@@ -78,13 +78,11 @@ pub fn run(client: *VpnClient) !void {
     }
 
     // Step 3: Build and upload auth
-    // C client sends the actual connected IP as ServerIpAddress in the auth pack.
-    // The controller uses this to route data-plane packets to the correct backend.
-    // server_ip is sa.addr in host byte order (same byte order SSTP C sends).
-    const server_ip: u32 = if (client.server_ip) |srv|
-        srv.in.sa.addr
-    else
-        0;
+    // The server already knows the client's source IP from the TCP
+    // connection — sending it as ServerIpAddress in the auth pack is
+    // redundant and some servers reject a non-zero value. Keep it at 0
+    // to match the original C client behaviour across all server versions.
+    const server_ip: u32 = 0;
     var ip_buf: [48]u8 = undefined;
     const server_hostname = if (client.server_ip) |addr| formatAddress(addr, &ip_buf) else client.config.server_address;
 
