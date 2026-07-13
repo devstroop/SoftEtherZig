@@ -436,14 +436,23 @@ pub const VpnClient = struct {
     }
 
     pub fn isConnected(self: *const Self) bool {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
         return self.state.isConnected();
     }
 
     pub fn isConnecting(self: *const Self) bool {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
         return self.state.isConnecting();
     }
 
     pub fn getStats(self: *const Self) ConnectionStats {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
         return self.stats;
     }
 
