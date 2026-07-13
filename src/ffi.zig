@@ -596,6 +596,22 @@ export fn softether_set_tcp_dial_callback(cb: ?tls_mod.ExternalTcpDialFn) void {
     }
 }
 
+/// Register an Android VpnService.protect() callback.
+///
+/// On Android, the VpnService creates a TUN device and routes ALL traffic
+/// through it. The VPN client's own TLS connections to the server would be
+/// caught in this routing loop — the TLS handshake goes through the TUN,
+/// which isn't connected to anything yet → instant failure. VpnService.protect()
+/// exempts a socket fd from the VPN routing so it goes through the physical
+/// network interface instead.
+///
+/// The Kotlin host calls this with a JNI-upcall wrapper that invokes
+/// VpnService.protect(fd). The callback returns the fd (unchanged) on success
+/// or -1 if protect failed. Pass null to clear.
+export fn softether_set_android_protect(cb: ?tls_mod.AndroidProtectFn) void {
+    tls_mod.android_protect_fn = cb;
+}
+
 /// Set default route (route all traffic through VPN). Must be called before connect().
 export fn softether_set_default_route(client: ?*VpnClient, enabled: bool) void {
     const c = client orelse return;

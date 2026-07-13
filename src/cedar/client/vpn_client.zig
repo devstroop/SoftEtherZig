@@ -424,7 +424,14 @@ pub const VpnClient = struct {
         self.event_user_data = user_data;
     }
 
+    /// Thread-safe state read. The state poller on Android (and any other
+    /// concurrent reader) calls this from a separate thread while connect()
+    /// holds the mutex. Without the lock, reading self.state is a data race
+    /// per the C11/Zig memory model even though ARM word reads are atomic.
     pub fn getState(self: *const Self) ClientState {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
         return self.state;
     }
 

@@ -83,8 +83,7 @@ pub fn run(client: *VpnClient) !void {
     // redundant and some servers reject a non-zero value. Keep it at 0
     // to match the original C client behaviour across all server versions.
     const server_ip: u32 = 0;
-    var ip_buf: [48]u8 = undefined;
-    const server_hostname = if (client.server_ip) |addr| formatAddress(addr, &ip_buf) else client.config.server_address;
+    const server_hostname = "";
 
     const session_opts = softether_proto.SessionOptions{
         .max_connection = client.config.max_connections,
