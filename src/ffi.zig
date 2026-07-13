@@ -109,6 +109,24 @@ fn libsoftetherLogFn(
 
 pub const std_options: std.Options = .{
     .logFn = libsoftetherLogFn,
+    .log_level = switch (builtin.mode) {
+        .Debug => .debug,
+        else => .info,
+    },
+    .log_scope_levels = &.{
+        // Per-packet I/O: only show in debug builds
+        .{ .scope = .packet_trace, .level = .err },
+        // Suppress noisy platform scopes to reduce logcat pressure
+        .{ .scope = .mayaqua, .level = .info },
+        .{ .scope = .adapter, .level = .info },
+        .{ .scope = .cedar_client, .level = .info },
+        .{ .scope = .cedar_conn, .level = .info },
+        .{ .scope = .cedar_proto, .level = .info },
+        .{ .scope = .cedar_tunnel, .level = .info },
+        .{ .scope = .cedar_auth, .level = .info },
+        .{ .scope = .cedar_pack, .level = .info },
+        .{ .scope = .cedar_session, .level = .info },
+    },
 };
 
 // Import library modules
