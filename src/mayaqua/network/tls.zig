@@ -29,6 +29,15 @@ pub var bind_interface_index: c_uint = 0;
 pub const ExternalTcpDialFn = *const fn (host: [*:0]const u8, port: u16) callconv(.c) c_int;
 pub var external_tcp_dial: ?ExternalTcpDialFn = null;
 
+/// Android VpnService.protect() callback. Called on every TCP socket fd created
+/// by libsoftether BEFORE the TLS handshake. The host (Kotlin/JNI) calls
+/// VpnService.protect(fd) to exempt the socket from the VPN's own routing —
+/// without this the TLS connection to the VPN server would be routed through
+/// the just-created TUN device (circular routing → instant failure).
+/// Returns the fd (unchanged on success) or -1 if protect failed.
+pub const AndroidProtectFn = *const fn (fd: c_int) callconv(.c) c_int;
+pub var android_protect_fn: ?AndroidProtectFn = null;
+
 /// Darwin socket option constants (sys/socket.h). Not in std.posix on iOS.
 const DARWIN_IP_BOUND_IF: c_int = 25;
 const DARWIN_IPV6_BOUND_IF: c_int = 125;
@@ -633,6 +642,19 @@ pub const TlsSocket = struct {
 
         // Attach to socket
         const fd_int: c_int = if (builtin.os.tag == .windows) @intCast(@intFromPtr(tcp_fd)) else @intCast(tcp_fd);
+
+        // Android: exempt this socket from the VPN's own routing table.
+        // Without VpnService.protect(), the TLS handshake packets would be
+        // routed through the just-created TUN → circular routing → ECONNREFUSED.
+        // The Kotlin host registers the protect callback via FFI before connect.
+        if (comptime builtin.os.tag == .linux and builtin.abi == .android) {
+            if (android_protect_fn) |protect| {
+                if (protect(fd_int) < 0) {
+                    std.log.err("TLS: VpnService.protect() failed for fd={d}", .{fd_int});
+                }
+            }
+        }
+
         if (c.SSL_set_fd(ssl, fd_int) != 1) {
             std.log.err("Failed to set SSL fd", .{});
             return TlsError.TlsInitializationFailed;
