@@ -523,11 +523,19 @@ pub const VpnClient = struct {
         self.stats = .{};
         self.stats.connect_time_ms = std.time.milliTimestamp();
 
+        // Release the mutex before performConnection() so the state poller
+        // (Android: 50ms loop, iOS: stats timer, desktop: 500ms dart:ffi poll)
+        // can read intermediate states (ssl_handshake, authenticating, etc.)
+        // instead of blocking for 10-15 seconds on TLS+auth.
+        self.mutex.unlock();
         self.performConnection() catch |err| {
+            self.mutex.lock();
             self.last_error = err;
             self.transitionState(.error_state);
+            self.mutex.unlock();
             return err;
         };
+        self.mutex.lock();
 
         // Mark data_loop_running BEFORE spawning the thread so that
         // softether_run_data_loop (which polls this flag) doesn't race
@@ -688,8 +696,10 @@ pub const VpnClient = struct {
     }
 
     fn transitionState(self: *Self, new_state: ClientState) void {
+        self.mutex.lock();
         const old_state = self.state;
         if (!old_state.canTransitionTo(new_state)) {
+            self.mutex.unlock();
             std.log.warn("Invalid state transition: {s} -> {s}", .{
                 @tagName(old_state),
                 @tagName(new_state),
@@ -697,6 +707,7 @@ pub const VpnClient = struct {
             return;
         }
         self.state = new_state;
+        self.mutex.unlock();
         if (self.event_callback) |cb| {
             cb(.{ .state_changed = .{
                 .old_state = old_state,
