@@ -497,9 +497,9 @@ pub const VpnClient = struct {
 
     pub fn connect(self: *Self) ClientError!void {
         self.mutex.lock();
-        defer self.mutex.unlock();
 
         if (self.state.isConnected() or self.state.isConnecting()) {
+            self.mutex.unlock();
             return ClientError.AlreadyConnected;
         }
 
@@ -529,10 +529,8 @@ pub const VpnClient = struct {
         // instead of blocking for 10-15 seconds on TLS+auth.
         self.mutex.unlock();
         self.performConnection() catch |err| {
-            self.mutex.lock();
             self.last_error = err;
             self.transitionState(.error_state);
-            self.mutex.unlock();
             return err;
         };
         self.mutex.lock();
@@ -551,6 +549,7 @@ pub const VpnClient = struct {
             @atomicStore(bool, &self.data_loop_running, false, .release);
             break :blk null;
         };
+        self.mutex.unlock();
     }
 
     fn runDataLoopThread(self: *Self) void {
@@ -1934,47 +1933,31 @@ pub const VpnClient = struct {
                 cm.hasPendingOutbound()
             else
                 false;
-            // iOS data-ready adaptive poll: poll(0) when the TLS socket has
-            // pending data (hasPending or kernelRecvQueue > 0), so we process
-            // immediately without spending 1ms in poll(). When no data is
-            // available, poll(1ms) gives the Swift pumps CPU time. This is
-            // safe — poll(0) only fires when there's real work to do, so the
-            // pumps are only briefly starved during active data processing.
-            // After a kernel preemption (poll_us > 10ms), poll(0) catches up
-            // the backlog without waiting, preventing TCP cwnd collapse.
-            const poll_timeout_ms: i32 = if (builtin.os.tag == .ios) blk: {
-                // Adaptive poll for all connection modes: poll(0) when
-                // TLS has pending data (process immediately), poll(1ms)
-                // otherwise. Half-connection mode keeps CPU low through
-                // per-direction poll isolation — the C2S socket only
-                // enters poll when needs_pollout is true, preventing the
-                // 23k iter/sec spin on a readable bridge during UL
-                // saturation. No need for a fixed 10ms penalty.
-                // Count consecutive idle-poll iterations. When the event
-                // loop does no productive I/O for 5+ iterations, the
-                // workload is idle — escalate to 50ms poll to reduce CPU
-                // wakes from ~1000/sec to ~20/sec. Any I/O (DL data
-                // arrival, UL work) resets the counter.
+            // Adaptive poll timeout with idle escalation (all platforms).
+            // Active: poll(0) — immediate retry when data is ready.
+            // Idle: poll(10ms) initially, escalate to 50ms after 30
+            // consecutive idle iterations (~300ms of no work) to reduce
+            // CPU wakes from ~1000/sec to ~20/sec on desktop without the
+            // iOS-specific 1ms penalty that saturates low-end CPUs.
+            const poll_timeout_ms: i32 = blk: {
                 if (!last_iter_had_work and !any_needs_pollout) {
                     idle_iterations += 1;
-                    // When skip_ul_poll is true, the UL bridge has events=0
-                    // so poll can't wake on UL data arriving at the TUN.
-                    // Cap idle escalation to 10ms to limit the UL blackout
-                    // window during speed test transitions.
                     const idle_max_ms: i32 = if (skip_ul_poll) 10 else 50;
                     if (idle_iterations >= 30) break :blk @as(i32, idle_max_ms);
                 } else {
                     idle_iterations = 0;
                 }
-                if (self.tls_socket != null and
-                    (self.tls_socket.?.hasPending() or
-                        self.tls_socket.?.kernelRecvQueue() > 0))
-                    break :blk @as(i32, 0);
-                break :blk @as(i32, 10);
-            } else if (last_iter_had_work)
-                @as(i32, 0)
-            else
-                @as(i32, 1); // 1ms on desktop — no CPU wake limit (iOS uses 10ms above)
+                // iOS: check TLS socket for pending data (hasPending /
+                // kernelRecvQueue > 0) and poll(0) to process immediately.
+                if (builtin.os.tag == .ios) {
+                    if (self.tls_socket != null and
+                        (self.tls_socket.?.hasPending() or
+                            self.tls_socket.?.kernelRecvQueue() > 0))
+                        break :blk @as(i32, 0);
+                }
+                // Desktop & Android: poll(10ms) idle, poll(0) busy.
+                break :blk if (last_iter_had_work) @as(i32, 0) else @as(i32, 10);
+            };
             // Reset — inbound/outbound sections below will set it true on work.
             last_iter_had_work = false;
 
