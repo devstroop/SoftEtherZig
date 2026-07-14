@@ -762,43 +762,15 @@ pub const VpnClient = struct {
         }
 
         // === Cluster server probe: detect broken data-plane nodes early ===
-        // DNS may return multiple IPs; probe each with a quick HTTP GET to
-        // /api/VPN/dtTIMESTAMP. A genuine healthy SoftEther server responds
-        // 401 with Content-Length: 1274. Skip nodes that fail this probe so
-        // we don't waste time on servers that accept TLS but silently drop
-        // upload traffic (broken data-plane). If ALL nodes fail the probe,
-        // fall back to the first resolved IP with a warning.
-        probe_done: {
-            const host = self.config.server_hostname orelse self.config.server_address;
+        // DNS is the app layer's responsibility — server_address is always
+        // a pre-resolved IP literal when arriving here. Use it directly for
+        // the probe; skip DNS resolution (net.getAddressList) entirely.
+        {
+            const host = self.config.server_address;
             const port = self.config.server_port;
-            // Only probe when hostname is not already an IP literal
-            const is_ip_literal = if (net.Address.parseIp4(host, port)) |_| true else |_| if (net.Address.parseIp6(host, port)) |_| true else |_| false;
-            if (!is_ip_literal) {
-                // Resolve all IPs and probe each; pick the first healthy one.
-                // If DNS or all probes fail, keep the address from startup resolution.
-                const addrs = net.getAddressList(self.allocator, host, port) catch {
-                    // DNS failed — skip probing, keep startup resolution result
-                    break :probe_done;
-                };
-                defer addrs.deinit();
-                var ip_buf: [64]u8 = undefined;
-                for (addrs.addrs) |addr| {
-                    if (addr.any.family != std.posix.AF.INET) continue;
-                    const ip_be = @byteSwap(addr.in.sa.addr);
-                    const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{
-                        @as(u8, @truncate(ip_be >> 24)),
-                        @as(u8, @truncate(ip_be >> 16)),
-                        @as(u8, @truncate(ip_be >> 8)),
-                        @as(u8, @truncate(ip_be)),
-                    }) catch continue;
-                    if (probeClusterServer(ip_str, port, self.allocator, host)) {
-                        self.server_ip = addr;
-                        self.effective_server_ip = addr;
-                        std.log.info("Cluster probe OK: {s}:{d}", .{ ip_str, port });
-                        break :probe_done;
-                    }
-                    std.log.debug("Cluster probe failed: {s}:{d} — not a cluster node (this is normal for standalone VPN Gate servers)", .{ ip_str, port });
-                }
+            // server_address is always an IP literal — probe directly
+            if (probeClusterServer(host, port, self.allocator, host)) {
+                std.log.info("Cluster probe OK: {s}:{d}", .{ host, port });
             }
         }
 
