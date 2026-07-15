@@ -82,6 +82,14 @@ pub fn run(client: *VpnClient) !void {
     // connection — sending it as ServerIpAddress in the auth pack is
     // redundant and some servers reject a non-zero value. Keep it at 0
     // to match the original C client behaviour across all server versions.
+    //
+    // Trade-off: setting ServerHostname="" means the server's logs and
+    // controller routing won't see the client's view of the hostname.
+    // SoftEther VPN Gate / public relay nodes expect empty hostname;
+    // private deployments that rely on this field for routing logic
+    // may need the caller to inject it via ClientConfig. If you see
+    // auth failures against a specific server, try restoring the actual
+    // server_ip and server_hostname in this struct.
     const server_ip: u32 = 0;
     const server_hostname = "";
 
