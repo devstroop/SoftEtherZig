@@ -767,12 +767,19 @@ pub const VpnClient = struct {
         // DNS is the app layer's responsibility — server_address is always
         // a pre-resolved IP literal when arriving here. Use it directly for
         // the probe; skip DNS resolution (net.getAddressList) entirely.
+        // If server_address is NOT an IP literal (e.g. a hostname passed by
+        // the CLI), skip probing — probeClusterServer's TCP connect needs a
+        // real IP string, and the app layer owns resolution anyway.
         {
             const host = self.config.server_address;
             const port = self.config.server_port;
-            // server_address is always an IP literal — probe directly
-            if (probeClusterServer(host, port, self.allocator, host)) {
-                std.log.info("Cluster probe OK: {s}:{d}", .{ host, port });
+            // Guard: only probe when the address is an IP literal
+            const is_ip = (net.Address.parseIp4(host, port) catch null) != null or
+                (net.Address.parseIp6(host, port) catch null) != null;
+            if (is_ip) {
+                if (probeClusterServer(host, port, self.allocator, host)) {
+                    std.log.info("Cluster probe OK: {s}:{d}", .{ host, port });
+                }
             }
         }
 
