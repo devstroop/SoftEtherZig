@@ -780,6 +780,8 @@ pub const VpnClient = struct {
                 if (probeClusterServer(host, port, self.allocator, host)) {
                     std.log.info("Cluster probe OK: {s}:{d}", .{ host, port });
                 }
+            } else {
+                std.log.debug("Cluster probe skipped: '{s}' is not an IP literal (DNS resolution is the app layer's responsibility)", .{host});
             }
         }
 
