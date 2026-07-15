@@ -647,10 +647,14 @@ pub const TlsSocket = struct {
         // Without VpnService.protect(), the TLS handshake packets would be
         // routed through the just-created TUN → circular routing → ECONNREFUSED.
         // The Kotlin host registers the protect callback via FFI before connect.
+        // We return an error here because a failed protect() guarantees the
+        // TLS handshake will fail (circular routing) — failing fast gives the
+        // caller a clearer diagnostic than a cryptic timeout or ECONNREFUSED.
         if (comptime builtin.os.tag == .linux and builtin.abi == .android) {
             if (android_protect_fn) |protect| {
                 if (protect(fd_int) < 0) {
-                    std.log.err("TLS: VpnService.protect() failed for fd={d}", .{fd_int});
+                    std.log.err("TLS: VpnService.protect() failed for fd={d} — circular routing will prevent TLS handshake", .{fd_int});
+                    return TlsError.TlsInitializationFailed;
                 }
             }
         }
