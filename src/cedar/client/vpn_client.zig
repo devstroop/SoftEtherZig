@@ -527,6 +527,9 @@ pub const VpnClient = struct {
         // (Android: 50ms loop, iOS: stats timer, desktop: 500ms dart:ffi poll)
         // can read intermediate states (ssl_handshake, authenticating, etc.)
         // instead of blocking for 10-15 seconds on TLS+auth.
+        // NOTE: the catch block does NOT hold the mutex — transitionState()
+        // acquires it internally. Do NOT add a self.mutex.lock() here or
+        // transitionState will deadlock.
         self.mutex.unlock();
         self.performConnection() catch |err| {
             self.last_error = err;
