@@ -632,6 +632,26 @@ pub const VpnClient = struct {
             self.mutex.unlock();
             return;
         }
+        // error_state → transition directly to disconnected.
+        // The normal path goes via .disconnecting → performDisconnect()
+        // which cleans up the data loop thread, adapter, session, and TLS
+        // sockets. When entering from error_state the disconnect_reason
+        // was already set by the error path (e.g. .network_error from a
+        // health check or .auth_failed from performConnection); preserve
+        // it and still run performDisconnect so resources are released.
+        // This handles both cases:
+        //   - error_state before data loop start (connect failure)
+        //     → performDisconnect is a no-op (data_loop_running false,
+        //       adapter/session/tls_socket already null)
+        //   - error_state while data loop was active (health check fail)
+        //     → performDisconnect joins the thread and frees everything
+        if (old_state == .error_state) {
+            self.should_stop = true;
+            self.performDisconnect();
+            self.mutex.unlock();
+            self.finishDisconnect(old_state);
+            return;
+        }
         if (!old_state.canTransitionTo(.disconnecting)) {
             std.log.warn("disconnect: invalid transition from {s}", .{@tagName(old_state)});
             self.mutex.unlock();
