@@ -545,6 +545,15 @@ export fn softether_get_effective_server_ip(client: ?*const VpnClient) u32 {
     return addr.in.sa.addr;
 }
 
+/// Get the last error code for a failed connection. Returns the SoftetherError
+/// enum value (negative on error, 0 = no error recorded).
+/// Callers should read this after a failed connect() to get an actionable
+/// error code rather than relying on generic "connection failed" messages.
+export fn softether_get_last_error(client: ?*const VpnClient) c_int {
+    const c = client orelse return 0;
+    return @intFromEnum(mapClientError(c.last_error orelse return 0));
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
