@@ -423,13 +423,6 @@ pub fn build(b: *std.Build) void {
     linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
     addZlib(shared_lib, b);
 
-    // Android 15+ requires 16 KB page size alignment for native libraries.
-    // Without this, the Play Console flags the library as incompatible and
-    // it will crash on x86_64 emulators and Chromebooks running Android 15+.
-    if (is_android and target_arch == .x86_64) {
-        shared_lib.root_module.page_size = 16384;
-    }
-
     // jni_bridge.c removed — moved to android/app/src/main/cpp/ (app-layer binding, not engine code).
     // Compiled into softether_jni.so via CMake, loaded after libsoftether.so.
 
@@ -469,9 +462,6 @@ pub fn build(b: *std.Build) void {
         static_lib.addIncludePath(.{ .cwd_relative = android_ssl_include });
         static_lib.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         static_lib.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .static });
-        if (target_arch == .x86_64) {
-            static_lib.root_module.page_size = 16384;
-        }
     } else if (target_os == .macos) {
         static_lib.addLibraryPath(.{ .cwd_relative = openssl_lib });
         static_lib.addIncludePath(.{ .cwd_relative = openssl_include });
