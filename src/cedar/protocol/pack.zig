@@ -419,7 +419,7 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     defer allocator.free(name);
 
     // Log name safely — the wire may contain non-UTF-8/binary names
-    var name_buf: [128]u8 = undefined;
+    var name_buf: [128]u8 = .{0} ** 128;
     const safe_name = sanitizeName(name, &name_buf);
 
     // Read type
