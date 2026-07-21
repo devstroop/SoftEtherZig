@@ -258,7 +258,9 @@ void softether_set_event_callback(client, callback_fn, user_data);
 
 // Logging
 void softether_set_log_callback(callback_fn);              // global: external log sink
-void softether_set_log_level(client, level);
+void softether_set_log_level_global(level);                // global: 0=err,1=warn,2=info,3=debug
+void softether_set_log_level(client, level);               // compat shim (legacy, ignores client)
+void softether_set_log_level_client(client, level);        // per-client: delegates to global
 
 // Routing overrides
 void softether_set_default_route(client, bool);
