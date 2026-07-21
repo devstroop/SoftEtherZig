@@ -96,7 +96,7 @@ fn libsoftetherLogFn(
     //    level gate so debug messages still reach the external sink.
     //    Uses the original scope_prefix ++ fmt format to preserve compatibility.
     if (external_log_fn) |cb| {
-        var cb_buf: [1024]u8 = .{0} ** 1024;
+        var cb_buf: [2048]u8 = .{0} ** 2048;
         const scope_prefix = if (scope == .default) "" else "[" ++ @tagName(scope) ++ "] ";
         const cb_text = std.fmt.bufPrintZ(&cb_buf, scope_prefix ++ fmt, args) catch blk: {
             cb_buf[cb_buf.len - 1] = 0;
