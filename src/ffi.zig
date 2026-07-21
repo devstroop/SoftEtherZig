@@ -46,8 +46,43 @@ fn iosWriteStderr(text: []const u8) void {
 const ExternalLogFn = *const fn (level: c_int, msg: [*:0]const u8) callconv(.c) void;
 var external_log_fn: ?ExternalLogFn = null;
 
+/// Runtime log level override. 0=err, 1=warn, 2=info, 3=debug.
+/// Values 4-5 from the old 0-5 API are mapped to 3 (debug).
+/// When set to a value lower than the caller's level, the message is skipped
+/// before any formatting. Initialized to 2 (info) by default; the Flutter
+/// app can raise it to 3 (debug) when "Verbose Logging" is enabled.
+var runtime_log_level: u3 = 2;
+
+/// When true (default), the external log callback is the sole sink — the
+/// function returns immediately after calling it. When false, the message is
+/// also forwarded to platform sinks (Android logcat, iOS stderr, desktop
+/// stdout) after the callback. This preserves the original exclusive-callback
+/// contract for existing FFI consumers.
+var external_log_fn_exclusive: bool = true;
+
 export fn softether_set_log_callback(cb: ?ExternalLogFn) void {
     external_log_fn = cb;
+}
+
+/// Set whether the external log callback is exclusive (stops further output)
+/// or allows fall-through to platform sinks. Default: true (exclusive).
+export fn softether_set_log_callback_exclusive(exclusive: bool) void {
+    external_log_fn_exclusive = exclusive;
+}
+
+/// Set the minimum log level at runtime. Messages below this level are
+/// dropped before formatting. 0=err, 1=warn, 2=info, 3=debug, 4-5→3 (debug).
+/// Values outside 0-5 are clamped. The old 0-5 range is accepted: levels 4
+/// and 5 (previously no-ops) now map to 3 (debug).
+export fn softether_set_log_level_global(level: c_int) void {
+    runtime_log_level = @as(u3, @intCast(@min(@max(level, 0), 3)));
+}
+
+/// Compatibility shim — old two-arg API (client pointer is ignored).
+/// Kept so FFI callers using `softether_set_log_level(client, level)` don't break.
+export fn softether_set_log_level(client: ?*VpnClient, level: c_int) void {
+    _ = client;
+    softether_set_log_level_global(level);
 }
 
 fn libsoftetherLogFn(
@@ -56,7 +91,46 @@ fn libsoftetherLogFn(
     comptime fmt: []const u8,
     args: anytype,
 ) void {
-    var buf: [2048]u8 = undefined;
+    // ── External callback: registered callbacks (e.g. iOS os_log via Swift)
+    //    may want all levels regardless of runtime_log_level. Runs before the
+    //    level gate so debug messages still reach the external sink.
+    //    Uses the original scope_prefix ++ fmt format to preserve compatibility.
+    if (external_log_fn) |cb| {
+        var cb_buf: [1024]u8 = .{0} ** 1024;
+        const scope_prefix = if (scope == .default) "" else "[" ++ @tagName(scope) ++ "] ";
+        const cb_text = std.fmt.bufPrintZ(&cb_buf, scope_prefix ++ fmt, args) catch blk: {
+            cb_buf[cb_buf.len - 1] = 0;
+            break :blk @as([:0]const u8, cb_buf[0 .. cb_buf.len - 1 :0]);
+        };
+        const lvl: c_int = switch (level) {
+            .err => 0,
+            .warn => 1,
+            .info => 2,
+            .debug => 3,
+        };
+        cb(lvl, cb_text.ptr);
+        // By default the external callback is exclusive (the FFI contract says
+        // this sink is set by hosts that can't read stderr). When
+        // external_log_fn_exclusive is true the log is consumed here; when
+        // false we fall through to platform sinks (Android logcat, iOS stderr,
+        // desktop stdout) for dual-routing.
+        if (external_log_fn_exclusive) return;
+    }
+
+    // ── fast-path: skip formatting debug messages in release builds ──
+    if (comptime level == .debug and builtin.mode != .Debug) {
+        if (runtime_log_level < 3) return;
+    }
+    // ── runtime log level gate ──
+    // Zig's Level enum is err=3, warn=2, info=1, debug=0 (reverse order),
+    // but runtime_log_level uses the external mapping (err=0, warn=1,
+    // info=2, debug=3). Map Zig level to external rank before comparing.
+    if ((3 - @intFromEnum(level)) > runtime_log_level) return;
+
+    // Use a 2049-byte buffer but format into the first 2048 bytes so there is
+    // always room for a trailing NUL sentinel — this avoids false "overflow"
+    // when bufPrint exactly fills the available space.
+    var buf: [2049]u8 = .{0} ** 2049;
     const scope_prefix = if (scope == .default) "" else "[" ++ @tagName(scope) ++ "] ";
     const level_prefix = switch (level) {
         .err => "ERR ",
@@ -65,42 +139,31 @@ fn libsoftetherLogFn(
         .debug => "DBG ",
     };
 
-    // External callback first (host-controlled, e.g. iOS os_log direct).
-    if (external_log_fn) |cb| {
-        const text = std.fmt.bufPrintZ(&buf, scope_prefix ++ fmt, args) catch blk: {
-            buf[buf.len - 1] = 0;
-            break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
-        };
-        const lvl: c_int = switch (level) {
-            .err => 0,
-            .warn => 1,
-            .info => 2,
-            .debug => 3,
-        };
-        cb(lvl, text.ptr);
-        return;
-    }
+    // Format into buf[0..2048] — one byte reserved for sentinel.
+    const format_prefix = (if (is_ios_build) level_prefix else "") ++ scope_prefix;
+    const decorated_fmt = if (is_ios_build) fmt ++ "\n" else fmt;
+    const text_slice = std.fmt.bufPrint(buf[0..2048], format_prefix ++ decorated_fmt, args) catch blk: {
+        // Overflow: bufPrint ran out of space. The message was truncated at
+        // buf[0..2048]; null-terminate the last byte and return a [:0] slice
+        // of the first 2047 characters.
+        buf[2047] = 0;
+        break :blk buf[0..2047];
+    };
+    const text_z: [:0]const u8 = buf[0..text_slice.len :0];
 
     if (is_android_build) {
-        const text = std.fmt.bufPrintZ(&buf, scope_prefix ++ fmt, args) catch blk: {
-            buf[buf.len - 1] = 0;
-            break :blk @as([:0]const u8, buf[0 .. buf.len - 1 :0]);
-        };
         const prio: c_int = switch (level) {
             .err => android_log.PRIO_ERROR,
             .warn => android_log.PRIO_WARN,
             .info => android_log.PRIO_INFO,
             .debug => android_log.PRIO_DEBUG,
         };
-        _ = android_log.__android_log_write(prio, "libsoftether", text.ptr);
+        _ = android_log.__android_log_write(prio, "libsoftether", text_z.ptr);
         return;
     }
 
     if (is_ios_build) {
-        const text = std.fmt.bufPrint(&buf, level_prefix ++ scope_prefix ++ fmt ++ "\n", args) catch blk: {
-            break :blk buf[0 .. buf.len - 1];
-        };
-        iosWriteStderr(text);
+        iosWriteStderr(text_z);
         return;
     }
 
@@ -1011,12 +1074,12 @@ export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8)
     c.config.static_ip.?.dns_servers = slices;
 }
 
-/// Set log level (0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace).
-/// Currently a no-op; Zig's log levels are compile-time. The setter exists
-/// for FFI API completeness and logs the requested level.
-export fn softether_set_log_level(client: ?*VpnClient, level: c_int) void {
+/// Set log level (0=err, 1=warn, 2=info, 3=debug).
+/// Values 4–5 from the legacy 0–5 range are clamped to 3 (debug).
+/// Delegates to the library-level softether_set_log_level_global.
+export fn softether_set_log_level_client(client: ?*VpnClient, level: c_int) void {
     _ = client;
-    std.log.info("softether_set_log_level: requested level {d} (compile-time only, no-op)", .{level});
+    softether_set_log_level_global(level);
 }
 
 // ============================================================================

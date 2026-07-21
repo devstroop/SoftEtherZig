@@ -338,16 +338,94 @@ fn readString(allocator: Allocator, reader: anytype) ![]u8 {
     return data;
 }
 
+/// Sanitize a name for logging — copies printable bytes into `buf`, replacing
+/// control characters (0x00–0x1F, 0x7F) with `?`. Valid multi-byte UTF-8
+/// sequences are preserved so internationalized names remain readable. Bytes
+/// that look like continuation bytes (0x80–0xBF) without a leading byte or
+/// that can't start a valid sequence (>0xC0) are also replaced. Truncates at
+/// `buf.len - 1`. A null byte is written at `buf[max]` but is **not** included
+/// in the returned slice — the result is NOT a valid C string (`[:0]const u8`).
+fn sanitizeName(raw: []const u8, buf: []u8) []const u8 {
+    if (buf.len == 0) return "";
+    const max = @min(raw.len, buf.len - 1);
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < max and j < buf.len) {
+        const byte = raw[i];
+        // Single-byte printable ASCII or whitespace
+        if ((byte >= 0x20 and byte <= 0x7e) or byte == 0x09 or byte == 0x0A or byte == 0x0D) {
+            buf[j] = byte;
+            i += 1;
+            j += 1;
+        } else if (byte >= 0xC2 and byte <= 0xF4) {
+            // Multi-byte UTF-8 leader — count continuation bytes.
+            const extra: usize = if (byte < 0xE0) 1 else if (byte < 0xF0) 2 else 3;
+            // Check that there are enough input bytes AND enough room in buf
+            // for the full sequence + trailing null (j < buf.len check).
+            if (i + extra < raw.len and j + extra + 1 < buf.len) {
+                var valid = true;
+                // Validate continuation bytes AND reject overlongs/surrogates.
+                switch (byte) {
+                    0xE0 => {
+                        if (raw[i + 1] < 0xA0 or raw[i + 1] > 0xBF) valid = false;
+                    },
+                    0xED => {
+                        // Surrogate halves U+D800–U+DFFF
+                        if (raw[i + 1] < 0x80 or raw[i + 1] > 0x9F) valid = false;
+                    },
+                    0xF0 => {
+                        if (raw[i + 1] < 0x90 or raw[i + 1] > 0xBF) valid = false;
+                    },
+                    0xF4 => {
+                        if (raw[i + 1] < 0x80 or raw[i + 1] > 0x8F) valid = false;
+                    },
+                    else => {},
+                }
+                if (valid) {
+                    var k: usize = 1;
+                    while (k <= extra) : (k += 1) {
+                        if (raw[i + k] < 0x80 or raw[i + k] > 0xBF) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                }
+                if (valid) {
+                    const seq_len = extra + 1;
+                    @memcpy(buf[j .. j + seq_len], raw[i .. i + seq_len]);
+                    i += seq_len;
+                    j += seq_len;
+                    continue;
+                }
+            }
+            buf[j] = '?';
+            i += 1;
+            j += 1;
+        } else {
+            buf[j] = '?';
+            i += 1;
+            j += 1;
+        }
+    }
+    // j is always < buf.len because every write path checks before writing
+    buf[j] = 0;
+    return buf[0..j];
+}
+
 // Read an element and add to pack
 fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     // Read name
     const name = try readString(allocator, reader);
     defer allocator.free(name);
 
+    // Log name safely — the wire may contain non-UTF-8/binary names
+    var name_buf: [128]u8 = undefined;
+    const safe_name = sanitizeName(name, &name_buf);
+
     // Read type
     const type_int = try reader.readInt(u32, .big);
     if (type_int > 4) {
-        std.log.err("Invalid element type {d} for '{s}'", .{ type_int, name });
+        std.log.err("Invalid element type {d} for '{s}'", .{ type_int, safe_name });
         return error.InvalidElementType;
     }
     const value_type: ValueType = @enumFromInt(type_int);
@@ -355,11 +433,11 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     // Read number of values
     const num_values = try reader.readInt(u32, .big);
     if (num_values > MAX_VALUE_NUM) {
-        std.log.err("Element '{s}': type={d}, num_values={d} exceeds MAX_VALUE_NUM", .{ name, type_int, num_values });
+        std.log.err("Element '{s}': type={d}, num_values={d} exceeds MAX_VALUE_NUM", .{ safe_name, type_int, num_values });
         return error.TooManyValues;
     }
 
-    std.log.debug("Element '{s}': type={s}, values={d}", .{ name, @tagName(value_type), num_values });
+    std.log.debug("Element '{s}': type={s}, values={d}", .{ safe_name, @tagName(value_type), num_values });
 
     // Read each value
     for (0..num_values) |_| {
