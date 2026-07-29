@@ -1048,6 +1048,21 @@ export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, pa
         },
     };
 
+    // Free any allocated strings that the selected interface type doesn't use.
+    switch (interface_type) {
+        SOFTETHER_INTERFACE_TUN, SOFTETHER_INTERFACE_TAP => {
+            if (ingress) |i| c.allocator.free(i);
+        },
+        SOFTETHER_INTERFACE_FD, SOFTETHER_INTERFACE_NULL => {
+            if (device) |d| c.allocator.free(d);
+            if (ingress) |i| c.allocator.free(i);
+        },
+        SOFTETHER_INTERFACE_BRIDGE => {
+            if (device) |d| c.allocator.free(d);
+        },
+        else => {},
+    }
+
     // Free old interface strings only after new config is fully built
     if (c.config.interface) |*old| {
         switch (old.*) {
