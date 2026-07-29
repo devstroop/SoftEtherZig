@@ -35,6 +35,20 @@ pub const InterfaceConfig = union(InterfaceType) {
     fd: FdConfig,
     bridge: BridgeConfig,
     null: void,
+
+    /// Free heap-allocated fields (device_name, ingress_iface).
+    pub fn deinit(self: *InterfaceConfig, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .tun => |*t| {
+                if (t.device_name) |d| allocator.free(d);
+            },
+            .tap => |*t| {
+                if (t.device_name) |d| allocator.free(d);
+            },
+            .bridge => |*b| allocator.free(b.ingress_iface),
+            .fd, .null => {},
+        }
+    }
 };
 
 pub fn parseInterfaceConfig(allocator: std.mem.Allocator, value: []const u8) !InterfaceConfig {
