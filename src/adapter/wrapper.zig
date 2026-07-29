@@ -4,6 +4,7 @@
 //! Provides TUN device management, routing, and packet I/O.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.adapter_tun);
 const Allocator = std.mem.Allocator;
 
@@ -12,11 +13,15 @@ const adapter_mod = @import("mod.zig");
 const VirtualAdapter = adapter_mod.VirtualAdapter;
 pub const TunStats = adapter_mod.TunStats;
 
+pub const InterfaceConfig = adapter_mod.InterfaceConfig;
+pub const factory = @import("factory.zig");
+
 /// Adapter wrapper that bridges VpnClient to the real adapter implementation
 pub const AdapterWrapper = struct {
     allocator: Allocator,
     real_adapter: ?VirtualAdapter,
     is_open: bool,
+    is_null_mode: bool,
     device_name: [32]u8,
     device_name_len: usize,
     mac: [6]u8,
@@ -39,6 +44,7 @@ pub const AdapterWrapper = struct {
             .allocator = allocator,
             .real_adapter = VirtualAdapter.init(allocator),
             .is_open = false,
+            .is_null_mode = false,
             .device_name = [_]u8{0} ** 32,
             .device_name_len = 0,
             .mac = mac,
@@ -79,6 +85,61 @@ pub const AdapterWrapper = struct {
         }
     }
 
+    /// Open with runtime InterfaceConfig selection.
+    /// When config is null or .tun with default settings, falls back to the
+    /// legacy comptime PlatformDevice path (backward compatible).
+    pub fn openWithConfig(self: *Self, iface: ?InterfaceConfig) !void {
+        const config = iface orelse {
+            try self.open();
+            return;
+        };
+        switch (config) {
+            .tun => |cfg| {
+                if (cfg.device_name) |name| std.log.warn("device_name '{s}' ignored for TUN (not yet implemented)", .{name});
+                try self.open();
+                if (cfg.mtu != 1500) {
+                    if (self.real_adapter) |*ra| try ra.setMtu(cfg.mtu);
+                }
+            },
+            .tap => |cfg| {
+                if (cfg.device_name) |name| std.log.warn("device_name '{s}' ignored for TAP (not yet implemented)", .{name});
+                try self.openTap();
+            },
+            .fd => |cfg| {
+                if (self.real_adapter) |*adapter| {
+                    if (cfg.rx_fd) |rx| {
+                        if (cfg.tx_fd) |tx| {
+                            try adapter.openWithFds(rx, tx, "fd-adapter");
+                            self.syncFromAdapter();
+                            return;
+                        }
+                    }
+                    try adapter.openWithFd(cfg.fd orelse return error.MissingFd, "fd-adapter");
+                    self.syncFromAdapter();
+                }
+            },
+            .bridge => |_| return error.BridgeNotImplemented,
+            .null => {
+                self.is_open = true;
+                self.is_null_mode = true;
+            },
+        }
+    }
+
+    fn syncFromAdapter(self: *Self) void {
+        if (self.real_adapter) |*adapter| {
+            self.is_open = adapter.isOpen();
+            if (adapter.getName()) |n| {
+                const len = @min(n.len, self.device_name.len);
+                @memcpy(self.device_name[0..len], n[0..len]);
+                self.device_name_len = len;
+            }
+            if (adapter.getMac()) |m| {
+                self.mac = m;
+            }
+        }
+    }
+
     /// Open using an externally-provided file descriptor (for mobile platforms)
     pub fn openWithFd(self: *Self, fd: i32, name: []const u8) !void {
         if (self.real_adapter) |*adapter| {
@@ -115,12 +176,33 @@ pub const AdapterWrapper = struct {
         }
     }
 
+    /// Open the adapter in TAP (L2 Ethernet) mode.
+    /// On Linux, opens /dev/net/tun with IFF_TAP flag (true L2).
+    /// On Windows, falls back to Wintun (L3 tunnel, not raw L2).
+    /// macOS returns TapNotImplemented.
+    pub fn openTap(self: *Self) !void {
+        self.is_null_mode = false;
+        if (self.real_adapter) |*adapter| {
+            try adapter.openTap();
+            self.is_open = adapter.isOpen();
+            if (adapter.getName()) |n| {
+                const len = @min(n.len, self.device_name.len);
+                @memcpy(self.device_name[0..len], n[0..len]);
+                self.device_name_len = len;
+            }
+            if (adapter.getMac()) |m| {
+                self.mac = m;
+            }
+        }
+    }
+
     /// Close the adapter
     pub fn close(self: *Self) void {
         if (self.real_adapter) |*adapter| {
             adapter.close();
         }
         self.is_open = false;
+        self.is_null_mode = false;
     }
 
     /// Get device name
@@ -165,9 +247,6 @@ pub const AdapterWrapper = struct {
     /// Configure full-tunnel routing (all traffic through VPN)
     pub fn configureFullTunnel(self: *Self, gateway: u32, server_ip: u32) void {
         self.gateway_ip = gateway;
-        // On Android the VpnService.Builder owns the routing table and the
-        // app sandbox blocks netlink writes via SELinux; skip our own routing.
-        const builtin = @import("builtin");
         if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
             std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
             return;
@@ -187,7 +266,6 @@ pub const AdapterWrapper = struct {
     /// `routes_str` is a newline-separated list of CIDR notations.
     pub fn configureSplitTunnel(self: *Self, gateway: u32, routes_str: []const u8) void {
         self.gateway_ip = gateway;
-        const builtin = @import("builtin");
         if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
             std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
             return;
@@ -206,7 +284,6 @@ pub const AdapterWrapper = struct {
     /// Add custom IPv6 split-tunnel routes through a gateway.
     /// `routes_str` is a newline-separated list of IPv6 CIDR notations.
     pub fn addIpv6Routes(self: *Self, gateway: []const u8, routes_str: []const u8) void {
-        const builtin = @import("builtin");
         if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
             return;
         }
@@ -247,6 +324,7 @@ pub const AdapterWrapper = struct {
 
     /// Write a packet to the adapter (TUN device)
     pub fn write(self: *Self, data: []const u8) !usize {
+        if (self.is_null_mode) return data.len;
         if (self.real_adapter) |*adapter| {
             return adapter.write(data);
         }

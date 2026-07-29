@@ -39,6 +39,8 @@
     "ipv6_exclude": null
   },
   
+  "interface": "tun",
+
   "reconnect": {
     "enabled": true,
     "max_attempts": 0

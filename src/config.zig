@@ -227,6 +227,9 @@ pub const JsonConfig = struct {
         ipv6_include: ?[]const u8 = null,
         ipv6_exclude: ?[]const u8 = null,
     } = null,
+
+    // Interface type string (e.g. "tun", "tun:mtu=1400", "null")
+    interface: ?[]const u8 = null,
 };
 
 /// Expand tilde (~) in path to home directory
@@ -346,6 +349,15 @@ pub fn mergeConfigs(
                 .is_hashed = false,
             } };
         }
+    }
+
+    // Interface type
+    if (pickOpt([]const u8, cli_config.interface, env_config.interface, file_config.interface, null)) |iface_str| {
+        const iface_cfg = @import("adapter/interface_config.zig");
+        builder.config.interface = iface_cfg.parseInterfaceConfig(allocator, iface_str) catch |err| blk: {
+            std.log.warn("mergeConfigs: failed to parse interface config '{s}': {}", .{ iface_str, @errorName(err) });
+            break :blk null;
+        };
     }
 
     // Connection settings

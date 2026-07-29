@@ -48,8 +48,9 @@ pub const SessionWrapper = session_mod.SessionWrapper;
 
 // Import adapter module
 const adapter_mod = @import("../../adapter/mod.zig");
-
 const AdapterWrapper = adapter_mod.AdapterWrapper;
+const bridge_mod = @import("../../cedar/bridge/mod.zig");
+const BridgeForwarder = bridge_mod.BridgeForwarder;
 
 // Import protocol modules
 const auth_mod = @import("../protocol/auth.zig");
@@ -64,6 +65,8 @@ const tunnel_mod = @import("../tunnel/mod.zig");
 
 // Import route healing (#9, #10)
 const route_heal = @import("../../adapter/route_heal.zig");
+
+// Import bridge engine (VPN router mode)
 
 // Import DHCPv6
 const dhcpv6_mod = @import("../tunnel/dhcpv6.zig");
@@ -223,6 +226,7 @@ pub const ClientConfig = struct {
 
     // Mobile: external tunnel fd provided by platform (iOS/Android)
     // When set, the VPN client uses this fd instead of opening its own adapter.
+    // DEPRECATED: Use `interface` with InterfaceConfig.fd instead.
     tunnel_fd: ?i32 = null,
 
     // iOS dual socketpair: separate fds for UL (read) and DL (write) directions.
@@ -230,8 +234,13 @@ pub const ClientConfig = struct {
     // (UL: Swift→Zig) and tunnel_tx_fd for writes (DL: Zig→Swift). This
     // prevents upload from starving the download path by keeping them on
     // independent kernel buffers. Falls back to tunnel_fd when not set.
+    // DEPRECATED: Use `interface` with InterfaceConfig.fd instead.
     tunnel_rx_fd: ?i32 = null,
     tunnel_tx_fd: ?i32 = null,
+
+    // Interface configuration (runtime-selectable adapter type).
+    // When null, the legacy comptime PlatformDevice selection is used (TUN).
+    interface: ?adapter_mod.InterfaceConfig = null,
 };
 
 /// IP version preference: null = try both, v4 = IPv4 only, v6 = IPv6 only
@@ -285,6 +294,7 @@ pub const VpnClient = struct {
     disconnect_reason: DisconnectReason,
 
     adapter_ctx: ?AdapterWrapper,
+    bridge_forwarder: ?BridgeForwarder,
     session: ?SessionWrapper,
 
     // Network connection
@@ -355,6 +365,7 @@ pub const VpnClient = struct {
             .stats = .{},
             .disconnect_reason = .none,
             .adapter_ctx = null,
+            .bridge_forwarder = null,
             .session = null,
             .tls_socket = null,
             .conn_manager = null,
@@ -403,6 +414,10 @@ pub const VpnClient = struct {
             ctx.deinit();
             self.adapter_ctx = null;
         }
+        if (self.bridge_forwarder) |*bf| {
+            bf.deinit();
+            self.bridge_forwarder = null;
+        }
         if (self.session) |*sess| {
             sess.deinit();
             self.session = null;
@@ -415,6 +430,93 @@ pub const VpnClient = struct {
             sock.close();
             self.tls_socket = null;
         }
+        freeConfigStrings(self.allocator, &self.config);
+    }
+
+    /// Free all dupe'd strings inside ClientConfig. Called by deinit() and by
+    /// FFI setters before overwriting a config field.
+    pub fn freeConfigStrings(allocator: Allocator, config: *ClientConfig) void {
+        // Guard against double-free: if already reset, skip.
+        // After the first free, server_address and hub_name are set to empty
+        // string literals — freeing them again would be UB.
+        if (config.server_address.len == 0 and config.hub_name.len == 0) return;
+
+        // server_address / server_hostname — dupe'd in softether_create
+        allocator.free(config.server_address);
+        if (config.server_hostname) |h| allocator.free(h);
+        allocator.free(config.hub_name);
+
+        // Auth method fields
+        switch (config.auth) {
+            .password => |*p| {
+                allocator.free(p.username);
+                allocator.free(p.password);
+            },
+            .plain_password => |*p| {
+                allocator.free(p.username);
+                allocator.free(p.password);
+            },
+            .certificate => |*c| {
+                allocator.free(c.cert_data);
+                allocator.free(c.key_data);
+            },
+            .anonymous => {},
+        }
+
+        // Proxy config
+        if (config.proxy) |*proxy| {
+            allocator.free(proxy.host);
+            if (proxy.username) |u| allocator.free(u);
+            if (proxy.password) |p| allocator.free(p);
+        }
+
+        // Routing config — ipv4_include, ipv4_exclude, etc.
+        if (config.routing.ipv4_include) |s| allocator.free(s);
+        if (config.routing.ipv4_exclude) |s| allocator.free(s);
+        if (config.routing.ipv6_include) |s| allocator.free(s);
+        if (config.routing.ipv6_exclude) |s| allocator.free(s);
+
+        // Static IP config
+        if (config.static_ip) |*sip| {
+            if (sip.ipv4_address) |s| allocator.free(s);
+            if (sip.ipv4_netmask) |s| allocator.free(s);
+            if (sip.ipv4_gateway) |s| allocator.free(s);
+            if (sip.ipv6_address) |s| allocator.free(s);
+            if (sip.ipv6_gateway) |s| allocator.free(s);
+            if (sip.dns_servers) |list| {
+                for (list) |srv| allocator.free(srv);
+                allocator.free(list);
+            }
+        }
+
+        // Fingerprint fields
+        if (config.fingerprint) |*fp| {
+            if (fp.client_str) |s| allocator.free(s);
+            if (fp.os_name) |s| allocator.free(s);
+            if (fp.os_version) |s| allocator.free(s);
+            if (fp.os_title) |s| allocator.free(s);
+        }
+
+        // Interface config — device name and ingress_iface
+        if (config.interface) |*iface| {
+            switch (iface.*) {
+                .tun => |*t| {
+                    if (t.device_name) |d| allocator.free(d);
+                },
+                .tap => |*t| {
+                    if (t.device_name) |d| allocator.free(d);
+                },
+                .bridge => |*b| allocator.free(b.ingress_iface),
+                .fd, .null => {},
+            }
+        }
+
+        // Reset everything to null/default to prevent double-free
+        config.* = ClientConfig{
+            .server_address = "",
+            .hub_name = "",
+            .auth = .{ .anonymous = {} },
+        };
     }
 
     pub fn setEventCallback(self: *Self, callback: ?EventCallback, user_data: ?*anyopaque) void {
@@ -1055,7 +1157,28 @@ pub const VpnClient = struct {
         self.adapter_ctx = AdapterWrapper.init(self.allocator);
         var ctx = &self.adapter_ctx.?;
 
-        if (self.config.tunnel_rx_fd) |rx_fd| {
+        // InterfaceConfig takes priority over deprecated tunnel_fd fields
+        if (self.config.interface) |iface| {
+            if (iface == .bridge) {
+                const bc = iface.bridge;
+                self.bridge_forwarder = BridgeForwarder.init(self.allocator, bc.ingress_iface) catch |err| {
+                    std.log.err("Failed to create bridge forwarder: {}", .{err});
+                    return ClientError.AdapterConfigurationFailed;
+                };
+                ctx.openWithConfig(.{ .tap = .{} }) catch |err| {
+                    std.log.err("Failed to open TAP device for bridge mode: {}", .{err});
+                    return ClientError.AdapterConfigurationFailed;
+                };
+                // Bridge routing is configured lazily after DHCP/static IP
+                // assignment in the DHCP ACK handler, where real gateway and
+                // subnet values are available.
+                return;
+            }
+            ctx.openWithConfig(iface) catch |err| {
+                std.log.err("Failed to open adapter with InterfaceConfig: {}", .{err});
+                return ClientError.AdapterConfigurationFailed;
+            };
+        } else if (self.config.tunnel_rx_fd) |rx_fd| {
             if (self.config.tunnel_tx_fd) |tx_fd| {
                 // iOS: dual socketpairs — separate UL (rx) and DL (tx) fds.
                 // This prevents UL from starving DL by keeping each direction on
@@ -1136,6 +1259,22 @@ pub const VpnClient = struct {
                         if (self.config.routing.ipv4_include) |routes| {
                             ctx.configureSplitTunnel(self.gateway_ip, routes);
                         }
+                    }
+                    // Bridge mode routing — set up after DHCP when we have
+                    // the gateway IP. Routes LAN subnet via ingress interface
+                    // and default via VPN gateway through TAP.
+                    if (self.config.interface != null and self.config.interface.? == .bridge) {
+                        const bc = self.config.interface.?.bridge;
+                        adapter_mod.route.configureBridgeRouting(
+                            bc.ingress_iface,
+                            ctx.getName() orelse "tap0",
+                            0, // lan_subnet — unknown until LAN subnet detection is implemented
+                            0, // lan_netmask
+                            self.gateway_ip,
+                            server_ip_be,
+                        ) catch |err| {
+                            std.log.warn("bridge routing failed (non-fatal): {s}", .{@errorName(err)});
+                        };
                     }
                 }
             }
@@ -1228,10 +1367,18 @@ pub const VpnClient = struct {
                 // }
                 if (adapter.real_adapter) |*real| {
                     if (real.device) |dev| {
-                        _ = dev.write(block_data[14..]) catch {
-                            self.tun_write_blocked = true;
-                            self.tun_eagain_count += 1;
-                        };
+                        // TAP mode (bridge): write full L2 frame; TUN mode: strip Ethernet header
+                        if (self.bridge_forwarder != null) {
+                            _ = dev.write(block_data) catch {
+                                self.tun_write_blocked = true;
+                                self.tun_eagain_count += 1;
+                            };
+                        } else {
+                            _ = dev.write(block_data[14..]) catch {
+                                self.tun_write_blocked = true;
+                                self.tun_eagain_count += 1;
+                            };
+                        }
                     }
                 }
             } else if (ethertype == 0x0806) {
@@ -1470,12 +1617,31 @@ pub const VpnClient = struct {
     fn flushTunWriteBatch(self: *Self, adapter: *AdapterWrapper, batch: []const []const u8) void {
         if (adapter.real_adapter) |*real| {
             if (real.device) |dev| {
+                const is_bridge = self.bridge_forwarder != null;
                 for (batch) |data| {
-                    _ = dev.write(data) catch {
-                        self.tun_write_blocked = true;
-                        self.tun_eagain_count += 1;
-                        return;
-                    };
+                    if (is_bridge) {
+                        // TAP mode: prepend Ethernet header before write
+                        const eth_hdr = [14]u8{
+                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+                            0x08, 0x00,
+                        };
+                        var frame: [14 + adapter_mod.MAX_PACKET_SIZE]u8 = undefined;
+                        const copy_len = @min(data.len, frame.len - 14);
+                        @memcpy(frame[0..14], &eth_hdr);
+                        @memcpy(frame[14..][0..copy_len], data[0..copy_len]);
+                        _ = dev.write(frame[0 .. 14 + copy_len]) catch {
+                            self.tun_write_blocked = true;
+                            self.tun_eagain_count += 1;
+                            return;
+                        };
+                    } else {
+                        _ = dev.write(data) catch {
+                            self.tun_write_blocked = true;
+                            self.tun_eagain_count += 1;
+                            return;
+                        };
+                    }
                 }
             }
         }
@@ -1530,11 +1696,12 @@ pub const VpnClient = struct {
             if (adapter.real_adapter) |*real| {
                 if (real.device) |dev| {
                     const fd = dev.getFd();
-                    if (fd < 0) return ClientError.AdapterConfigurationFailed;
+                    if (fd < 0) break :blk @as(std.posix.fd_t, -1);
                     break :blk fd;
                 }
             }
-            return ClientError.AdapterConfigurationFailed;
+            // Null mode or no device: use invalid fd, poll will skip it
+            break :blk @as(std.posix.fd_t, -1);
         };
 
         const tun_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(tun_fd) else @as(usize, @intCast(tun_fd));
@@ -1839,8 +2006,8 @@ pub const VpnClient = struct {
         // completes (see replaceTunFd). Refreshed at the top of every loop iter.
         var poll_tun_sock: std.posix.socket_t = if (builtin.os.tag == .windows) @ptrCast(tun_fd) else tun_fd;
 
-        // Dynamic poll_fds: up to 32 TLS connections + TUN + UDP = 34
-        var poll_fds: [34]std.posix.pollfd = undefined;
+        // Dynamic poll_fds: up to 32 TLS connections + TUN + UDP + bridge ingress = 35
+        var poll_fds: [35]std.posix.pollfd = undefined;
         var tls_fd_count: usize = 0;
 
         // Main packet loop
@@ -1950,7 +2117,20 @@ pub const VpnClient = struct {
                 .revents = 0,
             };
 
-            const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + (if (has_udp) @as(usize, 2) else if (builtin.os.tag == .windows) @as(usize, 0) else @as(usize, 1)));
+            // Bridge ingress fd at index tls_fd_count + 2 (when bridge mode active)
+            const bridge_ingress_fd: i32 = if (self.bridge_forwarder) |*bf| bf.getIngressFd() else -1;
+            const has_bridge = bridge_ingress_fd >= 0;
+            const poll_ingress_idx = tls_fd_count + 2;
+            poll_fds[poll_ingress_idx] = .{
+                .fd = bridge_ingress_fd,
+                .events = if (has_bridge) std.posix.POLL.IN else 0,
+                .revents = 0,
+            };
+
+            // Poll count: TLS + TUN (1) + UDP (1) + bridge (optional).
+            // The UDP slot always occupies tls_fd_count+1 even when disabled,
+            // so the base count always covers up to tls_fd_count+1 inclusive.
+            const total_poll_count: std.posix.nfds_t = @intCast(tls_fd_count + 2 + if (has_bridge) @as(usize, 1) else 0);
             // Adaptive poll: timeout=0 (immediate) when last iter did REAL work,
             // timeout=1ms when idle or stuck. When needs_pollout is true, TUN
             // reads are silently dropped (WouldBlock swallowed by write_fn) and
@@ -2001,6 +2181,7 @@ pub const VpnClient = struct {
 
             const tun_readable = if (builtin.os.tag == .windows) is_configured else (poll_fds[poll_tun_idx].revents & std.posix.POLL.IN) != 0;
             const udp_readable = has_udp and (poll_fds[poll_udp_idx].revents & std.posix.POLL.IN) != 0;
+            const ingress_readable = (bridge_ingress_fd >= 0) and (poll_fds[poll_ingress_idx].revents & std.posix.POLL.IN) != 0;
 
             // ============================================================
             // PENDING WRITE RETRY — drain any stashed outbound data before
@@ -2346,7 +2527,12 @@ pub const VpnClient = struct {
                             if (ethertype_udp == 0x0800 or ethertype_udp == 0x86DD) {
                                 if (adapter.real_adapter) |*real| {
                                     if (real.device) |dev| {
-                                        _ = dev.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
+                                        const is_bridge = self.bridge_forwarder != null;
+                                        if (is_bridge) {
+                                            _ = dev.write(udp_data) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
+                                        } else {
+                                            _ = dev.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
+                                        }
                                     }
                                 }
                             }
@@ -2521,8 +2707,13 @@ pub const VpnClient = struct {
                             while (outbound_count < batch_limit) {
                                 diag.tun_read_attempts += 1;
                                 if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
-                                    if (maybe_len) |ip_len| {
-                                        if (ip_len > 0 and ip_len <= 1500) {
+                                    if (maybe_len) |raw_len| {
+                                        if (raw_len > 0 and raw_len <= 1500 + 14) {
+                                            const is_bridge = self.bridge_forwarder != null;
+                                            // Bridge mode: TAP returns full L2 frames; strip Ethernet header
+                                            const ip_start: usize = if (is_bridge) 14 else 0;
+                                            const ip_len = raw_len - ip_start;
+                                            if (ip_len == 0 or ip_len > 1500) break;
                                             diag.tun_reads += 1;
                                             diag.tun_bytes += ip_len;
                                             const gw_mac = loop_state.gateway_mac orelse blk: {
@@ -2531,7 +2722,7 @@ pub const VpnClient = struct {
                                                 random_mac[0] = (random_mac[0] & 0xFE) | 0x02;
                                                 break :blk random_mac;
                                             };
-                                            if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
+                                            if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][ip_start..raw_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
                                                 diag.eth_pkts += 1;
                                                 diag.eth_bytes += eth_frame.len;
                                                 if (eth_frame.len >= 200) {
@@ -2834,6 +3025,22 @@ pub const VpnClient = struct {
             }
 
             // ============================================================
+            // BRIDGE INGRESS: forward LAN frames into VPN tunnel.
+            // Reads raw L2 frames from the ingress interface and injects them
+            // into the TAP device (UL direction). The data loop's UL path will
+            // pick them up from the TAP fd and send them via TLS.
+            // The reverse direction (VPN→LAN) is handled by kernel routing.
+            // ============================================================
+            if (ingress_readable and self.bridge_forwarder != null) {
+                var buf: [adapter_mod.MAX_PACKET_SIZE]u8 = undefined;
+                const bf = &self.bridge_forwarder.?;
+                _ = bf.forwardToTap(&buf, poll_tun_sock) catch |err| {
+                    std.log.warn("bridge ingress forward failed: {s}", .{@errorName(err)});
+                };
+                last_iter_had_work = true;
+            }
+
+            // ============================================================
             // DIAG: 1Hz throughput / queue / drain stats
             // ============================================================
             diag.poll_iters += 1;
@@ -3047,6 +3254,11 @@ pub const ClientConfigBuilder = struct {
 
     pub fn setStaticIp(self: *ClientConfigBuilder, ip: []const u8, gateway: ?[]const u8) *ClientConfigBuilder {
         self.config.static_ip = .{ .ipv4_address = ip, .ipv4_gateway = gateway };
+        return self;
+    }
+
+    pub fn setInterface(self: *ClientConfigBuilder, iface: adapter_mod.InterfaceConfig) *ClientConfigBuilder {
+        self.config.interface = iface;
         return self;
     }
 

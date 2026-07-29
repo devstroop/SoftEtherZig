@@ -91,6 +91,9 @@ pub const CliArgs = struct {
     // TCP_NODELAY (default: enabled for low latency)
     tcp_nodelay: bool = true,
 
+    // Interface type (tun, tap, fd, bridge, null)
+    interface: ?[]const u8 = null,
+
     // Allocator for dynamic data
     allocator: ?Allocator = null,
 
@@ -339,6 +342,9 @@ pub const ArgParser = struct {
                 self.args.tcp_nodelay = true;
             } else if (std.mem.eql(u8, arg, "--no-tcp-nodelay")) {
                 self.args.tcp_nodelay = false;
+            } else if (std.mem.eql(u8, arg, "--interface")) {
+                i += 1;
+                self.args.interface = try self.requireValue(argv, i, "--interface");
             } else if (arg.len > 0 and arg[0] == '-') {
                 return ParseError.UnknownArgument;
             }
@@ -443,6 +449,9 @@ pub const ArgParser = struct {
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_TCP_NODELAY")) |v| {
             self.args.tcp_nodelay = isTrue(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_INTERFACE")) |v| {
+            if (self.args.interface == null) self.args.interface = v;
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_FULL_TUNNEL")) |v| {
             self.args.default_route = isTrue(v);

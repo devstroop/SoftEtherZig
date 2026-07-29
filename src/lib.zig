@@ -66,6 +66,15 @@ pub const AuthMethod = @import("cedar/client/mod.zig").AuthMethod;
 /// Reconnection behavior configuration
 pub const ReconnectConfig = @import("cedar/client/mod.zig").ReconnectConfig;
 
+/// Interface configuration (runtime-selectable adapter type)
+pub const InterfaceConfig = @import("cedar/client/mod.zig").InterfaceConfig;
+
+/// Adapter factory for creating adapters from InterfaceConfig
+pub const AdapterFactory = @import("cedar/client/mod.zig").AdapterFactory;
+
+/// No-op adapter that discards all packets (for null mode)
+pub const NullDevice = @import("cedar/client/mod.zig").NullDevice;
+
 // ============================================================================
 // Utility Types
 // ============================================================================
@@ -108,6 +117,9 @@ test "library exports" {
     _ = EventCallback;
     _ = AuthMethod;
     _ = ReconnectConfig;
+    _ = InterfaceConfig;
+    _ = AdapterFactory;
+    _ = NullDevice;
     _ = core;
     _ = parseIpv4;
     _ = formatIpv4;

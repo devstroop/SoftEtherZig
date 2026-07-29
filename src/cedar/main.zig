@@ -12,6 +12,7 @@
 pub const protocol = @import("protocol/protocol.zig");
 pub const session = @import("session/mod.zig");
 pub const tunnel = @import("tunnel/mod.zig");
+pub const bridge = @import("bridge/mod.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

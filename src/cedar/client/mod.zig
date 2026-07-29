@@ -97,6 +97,11 @@ pub const ConnectionManager = connection_manager.ConnectionManager;
 pub const ManagedConnection = connection_manager.ManagedConnection;
 pub const TcpDirection = connection_manager.TcpDirection;
 
+// Interface config types
+pub const InterfaceConfig = @import("../../adapter/mod.zig").InterfaceConfig;
+pub const AdapterFactory = @import("../../adapter/mod.zig").AdapterFactory;
+pub const NullDevice = @import("../../adapter/mod.zig").NullDevice;
+
 // Packet processing types
 pub const PacketProcessor = packet_processor.PacketProcessor;
 pub const PacketQueue = packet_processor.PacketQueue;

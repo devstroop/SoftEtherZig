@@ -57,6 +57,9 @@ pub const ConfigFile = struct {
     keepalive_interval_ms: ?u32 = null,
     garp_interval_ms: ?u32 = null,
 
+    // Interface type
+    interface: ?[]const u8 = null,
+
     // Logging
     log_level: ?[]const u8 = null,
     /// Emit non-standard diagnostic logs (DIAG throughput/queue stats,
@@ -300,6 +303,11 @@ pub const ConfigManager = struct {
         if (self.config.keepalive_interval_ms) |v| cli_args.keepalive_interval_ms = v;
         if (self.config.garp_interval_ms) |v| cli_args.garp_interval_ms = v;
 
+        // Interface
+        if (cli_args.interface == null) {
+            if (self.config.interface) |s| cli_args.interface = try alloc.dupe(u8, s);
+        }
+
         // Log level
         if (self.config.log_level) |ll| {
             if (args_mod.LogLevel.fromString(ll)) |l| cli_args.log_level = l;
@@ -338,6 +346,7 @@ pub const ConfigManager = struct {
         cfg.max_connections = cli_args.max_connections;
         cfg.mtu = cli_args.mtu;
         cfg.proxy = cli_args.proxy;
+        cfg.interface = cli_args.interface;
         cfg.tcp_nodelay = cli_args.tcp_nodelay;
         cfg.connect_timeout_ms = cli_args.connect_timeout_ms;
         cfg.read_timeout_ms = cli_args.read_timeout_ms;

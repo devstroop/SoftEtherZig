@@ -680,13 +680,17 @@ pub fn configureDns(interface: []const u8, dns_servers: []const u32) !void {
         var ip_strs: [16][16]u8 = undefined;
         var argv: [16][]const u8 = undefined;
         var argc: usize = 0;
-        argv[argc] = "networksetup"; argc += 1;
-        argv[argc] = "-setdnsservers"; argc += 1;
-        argv[argc] = interface; argc += 1;
+        argv[argc] = "networksetup";
+        argc += 1;
+        argv[argc] = "-setdnsservers";
+        argc += 1;
+        argv[argc] = interface;
+        argc += 1;
         for (dns_servers, 0..) |dns, i| {
             if (argc >= argv.len) break;
             ip_strs[i] = formatIpv4(dns);
-            argv[argc] = trimNull(&ip_strs[i]); argc += 1;
+            argv[argc] = trimNull(&ip_strs[i]);
+            argc += 1;
         }
         _ = runCommandArgv(argv[0..argc]);
     }
@@ -1066,6 +1070,188 @@ test "Route structure" {
     try std.testing.expectEqualStrings("192.168.1.1", trimNull(&gw));
 
     try std.testing.expectEqualStrings("en0", route.getInterface());
+}
+
+/// Validate that an interface name contains only safe characters
+/// (alphanumeric, underscore, dot, hyphen). Returns the name unchanged
+/// on success, or `error.InvalidInterfaceName` if it contains unsafe chars.
+fn validateIfaceName(name: []const u8) ![]const u8 {
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '.' and c != '-') {
+            return error.InvalidInterfaceName;
+        }
+    }
+    if (name.len == 0) return error.InvalidInterfaceName;
+    return name;
+}
+
+/// Execute `ip route` with the given subcommand and args.
+/// Uses direct exec (not shell) to prevent command injection.
+fn execIpRoute(args: []const []const u8) !void {
+    var child = std.process.Child.init(args, std.heap.page_allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const result = try child.wait();
+    if (result.Exited != 0) {
+        std.log.debug("ip route command exited with code {d}", .{result.Exited});
+        return error.SystemCommandFailed;
+    }
+}
+
+/// Configure bridge-mode routing: route the LAN subnet through the ingress
+/// interface, and everything else through the VPN (TUN) device.
+/// Requires CAP_NET_ADMIN (Linux) or root (macOS).
+///
+/// Called from BridgeForwarder after the ingress raw socket is opened.
+/// On Linux: uses `ip route` with direct exec (no shell) to prevent injection.
+pub fn configureBridgeRouting(
+    ingress_iface: []const u8,
+    tun_iface: []const u8,
+    lan_subnet: u32,
+    lan_netmask: u32,
+    vpn_gateway: u32,
+    vpn_server_ip: u32,
+) !void {
+    if (builtin.os.tag != .linux) return error.NotYetImplemented;
+
+    const safe_ingress = try validateIfaceName(ingress_iface);
+    const safe_tun = try validateIfaceName(tun_iface);
+
+    const prefix_len = netmaskToPrefixLen(lan_netmask);
+    var subnet_buf: [32]u8 = undefined;
+    const subnet_str = formatIpBuf(&subnet_buf, lan_subnet);
+
+    var gw_buf: [32]u8 = undefined;
+    const gw_str = formatIpBuf(&gw_buf, vpn_gateway);
+
+    // Add host route for VPN server via physical gateway BEFORE changing
+    // the default route, to prevent routing loops (VPN traffic to the server
+    // must go through the physical gateway, not through the tunnel).
+    // We detect the physical gateway by reading the current default route.
+    addVpnServerHostRoute(vpn_server_ip) catch |err| {
+        std.log.warn("bridge routing: add VPN server host route failed: {s}", .{@errorName(err)});
+    };
+
+    // Build CIDR: subnet/prefix (e.g. 192.168.1.0/24) — uses prefix length, not netmask
+    // Skip if lan_subnet is 0 (caller didn't provide LAN subnet info)
+    if (lan_subnet != 0 and lan_netmask != 0) {
+        var cidr_buf: [64]u8 = undefined;
+        const cidr = std.fmt.bufPrint(&cidr_buf, "{s}/{d}", .{ subnet_str, prefix_len }) catch return error.SystemCommandFailed;
+        execIpRoute(&[_][]const u8{
+            "ip", "route", "add", cidr, "dev", safe_ingress,
+        }) catch |err| {
+            std.log.warn("bridge routing: add LAN route '{s}' failed: {s}", .{ cidr, @errorName(err) });
+        };
+    } else {
+        std.log.debug("bridge routing: skipping LAN route (no subnet info)", .{});
+    }
+
+    // Route everything else through the VPN (TUN) device with low metric
+    execIpRoute(&[_][]const u8{
+        "ip", "route", "add", "default", "via", gw_str, "dev", safe_tun, "metric", "10",
+    }) catch |err| {
+        std.log.debug("bridge routing: default route add (may already exist): {s}", .{@errorName(err)});
+        execIpRoute(&[_][]const u8{
+            "ip", "route", "replace", "default", "via", gw_str, "dev", safe_tun, "metric", "10",
+        }) catch |err2| {
+            std.log.warn("bridge routing: replace default route failed: {s}", .{@errorName(err2)});
+        };
+    };
+
+    std.log.info("Bridge routing configured: default via {s} ({s})", .{ gw_str, safe_tun });
+}
+
+/// Add a host route for the VPN server IP via the current physical gateway,
+/// so that traffic to the VPN server bypasses the tunnel (prevents routing loop).
+fn addVpnServerHostRoute(vpn_server_ip: u32) !void {
+    // Read the current default route to find the physical gateway
+    var child = std.process.Child.init(
+        &[_][]const u8{ "ip", "route", "show", "default" },
+        std.heap.page_allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    var stdout_buf: [4096]u8 = undefined;
+    const stdout = child.stdout.?;
+    const n = try stdout.read(&stdout_buf);
+    _ = try child.wait();
+    const output = stdout_buf[0..n];
+
+    // Parse "default via X.X.X.X dev YYY" to extract gateway IP
+    var gw: u32 = 0;
+    var it = std.mem.tokenizeScalar(u8, output, ' ');
+    while (it.next()) |tok| {
+        if (std.mem.eql(u8, tok, "via")) {
+            if (it.next()) |gw_str| {
+                gw = parseIpv4(gw_str) catch 0;
+            }
+            break;
+        }
+    }
+    if (gw == 0) return error.NoDefaultGateway;
+
+    var gw_buf: [32]u8 = undefined;
+    const gw_str = formatIpBuf(&gw_buf, gw);
+
+    var srv_buf: [32]u8 = undefined;
+    const srv_str = formatIpBuf(&srv_buf, vpn_server_ip);
+
+    execIpRoute(&[_][]const u8{
+        "ip", "route", "add", srv_str, "via", gw_str,
+    }) catch |err| {
+        // Route may already exist if configured elsewhere
+        std.log.debug("bridge routing: add VPN host route (may already exist): {s}", .{@errorName(err)});
+    };
+}
+
+/// Remove bridge-mode routing rules and restore the original default route.
+/// Saves the current default gateway before removing VPN routes, then
+/// re-adds the original default route through the physical interface.
+pub fn removeBridgeRouting(ingress_iface: []const u8, tun_iface: []const u8) void {
+    if (builtin.os.tag != .linux) return;
+    const safe_tun = validateIfaceName(tun_iface) catch return;
+    const safe_ingress = validateIfaceName(ingress_iface) catch return;
+
+    // Capture the original default gateway before removing VPN routes
+    const original_gw = getDefaultGateway(std.heap.page_allocator) catch {
+        std.log.warn("bridge routing: cannot save original gateway for restore", .{});
+        return;
+    };
+
+    execIpRoute(&[_][]const u8{
+        "ip", "route", "del", "default", "dev", safe_tun, "metric", "10",
+    }) catch |err| {
+        std.log.debug("bridge routing: remove default metric route: {s}", .{@errorName(err)});
+    };
+
+    execIpRoute(&[_][]const u8{
+        "ip", "route", "del", "default", "dev", safe_tun,
+    }) catch |err| {
+        std.log.debug("bridge routing: remove default route: {s}", .{@errorName(err)});
+    };
+
+    // Restore the original default route through the physical interface
+    var gw_buf: [32]u8 = undefined;
+    const gw_str = formatIpBuf(&gw_buf, original_gw);
+    execIpRoute(&[_][]const u8{
+        "ip", "route", "add", "default", "via", gw_str, "dev", safe_ingress,
+    }) catch |err| {
+        std.log.warn("bridge routing: failed to restore default route via {s}: {s}", .{ safe_ingress, @errorName(err) });
+    };
+}
+
+fn netmaskToPrefixLen(netmask: u32) u8 {
+    return @intCast(@popCount(netmask));
+}
+
+fn formatIpBuf(buf: *[32]u8, ip: u32) []const u8 {
+    const slice = std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+        (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+    }) catch return "0.0.0.0";
+    return slice;
 }
 
 test "RoutingState initialization" {

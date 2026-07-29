@@ -268,7 +268,10 @@ void softether_set_ipv6_include(softether_client_t client, const char* routes);
  *  Only used when enable_custom_routes is true. Pass NULL or "" to clear. */
 void softether_set_ipv6_exclude(softether_client_t client, const char* routes);
 
-/** Set tunnel file descriptor (utun fd) for packet I/O. Call after connect(). */
+/**
+ * Set tunnel file descriptor (utun fd) for packet I/O. Call after connect().
+ * @deprecated Use softether_set_interface() with SOFTETHER_INTERFACE_FD instead.
+ */
 void softether_set_tunnel_fd(softether_client_t client, int32_t fd);
 
 /**
@@ -308,6 +311,32 @@ void softether_set_event_callback(
  * Pass empty strings for username/password when the proxy doesn't require auth.
  */
 void softether_set_proxy(softether_client_t client, int proxy_type, const char* host, uint16_t port, const char* username, const char* password);
+
+/* ========================================================================== */
+/* Interface Configuration                                                    */
+/* ========================================================================== */
+
+/** Virtual network interface types for softether_set_interface(). */
+typedef enum {
+    SOFTETHER_INTERFACE_TUN    = 0,
+    SOFTETHER_INTERFACE_TAP    = 1,
+    SOFTETHER_INTERFACE_FD     = 2,
+    SOFTETHER_INTERFACE_BRIDGE = 3,
+    SOFTETHER_INTERFACE_NULL   = 4,
+} softether_interface_type_t;
+
+/**
+ * Set the virtual network interface type and configuration.
+ * Replaces the legacy compile-time PlatformDevice selection with a
+ * runtime-configurable interface type.
+ *
+ * @param client         Client handle.
+ * @param interface_type One of softether_interface_type_t values.
+ * @param params         JSON-encoded configuration string (e.g. "{\"mtu\":1400}") or NULL.
+ *                       Pass NULL for default configuration.
+ * Must be called before softether_connect().
+ */
+void softether_set_interface(softether_client_t client, int interface_type, const char* params);
 
 /* ========================================================================== */
 /* Diagnostics                                                                */

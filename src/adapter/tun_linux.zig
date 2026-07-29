@@ -31,6 +31,8 @@ const IFF_RUNNING: c_short = 0x40;
 const IFF_NOARP: c_short = 0x80;
 const IFF_POINTOPOINT: c_short = 0x10;
 
+const SIOCSIFHWADDR: c_int = 0x8924;
+
 pub const TunLinuxError = error{
     NotLinux,
     OpenFailed,
@@ -62,6 +64,14 @@ const IfreqMtu = extern struct {
     padding: [20]u8,
 };
 
+const IfreqHwaddr = extern struct {
+    ifrn_name: [16]u8,
+    /// Raw sockaddr bytes (2 bytes sa_family + 14 bytes sa_data).
+    /// Constructed as raw bytes to avoid UB from directly initialising posix.sockaddr.
+    ifru_hwaddr: [16]u8,
+    padding: [8]u8,
+};
+
 /// Linux TUN device structure
 pub const TunLinuxDevice = struct {
     allocator: std.mem.Allocator,
@@ -89,6 +99,121 @@ pub const TunLinuxDevice = struct {
     halt: bool,
 
     connection_start_time: i64,
+
+    /// Set the MTU on this device via SIOCSIFMTU ioctl.
+    pub fn setMtu(self: *TunLinuxDevice, mtu: u16) TunLinuxError!void {
+        _ = self.fd orelse return TunLinuxError.DeviceNotOpen;
+        // SIOCSIFMTU must be called on a socket (AF_INET, SOCK_DGRAM), not on
+        // the TUN device fd. Using the tun fd causes EINVAL.
+        const sock_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch |err| {
+            std.log.warn("setMtu: failed to create control socket: {}", .{err});
+            return TunLinuxError.SocketFailed;
+        };
+        defer posix.close(sock_fd);
+        var mtu_req = IfreqMtu{
+            .ifrn_name = self.device_name,
+            .ifru_mtu = mtu,
+            .padding = [_]u8{0} ** 20,
+        };
+        if (std.c.ioctl(sock_fd, SIOCSIFMTU, @intFromPtr(&mtu_req)) < 0) {
+            std.log.warn("Failed to set MTU {d}: errno={}", .{ mtu, std.c._errno().* });
+            return TunLinuxError.IoctlFailed;
+        }
+        std.log.info("Set MTU to {d} on {s}", .{ mtu, self.getName() });
+    }
+
+    /// Open a Linux TAP (L2 Ethernet) device
+    /// Uses IFF_TAP instead of IFF_TUN. Returns a TunLinuxDevice that reads/writes
+    /// full Ethernet frames (L2) rather than raw IP packets (L3).
+    pub fn openTap(allocator: std.mem.Allocator) TunLinuxError!*TunLinuxDevice {
+        if (builtin.os.tag != .linux) {
+            return TunLinuxError.NotLinux;
+        }
+
+        const fd = posix.open("/dev/net/tun", .{ .ACCMODE = .RDWR }, 0) catch |err| {
+            std.log.err("Failed to open /dev/net/tun: {}", .{err});
+            if (err == error.AccessDenied) {
+                return TunLinuxError.PermissionDenied;
+            }
+            return TunLinuxError.OpenFailed;
+        };
+        errdefer posix.close(fd);
+
+        var ifr = IfreqFlags{
+            .ifrn_name = [_]u8{0} ** 16,
+            .ifru_flags = @intCast(IFF_TAP | IFF_NO_PI),
+            .padding = [_]u8{0} ** 22,
+        };
+
+        const tap_pattern = "tap%d";
+        @memcpy(ifr.ifrn_name[0..tap_pattern.len], tap_pattern);
+
+        const ioctl_result = std.c.ioctl(fd, TUNSETIFF, @intFromPtr(&ifr));
+        if (ioctl_result < 0) {
+            std.log.err("TAP open: TUNSETIFF ioctl failed: errno={}", .{std.c._errno().*});
+            return TunLinuxError.IoctlFailed;
+        }
+
+        var device_name: [16]u8 = ifr.ifrn_name;
+        var name_len: usize = 0;
+        for (device_name) |c| {
+            if (c == 0) break;
+            name_len += 1;
+        }
+
+        std.log.info("Created TAP device: {s}", .{device_name[0..name_len]});
+
+        var mac: [6]u8 = undefined;
+        std.crypto.random.bytes(&mac);
+        mac[0] = (mac[0] & 0xFC) | 0x02;
+
+        // Apply MAC to the TAP interface via SIOCSIFHWADDR.
+        // This requires CAP_NET_ADMIN on the ioctl socket.
+        {
+            const sock_fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch |err| blk: {
+                std.log.warn("TAP open: failed to open control socket for MAC setup: {}", .{err});
+                break :blk -1;
+            };
+            if (sock_fd >= 0) {
+                defer posix.close(sock_fd);
+                var hwreq = IfreqHwaddr{
+                    .ifrn_name = device_name,
+                    .ifru_hwaddr = [_]u8{0} ** 16,
+                    .padding = [_]u8{0} ** 8,
+                };
+                // Set sa_family = ARPHRD_ETHER (1) in network byte order
+                hwreq.ifru_hwaddr[0] = 1; // sa_family low byte
+                hwreq.ifru_hwaddr[1] = 0; // sa_family high byte
+                @memcpy(hwreq.ifru_hwaddr[2..8], &mac);
+                if (std.c.ioctl(sock_fd, SIOCSIFHWADDR, @intFromPtr(&hwreq)) < 0) {
+                    std.log.warn("TAP open: SIOCSIFHWADDR failed (non-fatal): errno={}", .{std.c._errno().*});
+                } else {
+                    std.log.info("TAP device MAC set to {any}", .{mac});
+                }
+            }
+        }
+
+        const device = allocator.create(TunLinuxDevice) catch {
+            return TunLinuxError.OpenFailed;
+        };
+
+        device.* = TunLinuxDevice{
+            .allocator = allocator,
+            .fd = fd,
+            .device_name = device_name,
+            .mac_address = mac,
+            .ipv4_address = 0,
+            .ipv4_netmask = 0,
+            .ipv4_gateway = 0,
+            .stats = TunStats{},
+            .is_open = true,
+            .is_configured = false,
+            .halt = false,
+            .connection_start_time = std.time.milliTimestamp(),
+        };
+
+        return device;
+    }
 
     /// Open a Linux TUN device
     pub fn open(allocator: std.mem.Allocator) TunLinuxError!*TunLinuxDevice {

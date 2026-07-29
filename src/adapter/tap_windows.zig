@@ -360,6 +360,13 @@ pub const TapWindowsDevice = struct {
     /// Configure with temporary settings for DHCP phase
     /// On Windows with Wintun (L3), we skip this — the VPN tunnel performs its own
     /// DHCP negotiation and then configure() sets a static IP from the DHCP ACK.
+    /// Set the MTU on this device. Not supported for Wintun (handled by driver).
+    pub fn setMtu(self: *TapWindowsDevice, mtu: u16) !void {
+        _ = self;
+        _ = mtu;
+        std.log.debug("setMtu not supported for Wintun", .{});
+    }
+
     /// Running `netsh ... dhcp` here would trigger Windows' built-in DHCP client
     /// which races the tunnel DHCP and falls back to APIPA (169.254.x.x).
     pub fn configureTemporary(self: *TapWindowsDevice) !void {

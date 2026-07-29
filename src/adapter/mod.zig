@@ -19,6 +19,20 @@ pub const route = @import("route.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const wrapper = @import("wrapper.zig");
 
+// Interface config
+pub const InterfaceConfig = @import("interface_config.zig").InterfaceConfig;
+pub const TunConfig = @import("interface_config.zig").TunConfig;
+pub const TapConfig = @import("interface_config.zig").TapConfig;
+pub const FdConfig = @import("interface_config.zig").FdConfig;
+pub const BridgeConfig = @import("interface_config.zig").BridgeConfig;
+pub const parseInterfaceConfig = @import("interface_config.zig").parseInterfaceConfig;
+
+// Factory
+pub const AdapterFactory = @import("factory.zig").AdapterFactory;
+
+// Null device (kept for reference — null mode handled directly in wrapper)
+pub const NullDevice = @import("null_device.zig").NullDevice;
+
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
 
@@ -214,6 +228,8 @@ pub const deleteDefaultRoute = route.deleteDefaultRoute;
 pub const deleteRoute = route.deleteRoute;
 pub const configureDns = route.configureDns;
 pub const clearDns = route.clearDns;
+pub const configureBridgeRouting = route.configureBridgeRouting;
+pub const removeBridgeRouting = route.removeBridgeRouting;
 
 /// Virtual adapter state combining utun device with routing
 pub const VirtualAdapter = struct {
@@ -260,6 +276,51 @@ pub const VirtualAdapter = struct {
 
     pub fn deinit(self: *VirtualAdapter) void {
         self.close();
+    }
+
+    /// Open the virtual adapter in TAP (L2 Ethernet) mode (platform-specific).
+    /// Linux: /dev/net/tun with IFF_TAP.
+    /// Windows: falls back to Wintun (L3 tunnel — TAP semantics, not raw L2).
+    /// macOS/Android/iOS: unsupported (returns UnsupportedPlatform).
+    pub fn openTap(self: *VirtualAdapter) !void {
+        if (self.device != null) return;
+
+        if (is_android) {
+            return error.UnsupportedPlatform;
+        } else if (builtin.os.tag == .linux) {
+            self.device = tun_linux.TunLinuxDevice.openTap(self.allocator) catch |err| {
+                std.log.err("Failed to open Linux TAP device: {}", .{err});
+                return err;
+            };
+            try self.device.?.configureTemporary();
+        } else if (builtin.os.tag == .macos) {
+            // macOS TAP requires vmnet.framework (com.apple.vm.networking entitlement)
+            // or the legacy tuntaposx kext — neither is implemented yet.
+            std.log.err("TAP mode not yet supported on macOS", .{});
+            return error.UnsupportedPlatform;
+        } else if (builtin.os.tag == .windows) {
+            // Windows: TapWindowsDevice wraps Wintun (L3 tunnel — maps to TUN semantics).
+            // True L2 TAP via TAP-Windows6 NDIS driver is not yet implemented.
+            self.device = TapWindowsDevice.open(self.allocator) catch |err| {
+                std.log.err("Failed to open Windows TAP device: {}", .{err});
+                return err;
+            };
+            try self.device.?.configureTemporary();
+        } else if (builtin.os.tag == .ios) {
+            return error.UnsupportedPlatform;
+        } else {
+            return error.UnsupportedPlatform;
+        }
+    }
+
+    /// Set MTU on the underlying device. Calls through to platform-specific setMtu.
+    pub fn setMtu(self: *VirtualAdapter, mtu: u16) !void {
+        if (self.device) |dev| {
+            if (comptime is_android) return;
+            if (comptime builtin.os.tag == .linux) return dev.setMtu(mtu);
+            if (comptime builtin.os.tag == .macos) return dev.setMtu(mtu);
+            if (comptime builtin.os.tag == .windows) return dev.setMtu(mtu);
+        }
     }
 
     /// Open the virtual adapter (platform-specific)

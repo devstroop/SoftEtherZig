@@ -584,6 +584,14 @@ pub const UtunDevice = struct {
         };
     }
 
+    /// Set the MTU on this utun device. Uses ifconfig (requires root).
+    pub fn setMtu(self: *UtunDevice, mtu: u16) !void {
+        if (!self.is_open) return error.DeviceNotOpen;
+        // TODO: Use ifconfig to set MTU when privilege escalation is available.
+        _ = mtu;
+        std.log.debug("setMtu not yet implemented for utun (needs ifconfig)", .{});
+    }
+
     /// Configure with temporary link-local IP for initial setup
     pub fn configureTemporary(self: *UtunDevice) !void {
         // Generate random link-local address: 169.254.x.x

@@ -183,6 +183,12 @@
       },
       "additionalProperties": false
     },
+    "interface": {
+      "type": ["string", "null"],
+      "description": "Virtual network interface type. Options: 'tun', 'tap', 'fd', 'bridge', 'null'. Append ':key=val,...' for configuration (e.g. 'tun:mtu=1400').",
+      "default": "tun",
+      "examples": ["tun", "tun:mtu=1400,device=utun8", "fd", "null"]
+    },
     "log_level": {
       "type": "string",
       "description": "Logging verbosity level",

@@ -8,19 +8,30 @@ const log = std.log.scoped(.app);
 const cli = @import("../cli/mod.zig");
 const client = @import("../cedar/client/mod.zig");
 const tls = @import("../mayaqua/network/tls.zig");
+const adapter_mod = @import("../adapter/mod.zig");
+const iface_config = @import("../adapter/interface_config.zig");
 
 pub const ConfigBuildError = error{
     MissingAddress,
     MissingHub,
     MissingPassword,
     InvalidProxyUrl,
+    InvalidInterfaceType,
+    MissingBridgeIngress,
+    Overflow,
+    InvalidCharacter,
+    OutOfMemory,
 };
 
 /// Build a ClientConfig from CLI arguments
-pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.ClientConfig {
+pub fn buildClientConfig(allocator: std.mem.Allocator, args: *const cli.CliArgs) ConfigBuildError!client.ClientConfig {
     // Validate required fields — address is mandatory
-    const server_address = args.address orelse return error.MissingAddress;
-    const hub = args.hub orelse return error.MissingHub;
+    const server_address = try allocator.dupe(u8, args.address orelse return error.MissingAddress);
+    const hub = try allocator.dupe(u8, args.hub orelse return error.MissingHub);
+
+    // Free allocations on any subsequent error
+    errdefer allocator.free(server_address);
+    errdefer allocator.free(hub);
 
     // Build auth method
     const auth: client.AuthMethod = blk: {
@@ -100,6 +111,9 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .garp_interval_ms = args.garp_interval_ms,
         .tcp_nodelay = args.tcp_nodelay,
         .proxy = if (args.proxy) |proxy_str| try parseProxyUrl(proxy_str) else null,
+        .interface = if (args.interface) |iface_str| blk: {
+            break :blk try iface_config.parseInterfaceConfig(allocator, iface_str);
+        } else null,
     };
 }
 
@@ -201,7 +215,7 @@ test "buildClientConfig valid" {
         .password = "pass",
         .port = 443,
     };
-    const config = try buildClientConfig(&args);
+    const config = try buildClientConfig(std.testing.allocator, &args);
 
     try std.testing.expectEqualStrings("192.168.1.1", config.server_address);
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
@@ -282,7 +296,7 @@ test "buildClientConfig missing address" {
     };
     defer args.deinit();
 
-    try std.testing.expectError(error.MissingAddress, buildClientConfig(&args));
+    try std.testing.expectError(error.MissingAddress, buildClientConfig(std.testing.allocator, &args));
 }
 
 test "buildClientConfig missing hub" {
@@ -293,7 +307,7 @@ test "buildClientConfig missing hub" {
     };
     defer args.deinit();
 
-    try std.testing.expectError(error.MissingHub, buildClientConfig(&args));
+    try std.testing.expectError(error.MissingHub, buildClientConfig(std.testing.allocator, &args));
 }
 
 test "buildClientConfig anonymous auth" {
@@ -303,7 +317,7 @@ test "buildClientConfig anonymous auth" {
     };
     defer args.deinit();
 
-    const config = try buildClientConfig(&args);
+    const config = try buildClientConfig(std.testing.allocator, &args);
     try std.testing.expect(config.auth == .anonymous);
 }
 
@@ -316,7 +330,7 @@ test "buildClientConfig password hash" {
     };
     defer args.deinit();
 
-    const config = try buildClientConfig(&args);
+    const config = try buildClientConfig(std.testing.allocator, &args);
     switch (config.auth) {
         .password => |p| {
             try std.testing.expect(p.is_hashed);

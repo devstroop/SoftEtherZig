@@ -250,6 +250,12 @@ pub const FdAdapter = struct {
         self.ipv4_gateway = gateway;
     }
 
+    /// Set the MTU. No-op on mobile — set via VpnService.Builder / NE at tunnel build time.
+    pub fn setMtu(self: *FdAdapter, mtu: u16) !void {
+        _ = self;
+        _ = mtu;
+    }
+
     /// No-op on mobile — the platform configures the interface
     pub fn configureTemporary(self: *FdAdapter) !void {
         _ = self;

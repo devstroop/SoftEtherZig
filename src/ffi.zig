@@ -210,7 +210,7 @@ const ReconnectConfig = client_mod.ReconnectConfig;
 const ClientHandle = *VpnClient;
 
 /// Allocator for FFI-created objects (uses page allocator for safety)
-const ffi_allocator = std.heap.page_allocator;
+const ffi_allocator = std.heap.c_allocator;
 
 // ============================================================================
 // Error Codes
@@ -820,11 +820,21 @@ export fn softether_set_proxy(
 ) void {
     const c = client orelse return;
     if (proxy_type == 0) {
+        if (c.config.proxy) |*old| {
+            c.allocator.free(old.host);
+            if (old.username) |u| c.allocator.free(u);
+            if (old.password) |p| c.allocator.free(p);
+        }
         c.config.proxy = null;
         return;
     }
     const host_in = std.mem.span(host);
     if (host_in.len == 0) {
+        if (c.config.proxy) |*old| {
+            c.allocator.free(old.host);
+            if (old.username) |u| c.allocator.free(u);
+            if (old.password) |p| c.allocator.free(p);
+        }
         c.config.proxy = null;
         return;
     }
@@ -833,16 +843,25 @@ export fn softether_set_proxy(
         2 => .socks5,
         else => return,
     };
-    const host_slice = ffi_allocator.dupe(u8, host_in) catch return;
+    const host_slice = c.allocator.dupe(u8, host_in) catch return;
+    errdefer c.allocator.free(host_slice);
     var username_slice: ?[]const u8 = null;
     var password_slice: ?[]const u8 = null;
     const username_str = std.mem.span(username);
     const password_str = std.mem.span(password);
     if (username_str.len > 0) {
-        username_slice = ffi_allocator.dupe(u8, username_str) catch return;
+        username_slice = c.allocator.dupe(u8, username_str) catch return;
+        errdefer if (username_slice) |u| c.allocator.free(u);
     }
     if (password_str.len > 0) {
-        password_slice = ffi_allocator.dupe(u8, password_str) catch return;
+        password_slice = c.allocator.dupe(u8, password_str) catch return;
+        errdefer if (password_slice) |p| c.allocator.free(p);
+    }
+    // Free old strings only after new allocations succeed
+    if (c.config.proxy) |*old| {
+        c.allocator.free(old.host);
+        if (old.username) |u| c.allocator.free(u);
+        if (old.password) |p| c.allocator.free(p);
     }
     c.config.proxy = .{
         .host = host_slice,
@@ -880,10 +899,13 @@ export fn softether_set_ipv4_include(client: ?*VpnClient, routes: [*:0]const u8)
     const c = client orelse return;
     const routes_in = std.mem.span(routes);
     if (routes_in.len == 0) {
+        if (c.config.routing.ipv4_include) |old| c.allocator.free(old);
         c.config.routing.ipv4_include = null;
         return;
     }
-    c.config.routing.ipv4_include = ffi_allocator.dupe(u8, routes_in) catch return;
+    const new_include4 = c.allocator.dupe(u8, routes_in) catch return;
+    if (c.config.routing.ipv4_include) |old| c.allocator.free(old);
+    c.config.routing.ipv4_include = new_include4;
 }
 
 /// Set IPv4 routes to EXCLUDE (newline-separated CIDR notations).
@@ -893,10 +915,13 @@ export fn softether_set_ipv4_exclude(client: ?*VpnClient, routes: [*:0]const u8)
     const c = client orelse return;
     const routes_in = std.mem.span(routes);
     if (routes_in.len == 0) {
+        if (c.config.routing.ipv4_exclude) |old| c.allocator.free(old);
         c.config.routing.ipv4_exclude = null;
         return;
     }
-    c.config.routing.ipv4_exclude = ffi_allocator.dupe(u8, routes_in) catch return;
+    const new_exclude4 = c.allocator.dupe(u8, routes_in) catch return;
+    if (c.config.routing.ipv4_exclude) |old| c.allocator.free(old);
+    c.config.routing.ipv4_exclude = new_exclude4;
 }
 
 /// Set IPv6 routes to INCLUDE (newline-separated CIDR notations).
@@ -906,10 +931,13 @@ export fn softether_set_ipv6_include(client: ?*VpnClient, routes: [*:0]const u8)
     const c = client orelse return;
     const routes_in = std.mem.span(routes);
     if (routes_in.len == 0) {
+        if (c.config.routing.ipv6_include) |old| c.allocator.free(old);
         c.config.routing.ipv6_include = null;
         return;
     }
-    c.config.routing.ipv6_include = ffi_allocator.dupe(u8, routes_in) catch return;
+    const new_include6 = c.allocator.dupe(u8, routes_in) catch return;
+    if (c.config.routing.ipv6_include) |old| c.allocator.free(old);
+    c.config.routing.ipv6_include = new_include6;
 }
 
 /// Set IPv6 routes to EXCLUDE (newline-separated CIDR notations).
@@ -919,15 +947,20 @@ export fn softether_set_ipv6_exclude(client: ?*VpnClient, routes: [*:0]const u8)
     const c = client orelse return;
     const routes_in = std.mem.span(routes);
     if (routes_in.len == 0) {
+        if (c.config.routing.ipv6_exclude) |old| c.allocator.free(old);
         c.config.routing.ipv6_exclude = null;
         return;
     }
-    c.config.routing.ipv6_exclude = ffi_allocator.dupe(u8, routes_in) catch return;
+    const new_exclude6 = c.allocator.dupe(u8, routes_in) catch return;
+    if (c.config.routing.ipv6_exclude) |old| c.allocator.free(old);
+    c.config.routing.ipv6_exclude = new_exclude6;
 }
 
 /// Set an external tunnel file descriptor (for iOS/Android).
 /// On mobile, the OS creates the TUN device and provides an fd.
 /// Must be called before connect().
+///
+/// DEPRECATED: Use softether_set_interface() with SOFTETHER_INTERFACE_FD instead.
 export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: i32) void {
     const c = client orelse return;
     c.config.tunnel_fd = fd;
@@ -938,10 +971,171 @@ export fn softether_set_tunnel_fd(client: ?*VpnClient, fd: i32) void {
 /// dl_fd = DL bridge fd (Zig → Swift, for writing decrypted packets to utun).
 /// ul_fd = UL bridge fd (Swift → Zig, for reading upload packets from utun).
 /// Must be called before connect(). Overrides softether_set_tunnel_fd().
+///
+/// DEPRECATED: Use softether_set_interface() with SOFTETHER_INTERFACE_FD instead.
 export fn softether_set_tunnel_fds(client: ?*VpnClient, dl_fd: i32, ul_fd: i32) void {
     const c = client orelse return;
     c.config.tunnel_rx_fd = ul_fd;
     c.config.tunnel_tx_fd = dl_fd;
+}
+
+/// Interface type constants for softether_set_interface()
+pub const SOFTETHER_INTERFACE_TUN: c_int = 0;
+pub const SOFTETHER_INTERFACE_TAP: c_int = 1;
+pub const SOFTETHER_INTERFACE_FD: c_int = 2;
+pub const SOFTETHER_INTERFACE_BRIDGE: c_int = 3;
+pub const SOFTETHER_INTERFACE_NULL: c_int = 4;
+
+/// Set the virtual network interface type and configuration.
+/// Replaces the legacy compile-time PlatformDevice selection with a
+/// runtime-configurable interface type.
+///
+/// interface_type: one of SOFTETHER_INTERFACE_TUN, _TAP, _FD, _BRIDGE, _NULL.
+/// params: JSON-encoded configuration string (e.g. '{"mtu":1400}') or null.
+/// Must be called before connect().
+export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, params: ?[*:0]const u8) void {
+    const c = client orelse return;
+    const iface_config = @import("adapter/interface_config.zig");
+
+    // Parse optional JSON params. String values are immediately copied into
+    // the client's allocator to avoid dangling pointers.
+    const mtu_raw = parseJsonIntParam(params, "mtu");
+    const mtu: ?u16 = if (mtu_raw) |m| @intCast(@min(m, 65535)) else null;
+    const fd_val: ?i32 = parseJsonIntParam(params, "fd");
+    const rx_fd_val: ?i32 = parseJsonIntParam(params, "rx_fd");
+    const tx_fd_val: ?i32 = parseJsonIntParam(params, "tx_fd");
+    const device_raw = parseJsonStrParam(params, "device");
+    const device = if (device_raw) |d| (c.allocator.dupe(u8, d) catch null) else null;
+    const ingress_raw = parseJsonStrParam(params, "ingress_iface");
+    const ingress = if (ingress_raw) |d| (c.allocator.dupe(u8, d) catch null) else null;
+
+    // Build new config — allocate first, free old strings only after success
+    const new_iface: iface_config.InterfaceConfig = switch (interface_type) {
+        SOFTETHER_INTERFACE_TUN => iface_config.InterfaceConfig{
+            .tun = .{
+                .mtu = mtu orelse 1500,
+                .device_name = device,
+            },
+        },
+        SOFTETHER_INTERFACE_TAP => iface_config.InterfaceConfig{
+            .tap = .{
+                .mtu = mtu orelse 1500,
+                .device_name = device,
+            },
+        },
+        SOFTETHER_INTERFACE_FD => iface_config.InterfaceConfig{
+            .fd = .{
+                .fd = fd_val orelse c.config.tunnel_fd,
+                .rx_fd = rx_fd_val orelse c.config.tunnel_rx_fd,
+                .tx_fd = tx_fd_val orelse c.config.tunnel_tx_fd,
+            },
+        },
+        SOFTETHER_INTERFACE_BRIDGE => iface_config.InterfaceConfig{
+            .bridge = .{
+                .ingress_iface = ingress orelse {
+                    std.log.err("softether_set_interface: BRIDGE requires 'ingress_iface' in params JSON", .{});
+                    if (device) |d| c.allocator.free(d);
+                    return;
+                },
+            },
+        },
+        SOFTETHER_INTERFACE_NULL => iface_config.InterfaceConfig{ .null = {} },
+        else => {
+            std.log.err("softether_set_interface: unknown interface type {d}", .{interface_type});
+            if (device) |d| c.allocator.free(d);
+            if (ingress) |i| c.allocator.free(i);
+            return;
+        },
+    };
+
+    // Free old interface strings only after new config is fully built
+    if (c.config.interface) |*old| {
+        switch (old.*) {
+            .tun => |*t| {
+                if (t.device_name) |d| c.allocator.free(d);
+            },
+            .tap => |*t| {
+                if (t.device_name) |d| c.allocator.free(d);
+            },
+            .bridge => |*b| c.allocator.free(b.ingress_iface),
+            .fd, .null => {},
+        }
+    }
+    c.config.interface = new_iface;
+}
+
+/// Extract a named integer from a JSON-like params string: {"mtu":1400,"persist":1}
+/// Returns null if param is absent or unparseable.
+fn parseJsonIntParam(params: ?[*:0]const u8, key: []const u8) ?i32 {
+    const s = params orelse return null;
+    const len = std.mem.len(s);
+    // Minimal scan: skip leading whitespace and braces
+    var pos: usize = 0;
+    while (pos < len and (s[pos] == '{' or s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+    while (pos < len) {
+        // Skip whitespace
+        while (pos < len and (s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+        if (pos >= len or s[pos] == '}') break;
+        // Expect quote
+        if (s[pos] != '"') return null;
+        pos += 1;
+        const k_start = pos;
+        while (pos < len and s[pos] != '"') pos += 1;
+        if (pos >= len) return null;
+        const k = s[k_start..pos];
+        pos += 1; // skip closing quote
+        // Expect colon
+        while (pos < len and (s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+        if (pos >= len or s[pos] != ':') return null;
+        pos += 1;
+        while (pos < len and (s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+        if (pos >= len) return null;
+        if (std.mem.eql(u8, k, key)) {
+            const v_start = pos;
+            while (pos < len and s[pos] != ',' and s[pos] != '}' and s[pos] != ' ' and s[pos] != '\t') pos += 1;
+            return std.fmt.parseInt(i32, s[v_start..pos], 10) catch null;
+        }
+        // Skip value
+        while (pos < len and s[pos] != ',' and s[pos] != '}') pos += 1;
+        if (pos < len and s[pos] == ',') pos += 1;
+    }
+    return null;
+}
+
+/// Extract a named string from a JSON-like params string: {"device":"tap0"}
+fn parseJsonStrParam(params: ?[*:0]const u8, key: []const u8) ?[]const u8 {
+    const s = params orelse return null;
+    const len = std.mem.len(s);
+    var pos: usize = 0;
+    while (pos < len and (s[pos] == '{' or s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+    while (pos < len) {
+        while (pos < len and (s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+        if (pos >= len or s[pos] == '}') break;
+        if (s[pos] != '"') return null;
+        pos += 1;
+        const k_start = pos;
+        while (pos < len and s[pos] != '"') pos += 1;
+        if (pos >= len) return null;
+        const k = s[k_start..pos];
+        pos += 1;
+        while (pos < len and (s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+        if (pos >= len or s[pos] != ':') return null;
+        pos += 1;
+        while (pos < len and (s[pos] == ' ' or s[pos] == '\t')) pos += 1;
+        if (pos >= len) return null;
+        if (std.mem.eql(u8, k, key)) {
+            if (s[pos] != '"') return null;
+            pos += 1;
+            const v_start = pos;
+            while (pos < len and s[pos] != '"') pos += 1;
+            if (pos >= len) return null;
+            return s[v_start..pos];
+        }
+        // Skip value
+        while (pos < len and s[pos] != ',' and s[pos] != '}') pos += 1;
+        if (pos < len and s[pos] == ',') pos += 1;
+    }
+    return null;
 }
 
 /// Replace the active TUN fd at runtime (mobile only). Used after DHCP
@@ -965,11 +1159,16 @@ export fn softether_set_static_ipv4(client: ?*VpnClient, addr: [*:0]const u8) vo
     const c = client orelse return;
     const s = std.mem.span(addr);
     if (s.len == 0) {
-        if (c.config.static_ip) |*si| si.ipv4_address = null;
+        if (c.config.static_ip) |*si| {
+            if (si.ipv4_address) |old| c.allocator.free(old);
+            si.ipv4_address = null;
+        }
         return;
     }
     if (c.config.static_ip == null) c.config.static_ip = .{};
-    c.config.static_ip.?.ipv4_address = ffi_allocator.dupe(u8, s) catch return;
+    const new_ipv4 = c.allocator.dupe(u8, s) catch return;
+    if (c.config.static_ip.?.ipv4_address) |old| c.allocator.free(old);
+    c.config.static_ip.?.ipv4_address = new_ipv4;
 }
 
 /// Set static IPv4 netmask. Must be called before connect().
@@ -977,11 +1176,16 @@ export fn softether_set_static_ipv4_netmask(client: ?*VpnClient, addr: [*:0]cons
     const c = client orelse return;
     const s = std.mem.span(addr);
     if (s.len == 0) {
-        if (c.config.static_ip) |*si| si.ipv4_netmask = null;
+        if (c.config.static_ip) |*si| {
+            if (si.ipv4_netmask) |old| c.allocator.free(old);
+            si.ipv4_netmask = null;
+        }
         return;
     }
     if (c.config.static_ip == null) c.config.static_ip = .{};
-    c.config.static_ip.?.ipv4_netmask = ffi_allocator.dupe(u8, s) catch return;
+    const new_mask4 = c.allocator.dupe(u8, s) catch return;
+    if (c.config.static_ip.?.ipv4_netmask) |old| c.allocator.free(old);
+    c.config.static_ip.?.ipv4_netmask = new_mask4;
 }
 
 /// Set static IPv4 gateway. Must be called before connect().
@@ -989,11 +1193,16 @@ export fn softether_set_static_ipv4_gateway(client: ?*VpnClient, addr: [*:0]cons
     const c = client orelse return;
     const s = std.mem.span(addr);
     if (s.len == 0) {
-        if (c.config.static_ip) |*si| si.ipv4_gateway = null;
+        if (c.config.static_ip) |*si| {
+            if (si.ipv4_gateway) |old| c.allocator.free(old);
+            si.ipv4_gateway = null;
+        }
         return;
     }
     if (c.config.static_ip == null) c.config.static_ip = .{};
-    c.config.static_ip.?.ipv4_gateway = ffi_allocator.dupe(u8, s) catch return;
+    const new_gw4 = c.allocator.dupe(u8, s) catch return;
+    if (c.config.static_ip.?.ipv4_gateway) |old| c.allocator.free(old);
+    c.config.static_ip.?.ipv4_gateway = new_gw4;
 }
 
 /// Set static IPv6 address. Must be called before connect().
@@ -1001,11 +1210,16 @@ export fn softether_set_static_ipv6(client: ?*VpnClient, addr: [*:0]const u8) vo
     const c = client orelse return;
     const s = std.mem.span(addr);
     if (s.len == 0) {
-        if (c.config.static_ip) |*si| si.ipv6_address = null;
+        if (c.config.static_ip) |*si| {
+            if (si.ipv6_address) |old| c.allocator.free(old);
+            si.ipv6_address = null;
+        }
         return;
     }
     if (c.config.static_ip == null) c.config.static_ip = .{};
-    c.config.static_ip.?.ipv6_address = ffi_allocator.dupe(u8, s) catch return;
+    const new_ipv6 = c.allocator.dupe(u8, s) catch return;
+    if (c.config.static_ip.?.ipv6_address) |old| c.allocator.free(old);
+    c.config.static_ip.?.ipv6_address = new_ipv6;
 }
 
 /// Set static IPv6 prefix length. Must be called before connect().
@@ -1020,11 +1234,16 @@ export fn softether_set_static_ipv6_gateway(client: ?*VpnClient, addr: [*:0]cons
     const c = client orelse return;
     const s = std.mem.span(addr);
     if (s.len == 0) {
-        if (c.config.static_ip) |*si| si.ipv6_gateway = null;
+        if (c.config.static_ip) |*si| {
+            if (si.ipv6_gateway) |old| c.allocator.free(old);
+            si.ipv6_gateway = null;
+        }
         return;
     }
     if (c.config.static_ip == null) c.config.static_ip = .{};
-    c.config.static_ip.?.ipv6_gateway = ffi_allocator.dupe(u8, s) catch return;
+    const new_gw6 = c.allocator.dupe(u8, s) catch return;
+    if (c.config.static_ip.?.ipv6_gateway) |old| c.allocator.free(old);
+    c.config.static_ip.?.ipv6_gateway = new_gw6;
 }
 
 /// Set DNS servers (comma-separated). Must be called before connect().
@@ -1035,43 +1254,61 @@ export fn softether_set_hostname(client: ?*VpnClient, hostname: [*:0]const u8) v
     const c = client orelse return;
     const host_in = std.mem.span(hostname);
     if (host_in.len == 0) {
+        if (c.config.server_hostname) |old| c.allocator.free(old);
         c.config.server_hostname = null;
         return;
     }
-    const host_slice = ffi_allocator.dupe(u8, host_in) catch return;
+    const host_slice = c.allocator.dupe(u8, host_in) catch return;
+    if (c.config.server_hostname) |old| c.allocator.free(old);
     c.config.server_hostname = host_slice;
 }
 
 export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8) void {
     const c = client orelse return;
+
+    if (c.config.static_ip == null) c.config.static_ip = .{};
+
     const servers_in = std.mem.span(servers);
     if (servers_in.len == 0) {
-        if (c.config.static_ip) |*si| si.dns_servers = null;
+        // Free old list and clear
+        if (c.config.static_ip.?.dns_servers) |list| {
+            for (list) |srv| c.allocator.free(srv);
+            c.allocator.free(list);
+        }
+        c.config.static_ip.?.dns_servers = null;
         return;
     }
-    if (c.config.static_ip == null) c.config.static_ip = .{};
 
     var count: usize = 0;
     var it = std.mem.splitScalar(u8, servers_in, ',');
     while (it.next()) |part| {
         if (std.mem.trim(u8, part, " ").len > 0) count += 1;
     }
-    if (count == 0) {
-        c.config.static_ip.?.dns_servers = null;
-        return;
-    }
+    if (count == 0) return;
 
-    const slices = ffi_allocator.alloc([]const u8, count) catch return;
+    const slices = c.allocator.alloc([]const u8, count) catch return;
     var idx: usize = 0;
     var it2 = std.mem.splitScalar(u8, servers_in, ',');
     while (it2.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " ");
         if (trimmed.len > 0) {
-            slices[idx] = ffi_allocator.dupe(u8, trimmed) catch return;
+            slices[idx] = c.allocator.dupe(u8, trimmed) catch {
+                // Free already-allocated slices before returning
+                for (slices[0..idx]) |srv| c.allocator.free(srv);
+                c.allocator.free(slices);
+                return;
+            };
             idx += 1;
         }
     }
+
+    // Swap old list with new one, then free old
+    const old_dns = c.config.static_ip.?.dns_servers;
     c.config.static_ip.?.dns_servers = slices;
+    if (old_dns) |list| {
+        for (list) |srv| c.allocator.free(srv);
+        c.allocator.free(list);
+    }
 }
 
 /// Set log level (0=err, 1=warn, 2=info, 3=debug).
@@ -1093,10 +1330,13 @@ export fn softether_set_client_str(client: ?*VpnClient, str: [*:0]const u8) void
     const s = std.mem.span(str);
     if (c.config.fingerprint == null) c.config.fingerprint = .{};
     if (s.len == 0) {
+        if (c.config.fingerprint.?.client_str) |old| c.allocator.free(old);
         c.config.fingerprint.?.client_str = null;
         return;
     }
-    c.config.fingerprint.?.client_str = ffi_allocator.dupe(u8, s) catch return;
+    const new_cli_str = c.allocator.dupe(u8, s) catch return;
+    if (c.config.fingerprint.?.client_str) |old| c.allocator.free(old);
+    c.config.fingerprint.?.client_str = new_cli_str;
 }
 
 /// Override the client version number sent to the server.
@@ -1139,9 +1379,18 @@ export fn softether_set_os_info(client: ?*VpnClient, name: [*:0]const u8, versio
         return;
     }
     if (c.config.fingerprint == null) c.config.fingerprint = .{};
-    c.config.fingerprint.?.os_name = ffi_allocator.dupe(u8, name_s) catch return;
-    c.config.fingerprint.?.os_version = ffi_allocator.dupe(u8, ver_s) catch return;
-    c.config.fingerprint.?.os_title = ffi_allocator.dupe(u8, title_s) catch return;
+    const new_os_name = c.allocator.dupe(u8, name_s) catch return;
+    errdefer c.allocator.free(new_os_name);
+    const new_os_ver = c.allocator.dupe(u8, ver_s) catch return;
+    errdefer c.allocator.free(new_os_ver);
+    const new_os_title = c.allocator.dupe(u8, title_s) catch return;
+    errdefer c.allocator.free(new_os_title);
+    if (c.config.fingerprint.?.os_name) |old| c.allocator.free(old);
+    if (c.config.fingerprint.?.os_version) |old| c.allocator.free(old);
+    if (c.config.fingerprint.?.os_title) |old| c.allocator.free(old);
+    c.config.fingerprint.?.os_name = new_os_name;
+    c.config.fingerprint.?.os_version = new_os_ver;
+    c.config.fingerprint.?.os_title = new_os_title;
 }
 
 // ============================================================================

@@ -80,7 +80,7 @@ fn onGetStatus() ?cli.display.ConnectionStatus {
 /// Run the VPN client in interactive shell mode
 pub fn run(state: *AppState) !void {
     // Build client config
-    const config = config_mod.buildClientConfig(&state.cli_args) catch |err| {
+    const config = config_mod.buildClientConfig(state.allocator, &state.cli_args) catch |err| {
         cli.display.failure(&state.display, "Invalid configuration: {s}", .{@errorName(err)});
         state.setExitCode(1);
         return;
