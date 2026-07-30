@@ -1298,15 +1298,15 @@ export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8)
     const c = client orelse return;
 
     if (c.config.static_ip == null) c.config.static_ip = .{};
+    const si = &c.config.static_ip.?;
 
     const servers_in = std.mem.span(servers);
     if (servers_in.len == 0) {
-        // Free old list and clear
-        if (c.config.static_ip.?.dns_servers) |list| {
+        if (si.dns_servers) |list| {
             for (list) |srv| c.allocator.free(srv);
             c.allocator.free(list);
         }
-        c.config.static_ip.?.dns_servers = null;
+        si.dns_servers = null;
         return;
     }
 
@@ -1315,7 +1315,14 @@ export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8)
     while (it.next()) |part| {
         if (std.mem.trim(u8, part, " ").len > 0) count += 1;
     }
-    if (count == 0) return;
+    if (count == 0) {
+        if (si.dns_servers) |list| {
+            for (list) |srv| c.allocator.free(srv);
+            c.allocator.free(list);
+        }
+        si.dns_servers = null;
+        return;
+    }
 
     const slices = c.allocator.alloc([]const u8, count) catch return;
     var idx: usize = 0;
@@ -1324,7 +1331,6 @@ export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8)
         const trimmed = std.mem.trim(u8, part, " ");
         if (trimmed.len > 0) {
             slices[idx] = c.allocator.dupe(u8, trimmed) catch {
-                // Free already-allocated slices before returning
                 for (slices[0..idx]) |srv| c.allocator.free(srv);
                 c.allocator.free(slices);
                 return;
@@ -1333,9 +1339,8 @@ export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8)
         }
     }
 
-    // Swap old list with new one, then free old
-    const old_dns = c.config.static_ip.?.dns_servers;
-    c.config.static_ip.?.dns_servers = slices;
+    const old_dns = si.dns_servers;
+    si.dns_servers = slices;
     if (old_dns) |list| {
         for (list) |srv| c.allocator.free(srv);
         c.allocator.free(list);
