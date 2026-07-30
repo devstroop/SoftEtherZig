@@ -92,7 +92,7 @@ fn openLinuxRawSocket(iface: []const u8) !i32 {
     const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
     defer std.posix.close(sock);
 
-    if (std.c.ioctl(sock, SIOCGIFINDEX, @intFromPtr(&ifr)) < 0) {
+    if (std.c.ioctl(sock, SIOCGIFINDEX, &ifr) < 0) {
         log.err("failed to get interface index for {s}: errno={}", .{ iface, std.c._errno().* });
         return error.InvalidInterface;
     }

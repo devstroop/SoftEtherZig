@@ -115,7 +115,7 @@ pub const TunLinuxDevice = struct {
             .ifru_mtu = mtu,
             .padding = [_]u8{0} ** 20,
         };
-        if (std.c.ioctl(sock_fd, SIOCSIFMTU, @intFromPtr(&mtu_req)) < 0) {
+        if (std.c.ioctl(sock_fd, SIOCSIFMTU, &mtu_req) < 0) {
             std.log.warn("Failed to set MTU {d}: errno={}", .{ mtu, std.c._errno().* });
             return TunLinuxError.IoctlFailed;
         }
@@ -148,7 +148,7 @@ pub const TunLinuxDevice = struct {
         const tap_pattern = "tap%d";
         @memcpy(ifr.ifrn_name[0..tap_pattern.len], tap_pattern);
 
-        const ioctl_result = std.c.ioctl(fd, TUNSETIFF, @intFromPtr(&ifr));
+        const ioctl_result = std.c.ioctl(fd, TUNSETIFF, &ifr);
         if (ioctl_result < 0) {
             std.log.err("TAP open: TUNSETIFF ioctl failed: errno={}", .{std.c._errno().*});
             return TunLinuxError.IoctlFailed;
@@ -181,11 +181,11 @@ pub const TunLinuxDevice = struct {
                     .ifru_hwaddr = [_]u8{0} ** 16,
                     .padding = [_]u8{0} ** 8,
                 };
-                // Set sa_family = ARPHRD_ETHER (1) in network byte order
-                hwreq.ifru_hwaddr[0] = 1; // sa_family low byte
-                hwreq.ifru_hwaddr[1] = 0; // sa_family high byte
+                // Set sa_family = ARPHRD_ETHER (1) in native byte order
+                const sa_family: u16 = 1;
+                std.mem.writeInt(u16, hwreq.ifru_hwaddr[0..2], sa_family, .native);
                 @memcpy(hwreq.ifru_hwaddr[2..8], &mac);
-                if (std.c.ioctl(sock_fd, SIOCSIFHWADDR, @intFromPtr(&hwreq)) < 0) {
+                if (std.c.ioctl(sock_fd, SIOCSIFHWADDR, &hwreq) < 0) {
                     std.log.warn("TAP open: SIOCSIFHWADDR failed (non-fatal): errno={}", .{std.c._errno().*});
                 } else {
                     std.log.info("TAP device MAC set to {any}", .{mac});
@@ -243,7 +243,7 @@ pub const TunLinuxDevice = struct {
         const tun_pattern = "tun%d";
         @memcpy(ifr.ifrn_name[0..tun_pattern.len], tun_pattern);
 
-        const ioctl_result = std.c.ioctl(fd, TUNSETIFF, @intFromPtr(&ifr));
+        const ioctl_result = std.c.ioctl(fd, TUNSETIFF, &ifr);
         if (ioctl_result < 0) {
             std.log.err("TUNSETIFF ioctl failed: errno={}", .{std.c._errno().*});
             return TunLinuxError.IoctlFailed;
@@ -496,7 +496,7 @@ pub const TunLinuxDevice = struct {
         };
 
         // Get current flags
-        if (std.c.ioctl(sock_fd, SIOCGIFFLAGS, @intFromPtr(&flags_req)) < 0) {
+        if (std.c.ioctl(sock_fd, SIOCGIFFLAGS, &flags_req) < 0) {
             std.log.err("Failed to get interface flags: errno={}", .{std.c._errno().*});
             return TunLinuxError.ConfigureFailed;
         }
@@ -504,7 +504,7 @@ pub const TunLinuxDevice = struct {
         // Add UP and RUNNING flags
         flags_req.ifru_flags |= (IFF_UP | IFF_RUNNING);
 
-        if (std.c.ioctl(sock_fd, SIOCSIFFLAGS, @intFromPtr(&flags_req)) < 0) {
+        if (std.c.ioctl(sock_fd, SIOCSIFFLAGS, &flags_req) < 0) {
             std.log.err("Failed to bring interface up: errno={}", .{std.c._errno().*});
             return TunLinuxError.ConfigureFailed;
         }
@@ -526,14 +526,14 @@ pub const TunLinuxDevice = struct {
         };
 
         // Get current flags
-        if (std.c.ioctl(sock_fd, SIOCGIFFLAGS, @intFromPtr(&flags_req)) < 0) {
+        if (std.c.ioctl(sock_fd, SIOCGIFFLAGS, &flags_req) < 0) {
             return; // Interface might already be gone
         }
 
         // Remove UP flag
         flags_req.ifru_flags &= ~IFF_UP;
 
-        _ = std.c.ioctl(sock_fd, SIOCSIFFLAGS, @intFromPtr(&flags_req));
+        _ = std.c.ioctl(sock_fd, SIOCSIFFLAGS, &flags_req);
     }
 
     /// Read a packet from the TUN device
