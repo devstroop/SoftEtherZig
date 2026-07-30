@@ -19,10 +19,12 @@ pub const AdapterFactory = struct {
         switch (config) {
             .tun => |cfg| {
                 try adapter.open();
+                errdefer adapter.close();
                 if (cfg.mtu != 1500) try adapter.setMtu(cfg.mtu);
             },
             .tap => |cfg| {
                 try adapter.openTap();
+                errdefer adapter.close();
                 if (cfg.mtu != 1500) try adapter.setMtu(cfg.mtu);
             },
             .fd => |cfg| {

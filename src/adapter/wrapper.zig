@@ -95,17 +95,25 @@ pub const AdapterWrapper = struct {
         };
         switch (config) {
             .tun => |cfg| {
+                self.is_null_mode = false;
                 if (cfg.device_name) |name| std.log.warn("device_name '{s}' ignored for TUN (not yet implemented)", .{name});
                 try self.open();
+                errdefer self.close();
                 if (cfg.mtu != 1500) {
                     if (self.real_adapter) |*ra| try ra.setMtu(cfg.mtu);
                 }
             },
             .tap => |cfg| {
+                self.is_null_mode = false;
                 if (cfg.device_name) |name| std.log.warn("device_name '{s}' ignored for TAP (not yet implemented)", .{name});
                 try self.openTap();
+                errdefer self.close();
+                if (cfg.mtu != 1500) {
+                    if (self.real_adapter) |*ra| try ra.setMtu(cfg.mtu);
+                }
             },
             .fd => |cfg| {
+                self.is_null_mode = false;
                 if (self.real_adapter) |*adapter| {
                     if (cfg.rx_fd) |rx| {
                         if (cfg.tx_fd) |tx| {
