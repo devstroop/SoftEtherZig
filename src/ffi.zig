@@ -1000,7 +1000,7 @@ export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, pa
     // Parse optional JSON params. String values are immediately copied into
     // the client's allocator to avoid dangling pointers.
     const mtu_raw = parseJsonIntParam(params, "mtu");
-    const mtu: ?u16 = if (mtu_raw) |m| @intCast(@min(m, 65535)) else null;
+    const mtu: ?u16 = if (mtu_raw) |m| if (m >= 0) @intCast(@min(@as(u64, @intCast(m)), 65535)) else null else null;
     const fd_val: ?i32 = parseJsonIntParam(params, "fd");
     const rx_fd_val: ?i32 = parseJsonIntParam(params, "rx_fd");
     const tx_fd_val: ?i32 = parseJsonIntParam(params, "tx_fd");
@@ -1009,7 +1009,7 @@ export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, pa
     const ingress_raw = parseJsonStrParam(params, "ingress_iface");
     const ingress = if (ingress_raw) |d| (c.allocator.dupe(u8, d) catch null) else null;
 
-    // Build new config — allocate first, free old strings only after success
+    // Build new config before freeing old — preserves old interface on failure
     const new_iface: iface_config.InterfaceConfig = switch (interface_type) {
         SOFTETHER_INTERFACE_TUN => iface_config.InterfaceConfig{
             .tun = .{
@@ -1035,6 +1035,16 @@ export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, pa
                 .ingress_iface = ingress orelse {
                     std.log.err("softether_set_interface: BRIDGE requires 'ingress_iface' in params JSON", .{});
                     if (device) |d| c.allocator.free(d);
+                    // Free old interface before return to prevent leak
+                    if (c.config.interface) |*old| {
+                        switch (old.*) {
+                            .tun => |*t| { if (t.device_name) |d2| c.allocator.free(d2); },
+                            .tap => |*t| { if (t.device_name) |d2| c.allocator.free(d2); },
+                            .bridge => |*b| c.allocator.free(b.ingress_iface),
+                            .fd, .null => {},
+                        }
+                    }
+                    c.config.interface = null;
                     return;
                 },
             },
@@ -1044,11 +1054,21 @@ export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, pa
             std.log.err("softether_set_interface: unknown interface type {d}", .{interface_type});
             if (device) |d| c.allocator.free(d);
             if (ingress) |i| c.allocator.free(i);
+            // Free old interface before return to prevent leak
+            if (c.config.interface) |*old| {
+                switch (old.*) {
+                    .tun => |*t| { if (t.device_name) |d2| c.allocator.free(d2); },
+                    .tap => |*t| { if (t.device_name) |d2| c.allocator.free(d2); },
+                    .bridge => |*b| c.allocator.free(b.ingress_iface),
+                    .fd, .null => {},
+                }
+            }
+            c.config.interface = null;
             return;
         },
     };
 
-    // Free any allocated strings that the selected interface type doesn't use.
+    // Free any newly allocated strings that the selected interface type doesn't use
     switch (interface_type) {
         SOFTETHER_INTERFACE_TUN, SOFTETHER_INTERFACE_TAP => {
             if (ingress) |i| c.allocator.free(i);
@@ -1063,15 +1083,11 @@ export fn softether_set_interface(client: ?*VpnClient, interface_type: c_int, pa
         else => {},
     }
 
-    // Free old interface strings only after new config is fully built
+    // Free old interface strings now that new config is fully built
     if (c.config.interface) |*old| {
         switch (old.*) {
-            .tun => |*t| {
-                if (t.device_name) |d| c.allocator.free(d);
-            },
-            .tap => |*t| {
-                if (t.device_name) |d| c.allocator.free(d);
-            },
+            .tun => |*t| { if (t.device_name) |d| c.allocator.free(d); },
+            .tap => |*t| { if (t.device_name) |d| c.allocator.free(d); },
             .bridge => |*b| c.allocator.free(b.ingress_iface),
             .fd, .null => {},
         }
