@@ -241,6 +241,7 @@ test "buildClientConfig valid" {
         .port = 443,
     };
     const config = try buildClientConfig(std.testing.allocator, &args);
+    defer client.VpnClient.freeConfigStrings(std.testing.allocator, &config);
 
     try std.testing.expectEqualStrings("192.168.1.1", config.server_address);
     try std.testing.expectEqual(@as(u16, 443), config.server_port);
@@ -343,6 +344,7 @@ test "buildClientConfig anonymous auth" {
     defer args.deinit();
 
     const config = try buildClientConfig(std.testing.allocator, &args);
+    defer client.VpnClient.freeConfigStrings(std.testing.allocator, &config);
     try std.testing.expect(config.auth == .anonymous);
 }
 
@@ -356,6 +358,7 @@ test "buildClientConfig password hash" {
     defer args.deinit();
 
     const config = try buildClientConfig(std.testing.allocator, &args);
+    defer client.VpnClient.freeConfigStrings(std.testing.allocator, &config);
     switch (config.auth) {
         .password => |p| {
             try std.testing.expect(p.is_hashed);
