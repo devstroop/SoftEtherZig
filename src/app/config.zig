@@ -27,11 +27,36 @@ pub const ConfigBuildError = error{
 pub fn buildClientConfig(allocator: std.mem.Allocator, args: *const cli.CliArgs) ConfigBuildError!client.ClientConfig {
     // Validate required fields — address is mandatory
     const server_address = try allocator.dupe(u8, args.address orelse return error.MissingAddress);
-    const hub = try allocator.dupe(u8, args.hub orelse return error.MissingHub);
-
-    // Free allocations on any subsequent error
     errdefer allocator.free(server_address);
+    const hub = try allocator.dupe(u8, args.hub orelse return error.MissingHub);
     errdefer allocator.free(hub);
+
+    // Build proxy config — dupe string fields so they're consistently owned
+    // by ClientConfig and can be freed by freeConfigStrings.
+    // Must free on error: track allocation state explicitly.
+    var proxy_allocated = false;
+    const proxy = if (args.proxy) |proxy_str| blk: {
+        const parsed = try parseProxyUrl(proxy_str);
+        const host = try allocator.dupe(u8, parsed.host);
+        errdefer allocator.free(host);
+        const username = if (parsed.username) |u| try allocator.dupe(u8, u) else null;
+        errdefer if (username) |u| allocator.free(u);
+        const password = if (parsed.password) |p| try allocator.dupe(u8, p) else null;
+        errdefer if (password) |p| allocator.free(p);
+        proxy_allocated = true;
+        break :blk tls.ProxyConfig{
+            .host = host,
+            .port = parsed.port,
+            .username = username,
+            .password = password,
+            .proxy_type = parsed.proxy_type,
+        };
+    } else null;
+    errdefer if (proxy_allocated) {
+        allocator.free(proxy.?.host);
+        if (proxy.?.username) |u| allocator.free(u);
+        if (proxy.?.password) |p| allocator.free(p);
+    };
 
     // Build auth method
     const auth: client.AuthMethod = blk: {
@@ -110,7 +135,7 @@ pub fn buildClientConfig(allocator: std.mem.Allocator, args: *const cli.CliArgs)
         .keepalive_interval_ms = args.keepalive_interval_ms,
         .garp_interval_ms = args.garp_interval_ms,
         .tcp_nodelay = args.tcp_nodelay,
-        .proxy = if (args.proxy) |proxy_str| try parseProxyUrl(proxy_str) else null,
+        .proxy = proxy,
         .interface = if (args.interface) |iface_str| blk: {
             break :blk try iface_config.parseInterfaceConfig(allocator, iface_str);
         } else null,
