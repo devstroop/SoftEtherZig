@@ -388,7 +388,6 @@ pub const TunLinuxDevice = struct {
             .Exited => |code| {
                 if (code != 0) {
                     std.log.warn("ip addr command returned non-zero: {}", .{code});
-                    // Continue anyway - address might already be set
                 }
             },
             else => {
