@@ -1618,17 +1618,26 @@ pub const VpnClient = struct {
         if (adapter.real_adapter) |*real| {
             if (real.device) |dev| {
                 const is_bridge = self.bridge_forwarder != null;
+                const src_mac = adapter.getMac();
                 for (batch) |data| {
                     if (is_bridge) {
-                        // TAP mode: prepend Ethernet header before write
-                        const eth_hdr = [14]u8{
-                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                            0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-                            0x08, 0x00,
+                        // TAP mode: prepend Ethernet header with actual MACs
+                        // Derive EtherType from IP version nibble
+                        const ether_type: u16 = if (data.len > 0) brk: {
+                            if (data[0] & 0xF0 == 0x60) break :brk 0x86DD;
+                            break :brk 0x0800;
+                        } else 0x0800;
+                        const eth_hdr = brk: {
+                            var hdr: [14]u8 = undefined;
+                            hdr[0..6].* = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+                            hdr[6..12].* = src_mac;
+                            hdr[12] = @intCast((ether_type >> 8) & 0xFF);
+                            hdr[13] = @intCast(ether_type & 0xFF);
+                            break :brk hdr;
                         };
                         var frame: [14 + adapter_mod.MAX_PACKET_SIZE]u8 = undefined;
                         const copy_len = @min(data.len, frame.len - 14);
-                        @memcpy(frame[0..14], &eth_hdr);
+                        @memcpy(frame[0..14], eth_hdr[0..]);
                         @memcpy(frame[14..][0..copy_len], data[0..copy_len]);
                         _ = dev.write(frame[0 .. 14 + copy_len]) catch {
                             self.tun_write_blocked = true;

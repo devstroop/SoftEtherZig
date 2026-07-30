@@ -46,24 +46,46 @@ pub const BridgeForwarder = struct {
     /// Writes the complete L2 frame in a single write to avoid the kernel
     /// emitting two separate packets on the raw socket.
     pub fn writeToIngress(self: *const BridgeForwarder, ip_packet: []const u8) !void {
-        const eth_hdr = [14]u8{
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst: broadcast
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // src: bridge MAC
-            0x08, 0x00, // EtherType: IPv4
-        };
+        // Derive EtherType from IP version nibble.
+        // Assumes only IPv4/IPv6 packets are forwarded (the VPN protocol
+        // only encapsulates IP traffic). Non-IP protocols on a raw socket
+        // would be misidentified, but this code path only receives IP
+        // packets from the VPN decapsulation layer.
+        const ether_type: u16 = if (ip_packet.len > 0) brk: {
+            if (ip_packet[0] & 0xF0 == 0x60) break :brk 0x86DD; // IPv6
+            break :brk 0x0800; // IPv4 (default)
+        } else 0x0800;
+        var eth_hdr: [14]u8 = undefined;
+        @memset(&eth_hdr, 0);
+        // Destination: broadcast
+        eth_hdr[0..6].* = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        // Source: bridge MAC
+        eth_hdr[6..12].* = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+        // EtherType
+        eth_hdr[12] = @intCast((ether_type >> 8) & 0xFF);
+        eth_hdr[13] = @intCast(ether_type & 0xFF);
         // Pre-assemble full frame in stack buffer
         var frame: [14 + adapter_mod.MAX_PACKET_SIZE]u8 = undefined;
-        @memcpy(frame[0..14], &eth_hdr);
-        @memcpy(frame[14..][0..ip_packet.len], ip_packet);
-        try writeAll(self.ingress_fd, frame[0 .. 14 + ip_packet.len]);
+        if (ip_packet.len > adapter_mod.MAX_PACKET_SIZE) {
+            log.warn("writeToIngress: IP packet too large ({d} > {d}), dropping", .{ ip_packet.len, adapter_mod.MAX_PACKET_SIZE });
+            return;
+        }
+        const copy_len = ip_packet.len;
+        @memcpy(frame[0..14], eth_hdr[0..]);
+        @memcpy(frame[14..][0..copy_len], ip_packet[0..copy_len]);
+        try writeAll(self.ingress_fd, frame[0 .. 14 + copy_len]);
     }
 };
 
-/// Retry write until all bytes are written (handles short writes from signals).
+/// Equivalent to std.posix.writeAll — retry write until all bytes are written.
+/// Also retries on EINTR (signal interruption).
 fn writeAll(fd: i32, buf: []const u8) !void {
     var n: usize = 0;
     while (n < buf.len) {
-        n += try std.posix.write(fd, buf[n..]);
+        n += std.posix.write(fd, buf[n..]) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => |e| return e,
+        };
     }
 }
 
