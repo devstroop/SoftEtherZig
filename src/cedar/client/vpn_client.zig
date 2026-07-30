@@ -1163,10 +1163,16 @@ pub const VpnClient = struct {
                 const bc = iface.bridge;
                 self.bridge_forwarder = BridgeForwarder.init(self.allocator, bc.ingress_iface) catch |err| {
                     std.log.err("Failed to create bridge forwarder: {}", .{err});
+                    if (self.adapter_ctx) |*ac| ac.deinit();
+                    self.adapter_ctx = null;
                     return ClientError.AdapterConfigurationFailed;
                 };
                 ctx.openWithConfig(.{ .tap = .{} }) catch |err| {
                     std.log.err("Failed to open TAP device for bridge mode: {}", .{err});
+                    if (self.bridge_forwarder) |*bf| bf.deinit();
+                    self.bridge_forwarder = null;
+                    if (self.adapter_ctx) |*ac| ac.deinit();
+                    self.adapter_ctx = null;
                     return ClientError.AdapterConfigurationFailed;
                 };
                 // Bridge routing is configured lazily after DHCP/static IP
@@ -1176,6 +1182,8 @@ pub const VpnClient = struct {
             }
             ctx.openWithConfig(iface) catch |err| {
                 std.log.err("Failed to open adapter with InterfaceConfig: {}", .{err});
+                if (self.adapter_ctx) |*ac| ac.deinit();
+                self.adapter_ctx = null;
                 return ClientError.AdapterConfigurationFailed;
             };
         } else if (self.config.tunnel_rx_fd) |rx_fd| {
