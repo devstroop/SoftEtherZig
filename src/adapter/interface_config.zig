@@ -75,7 +75,11 @@ pub fn parseInterfaceConfig(allocator: std.mem.Allocator, value: []const u8) !In
                 const key = param[0..eq];
                 const val = param[eq + 1 ..];
                 if (std.mem.eql(u8, key, "device")) {
-                    if (config.device_name) |old| allocator.free(old);
+                    if (config.device_name) |old| {
+                        allocator.free(old);
+                        config.device_name = null;
+                        device_name_allocated = false;
+                    }
                     config.device_name = try allocator.dupe(u8, val);
                     device_name_allocated = true;
                 }
