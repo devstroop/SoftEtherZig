@@ -3258,6 +3258,10 @@ pub const ClientConfigBuilder = struct {
     }
 
     pub fn setInterface(self: *ClientConfigBuilder, iface: adapter_mod.InterfaceConfig) *ClientConfigBuilder {
+        // NOTE: The builder does not own an allocator, so it cannot free
+        // heap-allocated fields of a previous interface (device_name,
+        // ingress_iface). Call setInterface at most once, or ensure the
+        // old interface's strings are freed by the caller before reuse.
         self.config.interface = iface;
         return self;
     }
