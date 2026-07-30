@@ -120,7 +120,7 @@ fn openLinuxRawSocket(iface: []const u8) !i32 {
         .mr_address = [_]u8{0} ** 8,
     };
     if (std.c.setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, @ptrCast(&mr), @sizeOf(PacketMreq)) != 0) {
-        log.warn("failed to enable promiscuous mode on {s}: errno={}", .{ iface, std.c._errno().* });
+        log.warn("failed to enable promiscuous mode on {s}: errno={} — bridge will only see frames addressed to interface MAC; set CAP_NET_RAW/CAP_NET_ADMIN to enable", .{ iface, std.c._errno().* });
     }
 
     log.info("bound raw socket to {s} (idx={d}, promiscuous)", .{ iface, ifr.ifru_ifindex });
