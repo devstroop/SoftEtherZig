@@ -1093,9 +1093,17 @@ fn execIpRoute(args: []const []const u8) !void {
     child.stderr_behavior = .Ignore;
     try child.spawn();
     const result = try child.wait();
-    if (result.Exited != 0) {
-        std.log.debug("ip route command exited with code {d}", .{result.Exited});
-        return error.SystemCommandFailed;
+    switch (result) {
+        .Exited => |code| {
+            if (code != 0) {
+                std.log.debug("ip route command exited with code {d}", .{code});
+                return error.SystemCommandFailed;
+            }
+        },
+        else => {
+            std.log.debug("ip route command terminated abnormally", .{});
+            return error.SystemCommandFailed;
+        },
     }
 }
 
@@ -1177,7 +1185,17 @@ fn addVpnServerHostRoute(vpn_server_ip: u32) !void {
     var stdout_buf: [4096]u8 = undefined;
     const stdout = child.stdout.?;
     const n = try stdout.read(&stdout_buf);
-    _ = try child.wait();
+    const wait_result = try child.wait();
+    // Log a warning if the command failed (non-zero exit), but still attempt
+    // to parse the output — some systems report success even with non-zero.
+    switch (wait_result) {
+        .Exited => |code| {
+            if (code != 0) {
+                std.log.warn("bridge routing: 'ip route show default' exited with code {d}, attempting to parse output anyway", .{code});
+            }
+        },
+        else => return error.NoDefaultGateway,
+    }
     const output = stdout_buf[0..n];
 
     // Parse "default via X.X.X.X dev YYY" to extract gateway IP
