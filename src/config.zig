@@ -1,5 +1,6 @@
 const std = @import("std");
 const errors = @import("errors.zig");
+const iface_cfg = @import("adapter/interface_config.zig");
 
 const VpnError = errors.VpnError;
 
@@ -353,7 +354,6 @@ pub fn mergeConfigs(
 
     // Interface type
     if (pickOpt([]const u8, cli_config.interface, env_config.interface, file_config.interface, null)) |iface_str| {
-        const iface_cfg = @import("adapter/interface_config.zig");
         builder.config.interface = iface_cfg.parseInterfaceConfig(allocator, iface_str) catch |err| blk: {
             std.log.warn("mergeConfigs: failed to parse interface config '{s}': {}", .{ iface_str, @errorName(err) });
             break :blk null;
