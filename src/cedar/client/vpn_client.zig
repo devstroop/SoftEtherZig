@@ -436,9 +436,9 @@ pub const VpnClient = struct {
     /// Free all dupe'd strings inside ClientConfig. Called by deinit() and by
     /// FFI setters before overwriting a config field.
     pub fn freeConfigStrings(allocator: Allocator, config: *ClientConfig) void {
-        // Guard against double-free: if already reset, skip.
-        // After the first free, server_address and hub_name are set to empty
-        // string literals — freeing them again would be UB.
+        // Guard against double-free: after the first free, config is zeroed
+        // and server_address/hub_name are empty slices — freeing them again
+        // is a no-op for all allocators (empty slices have len=0).
         if (config.server_address.len == 0 and config.hub_name.len == 0) return;
 
         // server_address / server_hostname — dupe'd in softether_create
@@ -511,7 +511,7 @@ pub const VpnClient = struct {
             }
         }
 
-        // Reset everything to null/default to prevent double-free
+        // Reset to safe empty state to prevent double-free
         config.* = ClientConfig{
             .server_address = "",
             .hub_name = "",
