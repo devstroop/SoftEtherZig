@@ -423,6 +423,13 @@ pub fn build(b: *std.Build) void {
     linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
     addZlib(shared_lib, b);
 
+    // Android 15+ requires 16KB-aligned PT_LOAD segments. `patchelf
+    // --page-size` does not physically re-align segments, so set the lld
+    // `-z max-page-size` at link time, which re-aligns PT_LOAD segments.
+    if (is_android) {
+        shared_lib.link_z_max_page_size = 16384;
+    }
+
     // jni_bridge.c removed — moved to android/app/src/main/cpp/ (app-layer binding, not engine code).
     // Compiled into softether_jni.so via CMake, loaded after libsoftether.so.
 
