@@ -1114,7 +1114,11 @@ pub const VpnClient = struct {
                     if (parseIpv4(nm_str)) |v| @byteSwap(v) else 0xFFFFFF00
                 else
                     0xFFFFFF00;
-                ctx.configure(self.assigned_ip, netmask, self.gateway_ip);
+                ctx.configure(self.assigned_ip, netmask, self.gateway_ip) catch |cfg_err| {
+                    // Interface stays marked unconfigured (wrapper cache was
+                    // reverted); the DHCP ACK determines the real data path.
+                    std.log.err("Failed to apply static IP config: {}", .{cfg_err});
+                };
             }
             if (static.ipv6_address) |ip6_str| {
                 var addr: [16]u8 = undefined;
@@ -1242,10 +1246,14 @@ pub const VpnClient = struct {
                 //     }
                 // }
                 if (adapter.real_adapter) |*real| {
-                    _ = real.write(block_data[14..]) catch {
+                    if (real.write(block_data[14..])) |_| {
+                        // Write succeeded — clear backpressure from any prior
+                        // EAGAIN so inbound processing resumes.
+                        self.tun_write_blocked = false;
+                    } else |_| {
                         self.tun_write_blocked = true;
                         self.tun_eagain_count += 1;
-                    };
+                    }
                 }
             } else if (ethertype == 0x0806) {
                 if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
@@ -1481,11 +1489,15 @@ pub const VpnClient = struct {
     fn flushTunWriteBatch(self: *Self, adapter: *AdapterWrapper, batch: []const []const u8) void {
         if (adapter.real_adapter) |*real| {
             for (batch) |data| {
-                _ = real.write(data) catch {
+                if (real.write(data)) |_| {
+                    // Write succeeded — clear backpressure from any prior
+                    // EAGAIN so inbound processing resumes.
+                    self.tun_write_blocked = false;
+                } else |_| {
                     self.tun_write_blocked = true;
                     self.tun_eagain_count += 1;
                     return;
-                };
+                }
             }
         }
     }
@@ -1901,9 +1913,15 @@ pub const VpnClient = struct {
             // Refresh TUN fd each iter so a runtime fd swap (replaceTunFd) is
             // picked up by poll(). On non-Windows the FdAdapter exposes the
             // current fd via getFd(); we reuse the cached value otherwise.
+            // The fd_guard is held from this snapshot through the poll() call
+            // below so replaceFd (FFI thread) can never swap the descriptor
+            // mid-poll; the lock is released right after poll returns.
+            var tun_fd_guard_locked = false;
             if (builtin.os.tag != .windows) {
                 if (self.adapter_ctx) |*ac| {
                     if (ac.real_adapter) |*ra| {
+                        ra.fd_guard.lock();
+                        tun_fd_guard_locked = true;
                         poll_tun_sock = ra.getFd();
                     }
                 }
@@ -2000,6 +2018,16 @@ pub const VpnClient = struct {
 
             const poll_t0 = std.time.microTimestamp();
             _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
+            // Release the fd snapshot guard: the poll() call above is done, so
+            // a replaceFd on the FFI thread can now proceed safely.
+            if (tun_fd_guard_locked) {
+                tun_fd_guard_locked = false;
+                if (self.adapter_ctx) |*ac| {
+                    if (ac.real_adapter) |*ra| {
+                        ra.fd_guard.unlock();
+                    }
+                }
+            }
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
             if (poll_us > diag.poll_us_max) diag.poll_us_max = poll_us;
             diag.poll_us_total += poll_us;
