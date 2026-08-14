@@ -141,6 +141,11 @@ pub const StaticIpConfig = struct {
     ipv6_prefix_len: ?u8 = null,
     ipv6_gateway: ?[]const u8 = null,
     dns_servers: ?[]const []const u8 = null,
+    /// True when `dns_servers` (and each entry) was allocated by the client
+    /// allocator (via softether_set_dns_servers). Borrowed configs supplied
+    /// through `VpnClient.init` must never be freed, so deinit/setters free
+    /// this list only when owned.
+    dns_servers_owned: bool = false,
 };
 
 /// Routing configuration
@@ -414,6 +419,16 @@ pub const VpnClient = struct {
         if (self.tls_socket) |*sock| {
             sock.close();
             self.tls_socket = null;
+        }
+        if (self.config.static_ip) |*si| {
+            if (si.dns_servers_owned) {
+                if (si.dns_servers) |list| {
+                    for (list) |srv| self.allocator.free(srv);
+                    self.allocator.free(list);
+                }
+                si.dns_servers = null;
+                si.dns_servers_owned = false;
+            }
         }
     }
 
