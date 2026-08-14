@@ -20,6 +20,7 @@ pub const dhcp = @import("dhcp.zig");
 pub const wrapper = @import("wrapper.zig");
 pub const port = @import("port.zig");
 pub const nic_enumerate = @import("nic_enumerate.zig");
+pub const af_packet = @import("af_packet.zig");
 
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
@@ -30,6 +31,11 @@ pub const PortLayer = port.PortLayer;
 pub const PortStats = port.PortStats;
 pub const NicList = nic_enumerate.NicList;
 pub const NicInfo = nic_enumerate.NicInfo;
+
+// L2 bridge port (proposal §4.1) — Linux AF_PACKET
+pub const AfPacketPort = af_packet.AfPacketPort;
+pub const afPacketPort = af_packet.afPacketPort;
+pub const SESSION_FRAME_BUDGET = af_packet.SESSION_FRAME_BUDGET;
 
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;
