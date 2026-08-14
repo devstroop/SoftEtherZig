@@ -134,17 +134,22 @@ pub const AdapterWrapper = struct {
         return self.mac;
     }
 
-    /// Configure IP address
-    pub fn configure(self: *Self, ip: u32, mask: u32, gateway: u32) void {
+    /// Configure IP address. Propagates device failures and reverts the
+    /// cached configuration so callers can distinguish a successful OS
+    /// configuration from a failed one.
+    pub fn configure(self: *Self, ip: u32, mask: u32, gateway: u32) !void {
         self.ip_address = ip;
         self.netmask = mask;
         self.gateway_ip = gateway;
         if (self.real_adapter) |*real| {
             real.configure(ip, mask, gateway) catch |err| {
-                std.log.err("Failed to configure device: {}", .{err});
+                // Mark the wrapper unconfigured: the cache must reflect the
+                // actual device state, not the requested state.
+                self.ip_address = 0;
+                self.netmask = 0;
+                self.gateway_ip = 0;
+                return err;
             };
-        } else {
-            std.log.warn("AdapterWrapper.configure: real_adapter is null", .{});
         }
     }
 
@@ -300,7 +305,7 @@ test "AdapterWrapper configure" {
     var wrapper = AdapterWrapper.init(std.testing.allocator);
     defer wrapper.deinit();
 
-    wrapper.configure(0x0A150001, 0xFFFFFF00, 0x0A150001);
+    wrapper.configure(0x0A150001, 0xFFFFFF00, 0x0A150001) catch unreachable;
 
     try std.testing.expectEqual(@as(u32, 0x0A150001), wrapper.ip_address);
     try std.testing.expectEqual(@as(u32, 0xFFFFFF00), wrapper.netmask);

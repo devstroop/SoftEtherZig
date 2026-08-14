@@ -233,6 +233,12 @@ pub const VirtualAdapter = struct {
     port: ?NetPort,
     routes: RouteManager,
 
+    // Serializes fd replacement (mobile replaceFd) against the data pump's
+    // fd snapshot + poll window (see runDataLoop in vpn_client.zig). The pump
+    // holds this lock from snapshot through poll() so it can never poll a
+    // descriptor mid-swap.
+    fd_guard: std.Thread.Mutex = .{},
+
     // DHCP state
     dhcp_xid: u32,
     dhcp_state: DhcpState,
@@ -288,11 +294,12 @@ pub const VirtualAdapter = struct {
 
         if (is_android) {
             return error.UnsupportedPlatform; // Android must use openWithFd()
-        } else if (builtin.os.tag == .linux) {
+} else if (builtin.os.tag == .linux) {
             const dev = TunLinuxDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open Linux TUN device: {}", .{err});
                 return err;
             };
+            errdefer dev.close(); // device owns an open fd until wrapped
             try dev.configureTemporary();
             self.port = port.l3Port(PlatformDevice, dev, MAX_PACKET_SIZE);
         } else if (builtin.os.tag == .macos) {
@@ -311,6 +318,7 @@ pub const VirtualAdapter = struct {
                 self.port = port.l3Port(PlatformDevice, esc_dev, MAX_PACKET_SIZE);
                 return;
             };
+            errdefer direct_dev.close(); // device owns an open fd until wrapped
             // Direct utun open succeeded. Still need the privileged command channel
             // so that route add/delete commands run as root during tunnel setup.
             utun_escalate.ensurePrivilegedChannel(self.allocator);
@@ -321,6 +329,7 @@ pub const VirtualAdapter = struct {
                 std.log.err("Failed to open Windows TUN adapter (Wintun): {}", .{err});
                 return err;
             };
+            errdefer dev.close(); // device owns an open handle until wrapped
             try dev.configureTemporary();
             self.port = port.l3Port(PlatformDevice, dev, MAX_PACKET_SIZE);
         } else if (builtin.os.tag == .ios) {
@@ -417,6 +426,11 @@ pub const VirtualAdapter = struct {
     pub fn replaceFd(self: *VirtualAdapter, new_fd: i32) !void {
         if (PlatformDevice != FdAdapter) return error.UnsupportedPlatform;
         const dev = self.platformDevice() orelse return error.DeviceNotOpen;
+        // Serialize against the pump's snapshot+poll window (fd_guard held
+        // by runDataLoop from getFd() through poll()); the swap must never
+        // land mid-poll on the data-loop thread.
+        self.fd_guard.lock();
+        defer self.fd_guard.unlock();
         try dev.replaceFd(new_fd);
     }
 
