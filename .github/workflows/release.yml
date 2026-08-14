@@ -136,54 +136,11 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
           use-cache: true
 
-      - name: Install OpenSSL (macOS)
-        if: runner.os == 'macOS'
-        run: brew install openssl@3
-
-      - name: Install OpenSSL (Linux)
-        if: runner.os == 'Linux' && !matrix.ndk
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev
-
-      - name: Cache vcpkg packages (Windows)
-        if: matrix.windows
-        uses: actions/cache@v6
+      - name: Setup OpenSSL 3
+        if: runner.os != 'Linux' || !matrix.ndk
+        uses: devstroop/setup-openssl@v1
         with:
-          path: |
-            C:\vcpkg\installed
-            C:\vcpkg\packages
-          key: vcpkg-openssl-${{ runner.os }}-${{ matrix.os_arch }}-v3
-          restore-keys: |
-            vcpkg-openssl-${{ runner.os }}-${{ matrix.os_arch }}-
-
-      - name: Install OpenSSL (Windows via vcpkg — choco only ships x64)
-        if: matrix.windows
-        shell: pwsh
-        run: |
-          $osArch = "${{ matrix.os_arch }}"
-          $triplet = "$($osArch)-windows"
-          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
-          $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
-          $opensslDir = Join-Path $vcpkgRoot "installed\$triplet"
-          if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
-            Write-Host "Cache miss; installing OpenSSL via vcpkg ($triplet)..."
-            & $vcpkgExe install "openssl:$triplet" --triplet $triplet
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "vcpkg openssl:$triplet install failed"
-              exit 1
-            }
-          } else {
-            Write-Host "Using cached OpenSSL"
-          }
-          if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
-            Write-Error "libssl.lib not found after vcpkg install"
-            Get-ChildItem "$opensslDir" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 50
-            exit 1
-          }
-          echo "OPENSSL_DIR=$opensslDir" >> $env:GITHUB_ENV
-          Write-Host "OpenSSL ready at $opensslDir"
+          version: '3'
 
       - name: Setup Android NDK
         if: matrix.ndk
