@@ -10,6 +10,13 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- **`softether_list_interfaces(out, cap)` FFI export** (#48). C-ABI
+  `softether_nic_info {name[64], mac[6], index}` entries with loopback
+  exclusion; snprintf-style negative return on truncation. Windows path
+  (GetAdaptersAddresses, GUID as stable id) lands in `nic_enumerate.zig`,
+  completing the enumeration primitive for all supported platforms.
+  `include/softether.h` documents stable-id semantics (MAC or Windows GUID
+  is stable; POSIX names/indices are not). Export count 67 → 68.
 - **`NetPort` interface** (`adapter/port.zig`, L2 Network Bridge proposal §4.1).
   First-class port abstraction: `open/close/read/write/getFd/getName/getMac/
   getMtu/getLayer/setPromiscuous/getStats`, plus `PortLayer`/`PortStats`.
