@@ -377,12 +377,17 @@ void softether_set_tcp_dial_callback(softether_tcp_dial_callback_t cb);
  * renames. POSIX device names (en0/eth1) and `index` alone are NOT stable:
  * the OS may rename interfaces or reuse indices across boots, while the MAC
  * (or GUID) identifies the same physical/virtual interface regardless.
+ *
+ * Interfaces WITHOUT a hardware address (e.g. utun on macOS) carry an
+ * all-zero `mac` and have NO stable identity: do not use them as merge
+ * keys. Treat entries with a zeroed `mac` as identity-on-name only for the
+ * duration of a single enumeration.
  */
 typedef struct {
     /* Interface name: POSIX ifname (NUL-terminated, <= 15 chars) or the
      * Windows adapter GUID string ("{...}", <= 39 chars). NUL-padded. */
     char name[64];
-    /* Hardware address (6 bytes); zeroed for interfaces without one. */
+    /* Hardware address (6 bytes); all zeros for interfaces without one. */
     uint8_t mac[6];
     /* Platform interface index. */
     uint32_t index;
@@ -395,8 +400,11 @@ typedef struct {
  *
  * Returns:
  *   > 0        number of entries written into `out`
- *   < -1       negative of the FULL interface count when `out` was too
- *              small (snprintf-style) — grow the buffer and re-call
+ *   < -2       truncated — the host has more than `cap` interfaces;
+ *              the exact value is -(full_count + 2), so the buffer can be
+ *              grown to `full_count` entries and the call retried. The
+ *              offset guarantees truncation never collides with the
+ *              reserved error codes below, even when the full count is 2.
  *   -1         invalid arguments (NULL out, cap <= 0)
  *   -2         enumeration failed
  */
