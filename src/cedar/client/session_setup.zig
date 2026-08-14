@@ -37,11 +37,22 @@ fn createSession(client: *VpnClient) void {
             .hub = client.config.hub_name,
             .username = username,
             .use_encrypt = true,
+            .use_fast_rc4 = client.config.use_fast_rc4,
             .use_compress = client.config.use_compress,
         };
         client.session = SessionWrapper.initWithOptions(client.allocator, options);
 
         if (client.session) |*sess| {
+            if (client.auth_use_fast_rc4) {
+                if (client.auth_rc4_c2s_key) |c2s| {
+                    if (client.auth_rc4_s2c_key) |s2c| {
+                        sess.initFastRc4(&c2s, &s2c);
+                        std.log.info("Session established with fast RC4 encryption", .{});
+                        return;
+                    }
+                }
+                std.log.warn("Server negotiated fast RC4 but key pair was missing — falling back to AES-256-CBC", .{});
+            }
             sess.initEncryption(&client.auth_session_key.?, &client.auth_hello_random.?);
         }
         std.log.info("Session established with AES-256-CBC encryption", .{});
