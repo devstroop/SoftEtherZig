@@ -62,6 +62,18 @@ they are called out under **Breaking** in each entry.
 
 ### Fixed
 
+- **Release workflow built a spurious `vpnclient` exe on iOS/Android.**
+  The merged release matrix's build loop word-split target specs, so
+  `static-lib -Dtarget=aarch64-ios` became two invocations — the second
+  (`zig build -Dtarget=…` with no step) ran the default `install` step,
+  which builds the `vpnclient` executable for the mobile target. The CLI
+  had no Android/iOS OpenSSL linkage branch (only macOS/Windows/Linux
+  dynamic), so it failed with `unable to find dynamic system library
+  'ssl'`. `release.yml` now treats each `matrix.targets` line as one full
+  command, and the `vpnclient` linkage in `build.zig` uses the same
+  `linkOpenSsl` helper as the shared/static libraries (bundled static
+  OpenSSL on Android/iOS, system dynamic elsewhere) so a stray default
+  build works on every target.
 - **All C header imports unified into one translation unit
   (`src/cedar/protocol/c_imports.zig`).** `tls.zig`, `auth.zig`, and the
   Wintun adapter used three separate `@cImport` blocks (OpenSSL-TLS,
