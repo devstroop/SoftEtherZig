@@ -366,6 +366,43 @@ typedef int (*softether_tcp_dial_callback_t)(const char* host, uint16_t port);
 void softether_set_tcp_dial_callback(softether_tcp_dial_callback_t cb);
 
 /* ========================================================================== */
+/* NIC enumeration                                                            */
+/* ========================================================================== */
+
+/**
+ * Single NIC entry returned by softether_list_interfaces().
+ *
+ * Stable-id semantics: `mac` (hardware address) — or the Windows adapter
+ * GUID carried in `name` — is the stable identity of an interface across
+ * renames. POSIX device names (en0/eth1) and `index` alone are NOT stable:
+ * the OS may rename interfaces or reuse indices across boots, while the MAC
+ * (or GUID) identifies the same physical/virtual interface regardless.
+ */
+typedef struct {
+    /* Interface name: POSIX ifname (NUL-terminated, <= 15 chars) or the
+     * Windows adapter GUID string ("{...}", <= 39 chars). NUL-padded. */
+    char name[64];
+    /* Hardware address (6 bytes); zeroed for interfaces without one. */
+    uint8_t mac[6];
+    /* Platform interface index. */
+    uint32_t index;
+} softether_nic_info;
+
+/**
+ * Enumerate the host's network interfaces (loopback excluded).
+ *
+ * Fills out[0..cap] with {name, mac, index} entries.
+ *
+ * Returns:
+ *   > 0        number of entries written into `out`
+ *   < -1       negative of the FULL interface count when `out` was too
+ *              small (snprintf-style) — grow the buffer and re-call
+ *   -1         invalid arguments (NULL out, cap <= 0)
+ *   -2         enumeration failed
+ */
+int softether_list_interfaces(softether_nic_info* out, int cap);
+
+/* ========================================================================== */
 /* Version                                                                    */
 /* ========================================================================== */
 

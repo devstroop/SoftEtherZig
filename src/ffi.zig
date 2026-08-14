@@ -1266,12 +1266,95 @@ export fn softether_version() [*:0]const u8 {
 }
 
 // ============================================================================
+// NIC enumeration
+// ============================================================================
+
+/// C-ABI NIC entry (softether_nic_info in include/softether.h).
+pub const SoftEtherNicInfo = extern struct {
+    /// Interface name: POSIX ifname (≤15 chars) or the Windows adapter GUID
+    /// string ("{...}", ≤39 chars). NUL-padded.
+    name: [64]u8,
+    /// Hardware address; zeroed when the interface has none (e.g. utun).
+    mac: [6]u8,
+    /// Platform interface index.
+    index: u32,
+};
+
+/// Enumerate the host's network interfaces.
+///
+/// Fills `out[0..cap]` with {name, mac, index} entries, loopback excluded.
+/// Returns the number of entries written; if the host has more than `cap`
+/// interfaces the return value is the *negative* of the full count
+/// (snprintf-style), so callers can grow their buffer and retry.
+/// Returns -1 on invalid arguments (null out, cap <= 0) and -2 on
+/// enumeration failure.
+///
+/// Stable id semantics (see include/softether.h): `mac` — or the Windows
+/// GUID in `name` — is the stable identity across interface renames;
+/// POSIX `name` and `index` alone are not stable.
+export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int {
+    if (out == null or cap <= 0) return -1;
+
+    const adapter_mod = @import("adapter/mod.zig");
+    var list = adapter_mod.nic_enumerate.listNics(ffi_allocator) catch return -2;
+    defer list.deinit();
+
+    const n = @min(list.items.len, @as(usize, @intCast(cap)));
+    for (list.items[0..n], 0..) |item, i| {
+        const dst = &out.?[i];
+        @memset(&dst.name, 0);
+        const name_len = @min(item.name.len, dst.name.len);
+        @memcpy(dst.name[0..name_len], item.name[0..name_len]);
+        dst.mac = item.mac orelse [_]u8{0} ** 6;
+        dst.index = item.index;
+    }
+
+    if (list.items.len > n) {
+        // Truncated: report the full count as a negative so the caller can
+        // size the buffer and re-call.
+        return -@as(c_int, @intCast(@min(list.items.len, @as(usize, std.math.maxInt(c_int)))));
+    }
+    return @intCast(n);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 test "ffi error mapping" {
     const err = mapClientError(ClientError.ConnectionFailed);
     try std.testing.expectEqual(SoftetherError.connection_failed, err);
+}
+
+test "softether_list_interfaces enumerates host NICs" {
+    var buf: [64]SoftEtherNicInfo = undefined;
+    const n = softether_list_interfaces(&buf, buf.len);
+    try std.testing.expect(n > 0);
+
+    // Entries must carry a name, a plausible index, and a MAC or zeros.
+    for (buf[0..@intCast(n)]) |entry| {
+        try std.testing.expect(entry.name[0] != 0);
+        // Loopback must have been filtered out on all platforms.
+        try std.testing.expect(!std.mem.startsWith(u8, &entry.name, "lo"));
+        try std.testing.expect(std.mem.indexOfScalar(u8, &entry.name, 0) != null); // NUL-terminated
+    }
+}
+
+test "softether_list_interfaces rejects invalid arguments" {
+    var buf: [4]SoftEtherNicInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_list_interfaces(null, 4));
+    try std.testing.expectEqual(@as(c_int, -1), softether_list_interfaces(&buf, 0));
+    try std.testing.expectEqual(@as(c_int, -1), softether_list_interfaces(&buf, -3));
+}
+
+test "softether_list_interfaces truncation reports full count" {
+    // cap=1 must either fit the host (returns 1) or report -full.
+    var one: [1]SoftEtherNicInfo = undefined;
+    const r = softether_list_interfaces(&one, 1);
+    try std.testing.expect(r == 1 or r < -1);
+    if (r == 1) {
+        try std.testing.expect(one[0].name[0] != 0);
+    }
 }
 
 test "ffi callback context routes to per-client user_data" {
