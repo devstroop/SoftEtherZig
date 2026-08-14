@@ -324,22 +324,8 @@ pub fn build(b: *std.Build) void {
             } else if (os == .windows) {
                 step.addLibraryPath(.{ .cwd_relative = win_lib });
                 step.addIncludePath(.{ .cwd_relative = win_inc });
-                if (arch == .aarch64) {
-                    // aarch64-windows: linkSystemLibrary() translates PE import
-                    // libs (.lib) to Zig, and translate-c emits an exported
-                    // `__mingw_current_teb` global per translation that reaches
-                    // mingw's winnt.h — two import libs mean two exports of the
-                    // same symbol, aborting with "exported symbol collision".
-                    // Feed the import libs to lld-link directly instead, so no
-                    // translation happens.
-                    const ssl_lib = std.fs.path.join(builder.allocator, &.{ win_lib, "libssl.lib" }) catch unreachable;
-                    const crypto_lib = std.fs.path.join(builder.allocator, &.{ win_lib, "libcrypto.lib" }) catch unreachable;
-                    step.root_module.addObjectFile(.{ .cwd_relative = ssl_lib });
-                    step.root_module.addObjectFile(.{ .cwd_relative = crypto_lib });
-                } else {
-                    step.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-                    step.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-                }
+                step.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+                step.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
                 step.linkSystemLibrary("ws2_32");
                 step.linkSystemLibrary("kernel32");
                 step.linkSystemLibrary("advapi32");
@@ -382,15 +368,8 @@ pub fn build(b: *std.Build) void {
     } else if (target_os == .windows) {
         vpnclient.addLibraryPath(.{ .cwd_relative = win_openssl_lib });
         vpnclient.addIncludePath(.{ .cwd_relative = win_openssl_include });
-        if (target_arch == .aarch64) {
-            const ssl_lib = std.fs.path.join(b.allocator, &.{ win_openssl_lib, "libssl.lib" }) catch unreachable;
-            const crypto_lib = std.fs.path.join(b.allocator, &.{ win_openssl_lib, "libcrypto.lib" }) catch unreachable;
-            vpnclient.root_module.addObjectFile(.{ .cwd_relative = ssl_lib });
-            vpnclient.root_module.addObjectFile(.{ .cwd_relative = crypto_lib });
-        } else {
-            vpnclient.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-            vpnclient.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-        }
+        vpnclient.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
+        vpnclient.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
         vpnclient.linkSystemLibrary("ws2_32");
         vpnclient.linkSystemLibrary("kernel32");
         vpnclient.linkSystemLibrary("advapi32");
