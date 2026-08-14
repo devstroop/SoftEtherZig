@@ -13,6 +13,12 @@ const log = std.log.scoped(.ffi);
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const lib = @import("lib.zig");
+// L2 bridge pump tests live in the whole-package test target; force
+// analysis of lib.bridge.loop so its `bridge.loop.*` test blocks are
+// compiled into that binary (fdb/engine run standalone in test_sources).
+comptime {
+    _ = lib.bridge.loop;
+}
 
 // ============================================================================
 // Android logging bridge (routes std.log -> __android_log_print)
