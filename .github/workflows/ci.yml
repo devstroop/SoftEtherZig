@@ -85,21 +85,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
-
-      - name: Cache Zig compiler
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/setup-zig
-          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}
 
       - name: Setup Zig ${{ env.ZIG_VERSION }}
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache: true
+          use-cache: true
 
       - name: Install OpenSSL (macOS)
         if: runner.os == 'macOS'
@@ -113,7 +107,7 @@ jobs:
 
       - name: Cache vcpkg packages (Windows)
         if: matrix.windows
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             C:\vcpkg\installed

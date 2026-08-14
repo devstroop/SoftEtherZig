@@ -130,7 +130,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
           ref: ${{ github.event.inputs.tag || github.ref }}
@@ -164,17 +164,11 @@ jobs:
           fi
           echo "✅ Tag $TAG matches build.zig.zon version $ZON_VERSION"
 
-      - name: Cache Zig compiler
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/setup-zig
-          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}
-
       - name: Setup Zig ${{ env.ZIG_VERSION }}
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
-          cache: true
+          use-cache: true
 
       - name: Install OpenSSL (macOS)
         if: runner.os == 'macOS'
@@ -188,7 +182,7 @@ jobs:
 
       - name: Cache vcpkg packages (Windows)
         if: matrix.windows
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             C:\vcpkg\installed
@@ -303,7 +297,7 @@ jobs:
           Get-Item "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.zip" | Format-List Name,Length
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: staging/${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.${{ matrix.archive }}
@@ -328,7 +322,7 @@ jobs:
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
