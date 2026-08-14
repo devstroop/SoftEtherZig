@@ -675,6 +675,9 @@ pub const VpnClient = struct {
     /// take effect on the next connect. Storage-only today: the runtime
     /// bridge/monitor loops are not implemented yet.
     pub fn getNetworkMode(self: *const Self) NetworkMode {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
         return self.network_mode;
     }
 

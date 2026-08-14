@@ -1345,6 +1345,10 @@ export fn softether_set_network_mode(client: ?*VpnClient, mode: c_int) void {
         2 => NetworkMode.monitor,
         else => return,
     };
+    // Lock the client mutex so a setter racing with connect()'s mode read
+    // (and with getNetworkMode) cannot observe a torn/inconsistent mode.
+    c.mutex.lock();
+    defer c.mutex.unlock();
     c.config.mode = parsed;
     c.network_mode = parsed;
 }
