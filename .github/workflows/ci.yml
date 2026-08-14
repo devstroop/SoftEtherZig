@@ -58,6 +58,7 @@ jobs:
           - name: Windows (x64)
             runner: windows-latest
             build: shared-lib
+            cli: true
             test: true
             windows: true
             os_arch: x64
@@ -65,6 +66,7 @@ jobs:
           - name: Windows (arm64)
             runner: windows-11-arm
             build: shared-lib
+            cli: true
             test: true
             windows: true
             os_arch: arm64
@@ -117,6 +119,10 @@ jobs:
 
       - name: Show toolchain versions
         run: zig version
+
+      - name: Build CLI (vpnclient)
+        if: matrix.cli
+        run: zig build --release=fast --summary all
 
       - name: Build (${{ matrix.build }})
         run: zig build ${{ matrix.build }} --release=fast --summary all
