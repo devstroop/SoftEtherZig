@@ -62,6 +62,13 @@ they are called out under **Breaking** in each entry.
 
 ### Fixed
 
+- **All C header imports unified into one translation unit
+  (`src/cedar/protocol/c_imports.zig`).** `tls.zig`, `auth.zig`, and the
+  Wintun adapter used three separate `@cImport` blocks (OpenSSL-TLS,
+  OpenSSL-auth, `windows.h`), each independently translated. Any two of them
+  in one compilation produced the `exported symbol collision:
+  __mingw_current_teb` failure on `aarch64-windows` (mingw). They now share a
+  single module-level block, selected per-OS in one place.
 - **Windows arm64 (native mingw) build failure — `exported symbol collision:
   __mingw_current_teb`.** On `aarch64-windows` Zig translates its bundled
   mingw `winnt.h`, which declares the x18-register global

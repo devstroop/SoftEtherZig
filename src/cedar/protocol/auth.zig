@@ -28,15 +28,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;
 
-const ssl = @cImport({
-    @cInclude("openssl/pem.h");
-    @cInclude("openssl/evp.h");
-    @cInclude("openssl/x509.h");
-    @cInclude("openssl/bio.h");
-    @cInclude("openssl/err.h");
-    @cInclude("openssl/md4.h");
-    @cInclude("openssl/des.h");
-});
+const ssl = @import("c_imports.zig").c;
 
 /// SHA-0 digest length
 pub const sha0_digest_length = 20;
