@@ -90,7 +90,7 @@ jobs:
           submodules: recursive
 
       - name: Setup Zig ${{ env.ZIG_VERSION }}
-        uses: mlugg/setup-zig@v2
+        uses: devstroop/setup-zig@v1
         with:
           version: ${{ env.ZIG_VERSION }}
           use-cache: true
