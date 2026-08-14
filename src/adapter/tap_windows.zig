@@ -9,6 +9,12 @@ pub const TUN_MTU: usize = 1500;
 pub const MAX_PACKET_SIZE: usize = TUN_MTU + 14;
 pub const RECV_QUEUE_MAX: usize = 64;
 
+// Single shared Windows API import. Each distinct @cImport block is
+// translated independently, and on aarch64-windows (mingw) translate-c emits
+// an exported `__mingw_current_teb` global per block, so more than one
+// windows.h import causes an "exported symbol collision" at compile time.
+const kernel32 = @cImport(@cInclude("windows.h"));
+
 // ============================================
 // Windows API types (kernel32 / advapi32)
 // ============================================
@@ -110,7 +116,6 @@ const WintunApi = struct {
     getAdapterLUID: WintunGetAdapterLUIDFn,
 
     fn load() !WintunApi {
-        const kernel32 = @cImport(@cInclude("windows.h"));
         const dll = kernel32.LoadLibraryA("wintun.dll");
         if (dll == null) {
             std.log.err("Failed to load wintun.dll — Wintun driver not installed.", .{});
@@ -134,7 +139,6 @@ const WintunApi = struct {
     }
 
     fn unload(self: *WintunApi) void {
-        const kernel32 = @cImport(@cInclude("windows.h"));
         if (self.dll) |dll| {
             _ = kernel32.FreeLibrary(@ptrCast(@alignCast(dll)));
             self.dll = null;
