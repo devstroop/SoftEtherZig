@@ -100,6 +100,17 @@ pub fn buildClientConfig(args: *const cli.CliArgs) ConfigBuildError!client.Clien
         .garp_interval_ms = args.garp_interval_ms,
         .tcp_nodelay = args.tcp_nodelay,
         .proxy = if (args.proxy) |proxy_str| try parseProxyUrl(proxy_str) else null,
+        .mode = if (args.mode) |m| switch (m) {
+            .client => client.NetworkMode.client,
+            .bridge => client.NetworkMode.bridge,
+            .monitor => client.NetworkMode.monitor,
+        } else client.NetworkMode.client,
+        .bridge = .{
+            .ingress_ifs = args.ingress_ifs,
+            .fdb_max = args.fdb_max orelse 4096,
+            .fdb_aging_s = args.fdb_aging_s orelse 300,
+        },
+        .monitor = .{ .pcap_file = args.pcap_file },
     };
 }
 
