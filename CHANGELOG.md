@@ -8,6 +8,26 @@ they are called out under **Breaking** in each entry.
 
 ## [Unreleased]
 
+### Added
+
+- **`NetPort` interface** (`adapter/port.zig`, L2 Network Bridge proposal §4.1).
+  First-class port abstraction: `open/close/read/write/getFd/getName/getMac/
+  getMtu/getLayer/setPromiscuous/getStats`, plus `PortLayer`/`PortStats`.
+  Existing L3 devices (utun, tun_linux, Wintun, fd_adapter) are wrapped behind
+  it via `l3Port()` with unchanged behavior. `VirtualAdapter` is now composed
+  over a port; the data pump no longer reaches into device internals
+  (previously `runDataLoop` called `adapter.real_adapter.device.getFd()`).
+- **NIC enumeration primitive** (`adapter/nic_enumerate.zig`). Host interface
+  gathering via getifaddrs (AF_LINK / AF_PACKET) returning
+  `{name, mac, index}`; FFI surface lands in a follow-up.
+
+### Changed
+
+- `VirtualAdapter.device` replaced by `VirtualAdapter.port: ?NetPort`;
+  device-level l3 configuration operations (configure/configureIpv6/replaceFd)
+  route through the port's impl pointer. Client-mode behavior is unchanged
+  (byte-identical data path; FFI export count unchanged at 67).
+
 ## [0.3.10] - 2026-08-14
 
 ### Added

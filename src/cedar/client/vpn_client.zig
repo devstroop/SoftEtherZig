@@ -1242,12 +1242,10 @@ pub const VpnClient = struct {
                 //     }
                 // }
                 if (adapter.real_adapter) |*real| {
-                    if (real.device) |dev| {
-                        _ = dev.write(block_data[14..]) catch {
-                            self.tun_write_blocked = true;
-                            self.tun_eagain_count += 1;
-                        };
-                    }
+                    _ = real.write(block_data[14..]) catch {
+                        self.tun_write_blocked = true;
+                        self.tun_eagain_count += 1;
+                    };
                 }
             } else if (ethertype == 0x0806) {
                 if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
@@ -1347,11 +1345,9 @@ pub const VpnClient = struct {
                     std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     if (adapter.real_adapter) |*real| {
-                        if (real.device) |dev| {
-                            dev.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
-                                std.log.err("Failed to configure interface: {}", .{err});
-                            };
-                        }
+                        real.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
+                            std.log.err("Failed to configure interface: {}", .{err});
+                        };
                     }
 
                     {
@@ -1484,14 +1480,12 @@ pub const VpnClient = struct {
     /// Stops on first write error and sets tun_write_blocked.
     fn flushTunWriteBatch(self: *Self, adapter: *AdapterWrapper, batch: []const []const u8) void {
         if (adapter.real_adapter) |*real| {
-            if (real.device) |dev| {
-                for (batch) |data| {
-                    _ = dev.write(data) catch {
-                        self.tun_write_blocked = true;
-                        self.tun_eagain_count += 1;
-                        return;
-                    };
-                }
+            for (batch) |data| {
+                _ = real.write(data) catch {
+                    self.tun_write_blocked = true;
+                    self.tun_eagain_count += 1;
+                    return;
+                };
             }
         }
     }
@@ -1543,11 +1537,9 @@ pub const VpnClient = struct {
             break :win_blk @as(std.posix.fd_t, std.os.windows.INVALID_HANDLE_VALUE);
         } else blk: {
             if (adapter.real_adapter) |*real| {
-                if (real.device) |dev| {
-                    const fd = dev.getFd();
-                    if (fd < 0) return ClientError.AdapterConfigurationFailed;
-                    break :blk fd;
-                }
+                const fd = real.getFd();
+                if (fd < 0) return ClientError.AdapterConfigurationFailed;
+                break :blk fd;
             }
             return ClientError.AdapterConfigurationFailed;
         };
@@ -1912,9 +1904,7 @@ pub const VpnClient = struct {
             if (builtin.os.tag != .windows) {
                 if (self.adapter_ctx) |*ac| {
                     if (ac.real_adapter) |*ra| {
-                        if (ra.device) |dev| {
-                            poll_tun_sock = dev.getFd();
-                        }
+                        poll_tun_sock = ra.getFd();
                     }
                 }
             }
@@ -2360,9 +2350,7 @@ pub const VpnClient = struct {
                             const ethertype_udp = (@as(u16, udp_data[12]) << 8) | udp_data[13];
                             if (ethertype_udp == 0x0800 or ethertype_udp == 0x86DD) {
                                 if (adapter.real_adapter) |*real| {
-                                    if (real.device) |dev| {
-                                        _ = dev.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
-                                    }
+                                    _ = real.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
                                 }
                             }
                             self.stats.recordReceived(udp_data.len);
@@ -2461,7 +2449,7 @@ pub const VpnClient = struct {
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
                 if (adapter.real_adapter) |*real| {
-                    if (real.device) |dev| {
+                    if (real.port) |tun_port| {
                         var sendq: u32 = 0;
                         const is_multi = self.conn_manager != null;
                         if (single_sock) |ss| {
@@ -2535,7 +2523,7 @@ pub const VpnClient = struct {
 
                             while (outbound_count < batch_limit) {
                                 diag.tun_read_attempts += 1;
-                                if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
+                                if (tun_port.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                     if (maybe_len) |ip_len| {
                                         if (ip_len > 0 and ip_len <= 1500) {
                                             diag.tun_reads += 1;
