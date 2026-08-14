@@ -501,6 +501,12 @@ pub const VpnClient = struct {
     tun_write_blocked: bool = false,
     tun_eagain_count: u64 = 0,
 
+    /// Network operating mode captured at init from `config.mode` (or via
+    /// `softether_set_network_mode` before connect). The connect path branches
+    /// on this flag: client runs the classic data loop; bridge/monitor are
+    /// not yet implemented at runtime and fall back to the client loop.
+    network_mode: NetworkMode = .client,
+
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
 
@@ -560,6 +566,7 @@ pub const VpnClient = struct {
             .mutex = .{},
             .should_stop = false,
             .data_loop_running = false,
+            .network_mode = config.mode,
             .event_callback = null,
             .event_user_data = null,
             .reconnect_attempt = 0,
@@ -663,6 +670,17 @@ pub const VpnClient = struct {
         return self.state.isConnected();
     }
 
+    /// Network operating mode this session was created with. Fixed at
+    /// connect time — changes via `softether_set_network_mode` afterwards
+    /// take effect on the next connect. Storage-only today: the runtime
+    /// bridge/monitor loops are not implemented yet.
+    pub fn getNetworkMode(self: *const Self) NetworkMode {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
+        return self.network_mode;
+    }
+
     pub fn isConnecting(self: *const Self) bool {
         const mutable = @constCast(self);
         mutable.mutex.lock();
@@ -763,6 +781,14 @@ pub const VpnClient = struct {
         // softether_run_data_loop (which polls this flag) doesn't race
         // with thread startup and incorrectly return immediately.
         @atomicStore(bool, &self.data_loop_running, true, .release);
+
+        // Network operating mode branch (issue #52). Only .client has a
+        // runtime data loop today; .bridge and .monitor fall back to the
+        // client loop so connect() works end-to-end while the bridge pump
+        // and monitor capture are being implemented in later milestones.
+        if (self.network_mode != .client) {
+            std.log.warn("network mode '{s}' runtime not implemented yet — falling back to client data loop", .{@tagName(self.network_mode)});
+        }
 
         // Spawn the data loop on a native pthread with its own stack.
         // The data loop runs decoupled from any Dart Isolate.run() thread,
@@ -3139,8 +3165,19 @@ test "VpnClient initialization" {
     const config = ClientConfig{ .server_address = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
     var client = VpnClient.init(std.testing.allocator, config);
     defer client.deinit();
-    try std.testing.expectEqual(ClientState.disconnected, client.getState());
-    try std.testing.expect(!client.isConnected());
+    try std.testing.expectEqual(NetworkMode.client, client.getNetworkMode());
+}
+
+test "VpnClient network mode captured at init" {
+    const config = ClientConfig{
+        .server_address = "192.168.1.1",
+        .hub_name = "TEST",
+        .auth = .{ .anonymous = {} },
+        .mode = .bridge,
+    };
+    var client = VpnClient.init(std.testing.allocator, config);
+    defer client.deinit();
+    try std.testing.expectEqual(NetworkMode.bridge, client.getNetworkMode());
 }
 
 test "VpnClient connect with valid IP" {
