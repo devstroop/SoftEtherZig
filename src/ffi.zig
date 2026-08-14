@@ -1045,8 +1045,23 @@ export fn softether_set_hostname(client: ?*VpnClient, hostname: [*:0]const u8) v
 export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8) void {
     const c = client orelse return;
     const servers_in = std.mem.span(servers);
+
+    // Free the previously set list only if this setter allocated it. Configs
+    // supplied through VpnClient.init are borrowed and must never be freed.
+    const freeOldOwned = struct {
+        fn f(si: *client_mod.StaticIpConfig, allocator: Allocator) void {
+            if (!si.dns_servers_owned) return;
+            if (si.dns_servers) |list| {
+                for (list) |srv| allocator.free(srv);
+                allocator.free(list);
+            }
+            si.dns_servers = null;
+            si.dns_servers_owned = false;
+        }
+    }.f;
+
     if (servers_in.len == 0) {
-        if (c.config.static_ip) |*si| si.dns_servers = null;
+        if (c.config.static_ip) |*si| freeOldOwned(si, c.allocator);
         return;
     }
     if (c.config.static_ip == null) c.config.static_ip = .{};
@@ -1057,21 +1072,37 @@ export fn softether_set_dns_servers(client: ?*VpnClient, servers: [*:0]const u8)
         if (std.mem.trim(u8, part, " ").len > 0) count += 1;
     }
     if (count == 0) {
-        c.config.static_ip.?.dns_servers = null;
+        freeOldOwned(&c.config.static_ip.?, c.allocator);
         return;
     }
 
-    const slices = ffi_allocator.alloc([]const u8, count) catch return;
+    const slices = c.allocator.alloc([]const u8, count) catch return;
     var idx: usize = 0;
     var it2 = std.mem.splitScalar(u8, servers_in, ',');
     while (it2.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " ");
         if (trimmed.len > 0) {
-            slices[idx] = ffi_allocator.dupe(u8, trimmed) catch return;
+            slices[idx] = c.allocator.dupe(u8, trimmed) catch {
+                // Free already-allocated slices before returning
+                for (slices[0..idx]) |srv| c.allocator.free(srv);
+                c.allocator.free(slices);
+                return;
+            };
             idx += 1;
         }
     }
+
+    // Swap old list with new one, then free old (only if owned by us)
+    const old_dns = c.config.static_ip.?.dns_servers;
+    const old_owned = c.config.static_ip.?.dns_servers_owned;
     c.config.static_ip.?.dns_servers = slices;
+    c.config.static_ip.?.dns_servers_owned = true;
+    if (old_owned) {
+        if (old_dns) |list| {
+            for (list) |srv| c.allocator.free(srv);
+            c.allocator.free(list);
+        }
+    }
 }
 
 /// Set log level (0=err, 1=warn, 2=info, 3=debug).
@@ -1335,4 +1366,94 @@ test "ffi state mapping" {
     try std.testing.expectEqual(CState.disconnected, mapState(.disconnected));
     try std.testing.expectEqual(CState.connected, mapState(.connected));
     try std.testing.expectEqual(CState.authenticating, mapState(.authenticating));
+}
+
+test "ffi set_dns_servers frees replaced and cleared lists" {
+    // The testing allocator fails the test on any leak: repeated sets must
+    // free the previous list, empty/blank input must free the current list.
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    // Initial set
+    softether_set_dns_servers(&c, "1.1.1.1, 8.8.8.8");
+    var dns = c.config.static_ip.?.dns_servers.?;
+    try std.testing.expectEqual(@as(usize, 2), dns.len);
+    try std.testing.expectEqualStrings("1.1.1.1", dns[0]);
+    try std.testing.expectEqualStrings("8.8.8.8", dns[1]);
+
+    // Re-set (shorter) — replaces, must free the old list
+    softether_set_dns_servers(&c, "9.9.9.9");
+    dns = c.config.static_ip.?.dns_servers.?;
+    try std.testing.expectEqual(@as(usize, 1), dns.len);
+    try std.testing.expectEqualStrings("9.9.9.9", dns[0]);
+
+    // Re-set (longer) — replaces again
+    softether_set_dns_servers(&c, "4.4.4.4, 8.8.4.4, 1.0.0.1");
+    dns = c.config.static_ip.?.dns_servers.?;
+    try std.testing.expectEqual(@as(usize, 3), dns.len);
+
+    // Blank (all-whitespace/empty parts) — clears, must free
+    softether_set_dns_servers(&c, " , , ");
+    try std.testing.expect(c.config.static_ip.?.dns_servers == null);
+
+    // Empty string — clears, must free (and must not create static_ip)
+    c.config.static_ip = null;
+    softether_set_dns_servers(&c, "");
+    try std.testing.expect(c.config.static_ip == null);
+}
+
+test "ffi set_dns_servers never frees borrowed config lists" {
+    // VpnClient.init takes config by value; a literal dns_servers list is
+    // borrowed. The setter must not free it on replace/clear (invalid free
+    // would panic under testing.allocator), and deinit must not either.
+    const borrowed = [_][]const u8{ "1.1.1.1", "8.8.8.8" };
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+        .static_ip = .{ .dns_servers = &borrowed },
+    });
+    defer c.deinit();
+    try std.testing.expect(!c.config.static_ip.?.dns_servers_owned);
+
+    // Replacing borrowed list with our own allocation — must free only ours
+    softether_set_dns_servers(&c, "9.9.9.9");
+    try std.testing.expect(c.config.static_ip.?.dns_servers_owned);
+    try std.testing.expectEqual(@as(usize, 1), c.config.static_ip.?.dns_servers.?.len);
+
+    // Clearing must free ours, not the original borrowed entries
+    softether_set_dns_servers(&c, "");
+    try std.testing.expect(c.config.static_ip.?.dns_servers == null);
+    try std.testing.expect(!c.config.static_ip.?.dns_servers_owned);
+}
+
+test "ffi set_dns_servers list freed by client deinit" {
+    // Destroy a client with DNS still configured — deinit must free the
+    // setter-owned list (testing.allocator fails on any leak).
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    softether_set_dns_servers(&c, "1.1.1.1, 8.8.8.8, 1.0.0.1");
+    try std.testing.expect(c.config.static_ip.?.dns_servers_owned);
+    c.deinit(); // no defer: deinit is the only cleanup
+
+    // Borrowed config with no setter involvement must survive deinit untouched
+    const borrowed = [_][]const u8{"4.4.4.4"};
+    var c2 = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+        .static_ip = .{ .dns_servers = &borrowed },
+    });
+    c2.deinit();
 }
