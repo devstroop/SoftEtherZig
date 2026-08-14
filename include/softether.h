@@ -411,6 +411,31 @@ typedef struct {
 int softether_list_interfaces(softether_nic_info* out, int cap);
 
 /* ========================================================================== */
+/* Network mode (L2 bridge proposal §5.1)                                     */
+/* ========================================================================== */
+
+/**
+ * Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
+ * Invalid values are ignored.
+ *
+ * Storage-only plumbing: the connect path runs in client mode until the
+ * bridge/monitor runtime lands in later milestones.
+ */
+void softether_set_network_mode(softether_client_t client, int mode);
+
+/**
+ * Append an ingress interface to the bridge list (deduped, owned copy).
+ * Returns 0 on success, -1 on invalid client / empty name / OOM.
+ */
+int softether_add_ingress_interface(softether_client_t client, const char* name);
+
+/**
+ * Remove an ingress interface from the bridge list.
+ * Returns 0 on success (or if not present), -1 on invalid client / OOM.
+ */
+int softether_remove_ingress_interface(softether_client_t client, const char* name);
+
+/* ========================================================================== */
 /* Version                                                                    */
 /* ========================================================================== */
 
