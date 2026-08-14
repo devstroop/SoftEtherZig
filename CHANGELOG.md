@@ -8,6 +8,8 @@ they are called out under **Breaking** in each entry.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-08-14
+
 ### Added
 
 - **Per-client FFI callback isolation.** `softether_set_event_callback` now
