@@ -17,6 +17,26 @@ they are called out under **Breaking** in each entry.
   completing the enumeration primitive for all supported platforms.
   `include/softether.h` documents stable-id semantics (MAC or Windows GUID
   is stable; POSIX names/indices are not). Export count 67 → 68.
+- **Network operating mode plumbing** (`NetworkMode` client|bridge|monitor,
+  L2 bridge proposal §5.1). New `mode`/`bridge`/`monitor` section threaded
+  through all six config layers: CLI flags `--mode`/`--ingress`/`--pcap`,
+  env `SOFTETHER_MODE`/`SOFTETHER_INGRESS` (comma-split)/`SOFTETHER_PCAP`,
+  JSON config (`config.schema.json`/`config.example.json` updated), app
+  bridge mapping, FFI setters, and `ClientConfig` fields. `BridgeConfig`
+  carries `ingress_ifs`/`fdb_max`(4096)/`fdb_aging_s`(300);
+  `MonitorConfig` carries `pcap_file`. `--mode bridge` without `--ingress`
+  is rejected at parse time. Storage-only: the connect path stays in client
+  mode until bridge/monitor runtime lands in later milestones.
+- **FFI setters** `softether_set_network_mode` (0|1|2, invalid ignored),
+  `softether_add_ingress_interface` (dedup, owned copy, `-1` on
+  invalid/OOM), `softether_remove_ingress_interface` (`0` if absent).
+  Mutating setters replace the ingress list with fully-owned entries so
+  borrowed `VpnClient.init` configs are never freed; `VpnClient.deinit`
+  releases setter-owned bridge/monitor lists. FFI export count 67 → 70.
+
+### Changed
+
+>>>>>>> e6a1883 (feat: network operating mode config plumbing through all six layers (#49))
 - **`NetPort` interface** (`adapter/port.zig`, L2 Network Bridge proposal §4.1).
   First-class port abstraction: `open/close/read/write/getFd/getName/getMac/
   getMtu/getLayer/setPromiscuous/getStats`, plus `PortLayer`/`PortStats`.

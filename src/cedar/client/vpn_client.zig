@@ -166,6 +166,45 @@ pub const RoutingConfig = struct {
     ipv6_exclude: ?[]const u8 = null,
 };
 
+/// Network operating mode (L2 Network Bridge proposal §5.1).
+pub const NetworkMode = enum {
+    /// Classic VPN client (current behavior).
+    client,
+    /// L2 bridge between physical NICs and the virtual network.
+    bridge,
+    /// Packet monitor (passive capture).
+    monitor,
+
+    pub fn fromString(s: []const u8) ?NetworkMode {
+        if (std.mem.eql(u8, s, "client")) return .client;
+        if (std.mem.eql(u8, s, "bridge")) return .bridge;
+        if (std.mem.eql(u8, s, "monitor")) return .monitor;
+        return null;
+    }
+};
+
+/// L2 bridge options (proposal §5.2). Storage + validation only in this
+/// milestone — runtime bridge support lands in later milestones.
+pub const BridgeConfig = struct {
+    /// Physical NICs bridged into the virtual L2 network (interface names).
+    ingress_ifs: []const []const u8 = &.{},
+    /// Forwarding database (FDB) capacity.
+    fdb_max: u32 = 4096,
+    /// FDB entry aging in seconds.
+    fdb_aging_s: u32 = 300,
+    /// True when `ingress_ifs` was allocated by the client allocator
+    /// (via softether_add_ingress_interface). Borrowed lists are never freed.
+    ingress_ifs_owned: bool = false,
+};
+
+/// Packet monitor options (proposal §5.2). Storage + validation only.
+pub const MonitorConfig = struct {
+    /// Optional PCAP capture path; null = no capture.
+    pcap_file: ?[]const u8 = null,
+    /// True when `pcap_file` was allocated by the client allocator.
+    pcap_file_owned: bool = false,
+};
+
 /// VPN Client configuration
 pub const ClientConfig = struct {
     // Server settings
@@ -237,6 +276,17 @@ pub const ClientConfig = struct {
     // independent kernel buffers. Falls back to tunnel_fd when not set.
     tunnel_rx_fd: ?i32 = null,
     tunnel_tx_fd: ?i32 = null,
+
+    // Network operating mode (client | bridge | monitor). This milestone
+    // plumbs + validates the mode through all config layers; the connect
+    // path ignores everything except .client. See NetworkMode above.
+    mode: NetworkMode = .client,
+
+    // L2 bridge options (used when mode == .bridge)
+    bridge: BridgeConfig = .{},
+
+    // Monitor options (used when mode == .monitor)
+    monitor: MonitorConfig = .{},
 };
 
 /// IP version preference: null = try both, v4 = IPv4 only, v6 = IPv6 only
@@ -429,6 +479,20 @@ pub const VpnClient = struct {
                 si.dns_servers = null;
                 si.dns_servers_owned = false;
             }
+        }
+        // FFI-mutated bridge/monitor configs (softether_add/remove_ingress_interface)
+        // own their strings; mutating copy replaces the list with fully-owned
+        // entries, so deinit can free everything when the owned flag is set.
+        if (self.config.bridge.ingress_ifs_owned) {
+            for (self.config.bridge.ingress_ifs) |iface| self.allocator.free(iface);
+            self.allocator.free(self.config.bridge.ingress_ifs);
+            self.config.bridge.ingress_ifs = &.{};
+            self.config.bridge.ingress_ifs_owned = false;
+        }
+        if (self.config.monitor.pcap_file_owned) {
+            if (self.config.monitor.pcap_file) |f| self.allocator.free(f);
+            self.config.monitor.pcap_file = null;
+            self.config.monitor.pcap_file_owned = false;
         }
     }
 
