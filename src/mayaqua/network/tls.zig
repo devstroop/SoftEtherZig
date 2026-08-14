@@ -8,11 +8,7 @@ const std = @import("std");
 const log = std.log.scoped(.mayaqua_tls);
 const builtin = @import("builtin");
 const net = std.net;
-const c = @cImport({
-    @cInclude("openssl/ssl.h");
-    @cInclude("openssl/err.h");
-    @cInclude("openssl/x509.h");
-});
+const c = @import("../../cedar/protocol/c_imports.zig").c;
 const Allocator = std.mem.Allocator;
 
 /// Network interface index to bind outbound TLS sockets to (Darwin IP_BOUND_IF /

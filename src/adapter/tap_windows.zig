@@ -9,11 +9,12 @@ pub const TUN_MTU: usize = 1500;
 pub const MAX_PACKET_SIZE: usize = TUN_MTU + 14;
 pub const RECV_QUEUE_MAX: usize = 64;
 
-// Single shared Windows API import. Each distinct @cImport block is
-// translated independently, and on aarch64-windows (mingw) translate-c emits
-// an exported `__mingw_current_teb` global per block, so more than one
-// windows.h import causes an "exported symbol collision" at compile time.
-const kernel32 = @cImport(@cInclude("windows.h"));
+// Shared Windows API import. Must come from the same translation unit as the
+// OpenSSL import (see src/cedar/protocol/c_imports.zig): on aarch64-windows
+// (mingw) each distinct @cImport block that reaches winnt.h emits an exported
+// `__mingw_current_teb` global, and more than one such block causes an
+// "exported symbol collision" at compile time.
+const kernel32 = @import("../cedar/protocol/c_imports.zig").c;
 
 // ============================================
 // Windows API types (kernel32 / advapi32)
