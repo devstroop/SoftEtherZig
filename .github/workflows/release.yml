@@ -26,104 +26,70 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── Executable binaries ──
+          # ── Desktop: executable + shared library (one job per OS/arch) ──
           - name: macOS (aarch64)
             runner: macos-15
-            build: ""
+            targets: exe shared-lib
             artifact: softether-zig-macos-arm64
+            lib_artifact: libsoftether-zig-macos-arm64
             archive: tar.gz
 
           - name: macOS (x86_64)
             runner: macos-15-intel
-            build: ""
+            targets: exe shared-lib
             artifact: softether-zig-macos-x86_64
+            lib_artifact: libsoftether-zig-macos-x86_64
             archive: tar.gz
 
           - name: Linux (x86_64)
             runner: ubuntu-latest
-            build: ""
+            targets: exe shared-lib
             artifact: softether-zig-linux-x86_64
+            lib_artifact: libsoftether-zig-linux-x86_64
             archive: tar.gz
 
           - name: Linux (arm64)
             runner: ubuntu-24.04-arm
-            build: ""
+            targets: exe shared-lib
             artifact: softether-zig-linux-arm64
+            lib_artifact: libsoftether-zig-linux-arm64
             archive: tar.gz
 
           - name: Windows (x64)
             runner: windows-latest
-            build: ""
+            targets: exe shared-lib
             artifact: softether-zig-windows-x64
+            lib_artifact: libsoftether-zig-windows-x64
             archive: zip
             windows: true
             os_arch: x64
 
           - name: Windows (arm64)
             runner: windows-11-arm
-            build: ""
+            targets: exe shared-lib
             artifact: softether-zig-windows-arm64
+            lib_artifact: libsoftether-zig-windows-arm64
             archive: zip
             windows: true
             os_arch: arm64
 
-          # ── Library only ──
-          - name: macOS lib (arm64)
-            runner: macos-15
-            build: shared-lib
-            artifact: libsoftether-zig-macos-arm64
-            archive: tar.gz
-
-          - name: macOS lib (x86_64)
-            runner: macos-15-intel
-            build: shared-lib
-            artifact: libsoftether-zig-macos-x86_64
-            archive: tar.gz
-
-          - name: Linux lib (x86_64)
-            runner: ubuntu-latest
-            build: shared-lib
-            artifact: libsoftether-zig-linux-x86_64
-            archive: tar.gz
-
-          - name: Linux lib (arm64)
-            runner: ubuntu-24.04-arm
-            build: shared-lib
-            artifact: libsoftether-zig-linux-arm64
-            archive: tar.gz
-
-          - name: Windows lib (x64)
-            runner: windows-latest
-            build: shared-lib
-            artifact: libsoftether-zig-windows-x64
-            archive: zip
-            windows: true
-            os_arch: x64
-
-          - name: Windows lib (arm64)
-            runner: windows-11-arm
-            build: shared-lib
-            artifact: libsoftether-zig-windows-arm64
-            archive: zip
-            windows: true
-            os_arch: arm64
-
+          # ── Mobile: static library only ──
           - name: iOS lib (arm64 device)
             runner: macos-15
-            build: static-lib -Dtarget=aarch64-ios
+            targets: static-lib -Dtarget=aarch64-ios
             artifact: libsoftether-zig-ios-arm64
             archive: tar.gz
 
           - name: Android lib (arm64-v8a)
             runner: ubuntu-latest
-            build: static-lib -Dtarget=aarch64-linux-android
+            targets: static-lib -Dtarget=aarch64-linux-android
             artifact: libsoftether-zig-android-arm64-v8a
             archive: tar.gz
             ndk: true
 
           - name: Android lib (armeabi-v7a)
             runner: ubuntu-latest
-            build: static-lib -Dtarget=arm-linux-androideabi
+            targets: static-lib -Dtarget=arm-linux-androideabi
             artifact: libsoftether-zig-android-armeabi-v7a
             archive: tar.gz
             ndk: true
@@ -243,21 +209,26 @@ jobs:
         if: "!matrix.windows"
         shell: bash
         run: |
-          if [ -z "${{ matrix.build }}" ]; then
-            zig build --release=fast --summary all
-          else
-            zig build ${{ matrix.build }} --release=fast --summary all
-          fi
+          set -eu
+          for t in ${{ matrix.targets }}; do
+            if [ "$t" = "exe" ]; then
+              zig build --release=fast --summary all
+            else
+              zig build $t --release=fast --summary all
+            fi
+          done
 
       - name: Build (Windows)
         if: matrix.windows
         shell: pwsh
         run: |
-          $buildTarget = "${{ matrix.build }}"
-          if ([string]::IsNullOrEmpty($buildTarget)) {
-            zig build --release=fast --summary all
-          } else {
-            zig build $buildTarget --release=fast --summary all
+          $ErrorActionPreference = "Stop"
+          foreach ($t in "${{ matrix.targets }}".Split(' ')) {
+            if ($t -eq 'exe') {
+              zig build --release=fast --summary all
+            } else {
+              zig build $t --release=fast --summary all
+            }
           }
 
       - name: List build outputs
@@ -268,16 +239,18 @@ jobs:
         shell: bash
         run: |
           set -eu
-          STAGE="staging/${{ matrix.artifact }}"
-          mkdir -p "$STAGE"
-          cp -r zig-out/. "$STAGE/"
-          if [ -d include ]; then
-            mkdir -p "$STAGE/include"
-            cp -r include/. "$STAGE/include/"
-          fi
-          echo "${{ steps.version.outputs.tag }}" > "$STAGE/VERSION"
-          echo "${{ github.sha }}" > "$STAGE/COMMIT"
-          ls -lhR "$STAGE"
+          for A in "${{ matrix.artifact }}" ${{ matrix.lib_artifact }}; do
+            STAGE="staging/$A"
+            mkdir -p "$STAGE"
+            cp -r zig-out/. "$STAGE/"
+            if [ -d include ]; then
+              mkdir -p "$STAGE/include"
+              cp -r include/. "$STAGE/include/"
+            fi
+            echo "${{ steps.version.outputs.tag }}" > "$STAGE/VERSION"
+            echo "${{ github.sha }}" > "$STAGE/COMMIT"
+          done
+          ls -lhR staging
 
       - name: Create archive (tar.gz)
         if: matrix.archive == 'tar.gz'
@@ -285,22 +258,35 @@ jobs:
         run: |
           set -eu
           cd staging
-          tar -czf "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz" "${{ matrix.artifact }}"
-          ls -lh "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.tar.gz"
+          for A in "${{ matrix.artifact }}" ${{ matrix.lib_artifact }}; do
+            tar -czf "$A-${{ steps.version.outputs.tag }}.tar.gz" "$A"
+            ls -lh "$A-${{ steps.version.outputs.tag }}.tar.gz"
+          done
 
       - name: Create archive (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           Set-Location staging
-          Compress-Archive -Path "${{ matrix.artifact }}" -DestinationPath "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.zip" -Force
-          Get-Item "${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.zip" | Format-List Name,Length
+          foreach ($A in @("${{ matrix.artifact }}") + @("${{ matrix.lib_artifact }}".Split(' ') | Where-Object { $_ })) {
+            Compress-Archive -Path $A -DestinationPath "$A-${{ steps.version.outputs.tag }}.zip" -Force
+            Get-Item "$A-${{ steps.version.outputs.tag }}.zip" | Format-List Name,Length
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: staging/${{ matrix.artifact }}-${{ steps.version.outputs.tag }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload library artifact
+        if: matrix.lib_artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.lib_artifact }}
+          path: staging/${{ matrix.lib_artifact }}-${{ steps.version.outputs.tag }}.${{ matrix.archive }}
           if-no-files-found: error
           retention-days: 7
 
