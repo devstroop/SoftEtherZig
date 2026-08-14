@@ -62,6 +62,16 @@ they are called out under **Breaking** in each entry.
 
 ### Fixed
 
+- **Windows arm64 (native mingw) build failure — `exported symbol collision:
+  __mingw_current_teb`.** On `aarch64-windows` Zig translates its bundled
+  mingw `winnt.h`, which declares the x18-register global
+  `register struct _TEB *__mingw_current_teb`; translate-c emits it as a
+  `pub export var` in every `@cImport` that reaches `winnt.h`. The Wintun
+  adapter had two `@cImport(@cInclude("windows.h"))` sites (load/unload),
+  so the duplicated exported symbol aborted the build. Both sites now share
+  a single module-level import. (`-Dtarget=aarch64-windows-msvc` builds, as
+  used by the app consumers, were unaffected because the Windows SDK
+  headers don't declare that symbol.)
 - **Memory leak in `uploadAuth` debug-logging path.** Each call to the auth
   response field dump leaked one `allocPrint` allocation per int/int64
   field. Caught by the new integration test on its first run. Replaced
