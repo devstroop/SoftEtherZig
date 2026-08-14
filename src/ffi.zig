@@ -1284,14 +1284,17 @@ pub const SoftEtherNicInfo = extern struct {
 ///
 /// Fills `out[0..cap]` with {name, mac, index} entries, loopback excluded.
 /// Returns the number of entries written; if the host has more than `cap`
-/// interfaces the return value is the *negative* of the full count
-/// (snprintf-style), so callers can grow their buffer and retry.
-/// Returns -1 on invalid arguments (null out, cap <= 0) and -2 on
-/// enumeration failure.
+/// interfaces the return value is `-(full_count + 2)` (snprintf-style,
+/// offset past the reserved error codes), so callers can grow their buffer
+/// and retry. Returns -1 on invalid arguments (null out, cap <= 0) and -2
+/// on enumeration failure.
 ///
 /// Stable id semantics (see include/softether.h): `mac` — or the Windows
-/// GUID in `name` — is the stable identity across interface renames;
-/// POSIX `name` and `index` alone are not stable.
+/// GUID in `name` — is the stable identity across interface renames; POSIX
+/// `name` and `index` alone are not stable. Interfaces without a hardware
+/// address carry a zeroed `mac` and have NO stable identity (each
+/// enumeration may order them differently; key on `name` + `index` only
+/// for the duration of one enumeration).
 export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int {
     if (out == null or cap <= 0) return -1;
 
@@ -1310,9 +1313,12 @@ export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int
     }
 
     if (list.items.len > n) {
-        // Truncated: report the full count as a negative so the caller can
-        // size the buffer and re-call.
-        return -@as(c_int, @intCast(@min(list.items.len, @as(usize, std.math.maxInt(c_int)))));
+        // Truncated: report the full count as a negative, offset by 2 so
+        // the value can never collide with the reserved -1/-2 error codes
+        // (a host with exactly 2 interfaces and cap=1 must not look like
+        // an enumeration failure).
+        const full = @min(list.items.len, @as(usize, std.math.maxInt(c_int)));
+        return -@as(c_int, @intCast(full)) - 2;
     }
     return @intCast(n);
 }
@@ -1348,12 +1354,17 @@ test "softether_list_interfaces rejects invalid arguments" {
 }
 
 test "softether_list_interfaces truncation reports full count" {
-    // cap=1 must either fit the host (returns 1) or report -full.
+    // cap=1 must either fit the host (returns 1) or report truncation
+    // with the offset encoding -(full + 2) — never -1/-2.
     var one: [1]SoftEtherNicInfo = undefined;
     const r = softether_list_interfaces(&one, 1);
-    try std.testing.expect(r == 1 or r < -1);
+    try std.testing.expect(r == 1 or r < -2);
     if (r == 1) {
         try std.testing.expect(one[0].name[0] != 0);
+    } else {
+        // The exact amount is unknowable in a unit test, but the encoding
+        // must be -(full + 2): reconstruct and sanity-check the sign.
+        try std.testing.expect(r <= -4); // full >= 2 always when truncated
     }
 }
 
