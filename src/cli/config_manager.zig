@@ -328,7 +328,7 @@ pub const ConfigManager = struct {
         // Network mode + bridge/monitor options
         if (self.config.mode) |m| {
             if (cli_args.mode == null) {
-                cli_args.mode = args_mod.NetworkMode.fromString(m);
+                cli_args.mode = args_mod.NetworkMode.fromString(m) orelse return error.InvalidMode;
             }
         }
         if (self.config.bridge) |b| {
@@ -554,6 +554,52 @@ test "ConfigManager mergeWithArgs" {
     try std.testing.expectEqual(@as(u16, 8443), cli_args.port);
     // Config file value used
     try std.testing.expectEqualStrings("ConfigHub", cli_args.hub.?);
+}
+
+test "ConfigManager mergeWithArgs rejects invalid mode" {
+    var mgr = ConfigManager.init(std.testing.allocator);
+    defer mgr.deinit();
+
+    const json =
+        \\{
+        \\  "address": "192.168.1.1",
+        \\  "mode": "bridgge"
+        \\}
+    ;
+    try mgr.loadFromString(json);
+
+    var cli_args = args_mod.CliArgs{ .allocator = std.testing.allocator };
+    defer cli_args.deinit();
+
+    // A misspelled mode must be a config error, not a silent fallback to client
+    try std.testing.expectError(error.InvalidMode, mgr.mergeWithArgs(&cli_args));
+}
+
+test "ConfigManager mergeWithArgs accepts valid modes" {
+    var mgr = ConfigManager.init(std.testing.allocator);
+    defer mgr.deinit();
+
+    const json =
+        \\{
+        \\  "address": "192.168.1.1",
+        \\  "mode": "bridge",
+        \\  "bridge": { "ingress": ["en0", "en1"], "fdb_max": 8192, "fdb_aging_s": 600 },
+        \\  "monitor": { "pcap_file": "/tmp/vpn.pcap" }
+        \\}
+    ;
+    try mgr.loadFromString(json);
+
+    var cli_args = args_mod.CliArgs{ .allocator = std.testing.allocator };
+    defer cli_args.deinit();
+
+    try mgr.mergeWithArgs(&cli_args);
+    try std.testing.expectEqual(args_mod.NetworkMode.bridge, cli_args.mode.?);
+    try std.testing.expectEqual(@as(usize, 2), cli_args.ingress_ifs.len);
+    try std.testing.expectEqualStrings("en0", cli_args.ingress_ifs[0]);
+    try std.testing.expectEqualStrings("en1", cli_args.ingress_ifs[1]);
+    try std.testing.expectEqual(@as(u32, 8192), cli_args.fdb_max.?);
+    try std.testing.expectEqual(@as(u32, 600), cli_args.fdb_aging_s.?);
+    try std.testing.expectEqualStrings("/tmp/vpn.pcap", cli_args.pcap_file.?);
 }
 
 test "ConfigManager fromArgs" {
