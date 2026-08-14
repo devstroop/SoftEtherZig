@@ -140,17 +140,20 @@ pub const AdapterWrapper = struct {
         self.netmask = mask;
         self.gateway_ip = gateway;
         if (self.real_adapter) |*real| {
-            if (real.device) |dev| {
-                std.log.info("AdapterWrapper.configure: device present, calling dev.configure()", .{});
-                dev.configure(ip, mask, gateway) catch |err| {
-                    std.log.err("Failed to configure device: {}", .{err});
-                };
-            } else {
-                std.log.warn("AdapterWrapper.configure: real_adapter set but device is null", .{});
-            }
+            real.configure(ip, mask, gateway) catch |err| {
+                std.log.err("Failed to configure device: {}", .{err});
+            };
         } else {
             std.log.warn("AdapterWrapper.configure: real_adapter is null", .{});
         }
+    }
+
+    /// Get the pollable fd of the underlying device (data pump seam).
+    pub fn getFd(self: *const Self) std.posix.fd_t {
+        if (self.real_adapter) |*adapter| {
+            return adapter.getFd();
+        }
+        return adapter_mod.port.NetPort.invalid_fd;
     }
 
     /// Configure IPv6 on the adapter
