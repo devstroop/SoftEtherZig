@@ -50,11 +50,24 @@ jobs:
             build: shared-lib
             test: true
 
+          - name: Linux (arm64)
+            runner: ubuntu-24.04-arm
+            build: shared-lib
+            test: true
+
           - name: Windows (x64)
             runner: windows-latest
             build: shared-lib
             test: true
             windows: true
+            os_arch: x64
+
+          - name: Windows (arm64)
+            runner: windows-11-arm
+            build: shared-lib
+            test: true
+            windows: true
+            os_arch: arm64
 
           - name: iOS (arm64)
             runner: macos-15
@@ -105,18 +118,27 @@ jobs:
           path: |
             C:\vcpkg\installed
             C:\vcpkg\packages
-          key: vcpkg-openssl-${{ runner.os }}-x64-v3
+          key: vcpkg-openssl-${{ runner.os }}-${{ matrix.os_arch }}-v3
           restore-keys: |
-            vcpkg-openssl-${{ runner.os }}-x64-
+            vcpkg-openssl-${{ runner.os }}-${{ matrix.os_arch }}-
 
-      - name: Install OpenSSL (Windows via vcpkg)
+      - name: Install OpenSSL (Windows via vcpkg — choco only ships x64)
         if: matrix.windows
         shell: pwsh
         run: |
-          $opensslDir = "C:\vcpkg\installed\x64-windows"
+          $osArch = "${{ matrix.os_arch }}"
+          $triplet = "$($osArch)-windows"
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
+          $opensslDir = Join-Path $vcpkgRoot "installed\$triplet"
           if (-not (Test-Path "$opensslDir\lib\libssl.lib")) {
-            Write-Host "Cache miss; installing OpenSSL via vcpkg..."
-            vcpkg install openssl:x64-windows
+            Write-Host "Cache miss; installing OpenSSL via vcpkg ($triplet)..."
+            & $vcpkgExe install "openssl:$triplet" --triplet $triplet
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "vcpkg openssl:$triplet install failed"
+              exit 1
+            }
           } else {
             Write-Host "Using cached OpenSSL"
           }
