@@ -10,6 +10,18 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- **Session-side I/O helpers shared with the future bridge pump** (#50).
+  New `src/cedar/tunnel/session_io.zig` extracting, byte-identical from
+  `runDataLoop`'s hotspots: `SendTunnelHelper` (multi-connection fanout +
+  single fallback), `drainReceived` + `DrainSink` (fuses the three inline
+  drain copies: multi-connection fanout, single-connection, and the iOS
+  post-drain re-check), and `maybeSendKeepalive`. `MAX_INBOUND_DRAIN`
+  now lives in `session_io.zig`; drain diagnostics hoisted to file scope
+  (`DiagStats`, `singleDead`, `mergeDrainDiag`) so the bridge loop can
+  reuse them without copying. Zero behavior change: 250/250 tests.
+
+### Added
+
 - **`softether_list_interfaces(out, cap)` FFI export** (#48). C-ABI
   `softether_nic_info {name[64], mac[6], index}` entries with loopback
   exclusion; snprintf-style negative return on truncation. Windows path
