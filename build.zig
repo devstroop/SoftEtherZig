@@ -359,29 +359,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Link OpenSSL for TLS
-    if (target_os == .macos) {
-        vpnclient.addLibraryPath(.{ .cwd_relative = openssl_lib });
-        vpnclient.addIncludePath(.{ .cwd_relative = openssl_include });
-        vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-        vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-    } else if (target_os == .windows) {
-        vpnclient.addLibraryPath(.{ .cwd_relative = win_openssl_lib });
-        vpnclient.addIncludePath(.{ .cwd_relative = win_openssl_include });
-        vpnclient.linkSystemLibrary2("libssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-        vpnclient.linkSystemLibrary2("libcrypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-        vpnclient.linkSystemLibrary("ws2_32");
-        vpnclient.linkSystemLibrary("kernel32");
-        vpnclient.linkSystemLibrary("advapi32");
-        vpnclient.linkSystemLibrary("iphlpapi");
-    } else {
-        if (linux_lib_dir) |d| vpnclient.addLibraryPath(.{ .cwd_relative = d });
-        vpnclient.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-        vpnclient.linker_allow_shlib_undefined = true;
-        vpnclient.linkSystemLibrary2("ssl", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-        vpnclient.linkSystemLibrary2("crypto", .{ .use_pkg_config = .no, .preferred_link_mode = .dynamic });
-    }
-    if (is_android) setupAndroidNdk(b, vpnclient, target_arch);
+    // Link OpenSSL for TLS (platform branches mirror linkOpenSsl below:
+    // Android/iOS get the bundled static libs, desktop gets system libs)
+    linkOpenSsl(b, vpnclient, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
     vpnclient.linkLibC();
     addZlib(vpnclient, b);
 

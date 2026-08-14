@@ -29,35 +29,45 @@ jobs:
           # ── Desktop: executable + shared library (one job per OS/arch) ──
           - name: macOS (aarch64)
             runner: macos-15
-            targets: exe shared-lib
+            targets: |
+              exe
+              shared-lib
             artifact: softether-zig-macos-arm64
             lib_artifact: libsoftether-zig-macos-arm64
             archive: tar.gz
 
           - name: macOS (x86_64)
             runner: macos-15-intel
-            targets: exe shared-lib
+            targets: |
+              exe
+              shared-lib
             artifact: softether-zig-macos-x86_64
             lib_artifact: libsoftether-zig-macos-x86_64
             archive: tar.gz
 
           - name: Linux (x86_64)
             runner: ubuntu-latest
-            targets: exe shared-lib
+            targets: |
+              exe
+              shared-lib
             artifact: softether-zig-linux-x86_64
             lib_artifact: libsoftether-zig-linux-x86_64
             archive: tar.gz
 
           - name: Linux (arm64)
             runner: ubuntu-24.04-arm
-            targets: exe shared-lib
+            targets: |
+              exe
+              shared-lib
             artifact: softether-zig-linux-arm64
             lib_artifact: libsoftether-zig-linux-arm64
             archive: tar.gz
 
           - name: Windows (x64)
             runner: windows-latest
-            targets: exe shared-lib
+            targets: |
+              exe
+              shared-lib
             artifact: softether-zig-windows-x64
             lib_artifact: libsoftether-zig-windows-x64
             archive: zip
@@ -66,7 +76,9 @@ jobs:
 
           - name: Windows (arm64)
             runner: windows-11-arm
-            targets: exe shared-lib
+            targets: |
+              exe
+              shared-lib
             artifact: softether-zig-windows-arm64
             lib_artifact: libsoftether-zig-windows-arm64
             archive: zip
@@ -76,20 +88,23 @@ jobs:
           # ── Mobile: static library only ──
           - name: iOS lib (arm64 device)
             runner: macos-15
-            targets: static-lib -Dtarget=aarch64-ios
+            targets: |
+              static-lib -Dtarget=aarch64-ios
             artifact: libsoftether-zig-ios-arm64
             archive: tar.gz
 
           - name: Android lib (arm64-v8a)
             runner: ubuntu-latest
-            targets: static-lib -Dtarget=aarch64-linux-android
+            targets: |
+              static-lib -Dtarget=aarch64-linux-android
             artifact: libsoftether-zig-android-arm64-v8a
             archive: tar.gz
             ndk: true
 
           - name: Android lib (armeabi-v7a)
             runner: ubuntu-latest
-            targets: static-lib -Dtarget=arm-linux-androideabi
+            targets: |
+              static-lib -Dtarget=arm-linux-androideabi
             artifact: libsoftether-zig-android-armeabi-v7a
             archive: tar.gz
             ndk: true
@@ -167,7 +182,8 @@ jobs:
         shell: bash
         run: |
           set -eu
-          for t in ${{ matrix.targets }}; do
+          printf '%s\n' "${{ matrix.targets }}" | while IFS= read -r t; do
+            [ -z "$t" ] && continue
             if [ "$t" = "exe" ]; then
               zig build --release=fast --summary all
             else
@@ -180,7 +196,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          foreach ($t in "${{ matrix.targets }}".Split(' ')) {
+          foreach ($t in ("${{ matrix.targets }}".Replace("`r", "")) -split "`n") {
+            $t = $t.Trim()
+            if ($t -eq "") { continue }
             if ($t -eq 'exe') {
               zig build --release=fast --summary all
             } else {
