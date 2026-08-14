@@ -42,9 +42,9 @@ Implements the full SoftEther VPN protocol: HTTPS tunnel, AES-256-CBC session en
 
 | Platform | Build Target | Output | Status |
 |----------|-------------|--------|--------|
-| macOS (arm64) | `zig build` | CLI | ✅ |
+| macOS (aarch64) | `zig build` | CLI | ✅ |
 | macOS (x86_64) | `zig build` | CLI | ✅ |
-| macOS (arm64) | `zig build shared-lib` | .dylib | ✅ |
+| macOS (aarch64) | `zig build shared-lib` | .dylib | ✅ |
 | macOS (x86_64) | `zig build shared-lib` | .dylib | ✅ |
 | iOS (arm64) | `zig build static-lib -Dtarget=aarch64-ios` | .a | ✅ |
 | Linux (x86_64) | `zig build` | CLI | ✅ |

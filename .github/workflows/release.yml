@@ -27,7 +27,7 @@ jobs:
       matrix:
         include:
           # ── Executable binaries ──
-          - name: macOS (arm64)
+          - name: macOS (aarch64)
             runner: macos-15
             build: ""
             artifact: softether-zig-macos-arm64

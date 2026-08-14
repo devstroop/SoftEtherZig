@@ -35,7 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS (arm64)
+          - name: macOS (aarch64)
             runner: macos-15
             build: shared-lib
             test: true
