@@ -518,6 +518,8 @@ pub fn build(b: *std.Build) void {
         "src/cli/config_manager.zig",
         "src/mayaqua/network/dns_cache.zig",
         "src/mayaqua/network/socks.zig",
+        "src/bridge/fdb.zig",
+        "src/bridge/engine.zig",
     };
 
     for (test_sources) |test_src| {

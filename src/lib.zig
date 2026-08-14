@@ -73,6 +73,12 @@ pub const ReconnectConfig = @import("cedar/client/mod.zig").ReconnectConfig;
 /// Core utilities (IP parsing, etc.)
 pub const core = @import("mayaqua/kernel/mod.zig");
 
+// L2 bridge core (proposal §4.3) — pure logic, no I/O
+pub const bridge = struct {
+    pub const fdb = @import("bridge/fdb.zig");
+    pub const engine = @import("bridge/engine.zig");
+};
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
@@ -109,6 +115,7 @@ test "library exports" {
     _ = AuthMethod;
     _ = ReconnectConfig;
     _ = core;
+    _ = bridge;
     _ = parseIpv4;
     _ = formatIpv4;
 }
