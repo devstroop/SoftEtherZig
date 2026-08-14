@@ -20,6 +20,19 @@ they are called out under **Breaking** in each entry.
   on the ingress NIC logs an H-5 warning; `setPromiscuous(bool)` toggles
   PACKET_MR_PROMISC membership. PACKET_MMAP ring deferred (documented).
   Linux-gated tests; all non-Linux targets compile unchanged.
+- **L2 bridge core** (`src/bridge/`, proposal §4.3). Pure logic, no I/O:
+  - `fdb.zig` — hash-based MAC → port table (`FdbTable`): FNV-1a probing,
+    aging (default 300 s), overflow → `error.TableFull` after FIFO eviction
+    (engine floods), re-learn on move. Injected clock keeps tests
+    deterministic (`age(now)` — no timing flakiness).
+  - `engine.zig` — `BridgeEngine` over N ports sharing one FDB: learns src
+    MAC; unicast lookup → single port; broadcast/multicast/unknown →
+    flood to all other ports (**no-echo loop guard** — frames never return
+    to the source port); per-port `forwarded`/`blocked`/`flooded` counters.
+    Multi-ingress ready; STP deferred (documented, proposal §11 Q2).
+  - Wired into `lib.zig` (`softether.bridge`) and standalone test sources.
+    15 new tests (learn/age/refresh/overflow-flood/re-learn/move/bcast/
+    unknown-unicast/counters/no-echo/single-port): 265/265 total.
 
 ### Added
 
