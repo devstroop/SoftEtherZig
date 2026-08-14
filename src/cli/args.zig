@@ -91,6 +91,17 @@ pub const CliArgs = struct {
     // TCP_NODELAY (default: enabled for low latency)
     tcp_nodelay: bool = true,
 
+    // Network mode (client | bridge | monitor) — L2 bridge proposal §5.1
+    mode: ?NetworkMode = null,
+    /// L2 bridge ingress interfaces (repeatable --ingress)
+    ingress_ifs: []const []const u8 = &.{},
+    /// Monitor PCAP output path
+    pcap_file: ?[]const u8 = null,
+    /// L2 bridge FDB capacity (config-file only; no CLI flag)
+    fdb_max: ?u32 = null,
+    /// L2 bridge FDB aging in seconds (config-file only; no CLI flag)
+    fdb_aging_s: ?u32 = null,
+
     // Allocator for dynamic data
     allocator: ?Allocator = null,
 
@@ -108,6 +119,10 @@ pub const CliArgs = struct {
         if (self.dns_servers.len > 0) {
             for (self.dns_servers) |s| alloc.free(s);
             alloc.free(self.dns_servers);
+        }
+        if (self.ingress_ifs.len > 0) {
+            for (self.ingress_ifs) |s| alloc.free(s);
+            alloc.free(self.ingress_ifs);
         }
     }
 };
@@ -143,6 +158,21 @@ pub const IpVersion = enum(u8) {
     }
 };
 
+/// Network operating mode (L2 bridge proposal §5.1). Mirrors the client-side
+/// enum in cedar/client/vpn_client.zig; app/config.zig maps between them.
+pub const NetworkMode = enum {
+    client,
+    bridge,
+    monitor,
+
+    pub fn fromString(s: []const u8) ?NetworkMode {
+        if (std.mem.eql(u8, s, "client")) return .client;
+        if (std.mem.eql(u8, s, "bridge")) return .bridge;
+        if (std.mem.eql(u8, s, "monitor")) return .monitor;
+        return null;
+    }
+};
+
 // ============================================================================
 // Parse Errors
 // ============================================================================
@@ -165,6 +195,7 @@ pub const ArgParser = struct {
     allocator: Allocator,
     args: CliArgs,
     dns_list: std.ArrayListUnmanaged([]const u8),
+    ingress_list: std.ArrayListUnmanaged([]const u8),
     errors: std.ArrayListUnmanaged([]const u8),
 
     const Self = @This();
@@ -174,6 +205,7 @@ pub const ArgParser = struct {
             .allocator = allocator,
             .args = .{ .allocator = allocator },
             .dns_list = .{},
+            .ingress_list = .{},
             .errors = .{},
         };
     }
@@ -181,6 +213,8 @@ pub const ArgParser = struct {
     pub fn deinit(self: *Self) void {
         for (self.dns_list.items) |s| self.allocator.free(s);
         self.dns_list.deinit(self.allocator);
+        for (self.ingress_list.items) |s| self.allocator.free(s);
+        self.ingress_list.deinit(self.allocator);
         for (self.errors.items) |err| {
             self.allocator.free(err);
         }
@@ -301,6 +335,18 @@ pub const ArgParser = struct {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--dns-server");
                 try self.dns_list.append(self.allocator, val);
+            } else if (std.mem.eql(u8, arg, "--mode")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--mode");
+                defer self.allocator.free(val);
+                self.args.mode = NetworkMode.fromString(val) orelse return ParseError.InvalidValue;
+            } else if (std.mem.eql(u8, arg, "--ingress")) {
+                i += 1;
+                const val = try self.requireValue(argv, i, "--ingress");
+                try self.ingress_list.append(self.allocator, val);
+            } else if (std.mem.eql(u8, arg, "--pcap")) {
+                i += 1;
+                self.args.pcap_file = try self.requireValue(argv, i, "--pcap");
             } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--daemon")) {
                 self.args.daemon = true;
             } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
@@ -352,6 +398,12 @@ pub const ArgParser = struct {
             self.args.dns_servers = try self.allocator.dupe([]const u8, self.dns_list.items);
             // Transfer ownership: strings are now owned via dns_servers
             self.dns_list.items.len = 0;
+        }
+
+        // Convert ingress list to slice (same ownership transfer)
+        if (self.ingress_list.items.len > 0) {
+            self.args.ingress_ifs = try self.allocator.dupe([]const u8, self.ingress_list.items);
+            self.ingress_list.items.len = 0;
         }
 
         return self.args;
@@ -453,6 +505,24 @@ pub const ArgParser = struct {
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ENABLE_CUSTOM_ROUTES")) |v| {
             self.args.enable_custom_routes = isTrue(v);
         } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_MODE")) |v| {
+            self.args.mode = NetworkMode.fromString(v);
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_INGRESS")) |v| {
+            // Comma-separated interface list; each entry appended as owned.
+            var it = std.mem.splitScalar(u8, v, ',');
+            while (it.next()) |iface| {
+                if (iface.len == 0) continue;
+                const owned = allocator.dupe(u8, iface) catch continue;
+                self.ingress_list.append(allocator, owned) catch {
+                    allocator.free(owned);
+                    continue;
+                };
+            }
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PCAP")) |v| {
+            if (self.args.pcap_file == null) self.args.pcap_file = v;
+        } else |_| {}
     }
 };
 
@@ -496,6 +566,13 @@ pub fn validate(args: *const CliArgs, allocator: Allocator) !ValidationResult {
 
     if (args.daemon and args.interactive) {
         try errs.append(allocator, "Cannot specify both --daemon and --interactive");
+    }
+
+    // Network-mode validation (L2 bridge proposal §5.2)
+    if (args.mode) |mode| {
+        if (mode == .bridge and args.ingress_ifs.len == 0) {
+            try errs.append(allocator, "--mode bridge requires at least one --ingress <interface>");
+        }
     }
 
     return .{
@@ -608,4 +685,68 @@ test "validate help mode skips validation" {
     const result = try validate(&args, std.testing.allocator);
 
     try std.testing.expect(result.valid);
+}
+
+test "ArgParser network mode flags" {
+    var parser = ArgParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    const argv = [_][]const u8{
+        "vpnclient", "--mode", "bridge",
+        "--ingress", "en0",
+        "--ingress", "eth1",
+        "--pcap", "/tmp/cap.pcap",
+    };
+    var args = try parser.parse(&argv);
+    defer args.deinit();
+
+    try std.testing.expectEqual(NetworkMode.bridge, args.mode.?);
+    try std.testing.expectEqual(@as(usize, 2), args.ingress_ifs.len);
+    try std.testing.expectEqualStrings("en0", args.ingress_ifs[0]);
+    try std.testing.expectEqualStrings("eth1", args.ingress_ifs[1]);
+    try std.testing.expectEqualStrings("/tmp/cap.pcap", args.pcap_file.?);
+}
+
+test "ArgParser invalid mode value rejected" {
+    var parser = ArgParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    const argv = [_][]const u8{ "vpnclient", "--mode", "bogus" };
+    const result = parser.parse(&argv);
+    try std.testing.expectError(ParseError.InvalidValue, result);
+}
+
+test "NetworkMode fromString" {
+    try std.testing.expectEqual(NetworkMode.client, NetworkMode.fromString("client").?);
+    try std.testing.expectEqual(NetworkMode.bridge, NetworkMode.fromString("bridge").?);
+    try std.testing.expectEqual(NetworkMode.monitor, NetworkMode.fromString("monitor").?);
+    try std.testing.expect(NetworkMode.fromString("vpn") == null);
+}
+
+test "validate bridge mode requires ingress" {
+    const args = CliArgs{ .mode = .bridge };
+    const result = try validate(&args, std.testing.allocator);
+    defer std.testing.allocator.free(result.missing_fields);
+    defer std.testing.allocator.free(result.errors);
+
+    try std.testing.expect(!result.valid);
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "ingress") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "validate bridge mode with ingress passes" {
+    const args = CliArgs{ .mode = .bridge, .ingress_ifs = &.{"en0"} };
+    const result = try validate(&args, std.testing.allocator);
+    defer std.testing.allocator.free(result.missing_fields);
+    defer std.testing.allocator.free(result.errors);
+
+    // Missing server fields still invalid, but no network-mode error.
+    var found = false;
+    for (result.errors) |e| {
+        if (std.mem.indexOf(u8, e, "ingress") != null) found = true;
+    }
+    try std.testing.expect(!found);
 }

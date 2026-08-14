@@ -62,6 +62,11 @@ pub const ConfigFile = struct {
     /// Emit non-standard diagnostic logs (DIAG throughput/queue stats,
     /// per-connection RX state). Equivalent to the --verbose CLI flag.
     verbose: ?bool = null,
+
+    // Network mode (client | bridge | monitor)
+    mode: ?[]const u8 = null,
+    bridge: ?BridgeConfig = null,
+    monitor: ?MonitorConfig = null,
 };
 
 pub const ReconnectConfig = struct {
@@ -87,6 +92,18 @@ pub const RoutingConfig = struct {
     ipv4_exclude: ?[]const u8 = null,
     ipv6_include: ?[]const u8 = null,
     ipv6_exclude: ?[]const u8 = null,
+};
+
+/// L2 bridge section of the JSON config file (proposal §5.2).
+pub const BridgeConfig = struct {
+    ingress: ?[]const []const u8 = null,
+    fdb_max: ?u32 = null,
+    fdb_aging_s: ?u32 = null,
+};
+
+/// Packet monitor section of the JSON config file.
+pub const MonitorConfig = struct {
+    pcap_file: ?[]const u8 = null,
 };
 
 // ============================================================================
@@ -307,6 +324,31 @@ pub const ConfigManager = struct {
 
         // Verbose diagnostics
         if (self.config.verbose) |v| cli_args.verbose = v;
+
+        // Network mode + bridge/monitor options
+        if (self.config.mode) |m| {
+            if (cli_args.mode == null) {
+                cli_args.mode = args_mod.NetworkMode.fromString(m);
+            }
+        }
+        if (self.config.bridge) |b| {
+            if (cli_args.ingress_ifs.len == 0) {
+                if (b.ingress) |ifs| {
+                    if (ifs.len > 0) {
+                        const duped = try alloc.alloc([]const u8, ifs.len);
+                        for (ifs, 0..) |iface, j| duped[j] = try alloc.dupe(u8, iface);
+                        cli_args.ingress_ifs = duped;
+                    }
+                }
+            }
+            if (b.fdb_max) |fdb| cli_args.fdb_max = fdb;
+            if (b.fdb_aging_s) |aging| cli_args.fdb_aging_s = aging;
+        }
+        if (self.config.monitor) |mon| {
+            if (cli_args.pcap_file == null) {
+                if (mon.pcap_file) |s| cli_args.pcap_file = try alloc.dupe(u8, s);
+            }
+        }
     }
 
     /// Save current config to file
@@ -370,6 +412,19 @@ pub const ConfigManager = struct {
             .ipv6_include = cli_args.ipv6_include,
             .ipv6_exclude = cli_args.ipv6_exclude,
         };
+
+        // Network mode + bridge/monitor sections
+        cfg.mode = if (cli_args.mode) |m| @tagName(m) else null;
+        if (cli_args.ingress_ifs.len > 0 or cli_args.fdb_max != null or cli_args.fdb_aging_s != null) {
+            cfg.bridge = .{
+                .ingress = if (cli_args.ingress_ifs.len > 0) cli_args.ingress_ifs else null,
+                .fdb_max = cli_args.fdb_max,
+                .fdb_aging_s = cli_args.fdb_aging_s,
+            };
+        }
+        if (cli_args.pcap_file != null) {
+            cfg.monitor = .{ .pcap_file = cli_args.pcap_file };
+        }
 
         return cfg;
     }

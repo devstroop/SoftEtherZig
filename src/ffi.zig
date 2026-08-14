@@ -1324,6 +1324,101 @@ export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int
 }
 
 // ============================================================================
+// Network mode (L2 bridge proposal §5.1) — storage plumbing only; runtime
+// bridge/monitor support lands in later milestones. All three setters are
+// safe to call before connect(); the connect path ignores the mode today.
+// ============================================================================
+
+/// Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
+/// Invalid values are ignored.
+export fn softether_set_network_mode(client: ?*VpnClient, mode: c_int) void {
+    const c = client orelse return;
+    const NetworkMode = client_mod.NetworkMode;
+    c.config.mode = switch (mode) {
+        0 => NetworkMode.client,
+        1 => NetworkMode.bridge,
+        2 => NetworkMode.monitor,
+        else => return,
+    };
+}
+
+/// Append an ingress interface to the bridge list (deduped, owned copy).
+/// Returns 0 on success, -1 on invalid client / empty name / OOM.
+/// The resulting list is fully owned by the client: every prior entry is
+/// re-duplicated so mixed borrowed/owned states cannot arise.
+export fn softether_add_ingress_interface(client: ?*VpnClient, name: [*:0]const u8) c_int {
+    const c = client orelse return -1;
+    const iface = std.mem.span(name);
+    if (iface.len == 0) return -1;
+
+    for (c.config.bridge.ingress_ifs) |existing| {
+        if (std.mem.eql(u8, existing, iface)) return 0;
+    }
+
+    const old = c.config.bridge.ingress_ifs;
+    const old_owned = c.config.bridge.ingress_ifs_owned;
+
+    const new_list = c.allocator.alloc([]const u8, old.len + 1) catch return -1;
+    var i: usize = 0;
+    for (old) |existing| {
+        new_list[i] = c.allocator.dupe(u8, existing) catch {
+            for (new_list[0..i]) |e| c.allocator.free(e);
+            c.allocator.free(new_list);
+            return -1;
+        };
+        i += 1;
+    }
+    new_list[old.len] = c.allocator.dupe(u8, iface) catch {
+        for (new_list[0..i]) |e| c.allocator.free(e);
+        c.allocator.free(new_list);
+        return -1;
+    };
+
+    c.config.bridge.ingress_ifs = new_list;
+    c.config.bridge.ingress_ifs_owned = true;
+    if (old_owned) {
+        for (old) |e| c.allocator.free(e);
+        c.allocator.free(old);
+    }
+    return 0;
+}
+
+/// Remove an ingress interface from the bridge list.
+/// Returns 0 on success (or if not present), -1 on invalid client / OOM.
+export fn softether_remove_ingress_interface(client: ?*VpnClient, name: [*:0]const u8) c_int {
+    const c = client orelse return -1;
+    const iface = std.mem.span(name);
+    const old = c.config.bridge.ingress_ifs;
+    const old_owned = c.config.bridge.ingress_ifs_owned;
+
+    var keep: usize = 0;
+    for (old) |existing| {
+        if (!std.mem.eql(u8, existing, iface)) keep += 1;
+    }
+    if (keep == old.len) return 0; // not present
+
+    const new_list = c.allocator.alloc([]const u8, keep) catch return -1;
+    var j: usize = 0;
+    for (old) |existing| {
+        if (std.mem.eql(u8, existing, iface)) continue;
+        new_list[j] = c.allocator.dupe(u8, existing) catch {
+            for (new_list[0..j]) |e| c.allocator.free(e);
+            c.allocator.free(new_list);
+            return -1;
+        };
+        j += 1;
+    }
+
+    c.config.bridge.ingress_ifs = new_list;
+    c.config.bridge.ingress_ifs_owned = true;
+    if (old_owned) {
+        for (old) |e| c.allocator.free(e);
+        c.allocator.free(old);
+    }
+    return 0;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1550,4 +1645,104 @@ test "ffi set_dns_servers list freed by client deinit" {
         .static_ip = .{ .dns_servers = &borrowed },
     });
     c2.deinit();
+}
+
+test "ffi network mode setter" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    const NetworkMode = client_mod.NetworkMode;
+    try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+
+    softether_set_network_mode(&c, 1);
+    try std.testing.expectEqual(NetworkMode.bridge, c.config.mode);
+    softether_set_network_mode(&c, 2);
+    try std.testing.expectEqual(NetworkMode.monitor, c.config.mode);
+    softether_set_network_mode(&c, 0);
+    try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+
+    // Invalid values are ignored
+    softether_set_network_mode(&c, 7);
+    try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+}
+
+test "ffi add ingress interfaces owned lifecycle" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+    const NetworkMode = client_mod.NetworkMode;
+    softether_set_network_mode(&c, 1);
+    try std.testing.expectEqual(NetworkMode.bridge, c.config.mode);
+
+    // Empty name rejected
+    try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(&c, ""));
+    // Null client rejected
+    try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(null, "en0"));
+
+    // Add two
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en0"));
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en1"));
+    var list = c.config.bridge.ingress_ifs;
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("en0", list[0]);
+    try std.testing.expectEqualStrings("en1", list[1]);
+    try std.testing.expect(c.config.bridge.ingress_ifs_owned);
+
+    // Duplicate is a no-op
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en0"));
+    try std.testing.expectEqual(@as(usize, 2), c.config.bridge.ingress_ifs.len);
+
+    // Remove one; strings + arrays must be freed correctly (testing allocator)
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en0"));
+    list = c.config.bridge.ingress_ifs;
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("en1", list[0]);
+
+    // Remove absent is a no-op success
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "wlan0"));
+
+    // Remove last — empty owned list
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en1"));
+    try std.testing.expectEqual(@as(usize, 0), c.config.bridge.ingress_ifs.len);
+    try std.testing.expect(c.config.bridge.ingress_ifs_owned);
+
+    // Remaining list freed by deinit — no leak (defer c.deinit())
+}
+
+test "ffi add ingress never frees borrowed config lists" {
+    // A literal ingress list from VpnClient.init must survive add/remove
+    // without being freed (borrowed semantics, mirrors dns_servers contract).
+    const borrowed = [_][]const u8{ "en0", "en1" };
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+        .bridge = .{ .ingress_ifs = &borrowed },
+    });
+    defer c.deinit();
+    try std.testing.expect(!c.config.bridge.ingress_ifs_owned);
+
+    // Add replaces the whole list with owned copies — borrowed entries must
+    // not be freed (would panic under testing.allocator)
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en2"));
+    const list = c.config.bridge.ingress_ifs;
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+    try std.testing.expectEqualStrings("en0", list[0]);
+    try std.testing.expectEqualStrings("en1", list[1]);
+    try std.testing.expectEqualStrings("en2", list[2]);
+    try std.testing.expect(c.config.bridge.ingress_ifs_owned);
+
+    // Remove — replacements must also not free the literal
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en1"));
+    try std.testing.expectEqual(@as(usize, 2), c.config.bridge.ingress_ifs.len);
 }

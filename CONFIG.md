@@ -63,6 +63,11 @@ Every config property must be present in **all six layers** to be maintainable.
 | 43 | os_title | — | — | `"fingerprint.os_title"` | ✅ | `softether_set_os_info` | `fingerprint.os_title` | — |
 | 44 | watermark | — | — | `"fingerprint.watermark_b64"` | ✅ | — | `fingerprint.watermark` | — |
 | 45 | client_hostname | — | — | `"fingerprint.client_hostname"` | ✅ | — | `fingerprint.client_hostname` | — |
+| 46 | mode | `--mode` | `SOFTETHER_MODE` | `"mode"` | ✅ | `softether_set_network_mode` | `mode` | — |
+| 47 | ingress_ifs | `--ingress` (multi) | `SOFTETHER_INGRESS` | `"bridge.ingress"` | ✅ | `softether_add_ingress_interface` / `softether_remove_ingress_interface` | `bridge.ingress_ifs` | — |
+| 48 | fdb_max | — (config-only) | — | `"bridge.fdb_max"` | ✅ | — | `bridge.fdb_max` | — |
+| 49 | fdb_aging_s | — (config-only) | — | `"bridge.fdb_aging_s"` | ✅ | — | `bridge.fdb_aging_s` | — |
+| 50 | pcap_file | `--pcap` | `SOFTETHER_PCAP` | `"monitor.pcap_file"` | ✅ | — | `monitor.pcap_file` | — |
 
 ## Env Vars Reference
 
@@ -94,6 +99,9 @@ SOFTETHER_TCP_NODELAY         → isTrue(1|true|yes)
 SOFTETHER_FULL_TUNNEL            → isTrue(1|true|yes)
 SOFTETHER_ACCEPT_PUSHED_ROUTES   → isTrue(1|true|yes)
 SOFTETHER_ENABLE_CUSTOM_ROUTES   → isTrue(1|true|yes)
+SOFTETHER_MODE                   → client|bridge|monitor
+SOFTETHER_INGRESS                → comma-separated interface names (--mode bridge)
+SOFTETHER_PCAP                   → pcap output path (--mode monitor)
 
 Priority: CLI flag > env var > config file > code default.
 
