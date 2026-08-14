@@ -67,10 +67,12 @@ const route_heal = @import("../../adapter/route_heal.zig");
 
 // Import DHCPv6
 const dhcpv6_mod = @import("../tunnel/dhcpv6.zig");
+const session_io = @import("../tunnel/session_io.zig");
 const Dhcpv6Client = dhcpv6_mod.Dhcpv6Client;
 
 // Import connection manager for multi-TCP
 const connection_manager = @import("connection_manager.zig");
+const ManagedConnection = connection_manager.ManagedConnection;
 const ConnectionManager = connection_manager.ConnectionManager;
 const TcpDirection = connection_manager.TcpDirection;
 
@@ -90,12 +92,152 @@ const winmm = if (builtin.os.tag == .windows) struct {
 
 /// Maximum number of inbound packets to drain per poll iteration.
 /// Prevents complete outbound starvation during heavy download bursts.
-const MAX_INBOUND_DRAIN: u32 = 256;
+const MAX_INBOUND_DRAIN = session_io.MAX_INBOUND_DRAIN;
 
 /// Maximum number of IP packets to batch before flushing to the TUN device.
 /// Reduces per-packet overhead by coalescing the ethertype check and adapter
 /// null checks into one perfunctor call per batch rather than per packet.
 const TUN_WRITE_BATCH: usize = 64;
+
+// ============================================================================
+// SESSION DISPATCH (issue #50) — file-scope plumbing shared between the
+// drain bucket (session_io.drainReceived) and runDataLoop. Hoisted to
+// container level because Zig local fns cannot capture function-scope
+// types. All closure state is passed through the opaque ctx.
+// ============================================================================
+
+const DiagStats = struct {
+    bytes_in: u64 = 0,
+    bytes_out: u64 = 0,
+    pkts_in: u64 = 0,
+    pkts_out: u64 = 0,
+    drain_total: u64 = 0,
+    drain_max: u32 = 0,
+    drain_cap_hits: u64 = 0,
+    ssl_pending_max: u32 = 0,
+    /// Tracks the read-ahead buffer depth (inside TlsSocket, between
+    /// OpenSSL SSL_read and the application). Non-zero proves the 64KB
+    /// buffer is actively batching TLS records.
+    buf_avail_max: u32 = 0,
+    nread_max: u32 = 0,
+    nwrite_max: u32 = 0,
+    tcp_drops_pkts: u64 = 0,
+    tun_eagain: u64 = 0,
+    tx_drops_delta: u64 = 0, // FdAdapter ring buffer drops (this second)
+    tx_drops_last: u64 = 0, // cumulative tx_drops at last flush
+    poll_iters: u64 = 0,
+    // Latency tracking (microseconds): per-iteration wall time.
+    // iter_us_max captures the worst single-iter spike — useful to
+    // detect when one iteration starves the rest (e.g. blocking I/O,
+    // GC pause, kernel scheduler hiccup, large drain burst).
+    iter_us_max: u64 = 0,
+    iter_us_total: u64 = 0,
+    iter_slow_10ms: u32 = 0,
+    iter_slow_50ms: u32 = 0,
+    iter_slow_100ms: u32 = 0,
+    // poll() wait time (microseconds) — captures kernel-blocked time.
+    // High poll_us_max with low iter_us_max means we're idle-waiting;
+    // high values on both means a stall.
+    poll_us_max: u32 = 0,
+    poll_us_total: u64 = 0,
+    // Bufferbloat detection: kernel TCP sendq depth, sampled at end
+    // of every iter. Growing sendq while throughput drops = TX-side
+    // queue building (server can't pull, or TCP cwnd shrunk). This
+    // is the smoking gun for the latency-grows / throughput-collapses
+    // pattern that the in-loop iter_us metric cannot see.
+    sendq_max: u32 = 0,
+    sendq_sum: u64 = 0,
+    sendq_samples: u32 = 0,
+    // Count of write_fn calls that hit WANT_WRITE (POLLOUT poll)
+    // since last DIAG. High = TX bound. Diff'd from per-conn
+    // TlsSocket.write_block_count snapshots.
+    write_blocked: u64 = 0,
+    // Count of consecutive iterations where needs_pollout was true
+    // AND no inbound data was processed — the circular deadlock
+    // signature. Resets to 0 on any successful retryPendingWrite
+    // or any inbound data receipt. Monotonically climbs when stuck.
+    stalled_iters: u64 = 0,
+    // === Deep TX-path logging: track upload data from TUN→Ethernet→TLS→TCP ===
+    // Counters per DIAG window (1s). Proves whether the client is actually
+    // sending upload data, or only TCP ACKs for download traffic.
+    tun_reads: u64 = 0, // Number of successful dev.read() calls
+    tun_bytes: u64 = 0, // Total IP-level bytes from TUN reads
+    tun_read_attempts: u64 = 0, // Total dev.read() calls (incl WouldBlock)
+    eth_pkts: u64 = 0, // Number of Ethernet frames created
+    eth_bytes: u64 = 0, // Total bytes in Ethernet frames
+    tls_send_calls: u64 = 0, // Number of sendBlocksZeroCopy calls
+    tls_send_bytes: u64 = 0, // Total bytes passed to sendBlocksZeroCopy
+    pkt_small: u64 = 0, // Outbound packets < 200B (mostly ACKs)
+    pkt_large: u64 = 0, // Outbound packets >= 200B (data payload)
+};
+
+/// Closure state for the TUN batching + control-plane dispatch that every
+/// received block goes through — identical to the former inline drain loops.
+const TunDispatchCtx = struct {
+    self: *VpnClient,
+    adapter: *AdapterWrapper,
+    loop_state: *tunnel_mod.DataLoopState,
+    send_helper: *session_io.SendTunnelHelper,
+    dhcp_xid: *u32,
+    mac: [6]u8,
+    is_configured: *bool,
+    tun_write_batch: *[TUN_WRITE_BATCH][]const u8,
+    tun_write_batch_count: *usize,
+    diag: *DiagStats,
+};
+
+fn tunBlock(ctx_: *anyopaque, block_data: []u8) void {
+    const dc: *TunDispatchCtx = @ptrCast(@alignCast(ctx_));
+    if (dc.self.tun_write_blocked) return;
+    dc.diag.bytes_in += block_data.len;
+    dc.diag.pkts_in += 1;
+    // Fast path: batch IP writes to TUN when configured
+    if (dc.is_configured.* and block_data.len > 14) {
+        const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+        if (ethertype == 0x0800 or ethertype == 0x86DD) {
+            dc.tun_write_batch[dc.tun_write_batch_count.*] = block_data[14..];
+            dc.tun_write_batch_count.* += 1;
+            dc.self.stats.recordReceived(block_data.len);
+            if (dc.tun_write_batch_count.* >= dc.tun_write_batch.len) {
+                dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
+                dc.tun_write_batch_count.* = 0;
+            }
+            return;
+        }
+    }
+    // Control or not configured: flush batched IPs first (ordering),
+    // then dispatch through the full state machine (ARP, DHCP, etc.)
+    if (dc.tun_write_batch_count.* > 0) {
+        dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
+        dc.tun_write_batch_count.* = 0;
+    }
+    dc.self.processInboundBlock(block_data, dc.adapter, dc.loop_state, dc.send_helper, dc.dhcp_xid, dc.mac, dc.is_configured);
+}
+
+fn tunFlush(ctx_: *anyopaque) void {
+    const dc: *TunDispatchCtx = @ptrCast(@alignCast(ctx_));
+    if (dc.tun_write_batch_count.* > 0) {
+        dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
+        dc.tun_write_batch_count.* = 0;
+    }
+}
+
+fn singleDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
+    _ = ctx_;
+    if (reason == .connection_closed) {
+        std.log.info("Server closed connection: {s}", .{@errorName(err)});
+    }
+}
+
+fn mergeDrainDiag(diag: *DiagStats, dd: *const session_io.DrainDiag) void {
+    diag.drain_total += dd.total;
+    if (dd.max > diag.drain_max) diag.drain_max = dd.max;
+    diag.drain_cap_hits += dd.cap_hits;
+    if (dd.ssl_pending_max > diag.ssl_pending_max) diag.ssl_pending_max = dd.ssl_pending_max;
+    if (dd.buf_avail_max > diag.buf_avail_max) diag.buf_avail_max = dd.buf_avail_max;
+    if (dd.nread_max > diag.nread_max) diag.nread_max = dd.nread_max;
+    if (dd.nwrite_max > diag.nwrite_max) diag.nwrite_max = dd.nwrite_max;
+}
 
 // ============================================================================
 // Client Configuration
@@ -1566,19 +1708,11 @@ pub const VpnClient = struct {
         }
     }
 
-    // Forward declare SendTunnelHelper type for use in processInboundBlock signature
-    const SendTunnelHelper = struct {
-        cm_ptr: ?*ConnectionManager,
-        single_ptr: *protocol_tunnel_mod.TunnelConnection,
-
-        fn get(ctx: @This()) *protocol_tunnel_mod.TunnelConnection {
-            if (ctx.cm_ptr) |m| {
-                if (m.selectSendConnection()) |conn| return &conn.tunnel;
-                if (m.getPrimary()) |primary| return &primary.tunnel;
-            }
-            return ctx.single_ptr;
-        }
-    };
+    // Session-side I/O helpers (issue #50): SendTunnelHelper, drain bucket,
+    // keepalive cadence — shared with the future bridge pump via
+    // session_io.zig. This alias keeps processInboundBlock's signature
+    // unchanged.
+    const SendTunnelHelper = session_io.SendTunnelHelper;
 
     /// Run the data channel packet loop
     /// This is the main loop that processes packets between TLS and TUN
@@ -1710,7 +1844,7 @@ pub const VpnClient = struct {
         // (Dart Isolate.run() threads have ~1MB stack; these buffers are 800KB+)
         const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
         defer self.allocator.free(recv_scratch);
-        var recv_slices = try self.allocator.alloc([]u8, 512);
+        const recv_slices = try self.allocator.alloc([]u8, 512);
         defer self.allocator.free(recv_slices);
 
         // Outbound packet buffers — heap-allocated to allow larger batch (64)
@@ -1747,70 +1881,8 @@ pub const VpnClient = struct {
         // Hypotheses: TLS RX backpressure, kernel queue accumulation,
         // drain cap bottleneck, or TUN write blocking.
         // ============================================================
-        const DiagStats = struct {
-            bytes_in: u64 = 0,
-            bytes_out: u64 = 0,
-            pkts_in: u64 = 0,
-            pkts_out: u64 = 0,
-            drain_total: u64 = 0,
-            drain_max: u32 = 0,
-            drain_cap_hits: u64 = 0,
-            ssl_pending_max: u32 = 0,
-            /// Tracks the read-ahead buffer depth (inside TlsSocket, between
-            /// OpenSSL SSL_read and the application). Non-zero proves the 64KB
-            /// buffer is actively batching TLS records.
-            buf_avail_max: u32 = 0,
-            nread_max: u32 = 0,
-            nwrite_max: u32 = 0,
-            tcp_drops_pkts: u64 = 0,
-            tun_eagain: u64 = 0,
-            tx_drops_delta: u64 = 0, // FdAdapter ring buffer drops (this second)
-            tx_drops_last: u64 = 0, // cumulative tx_drops at last flush
-            poll_iters: u64 = 0,
-            // Latency tracking (microseconds): per-iteration wall time.
-            // iter_us_max captures the worst single-iter spike — useful to
-            // detect when one iteration starves the rest (e.g. blocking I/O,
-            // GC pause, kernel scheduler hiccup, large drain burst).
-            iter_us_max: u64 = 0,
-            iter_us_total: u64 = 0,
-            iter_slow_10ms: u32 = 0,
-            iter_slow_50ms: u32 = 0,
-            iter_slow_100ms: u32 = 0,
-            // poll() wait time (microseconds) — captures kernel-blocked time.
-            // High poll_us_max with low iter_us_max means we're idle-waiting;
-            // high values on both means a stall.
-            poll_us_max: u32 = 0,
-            poll_us_total: u64 = 0,
-            // Bufferbloat detection: kernel TCP sendq depth, sampled at end
-            // of every iter. Growing sendq while throughput drops = TX-side
-            // queue building (server can't pull, or TCP cwnd shrunk). This
-            // is the smoking gun for the latency-grows / throughput-collapses
-            // pattern that the in-loop iter_us metric cannot see.
-            sendq_max: u32 = 0,
-            sendq_sum: u64 = 0,
-            sendq_samples: u32 = 0,
-            // Count of write_fn calls that hit WANT_WRITE (POLLOUT poll)
-            // since last DIAG. High = TX bound. Diff'd from per-conn
-            // TlsSocket.write_block_count snapshots.
-            write_blocked: u64 = 0,
-            // Count of consecutive iterations where needs_pollout was true
-            // AND no inbound data was processed — the circular deadlock
-            // signature. Resets to 0 on any successful retryPendingWrite
-            // or any inbound data receipt. Monotonically climbs when stuck.
-            stalled_iters: u64 = 0,
-            // === Deep TX-path logging: track upload data from TUN→Ethernet→TLS→TCP ===
-            // Counters per DIAG window (1s). Proves whether the client is actually
-            // sending upload data, or only TCP ACKs for download traffic.
-            tun_reads: u64 = 0, // Number of successful dev.read() calls
-            tun_bytes: u64 = 0, // Total IP-level bytes from TUN reads
-            tun_read_attempts: u64 = 0, // Total dev.read() calls (incl WouldBlock)
-            eth_pkts: u64 = 0, // Number of Ethernet frames created
-            eth_bytes: u64 = 0, // Total bytes in Ethernet frames
-            tls_send_calls: u64 = 0, // Number of sendBlocksZeroCopy calls
-            tls_send_bytes: u64 = 0, // Total bytes passed to sendBlocksZeroCopy
-            pkt_small: u64 = 0, // Outbound packets < 200B (mostly ACKs)
-            pkt_large: u64 = 0, // Outbound packets >= 200B (data payload)
-        };
+        // (DiagStats is container-scoped — see top of file — so the drain
+        // closures can reference it.)
         var diag = DiagStats{};
         var diag_last_ms: i64 = std.time.milliTimestamp();
         // Cycle 6 adaptive poll: track if last iter did work
@@ -1824,6 +1896,22 @@ pub const VpnClient = struct {
         // packet in the caller rather than via processInboundBlock's full dispatch.
         var tun_write_batch: [TUN_WRITE_BATCH][]const u8 = undefined;
         var tun_write_batch_count: usize = 0;
+        var drain_diag = session_io.DrainDiag{};
+        // Closure state for the drain bucket dispatch (see tunBlock/tunFlush
+        // at file scope). Lives for the whole loop; drain call sites point
+        // the DrainSink at it.
+        var dispatch_ctx = TunDispatchCtx{
+            .self = self,
+            .adapter = adapter,
+            .loop_state = &loop_state,
+            .send_helper = &send_helper,
+            .dhcp_xid = &dhcp_xid,
+            .mac = mac,
+            .is_configured = &is_configured,
+            .tun_write_batch = &tun_write_batch,
+            .tun_write_batch_count = &tun_write_batch_count,
+            .diag = &diag,
+        };
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -2157,72 +2245,38 @@ pub const VpnClient = struct {
                 var any_conn_had_data = false;
                 var iter = cm.forEachReadable(poll_fds[0..tls_fd_count]);
                 while (iter.next()) |conn| {
-                    var drain_iter: u32 = 0;
-                    while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
-                        // Sample read-buffer peak BEFORE draining — batched SSL_read
-                        // fills 64KB in one syscall; this captures it before consumption.
-                        const bavail = conn.tls_socket.readBufAvailable();
-                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
-                        const recv_count = conn.tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
-                            if (self.should_stop) break;
-                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
-                                conn.established = false;
-                                std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
-                                break;
-                            }
-                            break;
-                        };
-
-                        if (recv_count > 0) {
-                            any_conn_had_data = true;
-                            for (recv_slices[0..recv_count]) |block_data| {
-                                if (self.tun_write_blocked) break;
-                                diag.bytes_in += block_data.len;
-                                diag.pkts_in += 1;
-                                // Fast path: batch IP writes to TUN when configured
-                                if (is_configured and block_data.len > 14) {
-                                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
-                                    if (ethertype == 0x0800 or ethertype == 0x86DD) {
-                                        tun_write_batch[tun_write_batch_count] = block_data[14..];
-                                        tun_write_batch_count += 1;
-                                        self.stats.recordReceived(block_data.len);
-                                        if (tun_write_batch_count >= tun_write_batch.len) {
-                                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                            tun_write_batch_count = 0;
-                                            if (self.tun_write_blocked) break;
-                                        }
-                                        continue;
-                                    }
+                    const MultiDeadCtx = struct {
+                        dc: *TunDispatchCtx,
+                        conn: *ManagedConnection,
+                    };
+                    var multi_dead_ctx = MultiDeadCtx{ .dc = &dispatch_ctx, .conn = conn };
+                    const sink = session_io.DrainSink{
+                        .ctx = &multi_dead_ctx,
+                        .onBlock = tunBlock,
+                        .onFlush = tunFlush,
+                        .onDead = struct {
+                            fn f(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
+                                const mc: *MultiDeadCtx = @ptrCast(@alignCast(ctx_));
+                                if (reason == .connection_closed) {
+                                    mc.conn.established = false;
+                                    std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
                                 }
-                                // Control or not configured: flush batched IPs first (ordering),
-                                // then dispatch through the full state machine (ARP, DHCP, etc.)
-                                if (tun_write_batch_count > 0) {
-                                    self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                    tun_write_batch_count = 0;
-                                }
-                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
-                                if (self.tun_write_blocked) break;
                             }
-                            // Flush any remaining batched IP packets before yielding to outbound
-                            if (tun_write_batch_count > 0) {
-                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                tun_write_batch_count = 0;
-                            }
-                        }
-
-                        if (!conn.tls_socket.hasPending() and conn.tls_socket.kernelRecvQueue() == 0) break;
-                    }
-                    // DIAG: drain stats per connection (sum across conns this iter)
-                    diag.drain_total += drain_iter;
-                    if (drain_iter > diag.drain_max) diag.drain_max = drain_iter;
-                    if (drain_iter == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
-                    // SSL pending / kernel queue stats for this conn
-                    const pend = conn.tls_socket.pendingBytes();
-                    if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
-                    const nrd = conn.tls_socket.kernelRecvQueue();
-                    if (nrd > diag.nread_max) diag.nread_max = nrd;
-                    const nwr = conn.tls_socket.kernelSendQueue();
-                    if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
+                        }.f,
+                    };
+                    drain_diag = .{};
+                    const drain_result = session_io.drainReceived(
+                        &conn.tunnel,
+                        &conn.tls_socket,
+                        recv_slices,
+                        recv_scratch,
+                        MAX_INBOUND_DRAIN,
+                        &self.should_stop,
+                        &drain_diag,
+                        sink,
+                    );
+                    mergeDrainDiag(&diag, &drain_diag);
+                    if (drain_result.drained_any) any_conn_had_data = true;
                 }
                 if (any_conn_had_data) {
                     last_iter_had_work = true;
@@ -2268,76 +2322,25 @@ pub const VpnClient = struct {
                     // hasPending() is the natural terminator; the cap is just a
                     // safety net to ensure outbound can run occasionally.
                     // Cycle 5 regression came from batch=32, NOT drain=32.
-                    var drain_iter: u32 = 0;
-                    var inbound_dead = false;
-                    while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
-                        const bavail = if (self.tls_socket) |ts| ts.readBufAvailable() else @as(u32, 0);
-                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
-                        const recv_count = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
-                            if (self.should_stop) {
-                                inbound_dead = true;
-                                break;
-                            }
-                            // BrokenPipe == TLS dead. Must break, not continue — otherwise we
-                            // spin forever polling a dead fd and silently drop all outbound.
-                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
-                                std.log.info("Server closed connection: {s}", .{@errorName(err)});
-                                inbound_dead = true;
-                                break;
-                            }
-                            // Non-fatal error — stop draining this iteration, retry next.
-                            break;
-                        };
-
-                        for (recv_slices[0..recv_count]) |block_data| {
-                            if (self.tun_write_blocked) break;
-                            diag.bytes_in += block_data.len;
-                            diag.pkts_in += 1;
-                            // Fast path: batch IP writes to TUN when configured
-                            if (is_configured and block_data.len > 14) {
-                                const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
-                                if (ethertype == 0x0800 or ethertype == 0x86DD) {
-                                    tun_write_batch[tun_write_batch_count] = block_data[14..];
-                                    tun_write_batch_count += 1;
-                                    self.stats.recordReceived(block_data.len);
-                                    if (tun_write_batch_count >= tun_write_batch.len) {
-                                        self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                        tun_write_batch_count = 0;
-                                        if (self.tun_write_blocked) break;
-                                    }
-                                    continue;
-                                }
-                            }
-                            // Control or not configured: flush batched IPs first (ordering),
-                            // then dispatch through the full state machine (ARP, DHCP, etc.)
-                            if (tun_write_batch_count > 0) {
-                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                tun_write_batch_count = 0;
-                            }
-                            self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
-                            if (self.tun_write_blocked) break;
-                        }
-                        // Flush any remaining batched IP packets before yielding
-                        if (tun_write_batch_count > 0) {
-                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                            tun_write_batch_count = 0;
-                        }
-
-                        if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
-                    }
-                    // DIAG: capture drain metrics + queue depths
-                    diag.drain_total += drain_iter;
-                    if (drain_iter > diag.drain_max) diag.drain_max = drain_iter;
-                    if (drain_iter == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
-                    if (self.tls_socket) |ts| {
-                        const pend = ts.pendingBytes();
-                        if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
-                        const nrd = ts.kernelRecvQueue();
-                        if (nrd > diag.nread_max) diag.nread_max = nrd;
-                        const nwr = ts.kernelSendQueue();
-                        if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
-                    }
-                    if (inbound_dead) {
+                    const sink = session_io.DrainSink{
+                        .ctx = &dispatch_ctx,
+                        .onBlock = tunBlock,
+                        .onFlush = tunFlush,
+                        .onDead = singleDead,
+                    };
+                    drain_diag = .{};
+                    const drain_result = session_io.drainReceived(
+                        single_tunnel,
+                        &self.tls_socket.?,
+                        recv_slices,
+                        recv_scratch,
+                        MAX_INBOUND_DRAIN,
+                        &self.should_stop,
+                        &drain_diag,
+                        sink,
+                    );
+                    mergeDrainDiag(&diag, &drain_diag);
+                    if (drain_result.dead) {
                         self.disconnect_reason = .network_error;
                         return error.ConnectionLost;
                     }
@@ -2362,70 +2365,25 @@ pub const VpnClient = struct {
                         if (!ios_fresh) break;
 
                         last_iter_had_work = true;
-                        var ios_drain: u32 = 0;
-                        var ios_dead = false;
-                        while (ios_drain < MAX_INBOUND_DRAIN) : (ios_drain += 1) {
-                            const bavail = if (self.tls_socket) |ts| ts.readBufAvailable() else @as(u32, 0);
-                            if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
-                            const ios_recv = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
-                                if (self.should_stop) {
-                                    ios_dead = true;
-                                    break;
-                                }
-                                if (err == error.ConnectionClosed or err == error.BrokenPipe) {
-                                    ios_dead = true;
-                                    break;
-                                }
-                                break;
-                            };
-                            for (recv_slices[0..ios_recv]) |block_data| {
-                                if (self.tun_write_blocked) break;
-                                diag.bytes_in += block_data.len;
-                                diag.pkts_in += 1;
-                                // Fast path: batch IP writes to TUN when configured
-                                if (is_configured and block_data.len > 14) {
-                                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
-                                    if (ethertype == 0x0800 or ethertype == 0x86DD) {
-                                        tun_write_batch[tun_write_batch_count] = block_data[14..];
-                                        tun_write_batch_count += 1;
-                                        self.stats.recordReceived(block_data.len);
-                                        if (tun_write_batch_count >= tun_write_batch.len) {
-                                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                            tun_write_batch_count = 0;
-                                            if (self.tun_write_blocked) break;
-                                        }
-                                        continue;
-                                    }
-                                }
-                                // Control or not configured: flush batched IPs first (ordering),
-                                // then dispatch through the full state machine (ARP, DHCP, etc.)
-                                if (tun_write_batch_count > 0) {
-                                    self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                    tun_write_batch_count = 0;
-                                }
-                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
-                                if (self.tun_write_blocked) break;
-                            }
-                            // Flush any remaining batched IP packets before yielding
-                            if (tun_write_batch_count > 0) {
-                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
-                                tun_write_batch_count = 0;
-                            }
-                            if (ios_dead) break;
-                            if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
-                        }
-                        diag.drain_total += ios_drain;
-                        if (ios_drain > diag.drain_max) diag.drain_max = ios_drain;
-                        if (ios_drain == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
-                        if (self.tls_socket) |ts| {
-                            const pend = ts.pendingBytes();
-                            if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
-                            const nrd = ts.kernelRecvQueue();
-                            if (nrd > diag.nread_max) diag.nread_max = nrd;
-                            const nwr = ts.kernelSendQueue();
-                            if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
-                        }
-                        if (ios_dead) {
+                        const sink = session_io.DrainSink{
+                            .ctx = &dispatch_ctx,
+                            .onBlock = tunBlock,
+                            .onFlush = tunFlush,
+                            .onDead = singleDead,
+                        };
+                        drain_diag = .{};
+                        const drain_result = session_io.drainReceived(
+                            single_tunnel,
+                            &self.tls_socket.?,
+                            recv_slices,
+                            recv_scratch,
+                            MAX_INBOUND_DRAIN,
+                            &self.should_stop,
+                            &drain_diag,
+                            sink,
+                        );
+                        mergeDrainDiag(&diag, &drain_diag);
+                        if (drain_result.dead) {
                             self.disconnect_reason = .network_error;
                             return error.ConnectionLost;
                         }
@@ -2838,17 +2796,13 @@ pub const VpnClient = struct {
             }
 
             // SoftEther keepalive (every 5s)
-            if (loop_state.timing.shouldSendKeepalive(now, keepalive_interval)) {
-                if (self.conn_manager) |*cm| {
-                    cm.sendKeepaliveAll();
-                } else {
-                    single_tunnel.sendKeepalive() catch |err| {
-                        std.log.warn("Failed to send keepalive: {}", .{err});
-                    };
-                }
-                std.log.debug("Sent keepalive", .{});
-                loop_state.timing.last_keepalive = now;
-            }
+            session_io.maybeSendKeepalive(
+                if (self.conn_manager) |*cm| cm else null,
+                single_tunnel,
+                &loop_state.timing,
+                now,
+                keepalive_interval,
+            );
 
             // DHCP retry — covers both no-OFFER (resend DISCOVER) and no-ACK
             // (resend REQUEST using stashed OFFER params). Without REQUEST retry,
