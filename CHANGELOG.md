@@ -10,6 +10,15 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+### Added
+
+- **Session network-mode flag + mode-aware connect path** (#52). `VpnClient`
+  now snapshots `config.mode` into a `network_mode` session flag at init
+  (`getNetworkMode()` getter), and `softether_set_network_mode` writes both
+  config and session flag. The connect path branches on the flag: `bridge`/
+  `monitor` log a warning and fall back to the client data loop (runtime not
+  implemented yet — zero behavior change for the default `client` mode;
+  250/250 tests). `include/softether.h` documents the storage-only semantics.
 - **Session-side I/O helpers shared with the future bridge pump** (#50).
   New `src/cedar/tunnel/session_io.zig` extracting, byte-identical from
   `runDataLoop`'s hotspots: `SendTunnelHelper` (multi-connection fanout +
@@ -48,7 +57,6 @@ they are called out under **Breaking** in each entry.
 
 ### Changed
 
->>>>>>> e6a1883 (feat: network operating mode config plumbing through all six layers (#49))
 - **`NetPort` interface** (`adapter/port.zig`, L2 Network Bridge proposal §4.1).
   First-class port abstraction: `open/close/read/write/getFd/getName/getMac/
   getMtu/getLayer/setPromiscuous/getStats`, plus `PortLayer`/`PortStats`.
