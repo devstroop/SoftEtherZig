@@ -126,9 +126,14 @@ pub const AuthResult = struct {
     server_half_connection: bool = false,
     server_use_compress: bool = false,
     server_use_encrypt: bool = true,
+    server_use_fast_rc4: bool = false,
     server_qos: bool = false,
     server_timeout: u32 = 0,
     server_no_routing: bool = false,
+
+    // RC4 fast-encryption keys (from server Welcome, `use_fast_rc4` path)
+    rc4_client_to_server_key: ?[16]u8 = null,
+    rc4_server_to_client_key: ?[16]u8 = null,
 
     // UDP acceleration fields (from server response)
     udp_accel_enabled: bool = false,
@@ -178,6 +183,7 @@ pub const SessionOptions = struct {
     half_connection: bool = false,
     qos: bool = true,
     use_encrypt: bool = true,
+    use_fast_rc4: bool = false,
     use_compress: bool = false,
     /// Optional protocol fingerprint overrides for anti-fingerprinting.
     /// When null, hardcoded Protocol constants and getOsInfo() are used.
@@ -651,6 +657,7 @@ pub fn buildPasswordAuth(
     // Protocol options
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_fast_rc4", opts.use_fast_rc4);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
@@ -750,6 +757,7 @@ pub fn buildPlainsPasswordAuth(
 
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_fast_rc4", opts.use_fast_rc4);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
@@ -875,6 +883,7 @@ pub fn buildPasswordAuthWithHash(
 
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_fast_rc4", opts.use_fast_rc4);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
@@ -976,6 +985,7 @@ pub fn buildAnonymousAuth(
 
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_fast_rc4", opts.use_fast_rc4);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
@@ -1052,6 +1062,7 @@ pub fn buildCertificateAuth(
 
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_fast_rc4", opts.use_fast_rc4);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
@@ -1154,6 +1165,7 @@ pub fn buildTicketAuth(
 
     try auth_pack.addInt("max_connection", @intCast(opts.max_connection));
     try auth_pack.addBool("use_encrypt", opts.use_encrypt);
+    try auth_pack.addBool("use_fast_rc4", opts.use_fast_rc4);
     try auth_pack.addBool("use_compress", opts.use_compress);
     try auth_pack.addBool("half_connection", opts.half_connection);
 
@@ -1429,12 +1441,35 @@ pub fn uploadAuth(
     const srv_half_conn = (resp_pack.getInt("half_connection") orelse 0) != 0;
     const srv_use_compress = (resp_pack.getInt("use_compress") orelse 0) != 0;
     const srv_use_encrypt = (resp_pack.getInt("use_encrypt") orelse 1) != 0;
+    // Fast RC4 only takes effect when the session is encrypted, mirroring the
+    // C client (Protocol.c:6011-6015): `if (UseEncrypt) UseFastRC4 = ...`.
+    const srv_fast_rc4 = (resp_pack.getInt("use_fast_rc4") orelse 0) != 0;
+    const srv_use_fast_rc4 = srv_use_encrypt and srv_fast_rc4;
     const srv_qos = (resp_pack.getInt("qos") orelse 0) != 0;
     const srv_timeout = resp_pack.getInt("timeout") orelse 0;
     const srv_no_routing = (resp_pack.getInt("policy:NoRouting") orelse 0) != 0;
 
-    std.log.debug("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, qos={}, timeout={d}, no_routing={}", .{
-        srv_max_conn, srv_half_conn, srv_use_compress, srv_use_encrypt, srv_qos, srv_timeout, srv_no_routing,
+    // RC4 key pair from the Welcome packet (C: Protocol.c:6083-6097). Only
+    // present when the server enabled fast RC4.
+    var rc4_c2s_key: ?[16]u8 = null;
+    if (resp_pack.getData("rc4_key_client_to_server")) |key| {
+        if (key.len >= 16) {
+            var buf: [16]u8 = undefined;
+            @memcpy(&buf, key[0..16]);
+            rc4_c2s_key = buf;
+        }
+    }
+    var rc4_s2c_key: ?[16]u8 = null;
+    if (resp_pack.getData("rc4_key_server_to_client")) |key| {
+        if (key.len >= 16) {
+            var buf: [16]u8 = undefined;
+            @memcpy(&buf, key[0..16]);
+            rc4_s2c_key = buf;
+        }
+    }
+
+    std.log.debug("Server session params: max_conn={d}, half_conn={}, compress={}, encrypt={}, fast_rc4={}, qos={}, timeout={d}, no_routing={}", .{
+        srv_max_conn, srv_half_conn, srv_use_compress, srv_use_encrypt, srv_use_fast_rc4, srv_qos, srv_timeout, srv_no_routing,
     });
 
     // Extract UDP acceleration fields
@@ -1477,6 +1512,9 @@ pub fn uploadAuth(
         .server_half_connection = srv_half_conn,
         .server_use_compress = srv_use_compress,
         .server_use_encrypt = srv_use_encrypt,
+        .server_use_fast_rc4 = srv_use_fast_rc4,
+        .rc4_client_to_server_key = rc4_c2s_key,
+        .rc4_server_to_client_key = rc4_s2c_key,
         .server_qos = srv_qos,
         .server_timeout = srv_timeout,
         .server_no_routing = srv_no_routing,
