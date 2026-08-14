@@ -1346,9 +1346,9 @@ export fn softether_set_network_mode(client: ?*VpnClient, mode: c_int) void {
 /// Returns 0 on success, -1 on invalid client / empty name / OOM.
 /// The resulting list is fully owned by the client: every prior entry is
 /// re-duplicated so mixed borrowed/owned states cannot arise.
-export fn softether_add_ingress_interface(client: ?*VpnClient, name: [*:0]const u8) c_int {
+export fn softether_add_ingress_interface(client: ?*VpnClient, name: ?[*:0]const u8) c_int {
     const c = client orelse return -1;
-    const iface = std.mem.span(name);
+    const iface = std.mem.span(name orelse return -1);
     if (iface.len == 0) return -1;
 
     for (c.config.bridge.ingress_ifs) |existing| {
@@ -1385,9 +1385,9 @@ export fn softether_add_ingress_interface(client: ?*VpnClient, name: [*:0]const 
 
 /// Remove an ingress interface from the bridge list.
 /// Returns 0 on success (or if not present), -1 on invalid client / OOM.
-export fn softether_remove_ingress_interface(client: ?*VpnClient, name: [*:0]const u8) c_int {
+export fn softether_remove_ingress_interface(client: ?*VpnClient, name: ?[*:0]const u8) c_int {
     const c = client orelse return -1;
-    const iface = std.mem.span(name);
+    const iface = std.mem.span(name orelse return -1);
     const old = c.config.bridge.ingress_ifs;
     const old_owned = c.config.bridge.ingress_ifs_owned;
 
@@ -1687,6 +1687,10 @@ test "ffi add ingress interfaces owned lifecycle" {
     try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(&c, ""));
     // Null client rejected
     try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(null, "en0"));
+    // NULL name pointer from C must not dereference
+    const null_name: ?[*:0]const u8 = null;
+    try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(&c, null_name));
+    try std.testing.expectEqual(@as(c_int, -1), softether_remove_ingress_interface(&c, null_name));
 
     // Add two
     try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en0"));
