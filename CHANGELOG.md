@@ -10,6 +10,19 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- **AF_PACKET L2 port** (`adapter/af_packet.zig`, L2 Network Bridge proposal
+  §4.1; issues H-3/H-5/H-8). Linux-only `NetPort` implementation over
+  AF_PACKET (SOCK_RAW, ETH_P_ALL): `afPacketPort(&impl, ifname)` mirrors the
+  `l3Port` ownership pattern, `open()` binds to the named interface.
+  CAP_NET_RAW detected at open (`error.NoCapability` on EPERM — never a
+  crash or silent passthrough); MTU > 1500 warns and frames > 1514 are
+  dropped into `PortStats.drops` (`SESSION_FRAME_BUDGET`); host-IP address
+  on the ingress NIC logs an H-5 warning; `setPromiscuous(bool)` toggles
+  PACKET_MR_PROMISC membership. PACKET_MMAP ring deferred (documented).
+  Linux-gated tests; all non-Linux targets compile unchanged.
+
+### Added
+
 ### Added
 
 - **Session network-mode flag + mode-aware connect path** (#52). `VpnClient`
