@@ -6,6 +6,7 @@
 pub const sha0 = @import("sha0.zig");
 pub const hash = @import("hash.zig");
 pub const cipher = @import("cipher.zig");
+pub const md4 = @import("md4");
 
 // Re-export commonly used types and functions
 
@@ -30,6 +31,12 @@ pub const HmacSha1 = hash.HmacSha1;
 pub const HmacSha256 = hash.HmacSha256;
 pub const hmacSha1 = hash.hmacSha1;
 pub const hmacSha256 = hash.hmacSha256;
+
+// MD4 (legacy NTLM / NT password hash compatibility)
+pub const Md4 = md4.Md4;
+pub const md4Hash = md4.md4;
+pub const generateNtPasswordHash = md4.generateNtPasswordHash;
+pub const generateNtPasswordHashHash = md4.generateNtPasswordHashHash;
 
 // Symmetric encryption
 pub const Aes128Cbc = cipher.Aes128Cbc;
