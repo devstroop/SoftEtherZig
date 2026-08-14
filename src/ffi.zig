@@ -1330,16 +1330,23 @@ export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int
 // ============================================================================
 
 /// Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
-/// Invalid values are ignored.
+/// Invalid values are ignored. Storage-only: this updates the client's
+/// config AND the session flag; the connect path branches on the flag.
+/// bridge/monitor runtime is not implemented yet, so a connect in those
+/// modes logs a warning and runs the client data loop. If called mid-
+/// session (after connect), the running loop is unaffected — the flag
+/// applies on the next connect.
 export fn softether_set_network_mode(client: ?*VpnClient, mode: c_int) void {
     const c = client orelse return;
     const NetworkMode = client_mod.NetworkMode;
-    c.config.mode = switch (mode) {
+    const parsed: NetworkMode = switch (mode) {
         0 => NetworkMode.client,
         1 => NetworkMode.bridge,
         2 => NetworkMode.monitor,
         else => return,
     };
+    c.config.mode = parsed;
+    c.network_mode = parsed;
 }
 
 /// Append an ingress interface to the bridge list (deduped, owned copy).
@@ -1658,17 +1665,22 @@ test "ffi network mode setter" {
 
     const NetworkMode = client_mod.NetworkMode;
     try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.client, c.getNetworkMode());
 
     softether_set_network_mode(&c, 1);
     try std.testing.expectEqual(NetworkMode.bridge, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.bridge, c.getNetworkMode());
     softether_set_network_mode(&c, 2);
     try std.testing.expectEqual(NetworkMode.monitor, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.monitor, c.getNetworkMode());
     softether_set_network_mode(&c, 0);
     try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.client, c.getNetworkMode());
 
     // Invalid values are ignored
     softether_set_network_mode(&c, 7);
     try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.client, c.getNetworkMode());
 }
 
 test "ffi add ingress interfaces owned lifecycle" {

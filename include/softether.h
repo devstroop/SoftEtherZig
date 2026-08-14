@@ -418,8 +418,12 @@ int softether_list_interfaces(softether_nic_info* out, int cap);
  * Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
  * Invalid values are ignored.
  *
- * Storage-only plumbing: the connect path runs in client mode until the
- * bridge/monitor runtime lands in later milestones.
+ * Storage-only semantics: the client stores the mode in its config AND its
+ * session flag, and the connect path branches on the flag. The bridge/
+ * monitor runtime is not implemented yet — connecting in those modes logs
+ * a warning and runs the client data loop (no behavior change). Calling
+ * this after connect() does not affect the running session; the mode is
+ * applied on the next connect.
  */
 void softether_set_network_mode(softether_client_t client, int mode);
 
