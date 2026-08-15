@@ -136,40 +136,46 @@ pub fn main() !void {
             std.process.exit(20);
         }
 
-        // Open the first free /dev/bpfN (root, so permission is fine).
+        // Open the first free /dev/bpfN (root, so permission is fine) and
+        // attach it. Two helpers can race for the same unit: open succeeds
+        // for both before either attaches, so BIOCSETIF may return EBUSY —
+        // close and retry the next unit (matches /dev/bpf0..N presence).
         var bpf_fd: posix.fd_t = -1;
         for (0..MAX_BPF_UNIT + 1) |unit| {
             var dev_buf: [16]u8 = undefined;
             const dev_path = std.fmt.bufPrintZ(&dev_buf, "/dev/bpf{d}", .{unit}) catch continue;
-            bpf_fd = posix.openZ(dev_path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
-            break;
+            const fd = posix.openZ(dev_path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
+            var ok = true;
+
+            // Configure capture: buffer size before attach, then attach.
+            var buf_len: c_uint = 65536;
+            if (std.c.ioctl(fd, BIOCSBLEN, @intFromPtr(&buf_len)) < 0) ok = false;
+            var req = BpfIfreq{ .ifr_name = [_]u8{0} ** IFNAMSIZ, .ifru_pad = [_]u8{0} ** 16 };
+            if (ok) {
+                if (ifname.len >= req.ifr_name.len) ok = false;
+                if (ok) @memcpy(req.ifr_name[0..ifname.len], ifname);
+            }
+            if (ok and std.c.ioctl(fd, BIOCSETIF, @intFromPtr(&req)) < 0) ok = false;
+            if (ok) {
+                bpf_fd = fd;
+                break;
+            }
+            std.debug.print("NOTE: /dev/bpf{d} unusable (errno={d}), trying next unit\n", .{ unit, std.c._errno().* });
+            posix.close(fd);
         }
         if (bpf_fd < 0) {
-            std.debug.print("ERROR: no free /dev/bpfN device\n", .{});
+            std.debug.print("ERROR: no usable /dev/bpfN device\n", .{});
             std.process.exit(21);
         }
         errdefer posix.close(bpf_fd);
 
-        // Configure capture: buffer size before attach, then attach + flags.
-        var buf_len: c_uint = 65536;
-        if (std.c.ioctl(bpf_fd, BIOCSBLEN, @intFromPtr(&buf_len)) < 0) {
-            std.debug.print("ERROR: ioctl(BIOCSBLEN) failed (errno={d})\n", .{std.c._errno().*});
-            std.process.exit(22);
-        }
-        var req = BpfIfreq{ .ifr_name = [_]u8{0} ** IFNAMSIZ, .ifru_pad = [_]u8{0} ** 16 };
-        if (ifname.len >= req.ifr_name.len) std.process.exit(23);
-        @memcpy(req.ifr_name[0..ifname.len], ifname);
-        if (std.c.ioctl(bpf_fd, BIOCSETIF, @intFromPtr(&req)) < 0) {
-            std.debug.print("ERROR: ioctl(BIOCSETIF) failed\n", .{});
-            std.process.exit(24);
-        }
         if (std.c.ioctl(bpf_fd, BIOCPROMISC, @as(c_uint, 0)) < 0) {
-            std.debug.print("ERROR: ioctl(BIOCPROMISC) failed\n", .{});
+            std.debug.print("ERROR: ioctl(BIOCPROMISC) failed (errno={d})\n", .{std.c._errno().*});
             std.process.exit(25);
         }
         const on: c_uint = 1;
         if (std.c.ioctl(bpf_fd, BIOCIMMEDIATE, @intFromPtr(&on)) < 0) {
-            std.debug.print("ERROR: ioctl(BIOCIMMEDIATE) failed\n", .{});
+            std.debug.print("ERROR: ioctl(BIOCIMMEDIATE) failed (errno={d})\n", .{std.c._errno().*});
             std.process.exit(26);
         }
         const flags = posix.fcntl(bpf_fd, posix.F.GETFL, 0) catch 0;
