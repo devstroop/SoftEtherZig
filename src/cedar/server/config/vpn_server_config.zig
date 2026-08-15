@@ -33,7 +33,9 @@
 //! the file whenever the config was modified since the last write, on a
 //! `AutoSaveConfigSpan` cadence. `markModified` is the equivalent of C's
 //! `SiSetServerConfigRevision`; `stop` does the final write (C
-//! `SiFreeConfiguration`) and joins the thread.
+//! `SiFreeConfiguration`) and joins the thread. Config mutations are
+//! serialized against the write under the saver's mutex: callers wrap a
+//! mutation in `Autosaver.lock`/`unlock` before `markModified`.
 //!
 //! ## Scope / fidelity
 //!
@@ -261,6 +263,9 @@ pub const ServerConfig = struct {
     /// Root item `Region` (C `SiGetCurrentRegion`; empty when not set).
     region: []u8, // owned
     config_revision: u32 = 1,
+    /// Config revision that produced the current `<path>~` backup (used to
+    /// implement `BackupConfigOnlyWhenModified`).
+    last_backup_revision: u32 = 0,
     server: ServerConfiguration,
     listeners: std.ArrayListUnmanaged(ListenerConfig) = .{},
     hubs: std.ArrayListUnmanaged(HubConfig) = .{},
@@ -386,13 +391,22 @@ pub const ServerConfig = struct {
     }
 
     /// Write the configuration with CFG_RW semantics (C
-    /// `SiWriteConfigurationFile` → `SaveCfgRw`): the previous file is
-    /// backed up to `<path>~` and the new one written atomically.
-    pub fn save(self: *const ServerConfig, dir: std.fs.Dir, path: []const u8) !void {
+    /// `SiWriteConfigurationFile` → `SaveCfgRwEx`). The previous file is
+    /// backed up to `<path>~` unless the policy says otherwise:
+    /// - `DontBackupConfig` disables the backup entirely (C sets
+    ///   `CfgRw->DontBackup`).
+    /// - `BackupConfigOnlyWhenModified` backs up only when the config revision
+    ///   changed since the last backup (C names backups after the revision and
+    ///   skips existing ones).
+    pub fn save(self: *ServerConfig, dir: std.fs.Dir, path: []const u8) !void {
         const c = try cfg.Cfg.init(self.allocator);
         defer c.deinit();
         try self.toCfg(c.root);
-        try c.saveToFile(dir, path);
+
+        const backup = !self.server.dont_backup_config and
+            (!self.server.backup_config_only_when_modified or self.config_revision != self.last_backup_revision);
+        try c.saveToFileEx(dir, path, backup);
+        if (backup) self.last_backup_revision = self.config_revision;
     }
 };
 
@@ -402,11 +416,14 @@ pub const ServerConfig = struct {
 
 fn loadServerCfg(allocator: Allocator, s: *ServerConfiguration, f: *const cfg.Folder) !void {
     // AutoSaveConfigSpan is persisted in seconds (C stores ms in struct).
+    // Clamp in seconds first: the on-disk value is unbounded and `* 1000`
+    // could overflow u32 for a hostile file.
     const span_sec = f.getUint("AutoSaveConfigSpan", save_interval_ms_default / 1000);
+    const span_sec_clamped = std.math.clamp(span_sec, save_interval_ms_min / 1000, save_interval_ms_max / 1000);
     s.auto_save_span_ms = if (span_sec == 0)
         save_interval_ms_default
     else
-        std.math.clamp(span_sec * 1000, save_interval_ms_min, save_interval_ms_max);
+        span_sec_clamped * 1000;
 
     s.backup_config_only_when_modified = f.getBool("BackupConfigOnlyWhenModified", true);
     s.dont_backup_config = f.getBool("DontBackupConfig", false);
@@ -421,7 +438,15 @@ fn loadServerCfg(allocator: Allocator, s: *ServerConfiguration, f: *const cfg.Fo
     const keep_port = f.getUint("KeepConnectPort", 0);
     s.keep_connect_port = if (keep_port == 0) keep_connect_default_port else keep_port;
     s.keep_connect_protocol = f.getUint("KeepConnectProtocol", keep_connect_default_protocol);
-    s.keep_connect_interval_ms = f.getUint("KeepConnectInterval", keep_connect_default_interval_ms / 1000) * 1000;
+    // `KeepConnectInterval` is unbounded on disk; clamp the seconds value so
+    // the `* 1000` conversion below cannot overflow (C's `UINT` multiplies
+    // unchecked, wrapping on a hostile file).
+    const keep_sec = std.math.clamp(
+        f.getUint("KeepConnectInterval", keep_connect_default_interval_ms / 1000),
+        0,
+        std.math.maxInt(u32) / 1000,
+    );
+    s.keep_connect_interval_ms = keep_sec * 1000;
 
     s.disable_dos_protection = f.getBool("DisableDosProction", false);
     s.disable_nat_traversal = f.getBool("DisableNatTraversal", false);
@@ -511,6 +536,11 @@ fn writeHubOption(f: *cfg.Folder, o: *const HubOption) !void {
 /// and calls `markModified` on any configuration change; the thread writes the
 /// file on the next tick. `stop` performs the final write and joins the
 /// thread (C `SiFreeConfiguration`).
+///
+/// Concurrency contract: config mutations are serialized against the write
+/// under `mutex`. Callers must wrap a mutation in `lock`/`unlock` and then call
+/// `markModified`; the saver thread performs the serialization (`toCfg` → file)
+/// while holding the same lock, so a write never observes a torn config.
 pub const Autosaver = struct {
     config: *ServerConfig,
     dir: std.fs.Dir,
@@ -540,7 +570,18 @@ pub const Autosaver = struct {
         self.thread = try std.Thread.spawn(.{}, saverLoop, .{self});
     }
 
+    /// Acquire the lock for a config mutation. Pair with `unlock`.
+    pub fn lock(self: *Autosaver) void {
+        self.mutex.lock();
+    }
+
+    /// Release the lock after a config mutation.
+    pub fn unlock(self: *Autosaver) void {
+        self.mutex.unlock();
+    }
+
     /// Record a configuration change so the next tick writes the file.
+    /// Must be called without the lock held (it takes the lock itself).
     pub fn markModified(self: *Autosaver) void {
         self.mutex.lock();
         self.modified = true;
@@ -568,15 +609,12 @@ pub const Autosaver = struct {
             self.mutex.lock();
             const do_save = self.modified and !self.halt;
             self.modified = false;
-            self.mutex.unlock();
-
             if (do_save) {
                 self.config.save(self.dir, self.path) catch |err| {
                     log.warn("config autosave failed: {s}", .{@errorName(err)});
                 };
             }
 
-            self.mutex.lock();
             if (self.halt) {
                 self.mutex.unlock();
                 return;
@@ -729,6 +767,35 @@ test "server.vpn_server_config rejects a file without ServerConfiguration" {
     try testing.expectError(error.InvalidConfig, ServerConfig.fromCfg(allocator, parsed.root));
 }
 
+test "server.vpn_server_config backup policy is honored" {
+    const allocator = testing.allocator;
+    var config = try ServerConfig.initDefault(allocator);
+    defer config.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = "policy_test.config";
+
+    // With `backup_config_only_when_modified`, a save at an unchanged
+    // revision must not produce a `<path>~` backup.
+    try config.save(tmp.dir, path);
+    try testing.expectError(error.FileNotFound, tmp.dir.openFile("policy_test.config~", .{}));
+
+    // Bump the revision: the next save backs the previous file up.
+    config.config_revision = 2;
+    try config.save(tmp.dir, path);
+    _ = try tmp.dir.openFile("policy_test.config~", .{});
+
+    // `dont_backup_config` disables backups entirely, even on revision change.
+    config.server.dont_backup_config = true;
+    config.config_revision = 3;
+    try config.save(tmp.dir, path);
+    tmp.dir.deleteFile("policy_test.config~") catch {};
+    config.config_revision = 4;
+    try config.save(tmp.dir, path);
+    try testing.expectError(error.FileNotFound, tmp.dir.openFile("policy_test.config~", .{}));
+}
+
 test "server.vpn_server_config load missing file falls back to defaults" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
@@ -751,9 +818,12 @@ test "server.vpn_server_config autosave writes on markModified and stops" {
 
     var saver: Autosaver = undefined;
     try saver.start(&config, tmp.dir, path, 10);
-    // Change the config, flag it, and give the 10ms tick time to fire.
+    // Change the config under the saver's lock, flag it, and give the 10ms
+    // tick time to fire.
+    saver.lock();
     allocator.free(config.server.keep_connect_host);
     config.server.keep_connect_host = try allocator.dupe(u8, "changed.example");
+    saver.unlock();
     saver.markModified();
     std.Thread.sleep(50 * std.time.ns_per_ms);
 
