@@ -10,10 +10,13 @@
 //!   fast RC4 / classic AES, per-connection cipher state)
 //! - `session_main.zig` — SessionMain data loop: ConnectionReceive/Send
 //!   framing orchestration over a TunnelConnection + hub PacketAdapter
+//! - `hub.zig` — Virtual Hub L2 switch: StorePacket (MAC/IP tables, unicast
+//!   + flood), per-session SessionPa PacketAdapter
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
 pub const session_main = @import("session_main.zig");
+pub const hub = @import("hub.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
@@ -32,6 +35,9 @@ pub const SessionConfig = session_main.SessionConfig;
 pub const SessionStats = session_main.SessionStats;
 pub const PacketAdapter = session_main.PacketAdapter;
 pub const SessionEnd = session_main.SessionEnd;
+pub const SwitchHub = hub.Hub;
+pub const SessionPa = hub.SessionPa;
+pub const parseEthernet = hub.parseEthernet;
 
 // Tests
 test {
