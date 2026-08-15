@@ -688,6 +688,7 @@ pub fn build(b: *std.Build) void {
                 "server.cfg ",
                 "server.vpn_server_config ",
                 "server.admin_rpc ",
+                "server.admin_structs ",
                 "client.state",
                 "client.stats",
                 "client.events",
