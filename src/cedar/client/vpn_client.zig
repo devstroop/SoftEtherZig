@@ -3494,7 +3494,7 @@ pub const VpnClient = struct {
                         std.log.debug("bridge: port read error: {}", .{err});
                         break;
                     } orelse break;
-                    bridge_loop.dispatchPortFrame(@intCast(i - 1), port_buf[0..n]);
+                    bridge_loop.dispatchPortFrame(@intCast(i), port_buf[0..n]);
                 }
             }
 
