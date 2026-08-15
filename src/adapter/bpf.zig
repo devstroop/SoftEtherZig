@@ -127,7 +127,7 @@ pub const BpfPort = struct {
             // Escalated path (H-7): setuid helper --bpf-open, allowlist-only.
             const utun_escalate = @import("utun_escalate.zig");
             break :blk utun_escalate.escalatedBpfOpen(self.allocator, self.ifname) catch |err| {
-                std.log.err("bpf: helper could not grant /dev/bpfN for '{s}': {}", .{ self.ifname, err });
+                std.log.warn("bpf: helper could not grant /dev/bpfN for '{s}': {}", .{ self.ifname, err });
                 self.allocator.free(self.scratch);
                 self.scratch = &.{};
                 return switch (err) {
@@ -518,9 +518,10 @@ test "bpfPort rejects non-macOS targets" {
     var port = BpfPort{ .allocator = std.testing.allocator };
     const p = bpfPort(&port, std.testing.allocator, "en0");
     if (builtin.os.tag == .macos) return error.SkipZigTest;
+    var buf = [_]u8{0} ** 64;
     try std.testing.expectError(error.NotMacos, p.open());
-    try std.testing.expectError(error.NotMacos, p.write(&[_]u8{0} ** 64));
-    try std.testing.expectError(error.NotMacos, p.read(&[_]u8{0} ** 64));
+    try std.testing.expectError(error.NotMacos, p.write(&buf));
+    try std.testing.expectError(error.NotMacos, p.read(&buf));
     p.setPromiscuous(true);
 }
 
