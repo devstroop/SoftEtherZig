@@ -35,17 +35,18 @@ const SockaddrCtl = extern struct {
 };
 
 // /dev/bpfN ioctls (macOS <net/bpf.h>); request codes exceed i32::MAX, so
-// they are stored as bitcast c_int for std.c.ioctl.
-const BIOCSBLEN: c_int = @bitCast(@as(u32, 0xc0044262)); // set buffer length
-const BIOCSETIF: c_int = @bitCast(@as(u32, 0x8024426c)); // set interface
-const BIOCPROMISC: c_int = @bitCast(@as(u32, 0x80044269)); // force promiscuous
+// they are stored as bitcast c_int for std.c.ioctl. Note: macOS has NO
+// BIOCNONBLOCK — the fd is set non-blocking with fcntl at open time.
+const BIOCSBLEN: c_int = @bitCast(@as(u32, 0xc0044266)); // set buffer length
+const BIOCSETIF: c_int = @bitCast(@as(u32, 0x8020426c)); // set interface
+const BIOCPROMISC: c_int = @bitCast(@as(u32, 0x20004269)); // force promiscuous
 const BIOCIMMEDIATE: c_int = @bitCast(@as(u32, 0x80044270)); // return immediately on packet
-const BIOCNONBLOCK: c_int = @bitCast(@as(u32, 0x8004426e)); // non-blocking mode
 const IFNAMSIZ: usize = 16;
 
+// struct ifreq on macOS: ifr_name[16] + 16-byte union (kernel copies 32).
 const BpfIfreq = extern struct {
     ifr_name: [IFNAMSIZ]u8,
-    ifru_pad: [24]u8,
+    ifru_pad: [16]u8,
 };
 
 /// `--bpf-open` allowlist (H-7): only /dev/bpf0..9 may be opened. The
@@ -152,10 +153,10 @@ pub fn main() !void {
         // Configure capture: buffer size before attach, then attach + flags.
         var buf_len: c_uint = 65536;
         if (std.c.ioctl(bpf_fd, BIOCSBLEN, @intFromPtr(&buf_len)) < 0) {
-            std.debug.print("ERROR: ioctl(BIOCSBLEN) failed\n", .{});
+            std.debug.print("ERROR: ioctl(BIOCSBLEN) failed (errno={d})\n", .{std.c._errno().*});
             std.process.exit(22);
         }
-        var req = BpfIfreq{ .ifr_name = [_]u8{0} ** IFNAMSIZ, .ifru_pad = [_]u8{0} ** 24 };
+        var req = BpfIfreq{ .ifr_name = [_]u8{0} ** IFNAMSIZ, .ifru_pad = [_]u8{0} ** 16 };
         if (ifname.len >= req.ifr_name.len) std.process.exit(23);
         @memcpy(req.ifr_name[0..ifname.len], ifname);
         if (std.c.ioctl(bpf_fd, BIOCSETIF, @intFromPtr(&req)) < 0) {
@@ -170,10 +171,6 @@ pub fn main() !void {
         if (std.c.ioctl(bpf_fd, BIOCIMMEDIATE, @intFromPtr(&on)) < 0) {
             std.debug.print("ERROR: ioctl(BIOCIMMEDIATE) failed\n", .{});
             std.process.exit(26);
-        }
-        if (std.c.ioctl(bpf_fd, BIOCNONBLOCK, @intFromPtr(&on)) < 0) {
-            std.debug.print("ERROR: ioctl(BIOCNONBLOCK) failed\n", .{});
-            std.process.exit(27);
         }
         const flags = posix.fcntl(bpf_fd, posix.F.GETFL, 0) catch 0;
         _ = posix.fcntl(bpf_fd, posix.F.SETFL, flags | 0x0004) catch {};

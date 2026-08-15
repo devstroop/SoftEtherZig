@@ -45,22 +45,26 @@ pub const IFNAMSIZ: usize = 16;
 /// Maximum BPF buffer size we request (BIOCSBLEN).
 pub const BPF_BUFFER_SIZE: usize = 65536;
 
-// /dev/bpfN ioctl numbers (macOS <net/bpf.h>). ioctl() takes a c_int; the
-// request codes exceed i32::MAX, so they are stored as bitcast c_int.
-const BIOCSBLEN: c_int = @bitCast(@as(u32, 0xc0044262)); // set buffer length
-const BIOCSETIF: c_int = @bitCast(@as(u32, 0x8024426c)); // set interface
-const BIOCPROMISC: c_int = @bitCast(@as(u32, 0x80044269)); // force promiscuous
+// /dev/bpfN ioctl numbers (macOS <net/bpf.h>, verified against the SDK:
+// _IOWR('B',102,u_int)=0xc0044266, _IOW('B',108,ifreq)=0x8020426c,
+// _IO('B',105)=0x20004269, _IOW('B',112,u_int)=0x80044270). ioctl() takes
+// a c_int; the request codes exceed i32::MAX, so they are stored as
+// bitcast c_int. Note: macOS has NO BIOCNONBLOCK — the fd is set
+// non-blocking with fcntl at open time.
+const BIOCSBLEN: c_int = @bitCast(@as(u32, 0xc0044266)); // set buffer length
+const BIOCSETIF: c_int = @bitCast(@as(u32, 0x8020426c)); // set interface
+const BIOCPROMISC: c_int = @bitCast(@as(u32, 0x20004269)); // force promiscuous
 const BIOCIMMEDIATE: c_int = @bitCast(@as(u32, 0x80044270)); // return immediately on packet
-const BIOCNONBLOCK: c_int = @bitCast(@as(u32, 0x8004426e)); // non-blocking mode
 
-const SIOCGIFMTU: c_int = @bitCast(@as(u32, 0x80206923)); // get interface MTU
+const SIOCGIFMTU: c_int = @bitCast(@as(u32, 0xc0206933)); // get interface MTU (SDK-verified)
 
 const DLT_EN10MB: u32 = 1; // Ethernet link type
 
-/// Request struct for BIOCSETIF (struct ifreq, name + union padding).
+/// Request struct for BIOCSETIF (struct ifreq = ifr_name[16] + 16-byte
+/// union; the kernel copies sizeof(struct ifreq) = 32 bytes from the code).
 const IfreqSetif = extern struct {
     ifr_name: [IFNAMSIZ]u8,
-    ifru_pad: [24]u8,
+    ifru_pad: [16]u8,
 };
 
 /// bpf_hdr as the kernel writes it (macOS 64-bit): timeval(16) + caplen(4) +
@@ -147,7 +151,6 @@ pub const BpfPort = struct {
             self.setPromiscuous(true) catch {};
         }
         self.setImmediate() catch {};
-        self.setNonBlocking() catch {};
 
         // Metadata (best effort; a miss is not fatal).
         self.mac = self.readMac() catch null;
@@ -185,7 +188,7 @@ pub const BpfPort = struct {
     fn setInterface(self: *BpfPort) BpfError!void {
         var req = IfreqSetif{
             .ifr_name = [_]u8{0} ** IFNAMSIZ,
-            .ifru_pad = [_]u8{0} ** 24,
+            .ifru_pad = [_]u8{0} ** 16,
         };
         @memcpy(req.ifr_name[0..self.ifname.len], self.ifname);
         if (std.c.ioctl(self.fd, BIOCSETIF, @intFromPtr(&req)) < 0) return error.AttachFailed;
@@ -198,11 +201,8 @@ pub const BpfPort = struct {
         if (std.c.ioctl(self.fd, BIOCIMMEDIATE, @intFromPtr(&on)) < 0) return error.AttachFailed;
     }
 
-    fn setNonBlocking(self: *BpfPort) BpfError!void {
-        const on: c_uint = 1;
-        if (std.c.ioctl(self.fd, BIOCNONBLOCK, @intFromPtr(&on)) < 0) return error.AttachFailed;
-    }
-
+    /// macOS has no BIOCNONBLOCK; the fd is opened O_NONBLOCK already
+    /// (direct path and the setuid helper both set it), so this is a no-op.
     pub fn close(self: *BpfPort) void {
         if (self.fd != NetPort.invalid_fd) {
             posix.close(self.fd);
@@ -359,7 +359,7 @@ pub const BpfPort = struct {
         defer posix.close(s);
         var req = IfreqSetif{
             .ifr_name = [_]u8{0} ** IFNAMSIZ,
-            .ifru_pad = [_]u8{0} ** 24,
+            .ifru_pad = [_]u8{0} ** 16,
         };
         @memcpy(req.ifr_name[0..self.ifname.len], self.ifname);
         if (std.c.ioctl(s, SIOCGIFMTU, @intFromPtr(&req)) < 0) return error.InterfaceNotFound;
