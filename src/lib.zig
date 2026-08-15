@@ -86,6 +86,7 @@ pub const server = struct {
     pub const session = @import("cedar/server/session.zig");
     pub const session_main = @import("cedar/server/session_main.zig");
     pub const listener = @import("cedar/server/listener.zig");
+    pub const hub = @import("cedar/server/hub.zig");
 };
 
 /// Parse an IPv4 address string to u32
