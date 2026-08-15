@@ -3485,7 +3485,7 @@ pub const VpnClient = struct {
             // LAN → session: read frames from ready ports and dispatch.
             // Non-pollable ports (getFd() == invalid_fd — Npcap, issue #61)
             // are drained every iteration instead; poll() skips fd -1.
-            for (net_ports, 1..) |*p, i| {
+            for (net_ports, 0..) |*p, i| {
                 const pollable = p.getFd() != adapter_mod.NetPort.invalid_fd;
                 if (pollable and (poll_fds[slot_of[i]].revents & std.posix.POLL.IN) == 0) continue;
                 while (true) {
