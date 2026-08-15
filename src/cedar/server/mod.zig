@@ -12,11 +12,14 @@
 //!   framing orchestration over a TunnelConnection + hub PacketAdapter
 //! - `listener.zig` — Listener layer: per-port accept threads, DoS gate,
 //!   listener registry
+//! - `hub.zig` — Virtual Hub L2 switch: StorePacket (MAC/IP tables, unicast
+//!   + flood), per-session SessionPa PacketAdapter
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
 pub const session_main = @import("session_main.zig");
 pub const listener = @import("listener.zig");
+pub const hub = @import("hub.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
@@ -42,6 +45,9 @@ pub const Protocol = listener.Protocol;
 pub const Status = listener.Status;
 pub const DosTable = listener.DosTable;
 pub const AcceptHandler = listener.AcceptHandler;
+pub const SwitchHub = hub.Hub;
+pub const SessionPa = hub.SessionPa;
+pub const parseEthernet = hub.parseEthernet;
 
 // Tests
 test {
