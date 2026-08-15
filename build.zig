@@ -501,6 +501,7 @@ pub fn build(b: *std.Build) void {
         "src/mayaqua/encrypt/sha0.zig",
         "src/mayaqua/encrypt/cipher.zig",
         "src/mayaqua/encrypt/hash.zig",
+        "src/mayaqua/encrypt/rc4.zig",
         "src/cedar/protocol/pack.zig",
         "src/cedar/protocol/auth.zig",
         "src/cedar/protocol/rpc.zig",
