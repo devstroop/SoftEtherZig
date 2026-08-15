@@ -544,7 +544,7 @@ test "bpfPort session frame budget drop accounting" {
     const sent = try p.write(&frame);
     try std.testing.expectEqual(@as(usize, 64), sent);
     var buf: [2048]u8 = undefined;
-    _ = try p.read(&buf);
+    _ = (try pollRead(p, &buf)) orelse return error.FrameEchoTimeout;
     s = p.getStats();
     try std.testing.expect(s.tx_pkts >= 1);
     try std.testing.expect(s.rx_pkts >= 1);
@@ -625,11 +625,30 @@ test "bpfPort frame chain parsing serves one frame per read" {
     var buf: [2048]u8 = undefined;
     var saw_a = false;
     var saw_b = false;
-    for (0..8) |_| {
-        const n = (try p.read(&buf)) orelse break;
+    const deadline = std.time.milliTimestamp() + 3_000;
+    while (std.time.milliTimestamp() < deadline and (!saw_a or !saw_b)) {
+        const n = (try pollRead(p, &buf)) orelse break;
         if (n == 40 and buf[0] == 0xaa) saw_a = true;
         if (n == 40 and buf[0] == 0xbb) saw_b = true;
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
+}
+
+/// Non-blocking read with a poll() guard: the lo0 echo arrives after the
+/// write returns, so a bare read would hit WouldBlock on CI.
+fn pollRead(p: NetPort, buf: []u8) !?usize {
+    var pfd = [1]posix.pollfd{
+        .{ .fd = p.getFd(), .events = posix.POLL.IN, .revents = 0 },
+    };
+    while (true) {
+        if (p.read(buf)) |n| {
+            return n;
+        } else |err| switch (err) {
+            error.WouldBlock => {},
+            else => return err,
+        }
+        const r = posix.poll(&pfd, 500) catch return error.PollFailed;
+        if (r == 0) return null;
+    }
 }
