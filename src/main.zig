@@ -169,6 +169,13 @@ pub fn main() !void {
         return;
     }
 
+    // Generate a server TLS certificate/key pair and exit (server bootstrap).
+    // C parity: vpnserver / SiGenerateDefaultCertEx first-run self-signed cert.
+    if (state.cli_args.gen_cert) {
+        try runGenCert(allocator, &state.display, state.cli_args.gen_cert_name);
+        return;
+    }
+
     // Everything else requires 'connect' subcommand
     if (!connect_mode) {
         cli.display.failure(&state.display, "No subcommand. Use 'vpnclient connect <options>' to connect, or 'vpnclient --help' for usage.", .{});
@@ -205,6 +212,33 @@ pub fn main() !void {
     }
 
     std.process.exit(state.exit_code);
+}
+
+/// `--gen-cert`: generate a first-run self-signed server certificate
+/// (server_cert.pem + server_key.pem in the current directory), matching C
+/// SiGenerateDefaultCertEx semantics. common_name == null → default CN
+/// "server.softether.vpn" + machine name.
+fn runGenCert(allocator: std.mem.Allocator, display: *cli.DisplayContext, common_name: ?[]const u8) !void {
+    const tls = @import("mayaqua/network/tls.zig");
+    const cert = tls.generateSelfSignedCert(allocator, common_name) catch |err| {
+        cli.display.failure(display, "Failed to generate self-signed certificate: {s}", .{@errorName(err)});
+        return err;
+    };
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    const cert_path = "server_cert.pem";
+    const key_path = "server_key.pem";
+
+    var cert_file = try std.fs.cwd().createFile(cert_path, .{ .truncate = true });
+    defer cert_file.close();
+    try cert_file.writeAll(cert.cert_pem);
+
+    var key_file = try std.fs.cwd().createFile(key_path, .{ .truncate = true });
+    defer key_file.close();
+    try key_file.writeAll(cert.key_pem);
+
+    cli.display.success(display, "Wrote {s} and {s} to the current directory", .{ cert_path, key_path });
 }
 
 // ============================================================================

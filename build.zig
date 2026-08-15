@@ -619,6 +619,7 @@ pub fn build(b: *std.Build) void {
                 "crypto.",
                 "core.",
                 "net.",
+                "mayaqua_tls.",
                 "session.",
                 "client.state",
                 "client.stats",
