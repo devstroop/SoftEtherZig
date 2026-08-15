@@ -3432,9 +3432,15 @@ if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != 
             poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
             if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
             for (net_ports, 0..) |*p, i| {
-                if (p.getFd() == adapter_mod.NetPort.invalid_fd) continue;
+                const fd = p.getFd();
+                if (fd == adapter_mod.NetPort.invalid_fd) continue;
                 slot_of[i] = n_fds;
-                poll_fds[n_fds] = .{ .fd = p.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+                poll_fds[n_fds] = .{
+                    // pollfd.fd is a SOCKET pointer on Windows, not an int.
+                    .fd = if (comptime builtin.os.tag == .windows) @ptrCast(fd) else fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                };
                 n_fds += 1;
             }
             _ = std.posix.poll(poll_fds[0..n_fds], 10) catch 0;
