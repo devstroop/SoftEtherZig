@@ -816,6 +816,14 @@ pub const TlsSocket = struct {
         // set the bit value directly: SSL_OP_NO_SSLv3 = 0x02000000.
         _ = c.SSL_CTX_set_options(ssl_ctx, 0x02000000);
 
+        // Enforce the configured minimum protocol version (previously only
+        // advertised; without this the server would accept TLS 1.2 regardless
+        // of config.min_version).
+        _ = c.SSL_CTX_set_min_proto_version(ssl_ctx, switch (config.min_version) {
+            .tls_1_3 => c.TLS1_3_VERSION,
+            else => c.TLS1_2_VERSION,
+        });
+
         // Load server certificate
         {
             const cert_bio = c.BIO_new_mem_buf(config.cert_pem.ptr, @intCast(config.cert_pem.len)) orelse {
@@ -911,6 +919,14 @@ pub const TlsSocket = struct {
                 },
             }
         }
+
+        // Handshake complete — drop the handshake-phase socket timeouts so
+        // long-lived reads/writes on the accepted connection do not fail after
+        // timeout_ms of inactivity. The handshake used poll() with
+        // config.timeout_ms, not these socket timeouts, so they are redundant
+        // past this point (mirrors the client data-loop lifecycle).
+        TcpSocket.setReadTimeout(tcp_fd, 0) catch {};
+        TcpSocket.setWriteTimeout(tcp_fd, 0) catch {};
 
         // Log connection info
         const version = c.SSL_get_version(ssl);
@@ -1493,20 +1509,30 @@ pub fn generateSelfSignedCert(allocator: Allocator, common_name: ?[]const u8) !S
     const key = pkey.?;
 
     // 2. Common name. Default mirrors C: "server.softether.vpn" + machine name.
-    var cn_default: [256]u8 = undefined;
+    // OpenSSL's ASN1 string table caps commonName at 64 octets
+    // (ASN1_R_STRING_TOO_LONG): an explicit name over the limit is rejected,
+    // and the default truncates the machine-name suffix to fit (long macOS/CI
+    // hostnames otherwise exceed the limit).
+    const cn_max_len = 64;
+    var cn_default: [cn_max_len]u8 = undefined;
     const cn: []const u8 = blk: {
         if (common_name) |cn_in| {
-            if (cn_in.len > 0 and cn_in.len < cn_default.len) break :blk cn_in;
+            if (cn_in.len > 0) {
+                if (cn_in.len > cn_max_len) {
+                    std.log.warn("TLS: certgen common name exceeds {d} octets (OpenSSL commonName limit)", .{cn_max_len});
+                    return error.NameTooLong;
+                }
+                break :blk cn_in;
+            }
         }
         const prefix = "server.softether.vpn";
         const machine = getMachineName();
-        const total = prefix.len + machine.len;
-        if (total <= cn_default.len) {
-            @memcpy(cn_default[0..prefix.len], prefix);
-            @memcpy(cn_default[prefix.len..total], machine);
-            break :blk cn_default[0..total];
+        const total = @min(prefix.len + machine.len, cn_default.len);
+        @memcpy(cn_default[0..prefix.len], prefix);
+        if (total > prefix.len) {
+            @memcpy(cn_default[prefix.len..total], machine[0 .. total - prefix.len]);
         }
-        break :blk prefix;
+        break :blk cn_default[0..total];
     };
     const cn_z = try allocator.dupeZ(u8, cn);
     defer allocator.free(cn_z);
@@ -1774,6 +1800,23 @@ test "mayaqua_tls.certgen default common name" {
     try testing.expect(cn_len > 0);
     // C default (SiGenerateDefaultCertEx): "server.softether.vpn" + hostname
     try testing.expect(std.mem.startsWith(u8, cn_buf[0..@intCast(cn_len)], "server.softether.vpn"));
+}
+
+test "mayaqua_tls.certgen common name length limits" {
+    const allocator = testing.allocator;
+
+    // Exactly the OpenSSL commonName cap (64 octets) is accepted.
+    var cn_ok: [64]u8 = undefined;
+    @memset(&cn_ok, 'a');
+    const cert = try generateSelfSignedCert(allocator, &cn_ok);
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    // 65 octets is rejected (would fail X509_NAME_add_entry_by_NID with
+    // ASN1_R_STRING_TOO_LONG otherwise).
+    var cn_long: [65]u8 = undefined;
+    @memset(&cn_long, 'a');
+    try testing.expectError(error.NameTooLong, generateSelfSignedCert(allocator, &cn_long));
 }
 
 /// fd handed to the client-side TLS connect via the host dial callback.

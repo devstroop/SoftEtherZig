@@ -234,8 +234,10 @@ fn runGenCert(allocator: std.mem.Allocator, display: *cli.DisplayContext, common
     defer cert_file.close();
     try cert_file.writeAll(cert.cert_pem);
 
-    var key_file = try std.fs.cwd().createFile(key_path, .{ .truncate = true });
+    var key_file = try std.fs.cwd().createFile(key_path, .{ .truncate = true, .mode = 0o600 });
     defer key_file.close();
+    // Enforce 0600 even if the file pre-exists with wider permissions.
+    if (builtin.os.tag != .windows) std.posix.fchmod(key_file.handle, 0o600) catch {};
     try key_file.writeAll(cert.key_pem);
 
     cli.display.success(display, "Wrote {s} and {s} to the current directory", .{ cert_path, key_path });
