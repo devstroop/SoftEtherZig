@@ -102,29 +102,40 @@ pub const DosTable = struct {
         return self.entries.count();
     }
 
-    /// Gate a new connection from `ip`. Mirrors C `CheckDosAttack`
-    /// (Listener.c:405). Returns true = accept, false = reject.
+    /// Gate a new connection from `ip`. Mirrors C `CheckDosAttack` +
+    /// `SearchDosList` (Listener.c:405, :500). Returns true = accept,
+    /// false = reject.
     pub fn check(self: *DosTable, ip: u32, now: i64) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.refresh(now);
 
         if (self.entries.getPtr(ip)) |d| {
-            // Repeated accesses from the same IP: grow the expiry span and
-            // reject once the per-IP connection budget is exceeded.
-            d.last_connected_tick = now;
-            d.current_expire_span = @min(d.current_expire_span * 2, DOS_TABLE_EXPIRES_MAX);
-            d.access_count += 1;
-            if (d.access_count > DOS_TABLE_MAX_LIMIT_PER_IP) return false;
-        } else {
-            self.entries.put(self.allocator, ip, .{
-                .first_connected_tick = now,
-                .last_connected_tick = now,
-                .current_expire_span = DOS_TABLE_EXPIRES_FIRST,
-                .delete_entry_tick = now + DOS_TABLE_EXPIRES_TOTAL,
-                .access_count = 1,
-            }) catch return false;
+            // Per-lookup expiry check (C SearchDosList): drop the record even
+            // between the 10s bulk sweeps so an expired entry resets the
+            // per-IP budget.
+            if (d.last_connected_tick + d.current_expire_span <= now or
+                d.delete_entry_tick <= now)
+            {
+                _ = self.entries.remove(ip);
+            } else {
+                // Repeated accesses within the expiry span: grow the span and
+                // reject once the per-IP connection budget is exceeded.
+                d.last_connected_tick = now;
+                d.current_expire_span = @min(d.current_expire_span * 2, DOS_TABLE_EXPIRES_MAX);
+                d.access_count += 1;
+                if (d.access_count > DOS_TABLE_MAX_LIMIT_PER_IP) return false;
+                return true;
+            }
         }
+        // Fresh (or just-expired-and-reset) record.
+        self.entries.put(self.allocator, ip, .{
+            .first_connected_tick = now,
+            .last_connected_tick = now,
+            .current_expire_span = DOS_TABLE_EXPIRES_FIRST,
+            .delete_entry_tick = now + DOS_TABLE_EXPIRES_TOTAL,
+            .access_count = 1,
+        }) catch return false;
         return true;
     }
 
@@ -462,6 +473,27 @@ test "server.listener dos records expire after their span" {
 
     // Past the (doubled) span → record swept on next check.
     try testing.expect(table.check(test_ip, t0 + DOS_TABLE_EXPIRES_MAX * 2));
+    try testing.expectEqual(@as(usize, 1), table.count());
+}
+
+test "server.listener dos budget resets after entry expiry" {
+    var table = DosTable.init(testing.allocator);
+    defer table.deinit();
+
+    // Exhaust the per-IP budget.
+    var now: i64 = 1000;
+    _ = table.check(test_ip, now);
+    for (1..DOS_TABLE_MAX_LIMIT_PER_IP) |_| {
+        now += 1;
+        _ = table.check(test_ip, now);
+    }
+    now += 1;
+    try testing.expect(!table.check(test_ip, now));
+
+    // Jump past the maxed expiry span: the record must be dropped at lookup
+    // (C SearchDosList) even between 10s sweeps, resetting the budget.
+    now += DOS_TABLE_EXPIRES_MAX + 1;
+    try testing.expect(table.check(test_ip, now));
     try testing.expectEqual(@as(usize, 1), table.count());
 }
 
