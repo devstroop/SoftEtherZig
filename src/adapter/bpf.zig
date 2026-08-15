@@ -249,7 +249,10 @@ pub const BpfPort = struct {
         // Parse the bpf_hdr chain: stash every frame, then serve the first.
         self.pending_start = 0;
         self.pending_len = self.parseFrames(n);
-        if (self.pending_len == 0) return null;
+        if (self.pending_len == 0) {
+            std.log.warn("bpf: read {d} raw bytes but parsed no frames; first bytes: {x}", .{ n, self.scratch[0..@min(n, 24)] });
+            return null;
+        }
         const frame = self.nextPendingFrame() orelse return null;
         if (frame.len > SESSION_FRAME_BUDGET) {
             self.stats.drops += 1;
@@ -548,7 +551,9 @@ test "bpfPort session frame budget drop accounting" {
     // macOS lo0 does not echo bpf writes back to the tap, so generate real
     // loopback traffic: a UDP datagram to 127.0.0.1 (captured on egress
     // and/or on the looped-back input).
-    sendUdpProbe() catch {};
+    sendUdpProbe() catch |e| {
+        std.log.warn("budget test: udp probe failed: {}", .{e});
+    };
     var buf: [2048]u8 = undefined;
     const deadline = std.time.milliTimestamp() + 3_000;
     while (std.time.milliTimestamp() < deadline and p.getStats().rx_pkts == 0) {
@@ -644,7 +649,9 @@ test "bpfPort live tap read on real lo0 traffic" {
         std.log.warn("live test: write b failed: {}", .{e});
         return e;
     };
-    sendUdpProbe() catch {};
+    sendUdpProbe() catch |e| {
+        std.log.warn("live test: udp probe failed: {}", .{e});
+    };
 
     var buf: [2048]u8 = undefined;
     var frames_read: usize = 0;
