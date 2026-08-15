@@ -403,6 +403,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "md4", .module = md4_mod },
         },
     });
+    // softether_mod compiles the server/protocol core, whose c_imports.zig
+    // does @cImport(openssl headers). A named module does NOT inherit the
+    // executable's C include paths (linkOpenSsl adds those to the step/root
+    // module), so mirror the integration-test proto_mod include setup.
+    if (target_os == .macos) {
+        softether_mod.addIncludePath(.{ .cwd_relative = openssl_include });
+    } else if (target_os == .windows) {
+        softether_mod.addIncludePath(.{ .cwd_relative = win_openssl_include });
+    }
 
     const vpnserver = b.addExecutable(.{
         .name = "vpnserver",
