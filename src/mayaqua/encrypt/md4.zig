@@ -213,18 +213,18 @@ pub fn hashToHex(digest: *const [digest_length]u8) [digest_length * 2]u8 {
 /// NT hash of a password: MD4(UTF-16LE(password)).
 /// Mirrors C `GenerateNtPasswordHash` (Mayaqua/TcpIp.c:4514).
 pub fn generateNtPasswordHash(password: []const u8) [digest_length]u8 {
-    // Convert password bytes to UTF-16LE (each byte becomes 2 bytes, LE)
-    var utf16_buf: [512]u8 = undefined;
-    var utf16_len: usize = 0;
-
+    // Hash MD4(UTF-16LE(password)). Bytes are fed into the MD4 state
+    // incrementally so there is no fixed-buffer limit, matching C
+    // `GenerateNtPasswordHash` (Mayaqua/TcpIp.c:4514) which allocates
+    // `len * 2` and hashes the complete password.
+    var h = Md4.init();
+    var utf16: [2]u8 = undefined;
     for (password) |byte| {
-        if (utf16_len + 2 > utf16_buf.len) break;
-        utf16_buf[utf16_len] = byte;
-        utf16_buf[utf16_len + 1] = 0;
-        utf16_len += 2;
+        utf16[0] = byte;
+        utf16[1] = 0;
+        h.update(&utf16);
     }
-
-    return md4(utf16_buf[0..utf16_len]);
+    return h.final();
 }
 
 /// Hash of an NT hash: MD4(nt_hash).
@@ -309,6 +309,19 @@ test "NT hash matches UTF-16LE MD4" {
     const utf16 = "a\x00b\x00c\x00";
     const direct = md4(utf16);
     try testing.expectEqualSlices(u8, &direct, &nt);
+}
+
+test "NT hash of password longer than 256 bytes" {
+    // Regression: passwords longer than 256 bytes must be hashed in full,
+    // not truncated at a fixed buffer limit (matches C `GenerateNtPasswordHash`,
+    // which allocates `len * 2`). Expected value cross-checked against
+    // OpenSSL `dgst -md4` on the same UTF-16LE input.
+    var password: [300]u8 = undefined;
+    for (0..256) |i| password[i] = @intCast(i);
+    @memset(password[256..], 'X');
+
+    const nt = generateNtPasswordHash(&password);
+    try testing.expectEqualStrings("acaf5f6c139f269919d1fa0605fdb8a1", &hashToHex(&nt));
 }
 
 test "GenerateNtPasswordHashHash is MD4 of NT hash" {
