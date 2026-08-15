@@ -590,7 +590,10 @@ export fn softether_is_connected(client: ?*const VpnClient) bool {
 export fn softether_get_bridge_stats(client: ?*const VpnClient, out: ?*CBridgeStats) c_int {
     const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
     const s = out orelse return @intFromEnum(SoftetherError.invalid_argument);
-    const st = c.bridge_stats;
+    // Contract: zeroed when bridge mode is not active or the pump is not
+    // running (the pump also resets the cached snapshot at teardown, but
+    // the flag guard covers the pre-start / post-stop windows too).
+    const st = if (c.session_mode == .bridge and c.data_loop_running) c.bridge_stats else lib.bridge.loop.BridgeStats{};
     s.* = .{
         .fdb_entries = st.fdb_entries,
         .forwarded = st.forwarded,
@@ -613,7 +616,10 @@ export fn softether_get_bridge_stats(client: ?*const VpnClient, out: ?*CBridgeSt
 export fn softether_get_monitor_stats(client: ?*const VpnClient, out: ?*CMonitorStats) c_int {
     const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
     const s = out orelse return @intFromEnum(SoftetherError.invalid_argument);
-    const st = c.monitor_stats;
+    // Contract: zeroed when monitor mode is not active or the pump is not
+    // running (the pump also resets the cached snapshot at teardown, but
+    // the flag guard covers the pre-start / post-stop windows too).
+    const st = if (c.session_mode == .monitor and c.data_loop_running) c.monitor_stats else lib.monitor.MonitorStats{};
     s.* = .{
         .frames_captured = st.frames_captured,
         .frames_dropped = st.frames_dropped,
@@ -626,8 +632,9 @@ export fn softether_get_monitor_stats(client: ?*const VpnClient, out: ?*CMonitor
     return 0;
 }
 
-/// Frames currently held in the monitor ring (0 = ring empty or not
-/// running). Returns -1 on invalid client / monitor pump not running.
+/// Frames currently held in the monitor ring; 0 means an empty ring.
+/// Returns -1 when the client is invalid or the monitor pump is not
+/// running.
 export fn softether_monitor_frame_count(client: ?*VpnClient) i64 {
     const c = client orelse return -1;
     c.mutex.lock();

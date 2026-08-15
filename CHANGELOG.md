@@ -92,6 +92,19 @@ they are called out under **Breaking** in each entry.
 - Stale "runtime not implemented / storage-only" comments updated across
   `ffi.zig`, `include/softether.h`, `config.example.json`, and the
   `network_mode` field doc after the bridge/monitor runtimes landed.
+- **Review fixes (#119)**: the network operating mode is frozen per connect
+  in `session_mode` (auth + pump dispatch read one immutable value — no
+  setter race mid-connect); bridge/monitor pumps now poll `POLL.OUT` and
+  drain `retryPendingWrite` so WouldBlock'd LAN→session frames / keepalives
+  flush instead of sticking; bridge pump poll array is allocated from the
+  ingress count (fixed 64-entry stack array overflowed with 63+ interfaces);
+  bridge/monitor stats are zeroed at pump teardown and the FFI getters
+  return zeroed structs when the pump is not running (header contract);
+  `MonitorRing` slots are initialized on alloc (deinit previously freed
+  uninitialized optionals — critical); the PCAP writer truncates partial
+  records and stops appending after an interrupted write instead of
+  corrupting the capture; `softether_monitor_frame_count` header/FFI docs
+  no longer claim 0 for a non-running pump.
 
 ### Added
 

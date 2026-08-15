@@ -101,8 +101,10 @@ pub fn run(client: *VpnClient) !void {
         .use_compress = client.config.use_compress,
         // H-4: monitor sessions pack require_monitor_mode=true so the
         // server mirrors hub traffic back (proposal §5.4). Client and
-        // bridge sessions leave it false.
-        .monitor_mode = client.getNetworkMode() == .monitor,
+        // bridge sessions leave it false. Reads the mode frozen at connect
+        // entry (session_mode) — never the mutable network_mode flag, so a
+        // setter racing mid-connect can't split auth from pump dispatch.
+        .monitor_mode = client.session_mode == .monitor,
         .fingerprint = if (client.config.fingerprint) |*fp| fp else null,
     };
 

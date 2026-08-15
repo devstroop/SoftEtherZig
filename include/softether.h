@@ -217,8 +217,9 @@ int softether_get_bridge_stats(const softether_client_t client, softether_bridge
 int softether_get_monitor_stats(const softether_client_t client, softether_monitor_stats_t* out);
 
 /**
- * Frames currently held in the monitor ring (0 = ring empty or not
- * running). Returns -1 on invalid client / monitor pump not running.
+ * Frames currently held in the monitor ring; 0 means an empty ring.
+ * Returns -1 when the client is invalid or the monitor pump is not
+ * running.
  */
 int64_t softether_monitor_frame_count(const softether_client_t client);
 
