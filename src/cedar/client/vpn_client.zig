@@ -88,6 +88,10 @@ const session_setup = @import("session_setup.zig");
 // and AF_PACKET ingress ports. Only reachable when network_mode == .bridge.
 const bridge_mod = @import("../../bridge/mod.zig");
 
+// Monitor role — ring + PCAP capture of session L2 frames. Only
+// reachable when network_mode == .monitor.
+const monitor_mod = @import("../../monitor.zig");
+
 // Windows multimedia timer API (for high-resolution poll timeouts)
 const winmm = if (builtin.os.tag == .windows) struct {
     extern "winmm" fn timeBeginPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
@@ -269,6 +273,32 @@ fn singleDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) vo
     _ = ctx_;
     if (reason == .connection_closed) {
         std.log.info("Server closed connection: {s}", .{@errorName(err)});
+    }
+}
+
+// MONITOR MODE closures (issue #55) — mirror-only capture sink
+// ============================================================================
+
+/// Closure state for the monitor pump's inbound drain: every session block
+/// is a mirrored frame from the hub's virtual HUB, passed to the
+/// MonitorLoop capture path (bounded ring + optional PCAP file writer).
+const MonitorDrainCtx = struct {
+    monitor: *monitor_mod.MonitorLoop,
+};
+
+fn monitorOnBlock(ctx_: *anyopaque, block_data: []u8) void {
+    const m: *MonitorDrainCtx = @ptrCast(@alignCast(ctx_));
+    m.monitor.capture(block_data);
+}
+
+fn monitorOnFlush(ctx_: *anyopaque) void {
+    _ = ctx_; // no TUN batching in monitor mode — frames are captured immediately
+}
+
+fn monitorOnDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
+    _ = ctx_;
+    if (reason == .connection_closed) {
+        std.log.info("Monitor session closed: {s}", .{@errorName(err)});
     }
 }
 
@@ -525,6 +555,14 @@ pub const VpnClient = struct {
     /// Live bridge pump stats snapshot (updated at 1 Hz by the bridge
     /// loop; `{}=` default when bridge mode is not active).
     bridge_stats: bridge_mod.BridgeStats = .{},
+    /// Live monitor pump stats snapshot (updated at 1 Hz by the monitor
+    /// loop; `{}=` default when monitor mode is not active).
+    monitor_stats: monitor_mod.MonitorStats = .{},
+    /// Live monitor loop (ring + PCAP), owned by the monitor pump thread;
+    /// set under the client mutex when the pump starts, cleared when it
+    /// ends. FFI frame getters read it under the same mutex (the loop
+    /// itself serializes pushes against reads with its own mutex).
+    monitor_loop: ?*monitor_mod.MonitorLoop = null,
     disconnect_reason: DisconnectReason,
 
     adapter_ctx: ?AdapterWrapper,
@@ -549,8 +587,9 @@ pub const VpnClient = struct {
 
     /// Network operating mode captured at init from `config.mode` (or via
     /// `softether_set_network_mode` before connect). The connect path branches
-    /// on this flag: client runs the classic data loop; bridge/monitor are
-    /// not yet implemented at runtime and fall back to the client loop.
+    /// on this flag: client runs the classic data loop, bridge (issue #56)
+    /// runs the AF_PACKET L2 pump, monitor (issue #55) runs the mirror-only
+    /// capture pump.
     network_mode: NetworkMode = .client,
 
     event_callback: ?EventCallback,
@@ -802,11 +841,11 @@ pub const VpnClient = struct {
             self.config.use_encrypt = true;
         }
 
-        // I-14: the bridge pump is single-connection (one TLS session port).
-        // Coerce max_connections>1 down to 1 instead of silently dropping the
-        // extra TCP connections later.
-        if (self.network_mode == .bridge and self.config.max_connections > 1) {
-            std.log.warn("bridge mode: max_connections={d} is not supported (I-14); using a single connection", .{self.config.max_connections});
+        // I-14: the bridge/monitor pumps are single-connection (one TLS
+        // session port). Coerce max_connections>1 down to 1 instead of
+        // silently dropping the extra TCP connections later.
+        if ((self.network_mode == .bridge or self.network_mode == .monitor) and self.config.max_connections > 1) {
+            std.log.warn("{s} mode: max_connections={d} is not supported (I-14); using a single connection", .{ @tagName(self.network_mode), self.config.max_connections });
             self.config.max_connections = 1;
         }
 
@@ -836,13 +875,11 @@ pub const VpnClient = struct {
         // with thread startup and incorrectly return immediately.
         @atomicStore(bool, &self.data_loop_running, true, .release);
 
-        // Network operating mode branch (issue #52). Bridge mode runs its
-        // own L2 pump (bridge/loop.zig) over the ingress ports; monitor
-        // capture is not implemented yet and falls back to the client loop.
+        // Network operating mode branch (issue #52): bridge runs its own
+        // L2 pump (bridge/loop.zig) over the ingress ports; monitor runs
+        // the mirror-only capture pump (monitor.zig ring + PCAP). Client
+        // mode runs the classic TUN data loop.
         const is_bridge_mode = self.network_mode == .bridge;
-        if (!is_bridge_mode and self.network_mode != .client) {
-            std.log.warn("network mode '{s}' runtime not implemented yet — falling back to client data loop", .{@tagName(self.network_mode)});
-        }
 
         // Spawn the data loop on a native pthread with its own stack.
         // The data loop runs decoupled from any Dart Isolate.run() thread,
@@ -851,6 +888,12 @@ pub const VpnClient = struct {
         self.data_loop_thread = if (is_bridge_mode)
             std.Thread.spawn(.{}, runBridgeLoopThread, .{self}) catch |err| blk: {
                 std.log.err("Failed to spawn bridge data loop thread: {}", .{err});
+                @atomicStore(bool, &self.data_loop_running, false, .release);
+                break :blk null;
+            }
+        else if (self.network_mode == .monitor)
+            std.Thread.spawn(.{}, runMonitorLoopThread, .{self}) catch |err| blk: {
+                std.log.err("Failed to spawn monitor data loop thread: {}", .{err});
                 @atomicStore(bool, &self.data_loop_running, false, .release);
                 break :blk null;
             }
@@ -3377,6 +3420,188 @@ pub const VpnClient = struct {
 
         std.log.info("Bridge data channel ended", .{});
     }
+
+    // ====================================================================
+    // MONITOR MODE (mirror-only capture, issue #55)
+    // ====================================================================
+
+    /// Monitor pump thread entry (network_mode == .monitor). Mirrors
+    /// runBridgeLoopThread's lifecycle: no adapter in monitor mode (TUN,
+    /// DHCP and static-IP configuration were skipped in
+    /// performConnection), same cleanup order, events, and reconnect
+    /// policy.
+    fn runMonitorLoopThread(self: *Self) void {
+        self.runMonitorLoop() catch |err| {
+            std.log.err("Monitor data loop thread exited with error: {}", .{err});
+        };
+
+        // Stop UDP acceleration (never started in monitor mode, but be safe)
+        if (self.udp_accel) |*ua| {
+            ua.stop();
+        }
+        self.udp_accel = null;
+
+        // Close session
+        if (self.session) |*sess| sess.disconnect();
+
+        // Close all TLS connections
+        if (self.conn_manager) |*cm| {
+            cm.deinit();
+            self.conn_manager = null;
+        }
+        if (self.tls_socket) |*sock| {
+            sock.close();
+            self.tls_socket = null;
+        }
+
+        self.state = .disconnected;
+
+        // === SIGNAL DONE (last thing — after all cleanup) ===
+        self.data_loop_thread = null;
+        @atomicStore(bool, &self.data_loop_running, false, .release);
+
+        // === Fire disconnect events + auto-reconnect ===
+        if (self.event_callback) |cb| {
+            cb(.{ .state_changed = .{
+                .old_state = .connected,
+                .new_state = .disconnected,
+            } }, self.event_user_data);
+            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
+        }
+
+        if (self.config.reconnect.enabled and
+            self.disconnect_reason != .user_requested and
+            self.disconnect_reason.shouldReconnect())
+        {
+            self.scheduleReconnect();
+        }
+    }
+
+    /// Monitor data pump (issue #55). Single TLS session; inbound session
+    /// blocks are mirrored hub traffic and land in the MonitorLoop capture
+    /// path — bounded ring + optional PCAP writer. Mirror-only: the pump
+    /// never forwards frames back into the session.
+    fn runMonitorLoop(self: *Self) !void {
+        if (!self.isConnected()) return ClientError.NotConnected;
+
+        @atomicStore(bool, &self.data_loop_running, true, .release);
+        defer @atomicStore(bool, &self.data_loop_running, false, .release);
+
+        // Single-connection monitor pump: max_connections was coerced to 1
+        // in connect() (I-14). conn_manager stays null.
+        const single_sock: *tls.TlsSocket = &(self.tls_socket orelse return ClientError.NotConnected);
+        single_sock.clearTimeouts();
+        single_sock.setNonBlocking() catch |e| std.log.warn("setNonBlocking (monitor) failed: {}", .{e});
+
+        // === MonitorLoop: bounded ring + optional PCAP writer ===
+        // PcapWriter.create opens the file here; a bad path aborts the
+        // pump with the raw error (thread logs it; runMonitorLoopThread
+        // cleans up session/TLS in the same order as bridge mode).
+        var monitor_loop = try monitor_mod.MonitorLoop.init(
+            self.allocator,
+            monitor_mod.DEFAULT_RING_CAPACITY,
+            self.config.monitor.pcap_file,
+        );
+        defer monitor_loop.deinit();
+
+        // Publish the loop to FFI getters (lock ordering: client mutex →
+        // loop mutex; the pump itself holds only the loop mutex, so there
+        // is no cycle). Cleared before deinit below via the same mutex.
+        self.mutex.lock();
+        self.monitor_loop = &monitor_loop;
+        self.mutex.unlock();
+        defer {
+            self.mutex.lock();
+            self.monitor_loop = null;
+            self.mutex.unlock();
+        }
+
+        // === Tunnel connection (session side) ===
+        const single_tunnel = try self.allocator.create(protocol_tunnel_mod.TunnelConnection);
+        defer {
+            single_tunnel.deinit();
+            self.allocator.destroy(single_tunnel);
+        }
+        single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
+            self.allocator,
+            @ptrCast(single_sock),
+            struct {
+                fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                    return s.read(buf);
+                }
+            }.read,
+            struct {
+                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
+                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                    s.writeAllNonBlocking(data) catch |e| switch (e) {
+                        error.WouldBlock => return data.len,
+                        else => |err| return err,
+                    };
+                    return data.len;
+                }
+            }.write,
+        );
+        single_tunnel.use_compress = self.config.use_compress;
+        single_tunnel.initCompression();
+
+        // === Buffers (heap; isolate threads have small stacks) ===
+        const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
+        defer self.allocator.free(recv_scratch);
+        const recv_slices = try self.allocator.alloc([]u8, 512);
+        defer self.allocator.free(recv_slices);
+
+        // Drain diagnostics + keepalive timing
+        var drain_diag = session_io.DrainDiag{};
+        var timing = tunnel_mod.data_loop.TimingState.init();
+        var last_upkeep_ms: i64 = 0;
+
+        std.log.info("Monitor data channel started", .{});
+
+        while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
+            const now = std.time.milliTimestamp();
+
+            // Single TLS socket poll — the monitor pump has no ingress
+            // ports to multiplex (mirror-only).
+            var poll_fds: [1]std.posix.pollfd = undefined;
+            poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+            _ = std.posix.poll(poll_fds[0..], 10) catch 0;
+
+            // INBOUND: drain session blocks → MonitorLoop capture.
+            if ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or single_sock.hasPending() or single_sock.kernelRecvQueue() > 0) {
+                var drain_ctx = MonitorDrainCtx{ .monitor = &monitor_loop };
+                drain_diag = .{};
+                const result = session_io.drainReceived(
+                    single_tunnel,
+                    single_sock,
+                    recv_slices,
+                    recv_scratch,
+                    session_io.MAX_INBOUND_DRAIN,
+                    &self.should_stop,
+                    &drain_diag,
+                    .{
+                        .ctx = &drain_ctx,
+                        .onBlock = monitorOnBlock,
+                        .onFlush = monitorOnFlush,
+                        .onDead = monitorOnDead,
+                    },
+                );
+                if (result.dead) {
+                    self.disconnect_reason = .network_error;
+                    return error.ConnectionLost;
+                }
+            }
+
+            // 1Hz upkeep: keepalive + monitor stats snapshot.
+            if (now - last_upkeep_ms >= 1000) {
+                last_upkeep_ms = now;
+                session_io.maybeSendKeepalive(null, single_tunnel, &timing, now, @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000));
+                self.monitor_stats = monitor_loop.getStats();
+            }
+        }
+
+        std.log.info("Monitor data channel ended", .{});
+    }
 };
 
 // ============================================================================
@@ -3517,6 +3742,82 @@ test "ReconnectConfig defaults" {
     try std.testing.expect(rc.enabled);
     try std.testing.expectEqual(@as(u32, 0), rc.max_attempts);
     try std.testing.expectEqual(@as(u32, 1000), rc.min_backoff_ms);
+}
+
+test "monitor pump: scripted session block drains into the ring (fixture)" {
+    // Deterministic fixture mirroring test/integration's ScriptedTransport:
+    // no socket, no TLS, no thread — the wire stream is hand-encoded in the
+    // session block format from protocol/tunnel.zig sendBlocks:
+    //   [u32 num_blocks][u32 block_size][payload]...
+    const eth_frame = [_]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0x08, 0x00 };
+    var wire: [4 + 4 + eth_frame.len]u8 = undefined;
+    std.mem.writeInt(u32, wire[0..4], 1, .big);
+    std.mem.writeInt(u32, wire[4..8], @intCast(eth_frame.len), .big);
+    @memcpy(wire[8..], &eth_frame);
+
+    var rd_pos: usize = 0;
+    var fed = std.mem.ArrayListUnmanaged(u8){};
+    defer fed.deinit(std.testing.allocator);
+
+    const Transport = struct {
+        const Self = @This();
+        wire: []const u8,
+        pos: *usize,
+        fed: *std.mem.ArrayListUnmanaged(u8),
+        fn readFn(ctx: *anyopaque, buf: []u8) anyerror!usize {
+            const t: *Self = @ptrCast(@alignCast(ctx));
+            const remaining = t.wire.len - t.pos.*;
+            if (remaining == 0) return 0;
+            const n = @min(remaining, buf.len);
+            @memcpy(buf[0..n], t.wire[t.pos.*..][0..n]);
+            t.pos.* += n;
+            return n;
+        }
+        fn writeFn(ctx: *anyopaque, data: []const u8) anyerror!usize {
+            const t: *Self = @ptrCast(@alignCast(ctx));
+            try t.fed.appendSlice(std.testing.allocator, data);
+            return data.len;
+        }
+    };
+    var transport = Transport{ .wire = &wire, .pos = &rd_pos, .fed = &fed };
+
+    var single_tunnel = protocol_tunnel_mod.TunnelConnection.init(
+        std.testing.allocator,
+        @ptrCast(&transport),
+        Transport.readFn,
+        Transport.writeFn,
+    );
+    defer single_tunnel.deinit();
+    single_tunnel.use_compress = false;
+
+    // Monitor mode: ring + no PCAP.
+    var monitor_loop = try monitor_mod.MonitorLoop.init(std.testing.allocator, 4096, null);
+    defer monitor_loop.deinit();
+
+    // Drive the same plumbing the pump wires: receiveBlocksBatch → the
+    // monitor closure (monitorOnBlock) → MonitorLoop capture.
+    var recv_scratch: [8 * 1600]u8 = undefined;
+    var recv_slices: [4][]u8 = undefined;
+    const n = try single_tunnel.receiveBlocksBatch(&recv_slices, &recv_scratch);
+    try std.testing.expectEqual(@as(usize, 1), n);
+
+    var drain_ctx = MonitorDrainCtx{ .monitor = &monitor_loop };
+    monitorOnBlock(&drain_ctx, recv_slices[0]);
+
+    const s = monitor_loop.getStats();
+    try std.testing.expectEqual(@as(u64, 1), s.frames_captured);
+    try std.testing.expectEqual(@as(u64, eth_frame.len), s.bytes_captured);
+    try std.testing.expectEqual(@as(u32, 1), s.ring_used);
+    try std.testing.expectEqual(@as(u64, 0), s.frames_dropped);
+    try std.testing.expectEqual(@as(u64, 0), s.pcap_records);
+
+    // FFI-facing readback of the captured frame.
+    try std.testing.expectEqual(@as(u32, 1), monitor_loop.frameCount());
+    var out: [64]u8 = undefined;
+    const copied = monitor_loop.readFrame(0, &out).?;
+    try std.testing.expectEqual(@as(usize, eth_frame.len), copied);
+    try std.testing.expectEqualSlices(u8, &eth_frame, out[0..copied]);
+    try std.testing.expect(monitor_loop.readFrame(1, &out) == null);
 }
 
 test "SessionWrapper" {

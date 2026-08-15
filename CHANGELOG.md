@@ -60,6 +60,41 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- **Monitor-mode runtime** (issue #55) — mirror-only capture pump. `connect()`
+  now fully branches on the session network-mode flag: client runs the
+  classic TUN data loop, bridge (issue #56) the AF_PACKET L2 pump, monitor
+  this new pump. `runMonitorLoop` (single TLS session, `max_connections`
+  coerced to 1 per I-14) drains inbound session blocks through the existing
+  `session_io.drainReceived` into the `MonitorLoop` capture path — bounded
+  ring (default 4096 frames, drop-and-count) + optional PCAP writer opened
+  from `config.monitor.pcap_file` (a bad path aborts the monitor session
+  with the raw file error). Mirror-only by design: nothing is forwarded back
+  into the session. UDP acceleration is now gated to client mode only (the
+  monitor pump, like the bridge pump, polls a single TLS socket); lifecycle,
+  events, and reconnect policy mirror `runBridgeLoopThread`. The monitor
+  loop is published on `VpnClient.monitor_loop` (set/cleared under the
+  client mutex) and serialized internally with its own mutex so FFI readers
+  can safely snapshot the ring while the pump captures.
+- **FFI: monitor frame retrieval** (`softether_monitor_frame_count`,
+  `softether_monitor_get_frame`) per CONFIG.md row — thread-safe snapshots
+  of the live ring (index 0 = oldest; truncated copies honor `out_cap`;
+  -1 when the pump is not running). `softether_monitor_stats_t` and both
+  getters added to `include/softether.h` (previous `get_monitor_stats`
+  export was missing from the header).
+- **FFI: `softether_set_monitor_pcap`** — owned-copy pcap path setter
+  ("" / NULL clears; the previous owned path is freed; borrowed paths from
+  `VpnClient.init` are never freed). Completes the 6-layer config matrix
+  for `pcap_file` (CONFIG.md row 50 FFI column).
+- **Monitor drain fixture test** — scripted in-memory transport (no socket,
+  no TLS, no thread) hand-encoding the session block wire format; verifies
+  receiveBlocksBatch → monitor closure → ring capture → stats + `readFrame`
+  readback, mirroring `test/integration`'s ScriptedTransport philosophy.
+- Stale "runtime not implemented / storage-only" comments updated across
+  `ffi.zig`, `include/softether.h`, `config.example.json`, and the
+  `network_mode` field doc after the bridge/monitor runtimes landed.
+
+### Added
+
 - **Session network-mode flag + mode-aware connect path** (#52). `VpnClient`
   now snapshots `config.mode` into a `network_mode` session flag at init
   (`getNetworkMode()` getter), and `softether_set_network_mode` writes both
