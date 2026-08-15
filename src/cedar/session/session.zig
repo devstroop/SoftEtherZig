@@ -14,6 +14,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const testing = std.testing;
+const Rc4 = @import("../../mayaqua/encrypt/rc4.zig").Rc4;
 
 // ============================================================================
 // Local Crypto Helpers (self-contained for testing)
@@ -674,6 +675,10 @@ pub const Session = struct {
     send_cipher: ?Aes256Cbc,
     recv_cipher: ?Aes256Cbc,
 
+    /// RC4 stream ciphers for legacy fast-encryption (one per direction)
+    send_rc4: ?Rc4,
+    recv_rc4: ?Rc4,
+
     /// Create a new session
     pub fn init(allocator: Allocator, options: SessionOptions) Session {
         var sess = Session{
@@ -708,6 +713,8 @@ pub const Session = struct {
             .recv_queue = PacketQueue.init(allocator, Config.max_queue_size),
             .send_cipher = null,
             .recv_cipher = null,
+            .send_rc4 = null,
+            .recv_rc4 = null,
         };
 
         // Copy strings
@@ -819,10 +826,42 @@ pub const Session = struct {
         self.use_encrypt = true;
     }
 
+    /// Initialize legacy RC4 session encryption with server-negotiated keys.
+    ///
+    /// Matches the C server's `use_fast_rc4` path: the client encrypts outgoing
+    /// packets with the `rc4_key_client_to_server` key and decrypts incoming
+    /// packets with `rc4_key_server_to_client` (`InitTcpSockRc4Key`,
+    /// Connection.c:2881-2906). RC4 is a stateful stream cipher — the
+    /// keystream continues across packets.
+    pub fn initFastRc4(self: *Session, client_to_server_key: *const [16]u8, server_to_client_key: *const [16]u8) void {
+        self.keys.use_fast_rc4 = true;
+        self.keys.use_encrypt = true;
+
+        self.send_rc4 = Rc4.init(client_to_server_key);
+        self.recv_rc4 = Rc4.init(server_to_client_key);
+
+        // RC4 replaces the AES path entirely
+        self.send_cipher = null;
+        self.recv_cipher = null;
+
+        self.use_encrypt = true;
+    }
+
     /// Encrypt a packet for sending
     pub fn encryptPacket(self: *Session, plaintext: []const u8) ![]u8 {
-        if (!self.use_encrypt or self.send_cipher == null) {
+        if (!self.use_encrypt) {
             // No encryption, return copy
+            return try self.allocator.dupe(u8, plaintext);
+        }
+
+        if (self.keys.use_fast_rc4) {
+            // RC4 stream cipher: keystream XOR in place, no IV, no padding
+            const result = try self.allocator.dupe(u8, plaintext);
+            self.send_rc4.?.apply(result);
+            return result;
+        }
+
+        if (self.send_cipher == null) {
             return try self.allocator.dupe(u8, plaintext);
         }
 
@@ -848,8 +887,19 @@ pub const Session = struct {
 
     /// Decrypt a received packet
     pub fn decryptPacket(self: *Session, ciphertext: []const u8) ![]u8 {
-        if (!self.use_encrypt or self.recv_cipher == null) {
+        if (!self.use_encrypt) {
             // No encryption
+            return try self.allocator.dupe(u8, ciphertext);
+        }
+
+        if (self.keys.use_fast_rc4) {
+            // RC4 is symmetric: decrypting applies the same keystream XOR
+            const result = try self.allocator.dupe(u8, ciphertext);
+            self.recv_rc4.?.apply(result);
+            return result;
+        }
+
+        if (self.recv_cipher == null) {
             return try self.allocator.dupe(u8, ciphertext);
         }
 
@@ -947,6 +997,7 @@ pub const SessionOptions = struct {
     hub: []const u8,
     username: []const u8,
     use_encrypt: bool = true,
+    use_fast_rc4: bool = false,
     use_compress: bool = false,
     half_connection: bool = false,
     qos_enabled: bool = true,
@@ -1153,4 +1204,48 @@ test "AES-256-CBC encryption round-trip" {
     defer testing.allocator.free(decrypted);
 
     try testing.expectEqualStrings(plaintext, decrypted);
+}
+
+test "Fast RC4 session encryption round-trip" {
+    var client_sess = Session.init(testing.allocator, .{
+        .host = "test.example.com",
+        .hub = "VPN",
+        .username = "user",
+    });
+    defer client_sess.deinit();
+
+    const c2s = [_]u8{0x11} ** 16;
+    const s2c = [_]u8{0x22} ** 16;
+    client_sess.initFastRc4(&c2s, &s2c);
+
+    try testing.expect(client_sess.keys.use_fast_rc4);
+    try testing.expect(client_sess.use_encrypt);
+    try testing.expect(client_sess.send_cipher == null);
+    try testing.expect(client_sess.recv_cipher == null);
+
+    // Peer "server" mirrors the key pair with swapped roles: it decrypts
+    // client→server traffic with c2s and encrypts server→client with s2c.
+    var server_sess = Session.init(testing.allocator, .{
+        .host = "server.example.com",
+        .hub = "VPN",
+        .username = "server",
+    });
+    defer server_sess.deinit();
+    server_sess.initFastRc4(&s2c, &c2s);
+
+    // Client→server direction
+    const plaintext = "RC4 session payload";
+    const encrypted = try client_sess.encryptPacket(plaintext);
+    defer testing.allocator.free(encrypted);
+    const decrypted = try server_sess.decryptPacket(encrypted);
+    defer testing.allocator.free(decrypted);
+    try testing.expectEqualStrings(plaintext, decrypted);
+
+    // Server→client direction
+    const reply = "reply from server";
+    const encrypted_reply = try server_sess.encryptPacket(reply);
+    defer testing.allocator.free(encrypted_reply);
+    const decrypted_reply = try client_sess.decryptPacket(encrypted_reply);
+    defer testing.allocator.free(decrypted_reply);
+    try testing.expectEqualStrings(reply, decrypted_reply);
 }
