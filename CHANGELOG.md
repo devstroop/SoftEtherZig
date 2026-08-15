@@ -14,7 +14,7 @@ they are called out under **Breaking** in each entry.
   H-5/H-7; issue #60). macOS `NetPort` implementation over `/dev/bpfN`:
   `bpfPort(&impl, allocator, ifname)` mirrors the `afPacketPort` ownership
   pattern; `open()` attaches with `BIOCSETIF`, enables `BIOCPROMISC` +
-  `BIOCIMMEDIATE` + `BIOCNONBLOCK` (pollable fd for the pump), clamps the
+  `BIOCIMMEDIATE` (pollable fd for the pump), clamps the
   MTU to the 1514-byte `SESSION_FRAME_BUDGET` (H-3), warns when the ingress
   NIC carries a host IP (H-5), and reads the MAC/MTU via `getifaddrs` +
   `SIOCGIFMTU`. BPF coalesces frames, so `read()` parses the `bpf_hdr`
@@ -28,14 +28,34 @@ they are called out under **Breaking** in each entry.
   — **no shell execution in this mode**. Parent side `escalatedBpfOpen`
   in `utun_escalate.zig` reuses the size-staleness install check; without a
   usable helper the port fails cleanly (`error.NoCapability`), never crashes.
-- **Per-OS ingress port dispatch in `runBridgeLoop`** (#60). The bridge
-  pump's port construction is now a comptime dispatch: Linux → AF_PACKET,
-  macOS → BPF (this PR); non-Linux/macOS targets fail cleanly with
-  `error.AdapterConfigurationFailed`. No new FFI exports (76 total).
 - **Bridge BPF live smoke on CI** (#60). The macOS matrix installs the
   freshly-built SUID helper (passwordless sudo) and re-runs the suite so
   `bpf.zig`'s live tests exercise a real `/dev/bpfN` attach + lo0
   round-trip; without a privileged path the live tests skip cleanly.
+- **Npcap L2 port** (`adapter/npcap.zig`, L2 Network Bridge proposal §4.1,
+  H-3; issue #61). Windows `NetPort` implementation over Npcap with a
+  **dynamic `pcap.dll`** load (LoadLibrary/GetProcAddress — no build-time
+  dependency; Wintun pattern from `tap_windows.zig`). When the DLL is
+  absent, `open()` fails with `error.NpcapNotInstalled` — a clean,
+  documented degrade; the client itself is unaffected. Interface names are
+  resolved against `pcap_findalldevs` accepting the GUID from
+  `softether_list_interfaces`, a friendly name, or a full
+  `\Device\NPF_...` name (case-insensitive + description fallback).
+  **Polling model (decided in #61):** Npcap handles have no pollable fd, so
+  `getFd()` returns `invalid_fd` and each port runs a dedicated worker
+  thread (blocking reads, 10 ms timeout — ~0% idle CPU) feeding a bounded
+  SPSC ring (`RX_QUEUE_CAP`=256 slots × 1514 bytes); the bridge pump drains
+  non-pollable ports every iteration. Promiscuous is open-time only
+  (`pcap_open_live` promisc=1; unset is a logged no-op). MTU clamped to
+  `SESSION_FRAME_BUDGET` (H-3), oversize frames → `PortStats.drops`.
+- **Bridge pump drain for non-pollable ports** (#61). The LAN→session
+  drain in `runBridgeLoop` now reads ports whose `getFd()` is `invalid_fd`
+  on every iteration (poll() skips fd -1), keeping the AF_PACKET path
+  behavior unchanged.
+- **Per-OS ingress port dispatch in `runBridgeLoop`** (#60/#61). The bridge
+  pump's port construction is a comptime dispatch: Linux → AF_PACKET,
+  macOS → BPF, Windows → Npcap; other targets fail cleanly with
+  `error.AdapterConfigurationFailed`. No new FFI exports (76 total).
 - **AF_PACKET L2 port** (`adapter/af_packet.zig`, L2 Network Bridge proposal
   §4.1; issues H-3/H-5/H-8). Linux-only `NetPort` implementation over
   AF_PACKET (SOCK_RAW, ETH_P_ALL): `afPacketPort(&impl, ifname)` mirrors the
