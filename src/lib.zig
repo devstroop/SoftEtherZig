@@ -79,10 +79,11 @@ pub const bridge = struct {
     pub const engine = @import("bridge/engine.zig");
 };
 
-// Server core (M1 epic) — session keys + data-channel encryption
+// Server core (M1 epic) — session keys, data-channel encryption, session loop
 pub const server = struct {
     pub const auth = @import("cedar/server/auth.zig");
     pub const session = @import("cedar/server/session.zig");
+    pub const session_main = @import("cedar/server/session_main.zig");
 };
 
 /// Parse an IPv4 address string to u32
