@@ -238,7 +238,10 @@ pub const NpcapPort = struct {
             self.handle = null;
         }
         if (self.api) |api| {
-            if (api.dll) |dll| _ = kernel32.FreeLibrary(@as([*c]kernel32.struct_HINSTANCE__, @ptrCast(dll)));
+            if (api.dll) |dll| {
+                const dllp: *kernel32.struct_HINSTANCE__ = @ptrCast(@alignCast(dll));
+                _ = kernel32.FreeLibrary(dllp);
+            }
             self.api = null;
         }
         self.head.store(0, .monotonic);
