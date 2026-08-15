@@ -69,8 +69,11 @@ sudo ./zig-out/bin/vpnclient connect \
   are dropped and counted in `PortStats.drops`. Keep the NIC MTU ≤ 1500.
 - **FDB sizing:** `fdb_max` (default 4096) — on overflow the engine floods
   after FIFO eviction; `fdb_aging_s` (default 300) prunes stale MACs.
-- **Single connection (I-14):** `max_connections > 1` is coerced to 1 with a
-  WARN. Bridge v1 always uses one TLS session.
+- **Multi-connection (issue #58):** bridge mode honors `max_connections > 1`
+  — the pump runs multiple parallel TLS connections with least-loaded send
+  fanout (I-14 relaxed for bridge only). The single-connection path still
+  applies when `max_connections <= 1`. Monitor mode remains
+  single-connection (I-14 intact).
 - **No UDP acceleration:** the bridge pump polls a single TLS socket; RUDP is
   disabled for bridge/monitor sessions regardless of server support.
 - **No-echo guard:** a frame arriving on a port is never flooded back to the
@@ -188,8 +191,8 @@ sudo ./zig-out/bin/vpnclient connect \
 - **Platform ports backlog:** macOS `bpf` + SUID allowlist (#60), Windows
   `npcap` with graceful degrade (#61), Android `EthernetManager` (#59) — all
   behind the `NetPort` abstraction (issue #51).
-- **Bridge/monitor multi-connection** is backlog (issue #58) — v1 is
-  single-TLS (I-14).
+- **Bridge multi-connection shipped** (issue #58) — the bridge pump honors
+  `max_connections > 1`; monitor mode remains single-connection (I-14).
 
 ## 7. Troubleshooting
 

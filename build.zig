@@ -704,6 +704,10 @@ pub fn build(b: *std.Build) void {
                 "bpfPort",
                 "npcapPort",
                 "etherManagerPort",
+                // issue #58 bridge multi-connection tests (session_io.zig +
+                // vpn_client.zig) and the I-14 coercion helper test
+                "multi-connection",
+                "sessionMaxConnections",
                 // auth.zig test blocks (cross-tree md4 import → run here)
                 "ClientAuth",
                 "Challenge generation",
