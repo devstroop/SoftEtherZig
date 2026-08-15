@@ -30,6 +30,15 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "version", version);
     const build_options_mod = build_options.createModule();
 
+    // Pure-Zig MD4 module (NTLM / NT password hash). auth.zig imports it by
+    // name because a relative import from cedar/protocol/ escapes the
+    // package source root (Zig 0.15 rule).
+    const md4_mod = b.createModule(.{
+        .root_source_file = b.path("src/mayaqua/encrypt/md4.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Detect Homebrew OpenSSL path (ARM vs Intel Mac)
     const openssl_lib: []const u8 = if (target_os == .macos) blk: {
         const candidates = [_][]const u8{
@@ -355,6 +364,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
+                .{ .name = "md4", .module = md4_mod },
             },
         }),
     });
@@ -390,6 +400,7 @@ pub fn build(b: *std.Build) void {
             .strip = optimize != .Debug and target_os != .macos,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
+                .{ .name = "md4", .module = md4_mod },
             },
         }),
     });
@@ -431,6 +442,7 @@ pub fn build(b: *std.Build) void {
             .strip = optimize != .Debug,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
+                .{ .name = "md4", .module = md4_mod },
             },
         }),
     });
@@ -501,8 +513,9 @@ pub fn build(b: *std.Build) void {
         "src/mayaqua/encrypt/sha0.zig",
         "src/mayaqua/encrypt/cipher.zig",
         "src/mayaqua/encrypt/hash.zig",
+        "src/mayaqua/encrypt/md4.zig",
+        "src/mayaqua/encrypt/rc4.zig",
         "src/cedar/protocol/pack.zig",
-        "src/cedar/protocol/auth.zig",
         "src/cedar/protocol/rpc.zig",
         "src/cedar/client/state.zig",
         "src/cedar/client/stats.zig",
@@ -569,6 +582,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "build_options", .module = build_options_mod },
+                    .{ .name = "md4", .module = md4_mod },
                 },
             }),
             .filters = &.{"ffi"},
@@ -588,6 +602,8 @@ pub fn build(b: *std.Build) void {
     // and can't be tested standalone.
     // Excludes: adapter.* (needs TUN), client.vpn_client (needs server),
     // protocol.tunnel (zlib state not reset between tests, issue #82).
+    // auth.zig tests run here (not standalone) because it imports md4.zig
+    // outside its source root.
     {
         const all_test = b.addTest(.{
             .root_module = b.createModule(.{
@@ -596,13 +612,20 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "build_options", .module = build_options_mod },
+                    .{ .name = "md4", .module = md4_mod },
                 },
             }),
             .filters = &.{
                 "crypto.",
                 "core.",
                 "net.",
+                "mayaqua_tls.",
+                "mayaqua_http.",
                 "session.",
+                "server.session.",
+                "server.auth.",
+                "server.session_main.",
+                "server.listener.",
                 "client.state",
                 "client.stats",
                 "client.events",
@@ -616,6 +639,16 @@ pub fn build(b: *std.Build) void {
                 "protocol.rpc",
                 "cli.args",
                 "cli.config_manager",
+                // auth.zig test blocks (cross-tree md4 import → run here)
+                "ClientAuth",
+                "Challenge generation",
+                "Secure password computation",
+                "Session key derivation",
+                "certPemToDer",
+                "signWithPrivateKey",
+                "extractCertCommonName",
+                "SHA-0 determinism",
+                "MS-CHAPv2",
             },
         });
         linkOpenSsl(b, all_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
@@ -637,6 +670,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/cedar/protocol/softether_protocol.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "md4", .module = md4_mod },
+            },
         });
         // proto_mod compiles auth.zig which uses @cImport(openssl/pem.h)
         // and needs the include path to find the header.

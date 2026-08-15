@@ -202,6 +202,14 @@ const ConnectionStats = client_mod.ConnectionStats;
 const AuthMethod = client_mod.AuthMethod;
 const ReconnectConfig = client_mod.ReconnectConfig;
 
+// Server-core modules (epic #71). Imported here so the whole-package test
+// runner collects `server.session.*` tests (decls are lazily analyzed).
+const server_mod = @import("cedar/server/mod.zig");
+
+comptime {
+    _ = server_mod;
+}
+
 // ============================================================================
 // Opaque Handle
 // ============================================================================
