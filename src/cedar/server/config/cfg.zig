@@ -319,18 +319,27 @@ pub const Cfg = struct {
     /// CFG_RW: write to `path` in `dir`, backing up the previous file to
     /// `path~` (C: `CfgSave`).
     pub fn saveToFile(self: *const Cfg, dir: std.fs.Dir, path: []const u8) !void {
+        try self.saveToFileEx(dir, path, true);
+    }
+
+    /// CFG_RW with the backup policy applied by the caller (C
+    /// `SaveCfgRwEx` + `CfgRw->DontBackup`): `backup == false` skips the
+    /// `<path>~` copy entirely.
+    pub fn saveToFileEx(self: *const Cfg, dir: std.fs.Dir, path: []const u8, backup: bool) !void {
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.allocator);
         try self.writeToBuffer(&buf);
 
         // Backup-on-modify: copy the current file to `<path>~` before
         // replacing it (C: `CfgSave` → `FileCopy(filename, "~")`).
-        const backup = try std.fmt.allocPrint(self.allocator, "{s}~", .{path});
-        defer self.allocator.free(backup);
-        dir.copyFile(path, dir, backup, .{}) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        if (backup) {
+            const backup_path = try std.fmt.allocPrint(self.allocator, "{s}~", .{path});
+            defer self.allocator.free(backup_path);
+            dir.copyFile(path, dir, backup_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
 
         // Atomic replace: temp file + rename.
         const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{path});
