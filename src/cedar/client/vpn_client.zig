@@ -3291,7 +3291,7 @@ pub const VpnClient = struct {
             std.log.err("bridge mode: no ingress interfaces configured (softether_add_ingress_interface)", .{});
             return ClientError.AdapterConfigurationFailed;
         }
-if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
             std.log.err("bridge mode requires AF_PACKET (Linux), BPF (macOS) or Npcap (Windows) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
             return ClientError.AdapterConfigurationFailed;
         }
