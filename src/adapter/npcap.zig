@@ -81,7 +81,7 @@ const PcapApi = struct {
     fn load() !PcapApi {
         const dll = kernel32.LoadLibraryA("pcap.dll");
         if (dll == null) {
-            std.log.err("npcap: pcap.dll not found — Npcap is not installed", .{});
+            std.log.warn("npcap: pcap.dll not found — Npcap is not installed", .{});
             return NpcapError.NpcapNotInstalled;
         }
         const addr = struct {
@@ -156,7 +156,7 @@ pub const NpcapPort = struct {
         // Resolve the Npcap device name for the requested interface.
         var dev_name_buf: [512]u8 = undefined;
         const dev_name = self.resolveDeviceName(&dev_name_buf, api) orelse {
-            std.log.err("npcap: interface '{s}' not found (use the GUID from softether_list_interfaces)", .{self.ifname});
+            std.log.warn("npcap: interface '{s}' not found (use the GUID from softether_list_interfaces)", .{self.ifname});
             return error.InterfaceNotFound;
         };
 
@@ -165,7 +165,7 @@ pub const NpcapPort = struct {
         // thread waits, so idle loops cost ~0% CPU (Npcap's event-driven
         // wait returns when a frame arrives or the timeout elapses).
         const handle = api.openLive(@ptrCast(dev_name.ptr), 65535, 1, 10, &errbuf) orelse {
-            std.log.err("npcap: open '{s}' failed: {s}", .{ dev_name, std.mem.sliceTo(&errbuf, 0) });
+            std.log.warn("npcap: open '{s}' failed: {s}", .{ dev_name, std.mem.sliceTo(&errbuf, 0) });
             return error.OpenFailed;
         };
         self.handle = handle;
@@ -182,7 +182,7 @@ pub const NpcapPort = struct {
         self.promisc = true;
 
         self.thread = std.Thread.spawn(.{}, rxWorker, .{self}) catch |err| {
-            std.log.err("npcap: rx worker spawn failed: {}", .{err});
+            std.log.warn("npcap: rx worker spawn failed: {}", .{err});
             return error.OpenFailed;
         };
         std.log.info("npcap: ingress port '{s}' open on {s}", .{ self.ifname, dev_name });
@@ -419,9 +419,10 @@ test "npcapPort rejects non-Windows targets" {
     var port = NpcapPort{ .allocator = std.testing.allocator };
     const p = npcapPort(&port, std.testing.allocator, "en0");
     if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var buf = [_]u8{0} ** 64;
     try std.testing.expectError(error.NotWindows, p.open());
-    try std.testing.expectError(error.NotWindows, p.write(&[_]u8{0} ** 64));
-    try std.testing.expectError(error.NotWindows, p.read(&[_]u8{0} ** 64));
+    try std.testing.expectError(error.NotWindows, p.write(&buf));
+    try std.testing.expectError(error.NotWindows, p.read(&buf));
     p.setPromiscuous(true);
 }
 
