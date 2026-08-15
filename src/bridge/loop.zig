@@ -217,7 +217,11 @@ pub const BridgeLoop = struct {
             },
             .flood => {
                 // To the session (remote LANs) + every LAN port except src.
+                // Record the session delivery too — getStats() sums the
+                // session-port counters, so an unrecorded flood would
+                // underreport LAN-to-session broadcast deliveries.
                 self.sendToSession(frame);
+                self.engine.noteForwarded(self.session_port, action);
                 for (self.ports, 0..) |_, i| {
                     if (i == port_index) continue;
                     self.writePort(@intCast(i), frame, action);
@@ -460,7 +464,9 @@ test "bridge loop: LAN unicast to session and LAN broadcast floods" {
     const stats = h.loop.getStats();
     try std.testing.expectEqual(@as(u64, 2), stats.session_tx);
     try std.testing.expectEqual(@as(u64, 3), stats.forwarded);
-    try std.testing.expectEqual(@as(u64, 1), stats.flooded);
+    // Port 1 flood delivery (LAN) + session flood delivery — the session
+    // port counter is recorded for broadcast floods too.
+    try std.testing.expectEqual(@as(u64, 2), stats.flooded);
 }
 
 test "bridge loop: no-echo — frame destined back to source port is blocked" {

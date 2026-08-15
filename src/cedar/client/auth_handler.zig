@@ -211,7 +211,9 @@ pub fn run(client: *VpnClient) !void {
     // only: the bridge pump (loop.zig) carries no UDP data channel yet
     // (proposal §4.6). Monitor mode inherits the classic runDataLoop,
     // which polls `udp_accel` — so it must keep UDP acceleration.
-    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.network_mode != .bridge) {
+    // getNetworkMode() reads under the client mutex (connect() released
+    // it while authenticating; softether_set_network_mode may acquire it).
+    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.getNetworkMode() != .bridge) {
         startUdpAcceleration(client, auth_result);
     }
 
