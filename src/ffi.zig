@@ -281,6 +281,23 @@ pub const CStats = extern struct {
     _padding: u32 = 0,
 };
 
+/// Aggregate bridge-mode stats (C layout, mirrors `BridgeStats`).
+pub const CBridgeStats = extern struct {
+    fdb_entries: u32,
+    _pad0: u32 = 0,
+    forwarded: u64,
+    flooded: u64,
+    blocked: u64,
+    lan_rx_pkts: u64,
+    lan_tx_pkts: u64,
+    lan_rx_bytes: u64,
+    lan_tx_bytes: u64,
+    drops: u64,
+    session_rx: u64,
+    session_tx: u64,
+    session_tx_errors: u64,
+};
+
 /// Connection state (C-compatible enum)
 pub const CState = enum(c_int) {
     disconnected = 0,
@@ -552,6 +569,29 @@ export fn softether_get_state(client: ?*const VpnClient) c_int {
 export fn softether_is_connected(client: ?*const VpnClient) bool {
     const c = client orelse return false;
     return c.isConnected();
+}
+
+/// Get bridge-mode stats (zeroed when bridge mode is not active or the
+/// pump is not running). Returns 0 on success.
+export fn softether_get_bridge_stats(client: ?*const VpnClient, out: ?*CBridgeStats) c_int {
+    const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const s = out orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const st = c.bridge_stats;
+    s.* = .{
+        .fdb_entries = st.fdb_entries,
+        .forwarded = st.forwarded,
+        .flooded = st.flooded,
+        .blocked = st.blocked,
+        .lan_rx_pkts = st.lan_rx_pkts,
+        .lan_tx_pkts = st.lan_tx_pkts,
+        .lan_rx_bytes = st.lan_rx_bytes,
+        .lan_tx_bytes = st.lan_tx_bytes,
+        .drops = st.drops,
+        .session_rx = st.session_rx,
+        .session_tx = st.session_tx,
+        .session_tx_errors = st.session_tx_errors,
+    };
+    return 0;
 }
 
 /// Get connection statistics. Returns 0 on success.

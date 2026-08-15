@@ -522,6 +522,9 @@ pub const VpnClient = struct {
     config: ClientConfig,
     state: ClientState,
     stats: ConnectionStats,
+    /// Live bridge pump stats snapshot (updated at 1 Hz by the bridge
+    /// loop; `{}=` default when bridge mode is not active).
+    bridge_stats: bridge_mod.BridgeStats = .{},
     disconnect_reason: DisconnectReason,
 
     adapter_ctx: ?AdapterWrapper,
@@ -3367,6 +3370,7 @@ pub const VpnClient = struct {
                 last_age_sec = now;
                 const aged = bridge_loop.age(@intCast(@divFloor(now, 1000)));
                 if (aged > 0) std.log.debug("bridge: aged out {d} FDB entries", .{aged});
+                self.bridge_stats = bridge_loop.getStats();
                 session_io.maybeSendKeepalive(null, single_tunnel, &timing, now, @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000));
             }
         }

@@ -89,6 +89,23 @@ typedef struct {
     uint32_t _padding;
 } softether_stats_t;
 
+/** Aggregate bridge-mode statistics (softether_get_bridge_stats). */
+typedef struct {
+    uint32_t fdb_entries;
+    uint32_t _pad0;
+    uint64_t forwarded;
+    uint64_t flooded;
+    uint64_t blocked;
+    uint64_t lan_rx_pkts;
+    uint64_t lan_tx_pkts;
+    uint64_t lan_rx_bytes;
+    uint64_t lan_tx_bytes;
+    uint64_t drops;
+    uint64_t session_rx;
+    uint64_t session_tx;
+    uint64_t session_tx_errors;
+} softether_bridge_stats_t;
+
 /* ========================================================================== */
 /* Callback                                                                   */
 /* ========================================================================== */
@@ -174,6 +191,12 @@ bool softether_is_connected(const softether_client_t client);
 
 /** Fill stats struct. Returns 0 on success. */
 int softether_get_stats(const softether_client_t client, softether_stats_t* out);
+
+/**
+ * Fill bridge-mode stats (zeroed when bridge mode is not active or the
+ * pump is not running). Returns 0 on success.
+ */
+int softether_get_bridge_stats(const softether_client_t client, softether_bridge_stats_t* out);
 
 /** Get assigned VPN IP (host byte order, 0 if not assigned). */
 uint32_t softether_get_assigned_ip(const softether_client_t client);
