@@ -134,3 +134,18 @@ jobs:
       - name: Run tests
         if: matrix.test
         run: zig build test --release=fast --summary all
+
+      # Bridge BPF live smoke (issue #60): install the SUID helper from the
+      # shared-lib build output (built above) and re-run the test suite so
+      # the bpf.zig live tests exercise a real /dev/bpfN attach on lo0.
+      # GitHub macOS runners provide passwordless sudo. On the plain test
+      # run above the live tests skip cleanly (no privileged path); with the
+      # helper in place they assert real BPF round-trips.
+      - name: Bridge BPF live smoke (macOS, setuid helper)
+        if: runner.os == 'macOS' && matrix.test
+        run: |
+          sudo mkdir -p /usr/local/libexec
+          sudo cp zig-out/bin/softether-utun-helper /usr/local/libexec/softether-utun-helper
+          sudo chown root:wheel /usr/local/libexec/softether-utun-helper
+          sudo chmod 4755 /usr/local/libexec/softether-utun-helper
+          zig build test --release=fast --summary all
