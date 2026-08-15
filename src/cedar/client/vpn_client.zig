@@ -3314,26 +3314,29 @@ pub const VpnClient = struct {
         //             wrapper; clean "unsupported role" error when the
         //             platform grants no NIC / no CAP_NET_RAW)
         const Ingress = struct {
-            const Store = if (builtin.os.tag == .linux)
+            // is_android MUST be tested first: Android builds report
+            // os.tag == .linux (the difference is the android ABI), so a
+            // plain .linux branch would shadow the ether_manager port.
+            const Store = if (is_android)
+                ether_manager.EtherManagerPort
+            else if (builtin.os.tag == .linux)
                 af_packet.AfPacketPort
             else if (builtin.os.tag == .macos)
                 bpf_mod.BpfPort
             else if (builtin.os.tag == .windows)
                 npcap_mod.NpcapPort
-            else if (is_android)
-                ether_manager.EtherManagerPort
             else
                 u8;
 
             fn make(store: *Store, allocator: std.mem.Allocator, name: []const u8) adapter_mod.NetPort {
-                if (builtin.os.tag == .linux) {
+                if (is_android) {
+                    return ether_manager.etherManagerPort(@as(*ether_manager.EtherManagerPort, @ptrCast(store)), name);
+                } else if (builtin.os.tag == .linux) {
                     return af_packet.afPacketPort(@as(*af_packet.AfPacketPort, @ptrCast(store)), name);
                 } else if (builtin.os.tag == .macos) {
                     return bpf_mod.bpfPort(@as(*bpf_mod.BpfPort, @ptrCast(store)), allocator, name);
                 } else if (builtin.os.tag == .windows) {
                     return npcap_mod.npcapPort(@as(*npcap_mod.NpcapPort, @ptrCast(store)), allocator, name);
-                } else if (is_android) {
-                    return ether_manager.etherManagerPort(@as(*ether_manager.EtherManagerPort, @ptrCast(store)), name);
                 } else {
                     unreachable;
                 }
