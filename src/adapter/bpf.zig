@@ -541,10 +541,20 @@ test "bpfPort session frame budget drop accounting" {
     try std.testing.expectEqual(@as(u64, 1), s.drops);
 
     const frame = [_]u8{0} ** 64;
-    const sent = try p.write(&frame);
+    const sent = p.write(&frame) catch |e| {
+        std.log.warn("budget test: write failed: {}", .{e});
+        return e;
+    };
     try std.testing.expectEqual(@as(usize, 64), sent);
     var buf: [2048]u8 = undefined;
-    _ = (try pollRead(p, &buf)) orelse return error.FrameEchoTimeout;
+    const got = pollRead(p, &buf) catch |e| {
+        std.log.warn("budget test: pollRead failed: {}", .{e});
+        return e;
+    };
+    if (got == null) {
+        std.log.warn("budget test: frame echo timed out (tx={d} rx={d} drops={d})", .{ p.getStats().tx_pkts, p.getStats().rx_pkts, p.getStats().drops });
+        return error.FrameEchoTimeout;
+    }
     s = p.getStats();
     try std.testing.expect(s.tx_pkts >= 1);
     try std.testing.expect(s.rx_pkts >= 1);
@@ -619,17 +629,29 @@ test "bpfPort frame chain parsing serves one frame per read" {
     // separate read() results (one frame per call contract).
     const frame_a = [_]u8{0xaa} ** 40;
     const frame_b = [_]u8{0xbb} ** 40;
-    _ = try p.write(&frame_a);
-    _ = try p.write(&frame_b);
+    _ = p.write(&frame_a) catch |e| {
+        std.log.warn("chain test: write a failed: {}", .{e});
+        return e;
+    };
+    _ = p.write(&frame_b) catch |e| {
+        std.log.warn("chain test: write b failed: {}", .{e});
+        return e;
+    };
 
     var buf: [2048]u8 = undefined;
     var saw_a = false;
     var saw_b = false;
     const deadline = std.time.milliTimestamp() + 3_000;
     while (std.time.milliTimestamp() < deadline and (!saw_a or !saw_b)) {
-        const n = (try pollRead(p, &buf)) orelse break;
+        const n = (pollRead(p, &buf) catch |e| {
+            std.log.warn("chain test: pollRead failed: {}", .{e});
+            return e;
+        }) orelse continue;
         if (n == 40 and buf[0] == 0xaa) saw_a = true;
         if (n == 40 and buf[0] == 0xbb) saw_b = true;
+    }
+    if (!saw_a or !saw_b) {
+        std.log.warn("chain test: saw_a={} saw_b={} (tx={d} rx={d})", .{ saw_a, saw_b, p.getStats().tx_pkts, p.getStats().rx_pkts });
     }
     try std.testing.expect(saw_a);
     try std.testing.expect(saw_b);
