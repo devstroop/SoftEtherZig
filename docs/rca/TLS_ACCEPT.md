@@ -144,14 +144,13 @@ pub fn generateSelfSignedCert(allocator: Allocator, common_name: ?[]const u8) !S
 ```zig
 pub const vpn_content_type   = "application/octet-stream";   // HTTP_CONTENT_TYPE2
 pub const vpn_target         = "/vpnsvc/vpn.cgi";            // HTTP_VPN_TARGET
-pub const vpn_target_connect = "/vpnsvc/connect.cgi";        // HTTP_VPN_TARGET2
 pub const vpn_keep_alive     = "timeout=15; max=19";         // HTTP_KEEP_ALIVE
 pub const max_pack_body_len: usize  = 65536;                 // HTTP_PACK_MAX_SIZE
 pub const max_request_head_len: usize = 32 * 1024;           // whole-head cap
 
 pub const HttpRequest = struct {
     method: []const u8,        // "POST" (validated)
-    uri: []const u8,           // canonical target actually used
+    uri: []const u8,           // canonical target (static literal)
     version: []const u8,       // "HTTP/1.1" (validated)
     content_length: usize,
     body: []u8,                // exactly Content-Length bytes in caller's buf
@@ -170,18 +169,22 @@ pub fn sendHttpResponse(tls: *TlsSocket, body: []const u8) !void;  // 200 + keep
   64KB batch buffer; `readHttpRequest` scans through the same read-ahead
   machinery so `\r\n\r\n` spanning TLS record boundaries is handled for free.
 - **Validation happens inside the envelope.** `readHttpRequest` mirrors C's
-  `HttpServerRecvEx`: it requires POST / HTTP/1.1, target
-  `/vpnsvc/vpn.cgi` *or* `/vpnsvc/connect.cgi` (per #76, C only accepts the
-  former), `Content-Type: application/octet-stream`, and `0 < Content-Length
-  <= HTTP_PACK_MAX_SIZE`. This deliberately deviates from the planned
-  "return the raw head" shape: the head is parsed, validated, and then
-  overwritten by the body (C frees the `HTTP_HEADER` right after the body
-  read), so no header state is retained. `method`/`uri`/`version` are the
-  canonical values that matched.
-- **Body bytes that arrive with the head are not lost.** A client sends
-  head+body in one `SendAll`; the scan may pull both in a single
-  `readBlocking`, so the buffered bytes after `\r\n\r\n` are copied forward
-  before the remainder of the body is read.
+  `HttpServerRecvEx` exactly: POST / HTTP/1.1, target `/vpnsvc/vpn.cgi`
+  (only), `Content-Type: application/octet-stream`, and `0 < Content-Length
+  <= HTTP_PACK_MAX_SIZE`. The `connect.cgi` POSTs (signature upload with
+  `image/jpeg`, the empty client hello) are plaintext-HTTP handshakes the
+  server handles *before* TLS (C: `ServerDownloadSignature`, Protocol.c:
+  7077) — they are deliberately outside this envelope, so accepting them here
+  would reject their real content types/lengths.
+- **Byte-exact reads keep keep-alive aligned.** The head is scanned
+  byte-by-byte and the body read to the exact Content-Length, so bytes beyond
+  the current request (the start of the next pipelined POST) stay in the
+  socket's read-ahead buffer and are served by the next `readHttpRequest`.
+  This mirrors C's `RecvLine`/`RecvAll`, which likewise never over-read into
+  the caller.
+- **Returned strings are canonical literals.** The head is validated and then
+  overwritten by the body, so `method`/`uri`/`version` are the static values
+  that passed validation, never slices into the (overwritten) buffer.
 - **Reply carries the C keep-alive headers.** `sendHttpResponse` emits
   `HTTP/1.1 200 OK` + `Date` (RFC 1123) + `Keep-Alive: timeout=15; max=19`
   + `Connection: Keep-Alive` + `Content-Type` + `Content-Length` + body
