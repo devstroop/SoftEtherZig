@@ -391,11 +391,14 @@ pub fn escalatedBpfOpen(allocator: std.mem.Allocator, ifname: []const u8) Escala
     };
 
     // Spawn the setuid helper in --bpf-open mode (no prompt on fast path).
+    // stderr is piped (not inherited): Zig's test runner fails any test
+    // whose stderr receives output, and the helper writes diagnostics there.
     var cmd_buf: [1200]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s} {s} --bpf-open {s}", .{ INSTALLED_HELPER_PATH, sock_path, ifname }) catch {
         return EscalationError.PathTooLong;
     };
     var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
+    child.stderr_behavior = .Pipe;
     child.spawn() catch {
         return EscalationError.HelperLaunchFailed;
     };
@@ -439,17 +442,39 @@ pub fn escalatedBpfOpen(allocator: std.mem.Allocator, ifname: []const u8) Escala
 
     const cmsg: *const Cmsghdr = @ptrCast(@alignCast(&cmsg_buf));
     if (cmsg.cmsg_level != SOL_SOCKET or cmsg.cmsg_type != SCM_RIGHTS) {
+        logHelperStderr(&child) catch {};
         _ = child.wait() catch {};
         return EscalationError.NoFdReceived;
     }
     const received_fd: *const c_int = @ptrCast(@alignCast(&cmsg_buf[@sizeOf(Cmsghdr)]));
     if (received_fd.* < 0) {
+        logHelperStderr(&child) catch {};
         _ = child.wait() catch {};
         return EscalationError.NoFdReceived;
     }
 
     std.log.info("utun_escalate: received bpf fd {d} for {s} from helper", .{ received_fd.*, ifname });
     return received_fd.*;
+}
+
+/// Drain the helper's piped stderr and log it (warn on content, since a
+/// healthy helper is silent on success; the pipe also prevents the helper's
+/// output from polluting the caller's stderr, which Zig's test runner treats
+/// as a test failure).
+fn logHelperStderr(child: *std.process.Child) !void {
+    if (child.stderr) |*pipe| {
+        defer child.stderr = null;
+        var buf: [2048]u8 = undefined;
+        var total: usize = 0;
+        while (total < buf.len) {
+            const n = try pipe.read(buf[total..]);
+            if (n == 0) break;
+            total += n;
+        }
+        if (total > 0) {
+            std.log.warn("utun_escalate: helper stderr: {s}", .{buf[0..total]});
+        }
+    }
 }
 
 /// Ensure a privileged command channel exists without opening a utun device.
