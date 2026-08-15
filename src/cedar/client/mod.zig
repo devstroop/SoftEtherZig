@@ -76,9 +76,6 @@ pub const ReconnectConfig = vpn_client.ReconnectConfig;
 pub const StaticIpConfig = vpn_client.StaticIpConfig;
 pub const RoutingConfig = vpn_client.RoutingConfig;
 pub const IpVersion = vpn_client.IpVersion;
-pub const NetworkMode = vpn_client.NetworkMode;
-pub const BridgeConfig = vpn_client.BridgeConfig;
-pub const MonitorConfig = vpn_client.MonitorConfig;
 
 // Connection types
 pub const TcpConnection = connection.TcpConnection;

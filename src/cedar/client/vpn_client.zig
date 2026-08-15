@@ -67,12 +67,10 @@ const route_heal = @import("../../adapter/route_heal.zig");
 
 // Import DHCPv6
 const dhcpv6_mod = @import("../tunnel/dhcpv6.zig");
-const session_io = @import("../tunnel/session_io.zig");
 const Dhcpv6Client = dhcpv6_mod.Dhcpv6Client;
 
 // Import connection manager for multi-TCP
 const connection_manager = @import("connection_manager.zig");
-const ManagedConnection = connection_manager.ManagedConnection;
 const ConnectionManager = connection_manager.ConnectionManager;
 const TcpDirection = connection_manager.TcpDirection;
 
@@ -84,14 +82,6 @@ const auth_handler = @import("auth_handler.zig");
 // Session setup — session creation + multi-connection establishment.
 const session_setup = @import("session_setup.zig");
 
-// L2 network bridge — pump (loop.zig), forwarding engine (engine.zig),
-// and AF_PACKET ingress ports. Only reachable when network_mode == .bridge.
-const bridge_mod = @import("../../bridge/mod.zig");
-
-// Monitor role — ring + PCAP capture of session L2 frames. Only
-// reachable when network_mode == .monitor.
-const monitor_mod = @import("../../monitor.zig");
-
 // Windows multimedia timer API (for high-resolution poll timeouts)
 const winmm = if (builtin.os.tag == .windows) struct {
     extern "winmm" fn timeBeginPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
@@ -100,217 +90,12 @@ const winmm = if (builtin.os.tag == .windows) struct {
 
 /// Maximum number of inbound packets to drain per poll iteration.
 /// Prevents complete outbound starvation during heavy download bursts.
-const MAX_INBOUND_DRAIN = session_io.MAX_INBOUND_DRAIN;
+const MAX_INBOUND_DRAIN: u32 = 256;
 
 /// Maximum number of IP packets to batch before flushing to the TUN device.
 /// Reduces per-packet overhead by coalescing the ethertype check and adapter
 /// null checks into one perfunctor call per batch rather than per packet.
 const TUN_WRITE_BATCH: usize = 64;
-
-// ============================================================================
-// SESSION DISPATCH (issue #50) — file-scope plumbing shared between the
-// drain bucket (session_io.drainReceived) and runDataLoop. Hoisted to
-// container level because Zig local fns cannot capture function-scope
-// types. All closure state is passed through the opaque ctx.
-// ============================================================================
-
-const DiagStats = struct {
-    bytes_in: u64 = 0,
-    bytes_out: u64 = 0,
-    pkts_in: u64 = 0,
-    pkts_out: u64 = 0,
-    drain_total: u64 = 0,
-    drain_max: u32 = 0,
-    drain_cap_hits: u64 = 0,
-    ssl_pending_max: u32 = 0,
-    /// Tracks the read-ahead buffer depth (inside TlsSocket, between
-    /// OpenSSL SSL_read and the application). Non-zero proves the 64KB
-    /// buffer is actively batching TLS records.
-    buf_avail_max: u32 = 0,
-    nread_max: u32 = 0,
-    nwrite_max: u32 = 0,
-    tcp_drops_pkts: u64 = 0,
-    tun_eagain: u64 = 0,
-    tx_drops_delta: u64 = 0, // FdAdapter ring buffer drops (this second)
-    tx_drops_last: u64 = 0, // cumulative tx_drops at last flush
-    poll_iters: u64 = 0,
-    // Latency tracking (microseconds): per-iteration wall time.
-    // iter_us_max captures the worst single-iter spike — useful to
-    // detect when one iteration starves the rest (e.g. blocking I/O,
-    // GC pause, kernel scheduler hiccup, large drain burst).
-    iter_us_max: u64 = 0,
-    iter_us_total: u64 = 0,
-    iter_slow_10ms: u32 = 0,
-    iter_slow_50ms: u32 = 0,
-    iter_slow_100ms: u32 = 0,
-    // poll() wait time (microseconds) — captures kernel-blocked time.
-    // High poll_us_max with low iter_us_max means we're idle-waiting;
-    // high values on both means a stall.
-    poll_us_max: u32 = 0,
-    poll_us_total: u64 = 0,
-    // Bufferbloat detection: kernel TCP sendq depth, sampled at end
-    // of every iter. Growing sendq while throughput drops = TX-side
-    // queue building (server can't pull, or TCP cwnd shrunk). This
-    // is the smoking gun for the latency-grows / throughput-collapses
-    // pattern that the in-loop iter_us metric cannot see.
-    sendq_max: u32 = 0,
-    sendq_sum: u64 = 0,
-    sendq_samples: u32 = 0,
-    // Count of write_fn calls that hit WANT_WRITE (POLLOUT poll)
-    // since last DIAG. High = TX bound. Diff'd from per-conn
-    // TlsSocket.write_block_count snapshots.
-    write_blocked: u64 = 0,
-    // Count of consecutive iterations where needs_pollout was true
-    // AND no inbound data was processed — the circular deadlock
-    // signature. Resets to 0 on any successful retryPendingWrite
-    // or any inbound data receipt. Monotonically climbs when stuck.
-    stalled_iters: u64 = 0,
-    // === Deep TX-path logging: track upload data from TUN→Ethernet→TLS→TCP ===
-    // Counters per DIAG window (1s). Proves whether the client is actually
-    // sending upload data, or only TCP ACKs for download traffic.
-    tun_reads: u64 = 0, // Number of successful dev.read() calls
-    tun_bytes: u64 = 0, // Total IP-level bytes from TUN reads
-    tun_read_attempts: u64 = 0, // Total dev.read() calls (incl WouldBlock)
-    eth_pkts: u64 = 0, // Number of Ethernet frames created
-    eth_bytes: u64 = 0, // Total bytes in Ethernet frames
-    tls_send_calls: u64 = 0, // Number of sendBlocksZeroCopy calls
-    tls_send_bytes: u64 = 0, // Total bytes passed to sendBlocksZeroCopy
-    pkt_small: u64 = 0, // Outbound packets < 200B (mostly ACKs)
-    pkt_large: u64 = 0, // Outbound packets >= 200B (data payload)
-};
-
-/// Closure state for the TUN batching + control-plane dispatch that every
-/// received block goes through — identical to the former inline drain loops.
-const TunDispatchCtx = struct {
-    self: *VpnClient,
-    adapter: *AdapterWrapper,
-    loop_state: *tunnel_mod.DataLoopState,
-    send_helper: *session_io.SendTunnelHelper,
-    dhcp_xid: *u32,
-    mac: [6]u8,
-    is_configured: *bool,
-    tun_write_batch: *[TUN_WRITE_BATCH][]const u8,
-    tun_write_batch_count: *usize,
-    diag: *DiagStats,
-};
-
-fn tunBlock(ctx_: *anyopaque, block_data: []u8) void {
-    const dc: *TunDispatchCtx = @ptrCast(@alignCast(ctx_));
-    if (dc.self.tun_write_blocked) return;
-    dc.diag.bytes_in += block_data.len;
-    dc.diag.pkts_in += 1;
-    // Fast path: batch IP writes to TUN when configured
-    if (dc.is_configured.* and block_data.len > 14) {
-        const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
-        if (ethertype == 0x0800 or ethertype == 0x86DD) {
-            dc.tun_write_batch[dc.tun_write_batch_count.*] = block_data[14..];
-            dc.tun_write_batch_count.* += 1;
-            dc.self.stats.recordReceived(block_data.len);
-            if (dc.tun_write_batch_count.* >= dc.tun_write_batch.len) {
-                dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
-                dc.tun_write_batch_count.* = 0;
-            }
-            return;
-        }
-    }
-    // Control or not configured: flush batched IPs first (ordering),
-    // then dispatch through the full state machine (ARP, DHCP, etc.)
-    if (dc.tun_write_batch_count.* > 0) {
-        dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
-        dc.tun_write_batch_count.* = 0;
-    }
-    dc.self.processInboundBlock(block_data, dc.adapter, dc.loop_state, dc.send_helper, dc.dhcp_xid, dc.mac, dc.is_configured);
-}
-
-fn tunFlush(ctx_: *anyopaque) void {
-    const dc: *TunDispatchCtx = @ptrCast(@alignCast(ctx_));
-    if (dc.tun_write_batch_count.* > 0) {
-        dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
-        dc.tun_write_batch_count.* = 0;
-    }
-}
-
-// ============================================================================
-// BRIDGE MODE closures (issue #56) — session-side I/O for the L2 pump
-// ============================================================================
-
-/// Closure state for the bridge pump's LAN → session sink: wraps
-/// SendTunnelHelper so `bridgeSendToSession` delivers one complete Ethernet
-/// frame into the session tunnel (softether framing).
-const BridgeSinkCtx = struct {
-    helper: *session_io.SendTunnelHelper,
-};
-
-fn bridgeSendToSession(ctx_: *anyopaque, frame: []const u8) anyerror!void {
-    const b: *BridgeSinkCtx = @ptrCast(@alignCast(ctx_));
-    const blocks = [_][]const u8{frame};
-    try b.helper.get().sendBlocks(&blocks);
-}
-
-/// Closure state for the inbound drain: session blocks land in the
-/// BridgeLoop which floods/unicasts them to the LAN ports.
-const BridgeDrainCtx = struct {
-    loop: *bridge_mod.BridgeLoop,
-};
-
-fn bridgeOnBlock(ctx_: *anyopaque, block_data: []u8) void {
-    const b: *BridgeDrainCtx = @ptrCast(@alignCast(ctx_));
-    b.loop.dispatchSessionBlock(block_data);
-}
-
-fn bridgeOnFlush(ctx_: *anyopaque) void {
-    _ = ctx_; // no TUN batching in bridge mode — frames are written immediately
-}
-
-fn bridgeOnDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
-    _ = ctx_;
-    if (reason == .connection_closed) {
-        std.log.info("Bridge session closed: {s}", .{@errorName(err)});
-    }
-}
-
-fn singleDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
-    _ = ctx_;
-    if (reason == .connection_closed) {
-        std.log.info("Server closed connection: {s}", .{@errorName(err)});
-    }
-}
-
-// MONITOR MODE closures (issue #55) — mirror-only capture sink
-// ============================================================================
-
-/// Closure state for the monitor pump's inbound drain: every session block
-/// is a mirrored frame from the hub's virtual HUB, passed to the
-/// MonitorLoop capture path (bounded ring + optional PCAP file writer).
-const MonitorDrainCtx = struct {
-    monitor: *monitor_mod.MonitorLoop,
-};
-
-fn monitorOnBlock(ctx_: *anyopaque, block_data: []u8) void {
-    const m: *MonitorDrainCtx = @ptrCast(@alignCast(ctx_));
-    m.monitor.capture(block_data);
-}
-
-fn monitorOnFlush(ctx_: *anyopaque) void {
-    _ = ctx_; // no TUN batching in monitor mode — frames are captured immediately
-}
-
-fn monitorOnDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
-    _ = ctx_;
-    if (reason == .connection_closed) {
-        std.log.info("Monitor session closed: {s}", .{@errorName(err)});
-    }
-}
-
-fn mergeDrainDiag(diag: *DiagStats, dd: *const session_io.DrainDiag) void {
-    diag.drain_total += dd.total;
-    if (dd.max > diag.drain_max) diag.drain_max = dd.max;
-    diag.drain_cap_hits += dd.cap_hits;
-    if (dd.ssl_pending_max > diag.ssl_pending_max) diag.ssl_pending_max = dd.ssl_pending_max;
-    if (dd.buf_avail_max > diag.buf_avail_max) diag.buf_avail_max = dd.buf_avail_max;
-    if (dd.nread_max > diag.nread_max) diag.nread_max = dd.nread_max;
-    if (dd.nwrite_max > diag.nwrite_max) diag.nwrite_max = dd.nwrite_max;
-}
 
 // ============================================================================
 // Client Configuration
@@ -381,45 +166,6 @@ pub const RoutingConfig = struct {
     ipv6_exclude: ?[]const u8 = null,
 };
 
-/// Network operating mode (L2 Network Bridge proposal §5.1).
-pub const NetworkMode = enum {
-    /// Classic VPN client (current behavior).
-    client,
-    /// L2 bridge between physical NICs and the virtual network.
-    bridge,
-    /// Packet monitor (passive capture).
-    monitor,
-
-    pub fn fromString(s: []const u8) ?NetworkMode {
-        if (std.mem.eql(u8, s, "client")) return .client;
-        if (std.mem.eql(u8, s, "bridge")) return .bridge;
-        if (std.mem.eql(u8, s, "monitor")) return .monitor;
-        return null;
-    }
-};
-
-/// L2 bridge options (proposal §5.2). Storage + validation only in this
-/// milestone — runtime bridge support lands in later milestones.
-pub const BridgeConfig = struct {
-    /// Physical NICs bridged into the virtual L2 network (interface names).
-    ingress_ifs: []const []const u8 = &.{},
-    /// Forwarding database (FDB) capacity.
-    fdb_max: u32 = 4096,
-    /// FDB entry aging in seconds.
-    fdb_aging_s: u32 = 300,
-    /// True when `ingress_ifs` was allocated by the client allocator
-    /// (via softether_add_ingress_interface). Borrowed lists are never freed.
-    ingress_ifs_owned: bool = false,
-};
-
-/// Packet monitor options (proposal §5.2). Storage + validation only.
-pub const MonitorConfig = struct {
-    /// Optional PCAP capture path; null = no capture.
-    pcap_file: ?[]const u8 = null,
-    /// True when `pcap_file` was allocated by the client allocator.
-    pcap_file_owned: bool = false,
-};
-
 /// VPN Client configuration
 pub const ClientConfig = struct {
     // Server settings
@@ -438,7 +184,6 @@ pub const ClientConfig = struct {
     max_connections: u8 = 1,
     use_compress: bool = false,
     use_encrypt: bool = true,
-    use_fast_rc4: bool = false,
     udp_acceleration: bool = false,
     half_connection: bool = false,
     qos: bool = false,
@@ -492,17 +237,6 @@ pub const ClientConfig = struct {
     // independent kernel buffers. Falls back to tunnel_fd when not set.
     tunnel_rx_fd: ?i32 = null,
     tunnel_tx_fd: ?i32 = null,
-
-    // Network operating mode (client | bridge | monitor). This milestone
-    // plumbs + validates the mode through all config layers; the connect
-    // path ignores everything except .client. See NetworkMode above.
-    mode: NetworkMode = .client,
-
-    // L2 bridge options (used when mode == .bridge)
-    bridge: BridgeConfig = .{},
-
-    // Monitor options (used when mode == .monitor)
-    monitor: MonitorConfig = .{},
 };
 
 /// IP version preference: null = try both, v4 = IPv4 only, v6 = IPv6 only
@@ -553,17 +287,6 @@ pub const VpnClient = struct {
     config: ClientConfig,
     state: ClientState,
     stats: ConnectionStats,
-    /// Live bridge pump stats snapshot (updated at 1 Hz by the bridge
-    /// loop; `{}=` default when bridge mode is not active).
-    bridge_stats: bridge_mod.BridgeStats = .{},
-    /// Live monitor pump stats snapshot (updated at 1 Hz by the monitor
-    /// loop; `{}=` default when monitor mode is not active).
-    monitor_stats: monitor_mod.MonitorStats = .{},
-    /// Live monitor loop (ring + PCAP), owned by the monitor pump thread;
-    /// set under the client mutex when the pump starts, cleared when it
-    /// ends. FFI frame getters read it under the same mutex (the loop
-    /// itself serializes pushes against reads with its own mutex).
-    monitor_loop: ?*monitor_mod.MonitorLoop = null,
     disconnect_reason: DisconnectReason,
 
     adapter_ctx: ?AdapterWrapper,
@@ -585,16 +308,6 @@ pub const VpnClient = struct {
     data_loop_running: bool,
     tun_write_blocked: bool = false,
     tun_eagain_count: u64 = 0,
-
-    /// Network operating mode captured at init from `config.mode` (or via
-    /// `softether_set_network_mode` before connect).
-    network_mode: NetworkMode = .client,
-    /// Network operating mode frozen once per connect() call (set under the
-    /// client mutex at connect entry). The auth pack (`require_monitor_mode`,
-    /// auth_handler.zig) and the pump dispatch read THIS value so a
-    /// `softether_set_network_mode` call racing with connect() can never
-    /// establish one session type while starting a different pump.
-    session_mode: NetworkMode = .client,
 
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
@@ -635,11 +348,6 @@ pub const VpnClient = struct {
     auth_session_key: ?[20]u8,
     auth_hello_random: ?[20]u8,
 
-    // Fast RC4 session encryption (server-negotiated, `use_fast_rc4` path)
-    auth_use_fast_rc4: bool = false,
-    auth_rc4_c2s_key: ?[16]u8 = null,
-    auth_rc4_s2c_key: ?[16]u8 = null,
-
     // (keepalive tracking uses loop_state.timing.last_keepalive in runDataLoop)
 
     const Self = @This();
@@ -660,7 +368,6 @@ pub const VpnClient = struct {
             .mutex = .{},
             .should_stop = false,
             .data_loop_running = false,
-            .network_mode = config.mode,
             .event_callback = null,
             .event_user_data = null,
             .reconnect_attempt = 0,
@@ -723,20 +430,6 @@ pub const VpnClient = struct {
                 si.dns_servers_owned = false;
             }
         }
-        // FFI-mutated bridge/monitor configs (softether_add/remove_ingress_interface)
-        // own their strings; mutating copy replaces the list with fully-owned
-        // entries, so deinit can free everything when the owned flag is set.
-        if (self.config.bridge.ingress_ifs_owned) {
-            for (self.config.bridge.ingress_ifs) |iface| self.allocator.free(iface);
-            self.allocator.free(self.config.bridge.ingress_ifs);
-            self.config.bridge.ingress_ifs = &.{};
-            self.config.bridge.ingress_ifs_owned = false;
-        }
-        if (self.config.monitor.pcap_file_owned) {
-            if (self.config.monitor.pcap_file) |f| self.allocator.free(f);
-            self.config.monitor.pcap_file = null;
-            self.config.monitor.pcap_file_owned = false;
-        }
     }
 
     pub fn setEventCallback(self: *Self, callback: ?EventCallback, user_data: ?*anyopaque) void {
@@ -762,18 +455,6 @@ pub const VpnClient = struct {
         mutable.mutex.lock();
         defer mutable.mutex.unlock();
         return self.state.isConnected();
-    }
-
-    /// Network operating mode this session was created with. Fixed at
-    /// connect time — changes via `softether_set_network_mode` afterwards
-    /// take effect on the next connect. The connect path freezes this into
-    /// `session_mode` (auth + pump dispatch), so mid-connect changes never
-    /// affect the running connection.
-    pub fn getNetworkMode(self: *const Self) NetworkMode {
-        const mutable = @constCast(self);
-        mutable.mutex.lock();
-        defer mutable.mutex.unlock();
-        return self.network_mode;
     }
 
     pub fn isConnecting(self: *const Self) bool {
@@ -837,12 +518,6 @@ pub const VpnClient = struct {
             return ClientError.AlreadyConnected;
         }
 
-        // Freeze the network operating mode for this connection. Auth and
-        // pump dispatch both read `session_mode`, so a concurrent
-        // softether_set_network_mode mid-connect can't split the session
-        // type from the data pump (mode is immutable for this connect).
-        self.session_mode = self.network_mode;
-
         // use_encrypt=false is not supported: SoftEther drops TLS on the data
         // channel and continues raw over the same TCP socket when encryption is
         // disabled, but this client keeps doing SSL_read/SSL_write on the data
@@ -855,14 +530,6 @@ pub const VpnClient = struct {
         if (!self.config.use_encrypt) {
             std.log.warn("use_encrypt=false is not supported (raw data channel unimplemented); forcing encryption ON to avoid a broken tunnel", .{});
             self.config.use_encrypt = true;
-        }
-
-        // I-14: the bridge/monitor pumps are single-connection (one TLS
-        // session port). Coerce max_connections>1 down to 1 instead of
-        // silently dropping the extra TCP connections later.
-        if ((self.session_mode == .bridge or self.session_mode == .monitor) and self.config.max_connections > 1) {
-            std.log.warn("{s} mode: max_connections={d} is not supported (I-14); using a single connection", .{ @tagName(self.session_mode), self.config.max_connections });
-            self.config.max_connections = 1;
         }
 
         self.should_stop = false;
@@ -891,34 +558,15 @@ pub const VpnClient = struct {
         // with thread startup and incorrectly return immediately.
         @atomicStore(bool, &self.data_loop_running, true, .release);
 
-        // Network operating mode branch (issue #52): bridge runs its own
-        // L2 pump (bridge/loop.zig) over the ingress ports; monitor runs
-        // the mirror-only capture pump (monitor.zig ring + PCAP). Client
-        // mode runs the classic TUN data loop.
-        const is_bridge_mode = self.session_mode == .bridge;
-
         // Spawn the data loop on a native pthread with its own stack.
         // The data loop runs decoupled from any Dart Isolate.run() thread,
         // avoiding the ARM 32-bit FFI trampoline corruption bug that
         // occurs when calling native functions from a second temp isolate.
-        self.data_loop_thread = if (is_bridge_mode)
-            std.Thread.spawn(.{}, runBridgeLoopThread, .{self}) catch |err| blk: {
-                std.log.err("Failed to spawn bridge data loop thread: {}", .{err});
-                @atomicStore(bool, &self.data_loop_running, false, .release);
-                break :blk null;
-            }
-        else if (self.session_mode == .monitor)
-            std.Thread.spawn(.{}, runMonitorLoopThread, .{self}) catch |err| blk: {
-                std.log.err("Failed to spawn monitor data loop thread: {}", .{err});
-                @atomicStore(bool, &self.data_loop_running, false, .release);
-                break :blk null;
-            }
-        else
-            std.Thread.spawn(.{}, runDataLoopThread, .{self}) catch |err| blk: {
-                std.log.err("Failed to spawn data loop thread: {}", .{err});
-                @atomicStore(bool, &self.data_loop_running, false, .release);
-                break :blk null;
-            };
+        self.data_loop_thread = std.Thread.spawn(.{}, runDataLoopThread, .{self}) catch |err| blk: {
+            std.log.err("Failed to spawn data loop thread: {}", .{err});
+            @atomicStore(bool, &self.data_loop_running, false, .release);
+            break :blk null;
+        };
         self.mutex.unlock();
     }
 
@@ -1250,18 +898,11 @@ pub const VpnClient = struct {
             return ClientError.OperationCancelled;
         }
 
-        if (self.session_mode == .client) {
-            self.transitionState(.configuring_adapter);
-            self.configureAdapter() catch {
-                self.disconnect_reason = .configuration_error;
-                return ClientError.AdapterConfigurationFailed;
-            };
-        } else {
-            // Bridge/monitor modes have no TUN device, DHCP, or static IP —
-            // the L2 pump owns the data plane (issue #52). Session is live.
-            std.log.info("network mode '{s}': skipping adapter configuration", .{@tagName(self.session_mode)});
-            self.transitionState(.configuring_adapter);
-        }
+        self.transitionState(.configuring_adapter);
+        self.configureAdapter() catch {
+            self.disconnect_reason = .configuration_error;
+            return ClientError.AdapterConfigurationFailed;
+        };
 
         self.transitionState(.connected);
         const connect_total = std.time.milliTimestamp() - self.stats.connect_time_ms;
@@ -1473,11 +1114,7 @@ pub const VpnClient = struct {
                     if (parseIpv4(nm_str)) |v| @byteSwap(v) else 0xFFFFFF00
                 else
                     0xFFFFFF00;
-                ctx.configure(self.assigned_ip, netmask, self.gateway_ip) catch |cfg_err| {
-                    // Interface stays marked unconfigured (wrapper cache was
-                    // reverted); the DHCP ACK determines the real data path.
-                    std.log.err("Failed to apply static IP config: {}", .{cfg_err});
-                };
+                ctx.configure(self.assigned_ip, netmask, self.gateway_ip);
             }
             if (static.ipv6_address) |ip6_str| {
                 var addr: [16]u8 = undefined;
@@ -1605,13 +1242,11 @@ pub const VpnClient = struct {
                 //     }
                 // }
                 if (adapter.real_adapter) |*real| {
-                    if (real.write(block_data[14..])) |_| {
-                        // Write succeeded — clear backpressure from any prior
-                        // EAGAIN so inbound processing resumes.
-                        self.tun_write_blocked = false;
-                    } else |_| {
-                        self.tun_write_blocked = true;
-                        self.tun_eagain_count += 1;
+                    if (real.device) |dev| {
+                        _ = dev.write(block_data[14..]) catch {
+                            self.tun_write_blocked = true;
+                            self.tun_eagain_count += 1;
+                        };
                     }
                 }
             } else if (ethertype == 0x0806) {
@@ -1712,9 +1347,11 @@ pub const VpnClient = struct {
                     std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
                     if (adapter.real_adapter) |*real| {
-                        real.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
-                            std.log.err("Failed to configure interface: {}", .{err});
-                        };
+                        if (real.device) |dev| {
+                            dev.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
+                                std.log.err("Failed to configure interface: {}", .{err});
+                            };
+                        }
                     }
 
                     {
@@ -1847,25 +1484,31 @@ pub const VpnClient = struct {
     /// Stops on first write error and sets tun_write_blocked.
     fn flushTunWriteBatch(self: *Self, adapter: *AdapterWrapper, batch: []const []const u8) void {
         if (adapter.real_adapter) |*real| {
-            for (batch) |data| {
-                if (real.write(data)) |_| {
-                    // Write succeeded — clear backpressure from any prior
-                    // EAGAIN so inbound processing resumes.
-                    self.tun_write_blocked = false;
-                } else |_| {
-                    self.tun_write_blocked = true;
-                    self.tun_eagain_count += 1;
-                    return;
+            if (real.device) |dev| {
+                for (batch) |data| {
+                    _ = dev.write(data) catch {
+                        self.tun_write_blocked = true;
+                        self.tun_eagain_count += 1;
+                        return;
+                    };
                 }
             }
         }
     }
 
-    // Session-side I/O helpers (issue #50): SendTunnelHelper, drain bucket,
-    // keepalive cadence — shared with the future bridge pump via
-    // session_io.zig. This alias keeps processInboundBlock's signature
-    // unchanged.
-    const SendTunnelHelper = session_io.SendTunnelHelper;
+    // Forward declare SendTunnelHelper type for use in processInboundBlock signature
+    const SendTunnelHelper = struct {
+        cm_ptr: ?*ConnectionManager,
+        single_ptr: *protocol_tunnel_mod.TunnelConnection,
+
+        fn get(ctx: @This()) *protocol_tunnel_mod.TunnelConnection {
+            if (ctx.cm_ptr) |m| {
+                if (m.selectSendConnection()) |conn| return &conn.tunnel;
+                if (m.getPrimary()) |primary| return &primary.tunnel;
+            }
+            return ctx.single_ptr;
+        }
+    };
 
     /// Run the data channel packet loop
     /// This is the main loop that processes packets between TLS and TUN
@@ -1900,9 +1543,11 @@ pub const VpnClient = struct {
             break :win_blk @as(std.posix.fd_t, std.os.windows.INVALID_HANDLE_VALUE);
         } else blk: {
             if (adapter.real_adapter) |*real| {
-                const fd = real.getFd();
-                if (fd < 0) return ClientError.AdapterConfigurationFailed;
-                break :blk fd;
+                if (real.device) |dev| {
+                    const fd = dev.getFd();
+                    if (fd < 0) return ClientError.AdapterConfigurationFailed;
+                    break :blk fd;
+                }
             }
             return ClientError.AdapterConfigurationFailed;
         };
@@ -1997,7 +1642,7 @@ pub const VpnClient = struct {
         // (Dart Isolate.run() threads have ~1MB stack; these buffers are 800KB+)
         const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
         defer self.allocator.free(recv_scratch);
-        const recv_slices = try self.allocator.alloc([]u8, 512);
+        var recv_slices = try self.allocator.alloc([]u8, 512);
         defer self.allocator.free(recv_slices);
 
         // Outbound packet buffers — heap-allocated to allow larger batch (64)
@@ -2034,8 +1679,70 @@ pub const VpnClient = struct {
         // Hypotheses: TLS RX backpressure, kernel queue accumulation,
         // drain cap bottleneck, or TUN write blocking.
         // ============================================================
-        // (DiagStats is container-scoped — see top of file — so the drain
-        // closures can reference it.)
+        const DiagStats = struct {
+            bytes_in: u64 = 0,
+            bytes_out: u64 = 0,
+            pkts_in: u64 = 0,
+            pkts_out: u64 = 0,
+            drain_total: u64 = 0,
+            drain_max: u32 = 0,
+            drain_cap_hits: u64 = 0,
+            ssl_pending_max: u32 = 0,
+            /// Tracks the read-ahead buffer depth (inside TlsSocket, between
+            /// OpenSSL SSL_read and the application). Non-zero proves the 64KB
+            /// buffer is actively batching TLS records.
+            buf_avail_max: u32 = 0,
+            nread_max: u32 = 0,
+            nwrite_max: u32 = 0,
+            tcp_drops_pkts: u64 = 0,
+            tun_eagain: u64 = 0,
+            tx_drops_delta: u64 = 0, // FdAdapter ring buffer drops (this second)
+            tx_drops_last: u64 = 0, // cumulative tx_drops at last flush
+            poll_iters: u64 = 0,
+            // Latency tracking (microseconds): per-iteration wall time.
+            // iter_us_max captures the worst single-iter spike — useful to
+            // detect when one iteration starves the rest (e.g. blocking I/O,
+            // GC pause, kernel scheduler hiccup, large drain burst).
+            iter_us_max: u64 = 0,
+            iter_us_total: u64 = 0,
+            iter_slow_10ms: u32 = 0,
+            iter_slow_50ms: u32 = 0,
+            iter_slow_100ms: u32 = 0,
+            // poll() wait time (microseconds) — captures kernel-blocked time.
+            // High poll_us_max with low iter_us_max means we're idle-waiting;
+            // high values on both means a stall.
+            poll_us_max: u32 = 0,
+            poll_us_total: u64 = 0,
+            // Bufferbloat detection: kernel TCP sendq depth, sampled at end
+            // of every iter. Growing sendq while throughput drops = TX-side
+            // queue building (server can't pull, or TCP cwnd shrunk). This
+            // is the smoking gun for the latency-grows / throughput-collapses
+            // pattern that the in-loop iter_us metric cannot see.
+            sendq_max: u32 = 0,
+            sendq_sum: u64 = 0,
+            sendq_samples: u32 = 0,
+            // Count of write_fn calls that hit WANT_WRITE (POLLOUT poll)
+            // since last DIAG. High = TX bound. Diff'd from per-conn
+            // TlsSocket.write_block_count snapshots.
+            write_blocked: u64 = 0,
+            // Count of consecutive iterations where needs_pollout was true
+            // AND no inbound data was processed — the circular deadlock
+            // signature. Resets to 0 on any successful retryPendingWrite
+            // or any inbound data receipt. Monotonically climbs when stuck.
+            stalled_iters: u64 = 0,
+            // === Deep TX-path logging: track upload data from TUN→Ethernet→TLS→TCP ===
+            // Counters per DIAG window (1s). Proves whether the client is actually
+            // sending upload data, or only TCP ACKs for download traffic.
+            tun_reads: u64 = 0, // Number of successful dev.read() calls
+            tun_bytes: u64 = 0, // Total IP-level bytes from TUN reads
+            tun_read_attempts: u64 = 0, // Total dev.read() calls (incl WouldBlock)
+            eth_pkts: u64 = 0, // Number of Ethernet frames created
+            eth_bytes: u64 = 0, // Total bytes in Ethernet frames
+            tls_send_calls: u64 = 0, // Number of sendBlocksZeroCopy calls
+            tls_send_bytes: u64 = 0, // Total bytes passed to sendBlocksZeroCopy
+            pkt_small: u64 = 0, // Outbound packets < 200B (mostly ACKs)
+            pkt_large: u64 = 0, // Outbound packets >= 200B (data payload)
+        };
         var diag = DiagStats{};
         var diag_last_ms: i64 = std.time.milliTimestamp();
         // Cycle 6 adaptive poll: track if last iter did work
@@ -2049,22 +1756,6 @@ pub const VpnClient = struct {
         // packet in the caller rather than via processInboundBlock's full dispatch.
         var tun_write_batch: [TUN_WRITE_BATCH][]const u8 = undefined;
         var tun_write_batch_count: usize = 0;
-        var drain_diag = session_io.DrainDiag{};
-        // Closure state for the drain bucket dispatch (see tunBlock/tunFlush
-        // at file scope). Lives for the whole loop; drain call sites point
-        // the DrainSink at it.
-        var dispatch_ctx = TunDispatchCtx{
-            .self = self,
-            .adapter = adapter,
-            .loop_state = &loop_state,
-            .send_helper = &send_helper,
-            .dhcp_xid = &dhcp_xid,
-            .mac = mac,
-            .is_configured = &is_configured,
-            .tun_write_batch = &tun_write_batch,
-            .tun_write_batch_count = &tun_write_batch_count,
-            .diag = &diag,
-        };
 
         // Send initial Gratuitous ARP (0.0.0.0) to announce ourselves
         {
@@ -2218,16 +1909,12 @@ pub const VpnClient = struct {
             // Refresh TUN fd each iter so a runtime fd swap (replaceTunFd) is
             // picked up by poll(). On non-Windows the FdAdapter exposes the
             // current fd via getFd(); we reuse the cached value otherwise.
-            // The fd_guard is held from this snapshot through the poll() call
-            // below so replaceFd (FFI thread) can never swap the descriptor
-            // mid-poll; the lock is released right after poll returns.
-            var tun_fd_guard_locked = false;
             if (builtin.os.tag != .windows) {
                 if (self.adapter_ctx) |*ac| {
                     if (ac.real_adapter) |*ra| {
-                        ra.fd_guard.lock();
-                        tun_fd_guard_locked = true;
-                        poll_tun_sock = ra.getFd();
+                        if (ra.device) |dev| {
+                            poll_tun_sock = dev.getFd();
+                        }
                     }
                 }
             }
@@ -2323,16 +2010,6 @@ pub const VpnClient = struct {
 
             const poll_t0 = std.time.microTimestamp();
             _ = std.posix.poll(poll_fds[0..total_poll_count], poll_timeout_ms) catch 0;
-            // Release the fd snapshot guard: the poll() call above is done, so
-            // a replaceFd on the FFI thread can now proceed safely.
-            if (tun_fd_guard_locked) {
-                tun_fd_guard_locked = false;
-                if (self.adapter_ctx) |*ac| {
-                    if (ac.real_adapter) |*ra| {
-                        ra.fd_guard.unlock();
-                    }
-                }
-            }
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
             if (poll_us > diag.poll_us_max) diag.poll_us_max = poll_us;
             diag.poll_us_total += poll_us;
@@ -2398,38 +2075,72 @@ pub const VpnClient = struct {
                 var any_conn_had_data = false;
                 var iter = cm.forEachReadable(poll_fds[0..tls_fd_count]);
                 while (iter.next()) |conn| {
-                    const MultiDeadCtx = struct {
-                        dc: *TunDispatchCtx,
-                        conn: *ManagedConnection,
-                    };
-                    var multi_dead_ctx = MultiDeadCtx{ .dc = &dispatch_ctx, .conn = conn };
-                    const sink = session_io.DrainSink{
-                        .ctx = &multi_dead_ctx,
-                        .onBlock = tunBlock,
-                        .onFlush = tunFlush,
-                        .onDead = struct {
-                            fn f(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
-                                const mc: *MultiDeadCtx = @ptrCast(@alignCast(ctx_));
-                                if (reason == .connection_closed) {
-                                    mc.conn.established = false;
-                                    std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
-                                }
+                    var drain_iter: u32 = 0;
+                    while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
+                        // Sample read-buffer peak BEFORE draining — batched SSL_read
+                        // fills 64KB in one syscall; this captures it before consumption.
+                        const bavail = conn.tls_socket.readBufAvailable();
+                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
+                        const recv_count = conn.tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
+                            if (self.should_stop) break;
+                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
+                                conn.established = false;
+                                std.log.warn("Connection lost (multi-conn): {s}", .{@errorName(err)});
+                                break;
                             }
-                        }.f,
-                    };
-                    drain_diag = .{};
-                    const drain_result = session_io.drainReceived(
-                        &conn.tunnel,
-                        &conn.tls_socket,
-                        recv_slices,
-                        recv_scratch,
-                        MAX_INBOUND_DRAIN,
-                        &self.should_stop,
-                        &drain_diag,
-                        sink,
-                    );
-                    mergeDrainDiag(&diag, &drain_diag);
-                    if (drain_result.drained_any) any_conn_had_data = true;
+                            break;
+                        };
+
+                        if (recv_count > 0) {
+                            any_conn_had_data = true;
+                            for (recv_slices[0..recv_count]) |block_data| {
+                                if (self.tun_write_blocked) break;
+                                diag.bytes_in += block_data.len;
+                                diag.pkts_in += 1;
+                                // Fast path: batch IP writes to TUN when configured
+                                if (is_configured and block_data.len > 14) {
+                                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+                                    if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                                        tun_write_batch[tun_write_batch_count] = block_data[14..];
+                                        tun_write_batch_count += 1;
+                                        self.stats.recordReceived(block_data.len);
+                                        if (tun_write_batch_count >= tun_write_batch.len) {
+                                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                            tun_write_batch_count = 0;
+                                            if (self.tun_write_blocked) break;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // Control or not configured: flush batched IPs first (ordering),
+                                // then dispatch through the full state machine (ARP, DHCP, etc.)
+                                if (tun_write_batch_count > 0) {
+                                    self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                    tun_write_batch_count = 0;
+                                }
+                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                                if (self.tun_write_blocked) break;
+                            }
+                            // Flush any remaining batched IP packets before yielding to outbound
+                            if (tun_write_batch_count > 0) {
+                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                tun_write_batch_count = 0;
+                            }
+                        }
+
+                        if (!conn.tls_socket.hasPending() and conn.tls_socket.kernelRecvQueue() == 0) break;
+                    }
+                    // DIAG: drain stats per connection (sum across conns this iter)
+                    diag.drain_total += drain_iter;
+                    if (drain_iter > diag.drain_max) diag.drain_max = drain_iter;
+                    if (drain_iter == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
+                    // SSL pending / kernel queue stats for this conn
+                    const pend = conn.tls_socket.pendingBytes();
+                    if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                    const nrd = conn.tls_socket.kernelRecvQueue();
+                    if (nrd > diag.nread_max) diag.nread_max = nrd;
+                    const nwr = conn.tls_socket.kernelSendQueue();
+                    if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
                 }
                 if (any_conn_had_data) {
                     last_iter_had_work = true;
@@ -2475,25 +2186,76 @@ pub const VpnClient = struct {
                     // hasPending() is the natural terminator; the cap is just a
                     // safety net to ensure outbound can run occasionally.
                     // Cycle 5 regression came from batch=32, NOT drain=32.
-                    const sink = session_io.DrainSink{
-                        .ctx = &dispatch_ctx,
-                        .onBlock = tunBlock,
-                        .onFlush = tunFlush,
-                        .onDead = singleDead,
-                    };
-                    drain_diag = .{};
-                    const drain_result = session_io.drainReceived(
-                        single_tunnel,
-                        &self.tls_socket.?,
-                        recv_slices,
-                        recv_scratch,
-                        MAX_INBOUND_DRAIN,
-                        &self.should_stop,
-                        &drain_diag,
-                        sink,
-                    );
-                    mergeDrainDiag(&diag, &drain_diag);
-                    if (drain_result.dead) {
+                    var drain_iter: u32 = 0;
+                    var inbound_dead = false;
+                    while (drain_iter < MAX_INBOUND_DRAIN) : (drain_iter += 1) {
+                        const bavail = if (self.tls_socket) |ts| ts.readBufAvailable() else @as(u32, 0);
+                        if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
+                        const recv_count = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
+                            if (self.should_stop) {
+                                inbound_dead = true;
+                                break;
+                            }
+                            // BrokenPipe == TLS dead. Must break, not continue — otherwise we
+                            // spin forever polling a dead fd and silently drop all outbound.
+                            if (err == error.ConnectionClosed or err == error.BrokenPipe) {
+                                std.log.info("Server closed connection: {s}", .{@errorName(err)});
+                                inbound_dead = true;
+                                break;
+                            }
+                            // Non-fatal error — stop draining this iteration, retry next.
+                            break;
+                        };
+
+                        for (recv_slices[0..recv_count]) |block_data| {
+                            if (self.tun_write_blocked) break;
+                            diag.bytes_in += block_data.len;
+                            diag.pkts_in += 1;
+                            // Fast path: batch IP writes to TUN when configured
+                            if (is_configured and block_data.len > 14) {
+                                const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+                                if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                                    tun_write_batch[tun_write_batch_count] = block_data[14..];
+                                    tun_write_batch_count += 1;
+                                    self.stats.recordReceived(block_data.len);
+                                    if (tun_write_batch_count >= tun_write_batch.len) {
+                                        self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                        tun_write_batch_count = 0;
+                                        if (self.tun_write_blocked) break;
+                                    }
+                                    continue;
+                                }
+                            }
+                            // Control or not configured: flush batched IPs first (ordering),
+                            // then dispatch through the full state machine (ARP, DHCP, etc.)
+                            if (tun_write_batch_count > 0) {
+                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                tun_write_batch_count = 0;
+                            }
+                            self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                            if (self.tun_write_blocked) break;
+                        }
+                        // Flush any remaining batched IP packets before yielding
+                        if (tun_write_batch_count > 0) {
+                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                            tun_write_batch_count = 0;
+                        }
+
+                        if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
+                    }
+                    // DIAG: capture drain metrics + queue depths
+                    diag.drain_total += drain_iter;
+                    if (drain_iter > diag.drain_max) diag.drain_max = drain_iter;
+                    if (drain_iter == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
+                    if (self.tls_socket) |ts| {
+                        const pend = ts.pendingBytes();
+                        if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                        const nrd = ts.kernelRecvQueue();
+                        if (nrd > diag.nread_max) diag.nread_max = nrd;
+                        const nwr = ts.kernelSendQueue();
+                        if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
+                    }
+                    if (inbound_dead) {
                         self.disconnect_reason = .network_error;
                         return error.ConnectionLost;
                     }
@@ -2518,25 +2280,70 @@ pub const VpnClient = struct {
                         if (!ios_fresh) break;
 
                         last_iter_had_work = true;
-                        const sink = session_io.DrainSink{
-                            .ctx = &dispatch_ctx,
-                            .onBlock = tunBlock,
-                            .onFlush = tunFlush,
-                            .onDead = singleDead,
-                        };
-                        drain_diag = .{};
-                        const drain_result = session_io.drainReceived(
-                            single_tunnel,
-                            &self.tls_socket.?,
-                            recv_slices,
-                            recv_scratch,
-                            MAX_INBOUND_DRAIN,
-                            &self.should_stop,
-                            &drain_diag,
-                            sink,
-                        );
-                        mergeDrainDiag(&diag, &drain_diag);
-                        if (drain_result.dead) {
+                        var ios_drain: u32 = 0;
+                        var ios_dead = false;
+                        while (ios_drain < MAX_INBOUND_DRAIN) : (ios_drain += 1) {
+                            const bavail = if (self.tls_socket) |ts| ts.readBufAvailable() else @as(u32, 0);
+                            if (bavail > diag.buf_avail_max) diag.buf_avail_max = bavail;
+                            const ios_recv = single_tunnel.receiveBlocksBatch(recv_slices, recv_scratch) catch |err| {
+                                if (self.should_stop) {
+                                    ios_dead = true;
+                                    break;
+                                }
+                                if (err == error.ConnectionClosed or err == error.BrokenPipe) {
+                                    ios_dead = true;
+                                    break;
+                                }
+                                break;
+                            };
+                            for (recv_slices[0..ios_recv]) |block_data| {
+                                if (self.tun_write_blocked) break;
+                                diag.bytes_in += block_data.len;
+                                diag.pkts_in += 1;
+                                // Fast path: batch IP writes to TUN when configured
+                                if (is_configured and block_data.len > 14) {
+                                    const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
+                                    if (ethertype == 0x0800 or ethertype == 0x86DD) {
+                                        tun_write_batch[tun_write_batch_count] = block_data[14..];
+                                        tun_write_batch_count += 1;
+                                        self.stats.recordReceived(block_data.len);
+                                        if (tun_write_batch_count >= tun_write_batch.len) {
+                                            self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                            tun_write_batch_count = 0;
+                                            if (self.tun_write_blocked) break;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                // Control or not configured: flush batched IPs first (ordering),
+                                // then dispatch through the full state machine (ARP, DHCP, etc.)
+                                if (tun_write_batch_count > 0) {
+                                    self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                    tun_write_batch_count = 0;
+                                }
+                                self.processInboundBlock(block_data, adapter, &loop_state, &send_helper, &dhcp_xid, mac, &is_configured);
+                                if (self.tun_write_blocked) break;
+                            }
+                            // Flush any remaining batched IP packets before yielding
+                            if (tun_write_batch_count > 0) {
+                                self.flushTunWriteBatch(adapter, tun_write_batch[0..tun_write_batch_count]);
+                                tun_write_batch_count = 0;
+                            }
+                            if (ios_dead) break;
+                            if (self.tls_socket == null or (!self.tls_socket.?.hasPending() and self.tls_socket.?.kernelRecvQueue() == 0)) break;
+                        }
+                        diag.drain_total += ios_drain;
+                        if (ios_drain > diag.drain_max) diag.drain_max = ios_drain;
+                        if (ios_drain == MAX_INBOUND_DRAIN) diag.drain_cap_hits += 1;
+                        if (self.tls_socket) |ts| {
+                            const pend = ts.pendingBytes();
+                            if (pend > diag.ssl_pending_max) diag.ssl_pending_max = pend;
+                            const nrd = ts.kernelRecvQueue();
+                            if (nrd > diag.nread_max) diag.nread_max = nrd;
+                            const nwr = ts.kernelSendQueue();
+                            if (nwr > diag.nwrite_max) diag.nwrite_max = nwr;
+                        }
+                        if (ios_dead) {
                             self.disconnect_reason = .network_error;
                             return error.ConnectionLost;
                         }
@@ -2553,7 +2360,9 @@ pub const VpnClient = struct {
                             const ethertype_udp = (@as(u16, udp_data[12]) << 8) | udp_data[13];
                             if (ethertype_udp == 0x0800 or ethertype_udp == 0x86DD) {
                                 if (adapter.real_adapter) |*real| {
-                                    _ = real.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
+                                    if (real.device) |dev| {
+                                        _ = dev.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
+                                    }
                                 }
                             }
                             self.stats.recordReceived(udp_data.len);
@@ -2652,7 +2461,7 @@ pub const VpnClient = struct {
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
                 if (adapter.real_adapter) |*real| {
-                    if (real.port) |tun_port| {
+                    if (real.device) |dev| {
                         var sendq: u32 = 0;
                         const is_multi = self.conn_manager != null;
                         if (single_sock) |ss| {
@@ -2726,7 +2535,7 @@ pub const VpnClient = struct {
 
                             while (outbound_count < batch_limit) {
                                 diag.tun_read_attempts += 1;
-                                if (tun_port.read(&tun_read_bufs[outbound_count])) |maybe_len| {
+                                if (dev.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                     if (maybe_len) |ip_len| {
                                         if (ip_len > 0 and ip_len <= 1500) {
                                             diag.tun_reads += 1;
@@ -2949,13 +2758,17 @@ pub const VpnClient = struct {
             }
 
             // SoftEther keepalive (every 5s)
-            session_io.maybeSendKeepalive(
-                if (self.conn_manager) |*cm| cm else null,
-                single_tunnel,
-                &loop_state.timing,
-                now,
-                keepalive_interval,
-            );
+            if (loop_state.timing.shouldSendKeepalive(now, keepalive_interval)) {
+                if (self.conn_manager) |*cm| {
+                    cm.sendKeepaliveAll();
+                } else {
+                    single_tunnel.sendKeepalive() catch |err| {
+                        std.log.warn("Failed to send keepalive: {}", .{err});
+                    };
+                }
+                std.log.debug("Sent keepalive", .{});
+                loop_state.timing.last_keepalive = now;
+            }
 
             // DHCP retry — covers both no-OFFER (resend DISCOVER) and no-ACK
             // (resend REQUEST using stashed OFFER params). Without REQUEST retry,
@@ -3204,526 +3017,6 @@ pub const VpnClient = struct {
 
         std.log.info("Data channel loop ended", .{});
     }
-
-    // ====================================================================
-    // BRIDGE MODE (L2 pump, issue #56)
-    // ====================================================================
-
-    /// Bridge pump thread entry (network_mode == .bridge).
-    ///
-    /// Mirrors `runDataLoopThread`'s lifecycle: runs the pump, then cleans
-    /// up in the same order (no adapter in bridge mode — the TUN device,
-    /// DHCP and static-IP configuration were skipped in performConnection),
-    /// signals the run flags, fires events, and schedules reconnect.
-    fn runBridgeLoopThread(self: *Self) void {
-        self.runBridgeLoop() catch |err| {
-            std.log.err("Bridge data loop thread exited with error: {}", .{err});
-        };
-
-        // Stop UDP acceleration (never started in bridge mode, but be safe)
-        if (self.udp_accel) |*ua| {
-            ua.stop();
-        }
-        self.udp_accel = null;
-
-        // Close session
-        if (self.session) |*sess| sess.disconnect();
-
-        // Close all TLS connections
-        if (self.conn_manager) |*cm| {
-            cm.deinit();
-            self.conn_manager = null;
-        }
-        if (self.tls_socket) |*sock| {
-            sock.close();
-            self.tls_socket = null;
-        }
-
-        self.state = .disconnected;
-
-        // Zero the mode-specific stats so FFI getters (documented as
-        // "zeroed when the pump is not running") never expose a previous
-        // session's counters after teardown.
-        self.bridge_stats = .{};
-        self.monitor_stats = .{};
-
-        // === SIGNAL DONE (last thing — after all cleanup) ===
-        self.data_loop_thread = null;
-        @atomicStore(bool, &self.data_loop_running, false, .release);
-
-        // === Fire disconnect events + auto-reconnect ===
-        if (self.event_callback) |cb| {
-            cb(.{ .state_changed = .{
-                .old_state = .connected,
-                .new_state = .disconnected,
-            } }, self.event_user_data);
-            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
-        }
-
-        if (self.config.reconnect.enabled and
-            self.disconnect_reason != .user_requested and
-            self.disconnect_reason.shouldReconnect())
-        {
-            self.scheduleReconnect();
-        }
-    }
-
-    /// Bridge data pump (issue #56). Single TLS session; LAN ingress ports
-    /// (AF_PACKET on Linux) polled alongside the TLS socket. Inbound session
-    /// blocks are dispatched to the LAN ports via the BridgeLoop; frames
-    /// received on LAN ports are forwarded into the session over the same
-    /// TunnelConnection the client loop uses (softether Ethernet framing).
-    fn runBridgeLoop(self: *Self) !void {
-        if (!self.isConnected()) return ClientError.NotConnected;
-
-        @atomicStore(bool, &self.data_loop_running, true, .release);
-        defer @atomicStore(bool, &self.data_loop_running, false, .release);
-
-        // Single-connection bridge pump (I-14): max_connections was coerced
-        // to 1 in connect(). conn_manager stays null.
-        const single_sock: *tls.TlsSocket = &(self.tls_socket orelse return ClientError.NotConnected);
-        single_sock.clearTimeouts();
-        single_sock.setNonBlocking() catch |e| std.log.warn("setNonBlocking (bridge) failed: {}", .{e});
-
-        // === Open ingress ports (per-OS L2 port; proposal §4.1) ===
-        const ifnames = self.config.bridge.ingress_ifs;
-        if (ifnames.len == 0) {
-            std.log.err("bridge mode: no ingress interfaces configured (softether_add_ingress_interface)", .{});
-            return ClientError.AdapterConfigurationFailed;
-        }
-        if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
-            std.log.err("bridge mode requires AF_PACKET (Linux/Android), BPF (macOS) or Npcap (Windows) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
-            return ClientError.AdapterConfigurationFailed;
-        }
-
-        const af_packet = @import("../../adapter/af_packet.zig");
-        const bpf_mod = @import("../../adapter/bpf.zig");
-        const npcap_mod = @import("../../adapter/npcap.zig");
-        const ether_manager = @import("../../adapter/ether_manager.zig");
-        // Zig has no .android OS tag — Android is linux + android ABI.
-        const is_android = builtin.os.tag == .linux and
-            (builtin.abi == .android or builtin.abi == .androideabi);
-        // Per-OS ingress port implementation:
-        //   linux   → AF_PACKET (issue #53, merged)
-        //   macos   → BPF /dev/bpfN (issue #60 — fd granted by the setuid
-        //             helper in --bpf-open mode when not running as root)
-        //   windows → Npcap (issue #61 — dynamic pcap.dll, worker thread +
-        //             SPSC ring; getFd() = invalid_fd, drained every pump
-        //             iteration, see the LAN→session section below)
-        //   android → ether_manager (issue #59 — best-effort AF_PACKET
-        //             wrapper; clean "unsupported role" error when the
-        //             platform grants no NIC / no CAP_NET_RAW)
-        const Ingress = struct {
-            // is_android MUST be tested first: Android builds report
-            // os.tag == .linux (the difference is the android ABI), so a
-            // plain .linux branch would shadow the ether_manager port.
-            const Store = if (is_android)
-                ether_manager.EtherManagerPort
-            else if (builtin.os.tag == .linux)
-                af_packet.AfPacketPort
-            else if (builtin.os.tag == .macos)
-                bpf_mod.BpfPort
-            else if (builtin.os.tag == .windows)
-                npcap_mod.NpcapPort
-            else
-                u8;
-
-            fn make(store: *Store, allocator: std.mem.Allocator, name: []const u8) adapter_mod.NetPort {
-                if (is_android) {
-                    return ether_manager.etherManagerPort(@as(*ether_manager.EtherManagerPort, @ptrCast(store)), name);
-                } else if (builtin.os.tag == .linux) {
-                    return af_packet.afPacketPort(@as(*af_packet.AfPacketPort, @ptrCast(store)), name);
-                } else if (builtin.os.tag == .macos) {
-                    return bpf_mod.bpfPort(@as(*bpf_mod.BpfPort, @ptrCast(store)), allocator, name);
-                } else if (builtin.os.tag == .windows) {
-                    return npcap_mod.npcapPort(@as(*npcap_mod.NpcapPort, @ptrCast(store)), allocator, name);
-                } else {
-                    unreachable;
-                }
-            }
-        };
-
-        // Stable store: BridgeLoop dupes the NetPort array but the impl
-        // pointers must stay valid for the whole pump lifetime.
-        const port_storage = try self.allocator.alloc(Ingress.Store, ifnames.len);
-        defer self.allocator.free(port_storage);
-        var net_ports = try self.allocator.alloc(adapter_mod.NetPort, ifnames.len);
-        defer self.allocator.free(net_ports);
-        var opened: usize = 0;
-        errdefer {
-            for (net_ports[0..opened]) |p| p.close();
-        }
-
-        for (port_storage, ifnames, 0..) |*store, ifname, i| {
-            net_ports[i] = Ingress.make(store, self.allocator, ifname);
-            net_ports[i].open() catch |err| {
-                std.log.err("bridge: failed to open ingress interface '{s}': {}", .{ ifname, err });
-                return ClientError.AdapterConfigurationFailed;
-            };
-            opened += 1;
-            std.log.info("bridge: ingress port {d} '{s}'", .{ i, ifname });
-        }
-
-        // === Tunnel connection (session side) ===
-        const single_tunnel = try self.allocator.create(protocol_tunnel_mod.TunnelConnection);
-        defer {
-            single_tunnel.deinit();
-            self.allocator.destroy(single_tunnel);
-        }
-        single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
-            self.allocator,
-            @ptrCast(single_sock),
-            struct {
-                fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.read(buf);
-                }
-            }.read,
-            struct {
-                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    s.writeAllNonBlocking(data) catch |e| switch (e) {
-                        error.WouldBlock => return data.len,
-                        else => |err| return err,
-                    };
-                    return data.len;
-                }
-            }.write,
-        );
-        single_tunnel.use_compress = self.config.use_compress;
-        single_tunnel.initCompression();
-
-        // === BridgeLoop + session sink ===
-        // File-scope closure ctx (see BridgeSinkCtx below): send() wraps
-        // sendBlocks so the pump hands one complete Ethernet frame to the
-        // session tunnel.
-        var send_helper = session_io.SendTunnelHelper{
-            .cm_ptr = null,
-            .single_ptr = single_tunnel,
-        };
-        var bridge_sink_ctx = BridgeSinkCtx{ .helper = &send_helper };
-        var bridge_loop = try bridge_mod.BridgeLoop.init(
-            self.allocator,
-            net_ports,
-            .{ .ctx = &bridge_sink_ctx, .send = bridgeSendToSession },
-            self.config.bridge.fdb_max,
-            self.config.bridge.fdb_aging_s,
-        );
-        defer bridge_loop.deinit();
-
-        // === Buffers (heap; isolate threads have small stacks) ===
-        const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
-        defer self.allocator.free(recv_scratch);
-        const recv_slices = try self.allocator.alloc([]u8, 512);
-        defer self.allocator.free(recv_slices);
-        const port_buf = try self.allocator.alloc(u8, 1600);
-        defer self.allocator.free(port_buf);
-
-        // Poll array sized by the ingress count — the fixed 64-entry stack
-        // array could overflow with 63+ configured interfaces (review #119).
-        const poll_fds = try self.allocator.alloc(std.posix.pollfd, 1 + net_ports.len);
-        defer self.allocator.free(poll_fds);
-        // Maps poll_fds slot (1..) back to the net_ports index for ports
-        // that are pollable; non-pollable ports (Npcap, issue #61) are not
-        // in the array and are drained every loop iteration instead.
-        const slot_of = try self.allocator.alloc(usize, net_ports.len);
-        defer self.allocator.free(slot_of);
-
-        // Aging cadence + drain diagnostics
-        var last_age_sec: i64 = 0;
-        var drain_diag = session_io.DrainDiag{};
-        var timing = tunnel_mod.data_loop.TimingState.init();
-
-        std.log.info("Bridge data channel started ({d} ingress ports)", .{net_ports.len});
-
-        while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
-            const now = std.time.milliTimestamp();
-
-            // Build poll fds: TLS socket + one per pollable ingress port.
-            // Register POLLOUT interest when the TLS socket is blocked on
-            // pending writes so the sndbuf drain below can flush them.
-            var n_fds: usize = 1;
-            poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
-            if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
-            for (net_ports, 0..) |*p, i| {
-                const fd = p.getFd();
-                if (fd == adapter_mod.NetPort.invalid_fd) continue;
-                slot_of[i] = n_fds;
-                poll_fds[n_fds] = .{
-                    // pollfd.fd is a SOCKET pointer on Windows, not an int.
-                    .fd = if (comptime builtin.os.tag == .windows) @ptrCast(fd) else fd,
-                    .events = std.posix.POLL.IN,
-                    .revents = 0,
-                };
-                n_fds += 1;
-            }
-            _ = std.posix.poll(poll_fds[0..n_fds], 10) catch 0;
-
-            // Drain pending outbound data when the kernel sndbuf frees up.
-            // The TLS write closure stores WouldBlock'd data in
-            // pending_outbound and reports delivery; without this drain the
-            // LAN→session frames would sit unflushed (or be lost once
-            // needs_pollout blocks new writes).
-            if (single_sock.needs_pollout and (poll_fds[0].revents & std.posix.POLL.OUT) != 0) {
-                _ = single_sock.retryPendingWrite() catch |e| blk: {
-                    std.log.warn("bridge: pending write retry failed: {}", .{e});
-                    break :blk false;
-                };
-            }
-
-            // INBOUND: drain session blocks → LAN ports.
-            if ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or single_sock.hasPending() or single_sock.kernelRecvQueue() > 0) {
-                var drain_ctx = BridgeDrainCtx{ .loop = &bridge_loop };
-                drain_diag = .{};
-                const result = session_io.drainReceived(
-                    single_tunnel,
-                    single_sock,
-                    recv_slices,
-                    recv_scratch,
-                    session_io.MAX_INBOUND_DRAIN,
-                    &self.should_stop,
-                    &drain_diag,
-                    .{
-                        .ctx = &drain_ctx,
-                        .onBlock = bridgeOnBlock,
-                        .onFlush = bridgeOnFlush,
-                        .onDead = bridgeOnDead,
-                    },
-                );
-                if (result.dead) {
-                    self.disconnect_reason = .network_error;
-                    return error.ConnectionLost;
-                }
-            }
-
-            // LAN → session: read frames from ready ports and dispatch.
-            // Non-pollable ports (getFd() == invalid_fd — Npcap, issue #61)
-            // are drained every iteration instead; poll() skips fd -1.
-            for (net_ports, 0..) |*p, i| {
-                const pollable = p.getFd() != adapter_mod.NetPort.invalid_fd;
-                if (pollable and (poll_fds[slot_of[i]].revents & std.posix.POLL.IN) == 0) continue;
-                while (true) {
-                    const n = p.read(port_buf) catch |err| {
-                        if (err == error.WouldBlock or err == error.DeviceClosed) break;
-                        std.log.debug("bridge: port read error: {}", .{err});
-                        break;
-                    } orelse break;
-                    bridge_loop.dispatchPortFrame(@intCast(i), port_buf[0..n]);
-                }
-            }
-
-            // 1Hz upkeep: FDB aging + keepalive.
-            if (now - last_age_sec >= 1000) {
-                last_age_sec = now;
-                const aged = bridge_loop.age(@intCast(@divFloor(now, 1000)));
-                if (aged > 0) std.log.debug("bridge: aged out {d} FDB entries", .{aged});
-                self.bridge_stats = bridge_loop.getStats();
-                session_io.maybeSendKeepalive(null, single_tunnel, &timing, now, @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000));
-            }
-        }
-
-        std.log.info("Bridge data channel ended", .{});
-    }
-
-    // ====================================================================
-    // MONITOR MODE (mirror-only capture, issue #55)
-    // ====================================================================
-
-    /// Monitor pump thread entry (network_mode == .monitor). Mirrors
-    /// runBridgeLoopThread's lifecycle: no adapter in monitor mode (TUN,
-    /// DHCP and static-IP configuration were skipped in
-    /// performConnection), same cleanup order, events, and reconnect
-    /// policy.
-    fn runMonitorLoopThread(self: *Self) void {
-        self.runMonitorLoop() catch |err| {
-            std.log.err("Monitor data loop thread exited with error: {}", .{err});
-        };
-
-        // Stop UDP acceleration (never started in monitor mode, but be safe)
-        if (self.udp_accel) |*ua| {
-            ua.stop();
-        }
-        self.udp_accel = null;
-
-        // Close session
-        if (self.session) |*sess| sess.disconnect();
-
-        // Close all TLS connections
-        if (self.conn_manager) |*cm| {
-            cm.deinit();
-            self.conn_manager = null;
-        }
-        if (self.tls_socket) |*sock| {
-            sock.close();
-            self.tls_socket = null;
-        }
-
-        self.state = .disconnected;
-
-        // Zero the mode-specific stats so FFI getters (documented as
-        // "zeroed when the pump is not running") never expose a previous
-        // session's counters after teardown.
-        self.bridge_stats = .{};
-        self.monitor_stats = .{};
-
-        // === SIGNAL DONE (last thing — after all cleanup) ===
-        self.data_loop_thread = null;
-        @atomicStore(bool, &self.data_loop_running, false, .release);
-
-        // === Fire disconnect events + auto-reconnect ===
-        if (self.event_callback) |cb| {
-            cb(.{ .state_changed = .{
-                .old_state = .connected,
-                .new_state = .disconnected,
-            } }, self.event_user_data);
-            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
-        }
-
-        if (self.config.reconnect.enabled and
-            self.disconnect_reason != .user_requested and
-            self.disconnect_reason.shouldReconnect())
-        {
-            self.scheduleReconnect();
-        }
-    }
-
-    /// Monitor data pump (issue #55). Single TLS session; inbound session
-    /// blocks are mirrored hub traffic and land in the MonitorLoop capture
-    /// path — bounded ring + optional PCAP writer. Mirror-only: the pump
-    /// never forwards frames back into the session.
-    fn runMonitorLoop(self: *Self) !void {
-        if (!self.isConnected()) return ClientError.NotConnected;
-
-        @atomicStore(bool, &self.data_loop_running, true, .release);
-        defer @atomicStore(bool, &self.data_loop_running, false, .release);
-
-        // Single-connection monitor pump: max_connections was coerced to 1
-        // in connect() (I-14). conn_manager stays null.
-        const single_sock: *tls.TlsSocket = &(self.tls_socket orelse return ClientError.NotConnected);
-        single_sock.clearTimeouts();
-        single_sock.setNonBlocking() catch |e| std.log.warn("setNonBlocking (monitor) failed: {}", .{e});
-
-        // === MonitorLoop: bounded ring + optional PCAP writer ===
-        // PcapWriter.create opens the file here; a bad path aborts the
-        // pump with the raw error (thread logs it; runMonitorLoopThread
-        // cleans up session/TLS in the same order as bridge mode).
-        var monitor_loop = try monitor_mod.MonitorLoop.init(
-            self.allocator,
-            monitor_mod.DEFAULT_RING_CAPACITY,
-            self.config.monitor.pcap_file,
-        );
-        defer monitor_loop.deinit();
-
-        // Publish the loop to FFI getters (lock ordering: client mutex →
-        // loop mutex; the pump itself holds only the loop mutex, so there
-        // is no cycle). Cleared before deinit below via the same mutex.
-        self.mutex.lock();
-        self.monitor_loop = &monitor_loop;
-        self.mutex.unlock();
-        defer {
-            self.mutex.lock();
-            self.monitor_loop = null;
-            self.mutex.unlock();
-        }
-
-        // === Tunnel connection (session side) ===
-        const single_tunnel = try self.allocator.create(protocol_tunnel_mod.TunnelConnection);
-        defer {
-            single_tunnel.deinit();
-            self.allocator.destroy(single_tunnel);
-        }
-        single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
-            self.allocator,
-            @ptrCast(single_sock),
-            struct {
-                fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    return s.read(buf);
-                }
-            }.read,
-            struct {
-                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
-                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
-                    s.writeAllNonBlocking(data) catch |e| switch (e) {
-                        error.WouldBlock => return data.len,
-                        else => |err| return err,
-                    };
-                    return data.len;
-                }
-            }.write,
-        );
-        single_tunnel.use_compress = self.config.use_compress;
-        single_tunnel.initCompression();
-
-        // === Buffers (heap; isolate threads have small stacks) ===
-        const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
-        defer self.allocator.free(recv_scratch);
-        const recv_slices = try self.allocator.alloc([]u8, 512);
-        defer self.allocator.free(recv_slices);
-
-        // Drain diagnostics + keepalive timing
-        var drain_diag = session_io.DrainDiag{};
-        var timing = tunnel_mod.data_loop.TimingState.init();
-        var last_upkeep_ms: i64 = 0;
-
-        std.log.info("Monitor data channel started", .{});
-
-        while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
-            const now = std.time.milliTimestamp();
-
-            // Single TLS socket poll — the monitor pump has no ingress
-            // ports to multiplex (mirror-only). Register POLLOUT when the
-            // TLS socket has pending writes (keepalive backpressure).
-            var poll_fds: [1]std.posix.pollfd = undefined;
-            poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
-            if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
-            _ = std.posix.poll(poll_fds[0..], 10) catch 0;
-
-            // Drain pending outbound data (e.g. keepalives) when the kernel
-            // sndbuf frees up; without this they would sit unflushed once
-            // needs_pollout blocks new writes (review #119).
-            if (single_sock.needs_pollout and (poll_fds[0].revents & std.posix.POLL.OUT) != 0) {
-                _ = single_sock.retryPendingWrite() catch |e| blk: {
-                    std.log.warn("monitor: pending write retry failed: {}", .{e});
-                    break :blk false;
-                };
-            }
-
-            // INBOUND: drain session blocks → MonitorLoop capture.
-            if ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or single_sock.hasPending() or single_sock.kernelRecvQueue() > 0) {
-                var drain_ctx = MonitorDrainCtx{ .monitor = &monitor_loop };
-                drain_diag = .{};
-                const result = session_io.drainReceived(
-                    single_tunnel,
-                    single_sock,
-                    recv_slices,
-                    recv_scratch,
-                    session_io.MAX_INBOUND_DRAIN,
-                    &self.should_stop,
-                    &drain_diag,
-                    .{
-                        .ctx = &drain_ctx,
-                        .onBlock = monitorOnBlock,
-                        .onFlush = monitorOnFlush,
-                        .onDead = monitorOnDead,
-                    },
-                );
-                if (result.dead) {
-                    self.disconnect_reason = .network_error;
-                    return error.ConnectionLost;
-                }
-            }
-
-            // 1Hz upkeep: keepalive + monitor stats snapshot.
-            if (now - last_upkeep_ms >= 1000) {
-                last_upkeep_ms = now;
-                session_io.maybeSendKeepalive(null, single_tunnel, &timing, now, @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000));
-                self.monitor_stats = monitor_loop.getStats();
-            }
-        }
-
-        std.log.info("Monitor data channel ended", .{});
-    }
 };
 
 // ============================================================================
@@ -3758,11 +3051,6 @@ pub const ClientConfigBuilder = struct {
 
     pub fn setEncryption(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
         self.config.use_encrypt = enabled;
-        return self;
-    }
-
-    pub fn setFastRc4(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
-        self.config.use_fast_rc4 = enabled;
         return self;
     }
 
@@ -3817,19 +3105,8 @@ test "VpnClient initialization" {
     const config = ClientConfig{ .server_address = "192.168.1.1", .hub_name = "TEST", .auth = .{ .anonymous = {} } };
     var client = VpnClient.init(std.testing.allocator, config);
     defer client.deinit();
-    try std.testing.expectEqual(NetworkMode.client, client.getNetworkMode());
-}
-
-test "VpnClient network mode captured at init" {
-    const config = ClientConfig{
-        .server_address = "192.168.1.1",
-        .hub_name = "TEST",
-        .auth = .{ .anonymous = {} },
-        .mode = .bridge,
-    };
-    var client = VpnClient.init(std.testing.allocator, config);
-    defer client.deinit();
-    try std.testing.expectEqual(NetworkMode.bridge, client.getNetworkMode());
+    try std.testing.expectEqual(ClientState.disconnected, client.getState());
+    try std.testing.expect(!client.isConnected());
 }
 
 test "VpnClient connect with valid IP" {
@@ -3869,82 +3146,6 @@ test "ReconnectConfig defaults" {
     try std.testing.expect(rc.enabled);
     try std.testing.expectEqual(@as(u32, 0), rc.max_attempts);
     try std.testing.expectEqual(@as(u32, 1000), rc.min_backoff_ms);
-}
-
-test "monitor pump: scripted session block drains into the ring (fixture)" {
-    // Deterministic fixture mirroring test/integration's ScriptedTransport:
-    // no socket, no TLS, no thread — the wire stream is hand-encoded in the
-    // session block format from protocol/tunnel.zig sendBlocks:
-    //   [u32 num_blocks][u32 block_size][payload]...
-    const eth_frame = [_]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0x08, 0x00 };
-    var wire: [4 + 4 + eth_frame.len]u8 = undefined;
-    std.mem.writeInt(u32, wire[0..4], 1, .big);
-    std.mem.writeInt(u32, wire[4..8], @intCast(eth_frame.len), .big);
-    @memcpy(wire[8..], &eth_frame);
-
-    var rd_pos: usize = 0;
-    var fed = std.mem.ArrayListUnmanaged(u8){};
-    defer fed.deinit(std.testing.allocator);
-
-    const Transport = struct {
-        const Self = @This();
-        wire: []const u8,
-        pos: *usize,
-        fed: *std.mem.ArrayListUnmanaged(u8),
-        fn readFn(ctx: *anyopaque, buf: []u8) anyerror!usize {
-            const t: *Self = @ptrCast(@alignCast(ctx));
-            const remaining = t.wire.len - t.pos.*;
-            if (remaining == 0) return 0;
-            const n = @min(remaining, buf.len);
-            @memcpy(buf[0..n], t.wire[t.pos.*..][0..n]);
-            t.pos.* += n;
-            return n;
-        }
-        fn writeFn(ctx: *anyopaque, data: []const u8) anyerror!usize {
-            const t: *Self = @ptrCast(@alignCast(ctx));
-            try t.fed.appendSlice(std.testing.allocator, data);
-            return data.len;
-        }
-    };
-    var transport = Transport{ .wire = &wire, .pos = &rd_pos, .fed = &fed };
-
-    var single_tunnel = protocol_tunnel_mod.TunnelConnection.init(
-        std.testing.allocator,
-        @ptrCast(&transport),
-        Transport.readFn,
-        Transport.writeFn,
-    );
-    defer single_tunnel.deinit();
-    single_tunnel.use_compress = false;
-
-    // Monitor mode: ring + no PCAP.
-    var monitor_loop = try monitor_mod.MonitorLoop.init(std.testing.allocator, 4096, null);
-    defer monitor_loop.deinit();
-
-    // Drive the same plumbing the pump wires: receiveBlocksBatch → the
-    // monitor closure (monitorOnBlock) → MonitorLoop capture.
-    var recv_scratch: [8 * 1600]u8 = undefined;
-    var recv_slices: [4][]u8 = undefined;
-    const n = try single_tunnel.receiveBlocksBatch(&recv_slices, &recv_scratch);
-    try std.testing.expectEqual(@as(usize, 1), n);
-
-    var drain_ctx = MonitorDrainCtx{ .monitor = &monitor_loop };
-    monitorOnBlock(&drain_ctx, recv_slices[0]);
-
-    const s = monitor_loop.getStats();
-    try std.testing.expectEqual(@as(u64, 1), s.frames_captured);
-    try std.testing.expectEqual(@as(u64, eth_frame.len), s.bytes_captured);
-    try std.testing.expectEqual(@as(u32, 1), s.ring_used);
-    try std.testing.expectEqual(@as(u64, 0), s.frames_dropped);
-    try std.testing.expectEqual(@as(u64, 0), s.pcap_records);
-
-    // FFI-facing readback of the captured frame.
-    try std.testing.expectEqual(@as(u32, 1), monitor_loop.frameCount());
-    var out: [64]u8 = undefined;
-    const copied = monitor_loop.readFrame(0, &out).?;
-    try std.testing.expectEqual(@as(usize, eth_frame.len), copied);
-    try std.testing.expectEqualSlices(u8, &eth_frame, out[0..copied]);
-    try std.testing.expect(monitor_loop.readFrame(1, &out) == null);
 }
 
 test "SessionWrapper" {

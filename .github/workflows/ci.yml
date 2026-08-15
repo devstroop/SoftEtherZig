@@ -105,10 +105,17 @@ jobs:
 
       - name: Setup Android NDK
         if: matrix.ndk
-        uses: devstroop/setup-ndk@v1
-        with:
-          version: '27.0.11902837'
-          use-cache: true
+        run: |
+          NDK_VERSION="27.0.11902837"
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          if [ ! -d "$NDK_DIR" ]; then
+            echo "NDK $NDK_VERSION not found, installing..."
+            yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "ndk;$NDK_VERSION"
+          else
+            echo "NDK $NDK_VERSION already installed"
+          fi
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
 
       - name: Show toolchain versions
         run: zig version
@@ -127,18 +134,3 @@ jobs:
       - name: Run tests
         if: matrix.test
         run: zig build test --release=fast --summary all
-
-      # Bridge BPF live smoke (issue #60): install the SUID helper from the
-      # shared-lib build output (built above) and re-run the test suite so
-      # the bpf.zig live tests exercise a real /dev/bpfN attach on lo0.
-      # GitHub macOS runners provide passwordless sudo. On the plain test
-      # run above the live tests skip cleanly (no privileged path); with the
-      # helper in place they assert real BPF round-trips.
-      - name: Bridge BPF live smoke (macOS, setuid helper)
-        if: runner.os == 'macOS' && matrix.test
-        run: |
-          sudo mkdir -p /usr/local/libexec
-          sudo cp zig-out/bin/softether-utun-helper /usr/local/libexec/softether-utun-helper
-          sudo chown root:wheel /usr/local/libexec/softether-utun-helper
-          sudo chmod 4755 /usr/local/libexec/softether-utun-helper
-          zig build test --release=fast --summary all

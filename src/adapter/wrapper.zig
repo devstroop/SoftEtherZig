@@ -134,31 +134,23 @@ pub const AdapterWrapper = struct {
         return self.mac;
     }
 
-    /// Configure IP address. Propagates device failures and reverts the
-    /// cached configuration so callers can distinguish a successful OS
-    /// configuration from a failed one.
-    pub fn configure(self: *Self, ip: u32, mask: u32, gateway: u32) !void {
+    /// Configure IP address
+    pub fn configure(self: *Self, ip: u32, mask: u32, gateway: u32) void {
         self.ip_address = ip;
         self.netmask = mask;
         self.gateway_ip = gateway;
         if (self.real_adapter) |*real| {
-            real.configure(ip, mask, gateway) catch |err| {
-                // Mark the wrapper unconfigured: the cache must reflect the
-                // actual device state, not the requested state.
-                self.ip_address = 0;
-                self.netmask = 0;
-                self.gateway_ip = 0;
-                return err;
-            };
+            if (real.device) |dev| {
+                std.log.info("AdapterWrapper.configure: device present, calling dev.configure()", .{});
+                dev.configure(ip, mask, gateway) catch |err| {
+                    std.log.err("Failed to configure device: {}", .{err});
+                };
+            } else {
+                std.log.warn("AdapterWrapper.configure: real_adapter set but device is null", .{});
+            }
+        } else {
+            std.log.warn("AdapterWrapper.configure: real_adapter is null", .{});
         }
-    }
-
-    /// Get the pollable fd of the underlying device (data pump seam).
-    pub fn getFd(self: *const Self) std.posix.fd_t {
-        if (self.real_adapter) |*adapter| {
-            return adapter.getFd();
-        }
-        return adapter_mod.port.NetPort.invalid_fd;
     }
 
     /// Configure IPv6 on the adapter
@@ -305,7 +297,7 @@ test "AdapterWrapper configure" {
     var wrapper = AdapterWrapper.init(std.testing.allocator);
     defer wrapper.deinit();
 
-    wrapper.configure(0x0A150001, 0xFFFFFF00, 0x0A150001) catch unreachable;
+    wrapper.configure(0x0A150001, 0xFFFFFF00, 0x0A150001);
 
     try std.testing.expectEqual(@as(u32, 0x0A150001), wrapper.ip_address);
     try std.testing.expectEqual(@as(u32, 0xFFFFFF00), wrapper.netmask);

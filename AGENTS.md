@@ -11,7 +11,7 @@ Pure Zig implementation of the SoftEther VPN client protocol — standalone CLI 
 | **Adapters** | `src/adapter/` | Zig — TUN/TAP per platform, DHCP, ARP, routing |
 | **CLI** | `src/cli/` | Zig — argument parsing, config file, interactive shell |
 | **App lifecycle** | `src/app/` | Zig — state, signals, daemon, interactive mode |
-| **FFI bridge** | `src/ffi.zig` | Zig → C ABI (76 exports) for Flutter, Swift, Kotlin |
+| **FFI bridge** | `src/ffi.zig` | Zig → C ABI (62 exports) for Flutter, Swift, Kotlin |
 | **Public API** | `src/lib.zig` | Zig module root — re-exports VpnClient, ClientConfig, etc. |
 
 ## Architecture
@@ -90,7 +90,7 @@ src/
 │   ���── signals.zig         Signal handling
 │   └── password_hash.zig   Password hashing
 │
-├── ffi.zig               ← C ABI exports (76 functions)
+├── ffi.zig               ← C ABI exports (62 functions)
 ├── lib.zig               ← Zig module root (public API)
 ├── main.zig              ← Entry point (log config + dispatch)
 ├── config.zig            �� ConnectionConfig, StaticIpConfig, RoutingConfig, AuthMethod
@@ -113,7 +113,7 @@ src/
 | Proxy tunnels (HTTP, SOCKS5) | `mayaqua/network/` | HTTP CONNECT + SOCKS5 |
 | Cryptography (SHA-0, AES) | `mayaqua/encrypt/` | Pure Zig, no OpenSSL dep |
 | CLI + interactive shell | `cli/` | args, config_manager, shell, display |
-| C ABI exports | `ffi.zig` | 76 `softether_*` functions |
+| C ABI exports | `ffi.zig` | 62 `softether_*` functions |
 | Zig public API | `lib.zig` | VpnClient, ClientConfig, etc. |
 
 ## Output Targets
@@ -191,7 +191,7 @@ Every property flows through: **CLI flag → env var → config file → app bri
 //   pub const ClientConfig = struct { ... }
 ```
 
-### C ABI — FFI interface (`ffi.zig`, 76 exports)
+### C ABI — FFI interface (`ffi.zig`, 62 exports)
 
 ```c
 // ====================================================================
@@ -369,7 +369,7 @@ bash test.sh 120                  # Custom timeout
 | `build.zig` | Build system — CLI, shared-lib, static-lib, utun-helper targets |
 | `build.zig.zon` | Package manifest (version v0.3.3, fingerprint `0xc1ce1081459614f0`) |
 | `include/softether.h` | C API header (auto-synced with ffi.zig exports) |
-| `src/ffi.zig` | C ABI exports (76 `softether_*` functions, ~1,200 lines) |
+| `src/ffi.zig` | C ABI exports (62 `softether_*` functions, ~1,100 lines) |
 | `src/lib.zig` | Zig module root (VpnClient, ClientConfig, etc.) |
 | `src/main.zig` | CLI entry point + scoped log level configuration |
 | `src/cedar/client/vpn_client.zig` | Main client facade (~2,800 lines) |

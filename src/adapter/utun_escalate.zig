@@ -96,7 +96,7 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
     const installed_ready = installedHelperReady(bundled_helper);
     if (!installed_ready and bundled_helper == null) {
-        std.log.warn("utun_escalate: helper binary not found", .{});
+        std.log.err("utun_escalate: helper binary not found", .{});
         return EscalationError.HelperNotFound;
     }
     // Path we'll actually exec. Prefer the installed setuid copy.
@@ -173,9 +173,6 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
     child.spawn() catch {
         return EscalationError.HelperLaunchFailed;
     };
-    defer {
-        _ = child.wait() catch {};
-    }
 
     // Accept connection from the helper. Fast path is near-instant (~50ms);
     // slow path needs up to 60s for user to type the admin password.
@@ -321,168 +318,6 @@ pub fn runPrivilegedCommand(cmd: []const u8) bool {
     return resp[0] == 0;
 }
 
-/// Open a /dev/bpfN device for `ifname` via the setuid helper in
-/// `--bpf-open` mode (H-7 — L2 bridge ingress, issue #60).
-///
-/// The helper is an allowlist-only mode: it validates the interface name
-/// against a conservative charset, opens /dev/bpf0..9, attaches with
-/// BIOCSETIF, enables promiscuous + immediate + non-blocking, and passes
-/// the fd back over SCM_RIGHTS. No shell commands are executed in this mode.
-///
-/// Like escalatedUtunOpen: fast path uses the already-installed setuid
-/// helper with no prompt; otherwise a one-time osascript admin install runs
-/// first. Returns the live BPF fd, or an error (callers map to a clean
-/// "no capability" failure — the bridge then reports the NIC as
-/// unsupported instead of crashing).
-pub fn escalatedBpfOpen(allocator: std.mem.Allocator, ifname: []const u8) EscalationError!posix.fd_t {
-    if (builtin.os.tag != .macos) return EscalationError.HelperNotFound;
-    if (ifname.len == 0 or ifname.len >= 16) return EscalationError.HelperFailed;
-
-    var helper_path_buf: [1024]u8 = undefined;
-    const bundled_helper = findHelperPath(&helper_path_buf);
-
-    if (!installedHelperReady(bundled_helper)) {
-        if (bundled_helper == null) {
-            std.log.warn("utun_escalate: helper binary not found; bpf open cannot be escalated", .{});
-            return EscalationError.HelperNotFound;
-        }
-        // One-time setuid install via osascript admin prompt.
-        var install_buf: [4096]u8 = undefined;
-        const install_cmd = std.fmt.bufPrint(
-            &install_buf,
-            "osascript -e 'do shell script \"mkdir -p /usr/local/libexec && cp -f \\\"{s}\\\" \\\"{s}\\\" && chown root:wheel \\\"{s}\\\" && chmod 4755 \\\"{s}\\\"\" with administrator privileges' 2>&1",
-            .{ bundled_helper.?, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH, INSTALLED_HELPER_PATH },
-        ) catch return EscalationError.PathTooLong;
-        var install_child = std.process.Child.init(&[_][]const u8{ "sh", "-c", install_cmd }, allocator);
-        const term = install_child.spawnAndWait() catch return EscalationError.HelperLaunchFailed;
-        switch (term) {
-            .Exited => |code| if (code != 0) {
-                std.log.err("utun_escalate: helper install failed (exit {d})", .{code});
-                return EscalationError.HelperFailed;
-            },
-            else => return EscalationError.HelperFailed,
-        }
-        std.log.info("utun_escalate: helper installed to {s} for bpf open", .{INSTALLED_HELPER_PATH});
-    }
-
-    // Listening socket for the helper to connect back on.
-    var sock_path_buf: [108]u8 = undefined;
-    var rand_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
-    const sock_path = std.fmt.bufPrint(&sock_path_buf, "/tmp/se-bpf-{x}{x}{x}{x}{x}{x}{x}{x}.sock", .{
-        rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
-        rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7],
-    }) catch return EscalationError.PathTooLong;
-
-    const listen_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
-        return EscalationError.SocketCreateFailed;
-    };
-    errdefer posix.close(listen_fd);
-
-    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
-    @memset(&addr.path, 0);
-    if (sock_path.len >= addr.path.len) return EscalationError.PathTooLong;
-    @memcpy(addr.path[0..sock_path.len], sock_path);
-
-    posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch {
-        return EscalationError.BindFailed;
-    };
-    defer _ = std.c.unlink(@ptrCast(&addr.path));
-
-    posix.listen(listen_fd, 1) catch {
-        return EscalationError.ListenFailed;
-    };
-
-    // Spawn the setuid helper in --bpf-open mode (no prompt on fast path).
-    // stderr is piped (not inherited): Zig's test runner fails any test
-    // whose stderr receives output, and the helper writes diagnostics there.
-    var cmd_buf: [1200]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "{s} {s} --bpf-open {s}", .{ INSTALLED_HELPER_PATH, sock_path, ifname }) catch {
-        return EscalationError.PathTooLong;
-    };
-    var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
-    child.stderr_behavior = .Pipe;
-    child.spawn() catch {
-        return EscalationError.HelperLaunchFailed;
-    };
-    defer {
-        _ = child.wait() catch {};
-    }
-
-    var poll_fds = [1]std.posix.pollfd{
-        .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
-    };
-    const poll_result = std.posix.poll(&poll_fds, 5_000) catch {
-        _ = child.wait() catch {};
-        return EscalationError.AcceptFailed;
-    };
-    if (poll_result == 0) {
-        _ = child.wait() catch {};
-        return EscalationError.HelperFailed;
-    }
-
-    const client_fd = posix.accept(listen_fd, null, null, 0) catch {
-        _ = child.wait() catch {};
-        return EscalationError.AcceptFailed;
-    };
-    defer posix.close(client_fd);
-
-    // Receive the bpf fd via SCM_RIGHTS; data payload echoes the ifname.
-    const CMSG_SPACE = @sizeOf(Cmsghdr) + @sizeOf(c_int);
-    var cmsg_buf: [CMSG_SPACE + 16]u8 align(@alignOf(Cmsghdr)) = [_]u8{0} ** (CMSG_SPACE + 16);
-    var ifname_echo: [16]u8 = [_]u8{0} ** 16;
-    var iov = [1]posix.iovec{.{ .base = &ifname_echo, .len = 16 }};
-    var msg = std.c.msghdr{
-        .name = null,
-        .namelen = 0,
-        .iov = &iov,
-        .iovlen = 1,
-        .control = &cmsg_buf,
-        .controllen = @intCast(cmsg_buf.len),
-        .flags = 0,
-    };
-    if (std.c.recvmsg(client_fd, &msg, 0) < 0) {
-        _ = child.wait() catch {};
-        return EscalationError.RecvFailed;
-    }
-
-    const cmsg: *const Cmsghdr = @ptrCast(@alignCast(&cmsg_buf));
-    if (cmsg.cmsg_level != SOL_SOCKET or cmsg.cmsg_type != SCM_RIGHTS) {
-        logHelperStderr(&child) catch {};
-        _ = child.wait() catch {};
-        return EscalationError.NoFdReceived;
-    }
-    const received_fd: *const c_int = @ptrCast(@alignCast(&cmsg_buf[@sizeOf(Cmsghdr)]));
-    if (received_fd.* < 0) {
-        logHelperStderr(&child) catch {};
-        _ = child.wait() catch {};
-        return EscalationError.NoFdReceived;
-    }
-
-    std.log.info("utun_escalate: received bpf fd {d} for {s} from helper", .{ received_fd.*, ifname });
-    return received_fd.*;
-}
-
-/// Drain the helper's piped stderr and log it (warn on content, since a
-/// healthy helper is silent on success; the pipe also prevents the helper's
-/// output from polluting the caller's stderr, which Zig's test runner treats
-/// as a test failure).
-fn logHelperStderr(child: *std.process.Child) !void {
-    if (child.stderr) |*pipe| {
-        defer child.stderr = null;
-        var buf: [2048]u8 = undefined;
-        var total: usize = 0;
-        while (total < buf.len) {
-            const n = try pipe.read(buf[total..]);
-            if (n == 0) break;
-            total += n;
-        }
-        if (total > 0) {
-            std.log.warn("utun_escalate: helper stderr: {s}", .{buf[0..total]});
-        }
-    }
-}
-
 /// Ensure a privileged command channel exists without opening a utun device.
 /// Called after a direct utun open so that routing commands (route add/delete)
 /// can still be executed as root via the setuid helper.
@@ -564,9 +399,6 @@ pub fn ensurePrivilegedChannel(allocator: std.mem.Allocator) void {
         posix.close(listen_fd);
         return;
     };
-    defer {
-        _ = child.wait() catch {};
-    }
 
     // Wait for helper to connect (5 s — setuid exec is near-instant).
     var poll_fds = [1]std.posix.pollfd{
