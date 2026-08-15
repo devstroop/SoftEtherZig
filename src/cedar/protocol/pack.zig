@@ -138,17 +138,14 @@ pub const Pack = struct {
         return &self.elements.items[self.elements.items.len - 1];
     }
 
-    /// Get or create an element whose values array is ensured to have room for
-    /// the given `index` (C `PackAdd*Ex` pre-sizes the element to `total` and
+    /// Get or create an element whose values array is ensured to hold at least
+    /// `index + 1` values (C `PackAdd*Ex` pre-sizes the element to `total` and
     /// fills slot `index`; here any missing slots are padded with zero values
-    /// so that callers may write indices in any order).
+    /// so that callers may write indices in any order and rewrite a slot).
     fn getElementEx(self: *Self, name: []const u8, value_type: ValueType, index: usize) !*Element {
         const elem = try self.getOrCreateElement(name, value_type);
-        if (elem.values.items.len > index) {
-            return error.DuplicateValue;
-        }
-        while (elem.values.items.len < index) {
-            try elem.values.append(self.allocator, zeroValue(value_type));
+        while (elem.values.items.len <= index) {
+            try elem.values.append(self.allocator, try zeroValue(self.allocator, value_type));
         }
         return elem;
     }
@@ -191,40 +188,40 @@ pub const Pack = struct {
         try self.addInt(name, if (value) 1 else 0);
     }
 
-    /// C `PackAddIntEx` (Pack.c): append the `index`-th int value of an element.
+    /// C `PackAddIntEx` (Pack.c): replace the `index`-th int value of an element.
     pub fn addIntEx(self: *Self, name: []const u8, value: u32, index: usize) !void {
         const elem = try self.getElementEx(name, .int, index);
-        try elem.values.append(self.allocator, .{ .int = value });
+        elem.values.items[index] = .{ .int = value };
     }
 
     /// C `PackAddInt64Ex` (Pack.c).
     pub fn addInt64Ex(self: *Self, name: []const u8, value: u64, index: usize) !void {
         const elem = try self.getElementEx(name, .int64, index);
-        try elem.values.append(self.allocator, .{ .int64 = value });
+        elem.values.items[index] = .{ .int64 = value };
     }
 
     /// C `PackAddStrEx` (Pack.c).
     pub fn addStrEx(self: *Self, name: []const u8, value: []const u8, index: usize) !void {
         const elem = try self.getElementEx(name, .str, index);
         const copy = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(copy);
-        try elem.values.append(self.allocator, .{ .str = copy });
+        self.allocator.free(elem.values.items[index].str);
+        elem.values.items[index] = .{ .str = copy };
     }
 
     /// C `PackAddUniStrEx` (Pack.c).
     pub fn addUniStrEx(self: *Self, name: []const u8, value: []const u8, index: usize) !void {
         const elem = try self.getElementEx(name, .unistr, index);
         const copy = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(copy);
-        try elem.values.append(self.allocator, .{ .unistr = copy });
+        self.allocator.free(elem.values.items[index].unistr);
+        elem.values.items[index] = .{ .unistr = copy };
     }
 
     /// C `PackAddDataEx` (Pack.c).
     pub fn addDataEx(self: *Self, name: []const u8, value: []const u8, index: usize) !void {
         const elem = try self.getElementEx(name, .data, index);
         const copy = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(copy);
-        try elem.values.append(self.allocator, .{ .data = copy });
+        self.allocator.free(elem.values.items[index].data);
+        elem.values.items[index] = .{ .data = copy };
     }
 
     /// C `PackAddBoolEx` (Pack.c): bool stored as int.
@@ -384,13 +381,16 @@ fn writeString(writer: anytype, str: []const u8) !void {
 }
 
 /// A zero value of a given type (used to pad index gaps in `getElementEx`).
-fn zeroValue(value_type: ValueType) Value {
+/// String/data values are heap-allocated empty slices so that `Element.deinit`
+/// (which frees every str/data/unistr value) and slot replacement in `add*Ex`
+/// can free them safely.
+fn zeroValue(allocator: Allocator, value_type: ValueType) !Value {
     return switch (value_type) {
         .int => .{ .int = 0 },
         .int64 => .{ .int64 = 0 },
-        .data => .{ .data = "" },
-        .str => .{ .str = "" },
-        .unistr => .{ .unistr = "" },
+        .data => .{ .data = try allocator.dupe(u8, "") },
+        .str => .{ .str = try allocator.dupe(u8, "") },
+        .unistr => .{ .unistr = try allocator.dupe(u8, "") },
     };
 }
 
@@ -702,6 +702,15 @@ test "Pack indexed accessors (PackGetIntEx/IndexCount)" {
     try p.addBoolEx("ExBools", false, 1);
     try p.addInt64Ex("ExTimes", 5, 0);
 
+    // Out-of-order and slot-rewrite writes must be permitted (C `PackAdd*Ex`
+    // pre-sizes the element to `total` and each call fills slot `index`).
+    try p.addIntEx("ExOOO", 300, 2);
+    try p.addIntEx("ExOOO", 100, 0);
+    try p.addStrEx("ExOOOStr", "third", 2);
+    try p.addStrEx("ExOOOStr", "first", 0);
+    try p.addStrEx("ExOOOStr", "second", 1);
+    try p.addStrEx("ExOOOStr", "rewritten", 2);
+
     try testing.expectEqual(@as(usize, 2), p.getValueCount("ExInts"));
     try testing.expectEqual(@as(u32, 100), p.getIntEx("ExInts", 0).?);
     try testing.expectEqual(@as(u32, 200), p.getIntEx("ExInts", 1).?);
@@ -710,4 +719,11 @@ test "Pack indexed accessors (PackGetIntEx/IndexCount)" {
     try testing.expectEqualSlices(u8, &[_]u8{ 9, 8 }, p.getDataEx("ExData", 0).?);
     try testing.expectEqual(@as(?bool, false), p.getBoolEx("ExBools", 1));
     try testing.expectEqual(@as(u64, 5), p.getInt64Ex("ExTimes", 0).?);
+
+    try testing.expectEqual(@as(usize, 3), p.getValueCount("ExOOO"));
+    try testing.expectEqual(@as(u32, 100), p.getIntEx("ExOOO", 0).?);
+    try testing.expectEqual(@as(u32, 300), p.getIntEx("ExOOO", 2).?);
+    try testing.expectEqualStrings("first", p.getStrEx("ExOOOStr", 0).?);
+    try testing.expectEqualStrings("second", p.getStrEx("ExOOOStr", 1).?);
+    try testing.expectEqualStrings("rewritten", p.getStrEx("ExOOOStr", 2).?);
 }
