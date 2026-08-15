@@ -96,7 +96,7 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
 
     const installed_ready = installedHelperReady(bundled_helper);
     if (!installed_ready and bundled_helper == null) {
-        std.log.err("utun_escalate: helper binary not found", .{});
+        std.log.warn("utun_escalate: helper binary not found", .{});
         return EscalationError.HelperNotFound;
     }
     // Path we'll actually exec. Prefer the installed setuid copy.
@@ -340,7 +340,7 @@ pub fn escalatedBpfOpen(allocator: std.mem.Allocator, ifname: []const u8) Escala
 
     if (!installedHelperReady(bundled_helper)) {
         if (bundled_helper == null) {
-            std.log.err("utun_escalate: helper binary not found; bpf open cannot be escalated", .{});
+            std.log.warn("utun_escalate: helper binary not found; bpf open cannot be escalated", .{});
             return EscalationError.HelperNotFound;
         }
         // One-time setuid install via osascript admin prompt.
