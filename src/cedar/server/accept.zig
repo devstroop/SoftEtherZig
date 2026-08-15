@@ -699,7 +699,9 @@ test "server.accept idle session emits keep-alive (bounded data-plane read)" {
 }
 
 /// Build an ARP-broadcast Ethernet frame for the loopback acceptance test
-/// (src MAC is a valid unicast address, dst is the broadcast address).
+/// (src MAC is a valid unicast address, dst is the broadcast address). Padded
+/// to the Ethernet minimum frame size (60 bytes, FCS excluded) so the gate
+/// exercises a valid frame rather than a sub-minimum one.
 fn buildLoopbackFrame() ![]u8 {
     const allocator = testing.allocator;
     const dst = [_]u8{0xff} ** 6;
@@ -712,11 +714,13 @@ fn buildLoopbackFrame() ![]u8 {
         0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x0a, 0x00, 0x00, 0x02,
     };
-    const f = try allocator.alloc(u8, 14 + payload.len);
+    const min_frame_len = 60;
+    const f = try allocator.alloc(u8, min_frame_len);
+    @memset(f, 0);
     @memcpy(f[0..6], &dst);
     @memcpy(f[6..12], &src);
     mem.writeInt(u16, f[12..14], 0x0806, .big);
-    @memcpy(f[14..], &payload);
+    @memcpy(f[14..][0..payload.len], &payload);
     return f;
 }
 
@@ -788,14 +792,30 @@ test "server.accept two sessions exchange a frame through the hub" {
     var send_buf: [tunnel_mod.MAX_PACKET_SIZE * 2]u8 = undefined;
     try tunnel_a.sendBlocksZeroCopy(&blocks, &send_buf);
 
-    // Client B must receive the exact frame. receiveBlocksBatch returns 0 for
-    // keep-alives (the server sends one on an idle wire), so loop until a data
-    // batch arrives.
+    // Client B must receive the exact frame. receiveBlocksBatch reads through
+    // readBlocking, which polls the fd for 30s — never enter it without known
+    // data, or the 8s deadline is not actually enforced. Poll the raw fd (or
+    // OpenSSL's already-buffered data) with a short timeout first. Returns 0
+    // for keep-alives (the server sends one on an idle wire), so loop until a
+    // data batch arrives.
     var out_data: [1][]u8 = undefined;
     var scratch: [tunnel_mod.MAX_PACKET_SIZE * 2]u8 = undefined;
     var received: ?[]const u8 = null;
     const recv_deadline = std.time.milliTimestamp() + 8000;
     while (received == null and std.time.milliTimestamp() < recv_deadline) {
+        while (!e2e_b.client.hasPending() and std.time.milliTimestamp() < recv_deadline) {
+            var pfd = [_]std.posix.pollfd{.{
+                .fd = e2e_b.client.tcp_fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            if ((std.posix.poll(&pfd, 50) catch 0) == 0) {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
+            break;
+        }
+        if (std.time.milliTimestamp() >= recv_deadline) break;
         const n = tunnel_b.receiveBlocksBatch(&out_data, &scratch) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
