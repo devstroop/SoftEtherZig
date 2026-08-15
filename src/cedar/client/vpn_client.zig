@@ -3291,23 +3291,28 @@ pub const VpnClient = struct {
             std.log.err("bridge mode: no ingress interfaces configured (softether_add_ingress_interface)", .{});
             return ClientError.AdapterConfigurationFailed;
         }
-        if (builtin.os.tag != .linux and builtin.os.tag != .macos) {
-            std.log.err("bridge mode requires AF_PACKET (Linux) or BPF (macOS) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
+if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
+            std.log.err("bridge mode requires AF_PACKET (Linux), BPF (macOS) or Npcap (Windows) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
             return ClientError.AdapterConfigurationFailed;
         }
 
         const af_packet = @import("../../adapter/af_packet.zig");
         const bpf_mod = @import("../../adapter/bpf.zig");
+        const npcap_mod = @import("../../adapter/npcap.zig");
         // Per-OS ingress port implementation:
         //   linux   → AF_PACKET (issue #53, merged)
         //   macos   → BPF /dev/bpfN (issue #60 — fd granted by the setuid
         //             helper in --bpf-open mode when not running as root)
-        //   windows → Npcap (issue #61 — lands on its own branch)
+        //   windows → Npcap (issue #61 — dynamic pcap.dll, worker thread +
+        //             SPSC ring; getFd() = invalid_fd, drained every pump
+        //             iteration, see the LAN→session section below)
         const Ingress = struct {
             const Store = if (builtin.os.tag == .linux)
                 af_packet.AfPacketPort
             else if (builtin.os.tag == .macos)
                 bpf_mod.BpfPort
+            else if (builtin.os.tag == .windows)
+                npcap_mod.NpcapPort
             else
                 u8;
 
@@ -3316,6 +3321,8 @@ pub const VpnClient = struct {
                     return af_packet.afPacketPort(@as(*af_packet.AfPacketPort, @ptrCast(store)), name);
                 } else if (builtin.os.tag == .macos) {
                     return bpf_mod.bpfPort(@as(*bpf_mod.BpfPort, @ptrCast(store)), allocator, name);
+                } else if (builtin.os.tag == .windows) {
+                    return npcap_mod.npcapPort(@as(*npcap_mod.NpcapPort, @ptrCast(store)), allocator, name);
                 } else {
                     unreachable;
                 }
@@ -3462,8 +3469,11 @@ pub const VpnClient = struct {
             }
 
             // LAN → session: read frames from ready ports and dispatch.
+            // Non-pollable ports (getFd() == invalid_fd — Npcap, issue #61)
+            // are drained every iteration instead; poll() skips fd -1.
             for (net_ports, 1..) |*p, i| {
-                if ((poll_fds[i].revents & std.posix.POLL.IN) == 0) continue;
+                const pollable = p.getFd() != adapter_mod.NetPort.invalid_fd;
+                if (pollable and (poll_fds[i].revents & std.posix.POLL.IN) == 0) continue;
                 while (true) {
                     const n = p.read(port_buf) catch |err| {
                         if (err == error.WouldBlock or err == error.DeviceClosed) break;
