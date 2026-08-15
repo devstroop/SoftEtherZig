@@ -232,6 +232,7 @@ pub const NpcapPort = struct {
     }
 
     pub fn close(self: *NpcapPort) void {
+        if (comptime builtin.os.tag != .windows) return;
         self.halt.store(true, .release);
         if (self.thread) |t| {
             t.join();
