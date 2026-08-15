@@ -79,6 +79,14 @@ pub const CliArgs = struct {
     gen_hash_user: ?[]const u8 = null,
     gen_hash_pass: ?[]const u8 = null,
 
+    // Server TLS bootstrap
+    /// Generate a self-signed server certificate/key pair (server_cert.pem +
+    /// server_key.pem in the current directory) and exit.
+    gen_cert: bool = false,
+    /// Optional certificate CN for --gen-cert. When null/empty the C-parity
+    /// default "server.softether.vpn" + machine name is used.
+    gen_cert_name: ?[]const u8 = null,
+
     // Timeouts (milliseconds)
     connect_timeout_ms: u32 = 30000,
     read_timeout_ms: u32 = 60000,
@@ -363,6 +371,14 @@ pub const ArgParser = struct {
                 self.args.gen_hash_user = try self.requireValue(argv, i, "--gen-hash username");
                 i += 1;
                 self.args.gen_hash_pass = try self.requireValue(argv, i, "--gen-hash password");
+            } else if (std.mem.eql(u8, arg, "--gen-cert")) {
+                self.args.gen_cert = true;
+                // Optional common name: consume the next token only if it is
+                // not a flag (so `--gen-cert --help` still parses).
+                if (i + 1 < argv.len and argv[i + 1].len > 0 and argv[i + 1][0] != '-') {
+                    i += 1;
+                    self.args.gen_cert_name = try self.requireValue(argv, i, "--gen-cert");
+                }
             } else if (std.mem.eql(u8, arg, "--connect-timeout")) {
                 i += 1;
                 const val = try self.requireValue(argv, i, "--connect-timeout");
@@ -542,8 +558,8 @@ pub fn validate(args: *const CliArgs, allocator: Allocator) !ValidationResult {
     var errs = std.ArrayListUnmanaged([]const u8){};
     defer errs.deinit(allocator);
 
-    // Skip validation for help/version/gen-hash modes
-    if (args.help or args.version or args.gen_hash_user != null) {
+    // Skip validation for help/version/gen-hash/gen-cert modes
+    if (args.help or args.version or args.gen_hash_user != null or args.gen_cert) {
         return .{
             .valid = true,
             .missing_fields = &.{},
