@@ -104,14 +104,6 @@ pub const SessionWrapper = struct {
         }
     }
 
-    /// Initialize legacy RC4 session encryption with server-negotiated keys
-    pub fn initFastRc4(self: *Self, client_to_server_key: *const [16]u8, server_to_client_key: *const [16]u8) void {
-        if (self.real_session) |*sess| {
-            sess.initFastRc4(client_to_server_key, server_to_client_key);
-        }
-        self.use_encrypt = true;
-    }
-
     /// Get traffic statistics
     pub fn getTrafficStats(self: *const Self) ?TrafficStats {
         if (self.real_session) |*sess| {

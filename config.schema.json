@@ -183,51 +183,6 @@
       },
       "additionalProperties": false
     },
-    "mode": {
-      "type": ["string", "null"],
-      "description": "Network operating mode (L2 bridge proposal §5.1). Storage-only until bridge/monitor runtime lands.",
-      "enum": ["client", "bridge", "monitor"],
-      "default": "client"
-    },
-    "bridge": {
-      "type": "object",
-      "description": "L2 bridge configuration (mode=bridge)",
-      "properties": {
-        "ingress": {
-          "type": ["array", "null"],
-          "description": "Physical interfaces bridged to the VPN. At least one required when mode=bridge.",
-          "items": {
-            "type": "string",
-            "examples": ["en0", "eth0"]
-          }
-        },
-        "fdb_max": {
-          "type": ["integer", "null"],
-          "description": "Maximum FDB (forwarding database) entries",
-          "default": 4096,
-          "minimum": 64
-        },
-        "fdb_aging_s": {
-          "type": ["integer", "null"],
-          "description": "FDB entry aging time in seconds",
-          "default": 300,
-          "minimum": 30
-        }
-      },
-      "additionalProperties": false
-    },
-    "monitor": {
-      "type": "object",
-      "description": "Monitor mode configuration (mode=monitor)",
-      "properties": {
-        "pcap_file": {
-          "type": ["string", "null"],
-          "description": "Write decrypted VPN traffic as PCAP to this file (null = off)",
-          "examples": ["/tmp/vpn.pcap"]
-        }
-      },
-      "additionalProperties": false
-    },
     "log_level": {
       "type": "string",
       "description": "Logging verbosity level",

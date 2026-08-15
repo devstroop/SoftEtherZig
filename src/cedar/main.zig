@@ -8,12 +8,10 @@
 //! - `protocol/` — Wire protocol (tunnel framing, auth, pack, watermark)
 //! - `session/` — Session state, encryption keys
 //! - `tunnel/`  — ARP, DHCP, data loop state machine
-//! - `server/`  — Server-side session keys, encryption, handshake
 
 pub const protocol = @import("protocol/protocol.zig");
 pub const session = @import("session/mod.zig");
 pub const tunnel = @import("tunnel/mod.zig");
-pub const server = @import("server/mod.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

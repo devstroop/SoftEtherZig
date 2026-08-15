@@ -432,7 +432,6 @@ SoftEtherZig/
 ├── scripts/                  Build helpers + Python diagnostics
 ├── docs/
 │   ├── rca/                  Root Cause Analysis documents
-│   ├── bridge_monitor_ops.md Operator + security guide (bridge/monitor modes)
 │   └── CODEBASE_REORGANIZATION.md
 ├── test/
 │   ├── integration/          Handshake fixture, DHCPv6 wire tests

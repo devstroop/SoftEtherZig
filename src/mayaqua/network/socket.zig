@@ -203,31 +203,7 @@ pub const TcpListener = struct {
 
     pub fn accept(self: *TcpListener) !TcpSocket {
         const conn = try self.listener.accept();
-        return .{ .stream = conn.stream };
-    }
-
-    /// Accept a connection, also returning the peer address (C `Accept` +
-    /// `GetIPAddress`). The caller owns the returned socket.
-    pub fn acceptEx(self: *TcpListener) !AcceptedConnection {
-        const conn = try self.listener.accept();
-        return .{
-            .socket = .{ .stream = conn.stream },
-            .peer = .{ .inner = conn.address },
-        };
-    }
-
-    /// Underlying socket fd (e.g. for `poll` in accept loops).
-    pub fn getFd(self: *const TcpListener) posix.socket_t {
-        return if (builtin.os.tag == .windows) @ptrCast(self.listener.stream.handle) else self.listener.stream.handle;
-    }
-
-    /// The real local port. Differs from the requested port when port 0 was
-    /// passed (OS-assigned ephemeral port).
-    pub fn getLocalPort(self: *const TcpListener) u16 {
-        var addr = std.mem.zeroes(net.Address);
-        var len: posix.socklen_t = @sizeOf(net.Address);
-        posix.getsockname(self.listener.stream.handle, &addr.any, &len) catch return 0;
-        return addr.getPort();
+        return .{ .stream = conn };
     }
 
     pub fn close(self: *TcpListener) void {
@@ -237,12 +213,6 @@ pub const TcpListener = struct {
     pub fn getLocalAddress(self: *const TcpListener) Address {
         return .{ .inner = self.listener.listen_address };
     }
-};
-
-/// A connection accepted from a `TcpListener`, carrying its peer address.
-pub const AcceptedConnection = struct {
-    socket: TcpSocket,
-    peer: Address,
 };
 
 // ============================================================================

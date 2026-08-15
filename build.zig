@@ -30,15 +30,6 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "version", version);
     const build_options_mod = build_options.createModule();
 
-    // Pure-Zig MD4 module (NTLM / NT password hash). auth.zig imports it by
-    // name because a relative import from cedar/protocol/ escapes the
-    // package source root (Zig 0.15 rule).
-    const md4_mod = b.createModule(.{
-        .root_source_file = b.path("src/mayaqua/encrypt/md4.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Detect Homebrew OpenSSL path (ARM vs Intel Mac)
     const openssl_lib: []const u8 = if (target_os == .macos) blk: {
         const candidates = [_][]const u8{
@@ -364,7 +355,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
-                .{ .name = "md4", .module = md4_mod },
             },
         }),
     });
@@ -388,63 +378,6 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // ============================================
-    // VPN SERVER (issue #83)
-    // ============================================
-    // The server executable lives below src/ (src/exec/vpnserver/), so per the
-    // Zig 0.15 module-root rule it cannot reach the server core through
-    // relative imports. It imports one named module, `softether` (src/lib.zig,
-    // which re-exports server.* + server_tls + server_cert + cli), instead.
-    const softether_mod = b.createModule(.{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "build_options", .module = build_options_mod },
-            .{ .name = "md4", .module = md4_mod },
-        },
-    });
-    // softether_mod compiles the server/protocol core, whose c_imports.zig
-    // does @cImport(openssl headers). A named module does NOT inherit the
-    // executable's C include paths (linkOpenSsl adds those to the step/root
-    // module), so mirror the integration-test proto_mod include setup.
-    if (target_os == .macos) {
-        softether_mod.addIncludePath(.{ .cwd_relative = openssl_include });
-    } else if (target_os == .windows) {
-        softether_mod.addIncludePath(.{ .cwd_relative = win_openssl_include });
-    }
-    // tunnel.zig @cInclude("zlib.h") in the module tree; Windows has no
-    // system zlib, so the bundled header must reach the module's c import
-    // (same zlib the exe links via addZlib — harmless elsewhere).
-    softether_mod.addIncludePath(b.path("deps/zlib"));
-
-    const vpnserver = b.addExecutable(.{
-        .name = "vpnserver",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/exec/vpnserver/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "softether", .module = softether_mod },
-            },
-        }),
-    });
-
-    linkOpenSsl(b, vpnserver, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
-    vpnserver.linkLibC();
-    addZlib(vpnserver, b);
-
-    b.installArtifact(vpnserver);
-
-    const server_run_cmd = b.addRunArtifact(vpnserver);
-    server_run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        server_run_cmd.addArgs(args);
-    }
-
-    const server_run_step = b.step("run-server", "Run the VPN server");
-    server_run_step.dependOn(&server_run_cmd.step);
-
-    // ============================================
     // SHARED LIBRARY (for FFI: Flutter, Python, etc.)
     // ============================================
     const shared_lib = b.addLibrary(.{
@@ -457,7 +390,6 @@ pub fn build(b: *std.Build) void {
             .strip = optimize != .Debug and target_os != .macos,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
-                .{ .name = "md4", .module = md4_mod },
             },
         }),
     });
@@ -499,7 +431,6 @@ pub fn build(b: *std.Build) void {
             .strip = optimize != .Debug,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
-                .{ .name = "md4", .module = md4_mod },
             },
         }),
     });
@@ -570,9 +501,8 @@ pub fn build(b: *std.Build) void {
         "src/mayaqua/encrypt/sha0.zig",
         "src/mayaqua/encrypt/cipher.zig",
         "src/mayaqua/encrypt/hash.zig",
-        "src/mayaqua/encrypt/md4.zig",
-        "src/mayaqua/encrypt/rc4.zig",
         "src/cedar/protocol/pack.zig",
+        "src/cedar/protocol/auth.zig",
         "src/cedar/protocol/rpc.zig",
         "src/cedar/client/state.zig",
         "src/cedar/client/stats.zig",
@@ -588,8 +518,6 @@ pub fn build(b: *std.Build) void {
         "src/cli/config_manager.zig",
         "src/mayaqua/network/dns_cache.zig",
         "src/mayaqua/network/socks.zig",
-        "src/bridge/fdb.zig",
-        "src/bridge/engine.zig",
     };
 
     for (test_sources) |test_src| {
@@ -639,7 +567,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "build_options", .module = build_options_mod },
-                    .{ .name = "md4", .module = md4_mod },
                 },
             }),
             .filters = &.{"ffi"},
@@ -659,8 +586,6 @@ pub fn build(b: *std.Build) void {
     // and can't be tested standalone.
     // Excludes: adapter.* (needs TUN), client.vpn_client (needs server),
     // protocol.tunnel (zlib state not reset between tests, issue #82).
-    // auth.zig tests run here (not standalone) because it imports md4.zig
-    // outside its source root.
     {
         const all_test = b.addTest(.{
             .root_module = b.createModule(.{
@@ -669,24 +594,13 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "build_options", .module = build_options_mod },
-                    .{ .name = "md4", .module = md4_mod },
                 },
             }),
             .filters = &.{
                 "crypto.",
                 "core.",
                 "net.",
-                "mayaqua_tls.",
-                "mayaqua_http.",
                 "session.",
-                "server.session.",
-                "server.auth.",
-                "server.session_main.",
-                "server.hub.",
-                "server.listener.",
-                "server.accept.",
-                "server.cfg ",
-                "server.vpn_server_config ",
                 "client.state",
                 "client.stats",
                 "client.events",
@@ -700,20 +614,6 @@ pub fn build(b: *std.Build) void {
                 "protocol.rpc",
                 "cli.args",
                 "cli.config_manager",
-                "bridge.loop",
-                "bpfPort",
-                "npcapPort",
-                "etherManagerPort",
-                // auth.zig test blocks (cross-tree md4 import → run here)
-                "ClientAuth",
-                "Challenge generation",
-                "Secure password computation",
-                "Session key derivation",
-                "certPemToDer",
-                "signWithPrivateKey",
-                "extractCertCommonName",
-                "SHA-0 determinism",
-                "MS-CHAPv2",
             },
         });
         linkOpenSsl(b, all_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
@@ -723,30 +623,6 @@ pub fn build(b: *std.Build) void {
 
         const run_all_test = b.addRunArtifact(all_test);
         test_step.dependOn(&run_all_test.step);
-    }
-
-    // vpnserver executable tests (issue #83) — standalone module sharing the
-    // vpnserver target's named imports and linkage. The filter restricts
-    // execution to this file's `server.exe.*` test blocks.
-    {
-        const server_exe_test = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/exec/vpnserver/main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "softether", .module = softether_mod },
-                },
-            }),
-            .filters = &.{"server.exe"},
-        });
-        linkOpenSsl(b, server_exe_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
-        addZlib(server_exe_test, b);
-        if (is_android) setupAndroidNdk(b, server_exe_test, target_arch);
-        server_exe_test.linkLibC();
-
-        const run_server_exe_test = b.addRunArtifact(server_exe_test);
-        test_step.dependOn(&run_server_exe_test.step);
     }
 
     // Protocol integration tests — drive the full handshake (signature →
@@ -759,9 +635,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/cedar/protocol/softether_protocol.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "md4", .module = md4_mod },
-            },
         });
         // proto_mod compiles auth.zig which uses @cImport(openssl/pem.h)
         // and needs the include path to find the header.

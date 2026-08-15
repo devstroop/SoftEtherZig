@@ -169,13 +169,6 @@ pub fn main() !void {
         return;
     }
 
-    // Generate a server TLS certificate/key pair and exit (server bootstrap).
-    // C parity: vpnserver / SiGenerateDefaultCertEx first-run self-signed cert.
-    if (state.cli_args.gen_cert) {
-        try app.gen_cert.generateServerCertFiles(allocator, &state.display, state.cli_args.gen_cert_name);
-        return;
-    }
-
     // Everything else requires 'connect' subcommand
     if (!connect_mode) {
         cli.display.failure(&state.display, "No subcommand. Use 'vpnclient connect <options>' to connect, or 'vpnclient --help' for usage.", .{});

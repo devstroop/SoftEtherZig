@@ -39,23 +39,11 @@
     "ipv6_exclude": null
   },
   
-"reconnect": {
+  "reconnect": {
     "enabled": true,
     "max_attempts": 0
   },
-
-  "mode": "client",
-
-  "bridge": {
-    "ingress": [],
-    "fdb_max": 4096,
-    "fdb_aging_s": 300
-  },
-
-  "monitor": {
-    "pcap_file": null
-  },
-
+  
   "log_level": "info",
   
   "notes": [
@@ -70,10 +58,6 @@
     "mtu: default 1486 (1500 - 14 byte Ethernet header)",
     "reconnect.max_attempts: 0 = infinite retries",
     "routing.default_route: true = all traffic through VPN",
-    "mode: client | bridge | monitor — bridge is Linux-only (AF_PACKET), monitor captures mirrored hub traffic",
-    "bridge.ingress: names of physical interfaces bridged to the VPN (e.g. en0)",
-    "bridge.fdb_max: max FDB entries (default 4096), bridge.fdb_aging_s: FDB aging seconds (default 300)",
-    "monitor.pcap_file: write decrypted VPN traffic as PCAP (null = off; the bounded ring always captures)",
     "All fields are optional - CLI args and env vars will be used as fallback"
   ]
 }
