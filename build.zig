@@ -624,6 +624,7 @@ pub fn build(b: *std.Build) void {
                 "session.",
                 "server.session.",
                 "server.auth.",
+                "server.session_main.",
                 "client.state",
                 "client.stats",
                 "client.events",
