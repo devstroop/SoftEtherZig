@@ -69,7 +69,7 @@ const IfreqSetif = extern struct {
 
 /// bpf_hdr as the kernel writes it (macOS 64-bit): timeval(16) + caplen(4) +
 /// datalen(4) + hdrlen(2) + pad(2) = 28 bytes.
-const BpfHdrSize: usize = 28;
+const BpfHdrSize: usize = 20;
 
 /// Errors specific to the BPF port lifecycle.
 pub const BpfError = error{
@@ -273,20 +273,24 @@ pub const BpfPort = struct {
         var write_off: usize = 0;
         while (off + BpfHdrSize <= n) {
             const hdr = self.scratch[off .. off + BpfHdrSize];
-            const hdrlen = @as(usize, hdr[24]) | (@as(usize, hdr[25]) << 8);
-            const caplen = @as(usize, hdr[16]) | (@as(usize, hdr[17]) << 8) |
-                (@as(usize, hdr[18]) << 16) | (@as(usize, hdr[19]) << 24);
+            const hdrlen = @as(usize, hdr[16]) | (@as(usize, hdr[17]) << 8);
+            const caplen = @as(usize, hdr[8]) | (@as(usize, hdr[9]) << 8) |
+                (@as(usize, hdr[10]) << 16) | (@as(usize, hdr[11]) << 24);
             if (hdrlen < BpfHdrSize or hdrlen + caplen > n - off) break; // malformed tail
             const frame = self.scratch[off + hdrlen .. off + hdrlen + caplen];
             if (write_off + BpfHdrSize + caplen > self.scratch.len) break;
-            // Synthetic header: hdrlen=28, caplen=<frame len>.
+            // Synthetic header (kernel layout: caplen@8, datalen@12, hdrlen@16).
             const out = self.scratch[write_off .. write_off + BpfHdrSize];
             @memset(out, 0);
-            out[16] = @intCast(caplen & 0xFF);
-            out[17] = @intCast((caplen >> 8) & 0xFF);
-            out[18] = @intCast((caplen >> 16) & 0xFF);
-            out[19] = @intCast((caplen >> 24) & 0xFF);
-            out[24] = BpfHdrSize;
+            out[8] = @intCast(caplen & 0xFF);
+            out[9] = @intCast((caplen >> 8) & 0xFF);
+            out[10] = @intCast((caplen >> 16) & 0xFF);
+            out[11] = @intCast((caplen >> 24) & 0xFF);
+            out[12] = out[8];
+            out[13] = out[9];
+            out[14] = out[10];
+            out[15] = out[11];
+            out[16] = BpfHdrSize;
             std.mem.copyForwards(u8, self.scratch[write_off + BpfHdrSize ..][0..caplen], frame);
             write_off += BpfHdrSize + caplen;
             off += hdrlen + caplen;
@@ -305,9 +309,9 @@ pub const BpfPort = struct {
             return null;
         }
         const hdr = self.scratch[off .. off + BpfHdrSize];
-        const hdrlen = @as(usize, hdr[24]) | (@as(usize, hdr[25]) << 8);
-        const caplen = @as(usize, hdr[16]) | (@as(usize, hdr[17]) << 8) |
-            (@as(usize, hdr[18]) << 16) | (@as(usize, hdr[19]) << 24);
+        const hdrlen = @as(usize, hdr[16]) | (@as(usize, hdr[17]) << 8);
+        const caplen = @as(usize, hdr[8]) | (@as(usize, hdr[9]) << 8) |
+            (@as(usize, hdr[10]) << 16) | (@as(usize, hdr[11]) << 24);
         if (hdrlen < BpfHdrSize or hdrlen + caplen > n - off) {
             self.pending_len = 0;
             return null;
@@ -572,9 +576,10 @@ test "bpfPort session frame budget drop accounting" {
 }
 
 test "bpfPort frame chain parser (root-free)" {
-    // Craft a kernel-style buffer: [hdr len 28, caplen 40][40B][hdr][caplen 20][20B]
-    // followed by a malformed tail, and verify parseFrames re-encodes it so
-    // nextPendingFrame pops one frame per call, in order.
+    // Craft a kernel-style buffer (macOS layout: 20-byte bpf_hdr with
+    // caplen@8, datalen@12, hdrlen@16): [hdr caplen 40][40B][hdr caplen 20]
+    // [20B] followed by a malformed tail, and verify parseFrames re-encodes
+    // it so nextPendingFrame pops one frame per call, in order.
     var port = BpfPort{ .allocator = std.testing.allocator };
     port.scratch = try std.testing.allocator.alloc(u8, 4096);
     defer std.testing.allocator.free(port.scratch);
@@ -583,10 +588,12 @@ test "bpfPort frame chain parser (root-free)" {
     @memset(&raw, 0);
     const mk_hdr = struct {
         fn f(buf: []u8, caplen: usize) usize {
-            buf[16] = @intCast(caplen & 0xFF);
-            buf[17] = @intCast((caplen >> 8) & 0xFF);
-            buf[24] = 28;
-            return 28 + caplen;
+            buf[8] = @intCast(caplen & 0xFF);
+            buf[9] = @intCast((caplen >> 8) & 0xFF);
+            buf[12] = buf[8];
+            buf[13] = buf[9];
+            buf[16] = 20;
+            return 20 + caplen;
         }
     }.f;
     var off: usize = 0;
@@ -596,11 +603,11 @@ test "bpfPort frame chain parser (root-free)" {
     @memset(raw[off - 20 .. off], 0xbb);
     off += mk_hdr(raw[off..], 200); // caplen exceeds remaining — malformed
     // parseFrames walks self.scratch (the BPF read buffer) — feed it the
-    // crafted chain (176 valid bytes; the malformed tail is cut off).
-    @memcpy(port.scratch[0..176], raw[0..176]);
+    // crafted chain (160 valid bytes; the malformed tail is cut off).
+    @memcpy(port.scratch[0..160], raw[0..160]);
     port.pending_start = 0;
-    port.pending_len = port.parseFrames(176);
-    try std.testing.expectEqual(@as(usize, 60 + 2 * 28), port.pending_len);
+    port.pending_len = port.parseFrames(160);
+    try std.testing.expectEqual(@as(usize, 60 + 2 * 20), port.pending_len);
 
     var got: usize = 0;
     var last_byte: u8 = 0;
