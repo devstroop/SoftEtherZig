@@ -26,9 +26,11 @@
 //! - Item line: `<type> <name> <value>`, one per line. Types: `string`,
 //!   `uint` (decimal u32), `uint64` (decimal u64), `bool` (`true`/`false`),
 //!   `byte` (Base64).
-//! - Folders: `declare <name>` opens a folder; `{` / `}` delimit its body.
-//!   Indentation is tabs (one per depth) in C output; the parser accepts any
-//!   leading whitespace.
+//! - Folders: `declare <name>` declares a folder that `{` / `}` delimit (C
+//!   only enters a declared folder on the following `{`). Indentation is tabs
+//!   (one per depth) in C output; the parser accepts any leading whitespace.
+//!   Structure is validated: every `declare` needs its opening `{`, and the
+//!   `{` / `}` delimiters must stand alone on their line.
 //! - String values are written raw (rest of line) unless they are empty, wrap
 //!   in whitespace, or contain `"` or `\` — then they are quoted with `\` and
 //!   `"` escaped. The reader unquotes/unescapes exactly that form.
@@ -141,7 +143,11 @@ pub const Folder = struct {
 
     /// Create and append a child folder with `name`. If a child with that
     /// name already exists it is returned instead (C: `CfgCreateFolder`).
-    pub fn addFolder(self: *Folder, name: []const u8) !*Folder {
+    /// Names must be single tokens without syntax characters (see
+    /// `validName`), otherwise the tree would not round-trip through the
+    /// text format.
+    pub fn addFolder(self: *Folder, name: []const u8) Error!*Folder {
+        if (!validName(name)) return Error.SyntaxError;
         if (self.getFolder(name)) |existing| return existing;
         const child = try Folder.init(self.allocator, name);
         errdefer child.deinit();
@@ -152,7 +158,8 @@ pub const Folder = struct {
 
     /// Append an item, replacing any existing item of the same name
     /// (C: `CfgAddItem`).
-    pub fn addItem(self: *Folder, name: []const u8, value: Value) !void {
+    pub fn addItem(self: *Folder, name: []const u8, value: Value) Error!void {
+        if (!validName(name)) return Error.SyntaxError;
         if (self.getItem(name)) |existing| {
             freeValue(self.allocator, existing.value);
             existing.value = value;
@@ -247,25 +254,28 @@ pub const Folder = struct {
         };
     }
 
-    /// Typed setters (C: `CfgAddStr/Int/...` — replace-or-create).
-    pub fn setStr(self: *Folder, path: []const u8, value: []const u8) !void {
-        try self.addItem(path, .{ .string = try self.allocator.dupe(u8, value) });
+    /// Typed setters, replace-or-create (C: `CfgAddStr/Int/...`). The name is
+    /// folder-local: unlike the getters, it is NOT a `/`-separated path.
+    pub fn setStr(self: *Folder, name: []const u8, value: []const u8) !void {
+        if (!validName(name)) return error.SyntaxError;
+        try self.addItem(name, .{ .string = try self.allocator.dupe(u8, value) });
     }
 
-    pub fn setUint(self: *Folder, path: []const u8, value: u32) !void {
-        try self.addItem(path, .{ .uint = value });
+    pub fn setUint(self: *Folder, name: []const u8, value: u32) !void {
+        try self.addItem(name, .{ .uint = value });
     }
 
-    pub fn setUint64(self: *Folder, path: []const u8, value: u64) !void {
-        try self.addItem(path, .{ .uint64 = value });
+    pub fn setUint64(self: *Folder, name: []const u8, value: u64) !void {
+        try self.addItem(name, .{ .uint64 = value });
     }
 
-    pub fn setBool(self: *Folder, path: []const u8, value: bool) !void {
-        try self.addItem(path, .{ .boolean = value });
+    pub fn setBool(self: *Folder, name: []const u8, value: bool) !void {
+        try self.addItem(name, .{ .boolean = value });
     }
 
-    pub fn setBytes(self: *Folder, path: []const u8, value: []const u8) !void {
-        try self.addItem(path, .{ .bytes = try self.allocator.dupe(u8, value) });
+    pub fn setBytes(self: *Folder, name: []const u8, value: []const u8) !void {
+        if (!validName(name)) return error.SyntaxError;
+        try self.addItem(name, .{ .bytes = try self.allocator.dupe(u8, value) });
     }
 };
 
@@ -358,6 +368,10 @@ pub fn parse(allocator: Allocator, text: []const u8) Error!*Cfg {
     defer stack.deinit(allocator);
     try stack.append(allocator, cfg.root);
 
+    // A folder declared via `declare X` whose opening `{` we are still
+    // waiting for (C only enters a declared folder on the following `{`).
+    var pending: ?*Folder = null;
+
     var lines = std.mem.splitScalar(u8, text, '\n');
     var line_no: usize = 0;
     while (lines.next()) |raw_line| {
@@ -365,34 +379,49 @@ pub fn parse(allocator: Allocator, text: []const u8) Error!*Cfg {
         const line = std.mem.trimRight(u8, raw_line, " \t\r");
         if (line.len == 0) continue;
 
-        const current = stack.items[stack.items.len - 1];
-
         const first = firstToken(line) orelse continue;
+        const first_start = @intFromPtr(first.ptr) - @intFromPtr(line.ptr);
 
         if (mem.eql(u8, first, "declare")) {
-            const first_start = @intFromPtr(first.ptr) - @intFromPtr(line.ptr);
+            if (pending != null) return syntaxError("missing '{' after previous declare", line_no);
             const rest = std.mem.trimLeft(u8, line[first_start + first.len ..], " \t");
-            const name = firstToken(rest) orelse {
-                return syntaxError("declare without folder name", line_no);
-            };
-            const child = try current.addFolder(name);
-            try stack.append(allocator, child);
+            const name = firstToken(rest) orelse return syntaxError("declare without folder name", line_no);
+            const name_start = @intFromPtr(name.ptr) - @intFromPtr(rest.ptr);
+            if (std.mem.indexOfNone(u8, rest[name_start + name.len ..], " \t") != null) {
+                return syntaxError("extra token after folder name", line_no);
+            }
+            const current = stack.items[stack.items.len - 1];
+            pending = try current.addFolder(name);
             continue;
         }
 
-        if (mem.eql(u8, first, "{")) continue; // body delimiter, already open
+        if (mem.eql(u8, first, "{")) {
+            if (std.mem.indexOfNone(u8, line[first_start + 1 ..], " \t") != null) {
+                return syntaxError("unexpected token after '{'", line_no);
+            }
+            const declared = pending orelse return syntaxError("'{' without a preceding declare", line_no);
+            pending = null;
+            try stack.append(allocator, declared);
+            continue;
+        }
 
         if (mem.eql(u8, first, "}")) {
+            if (std.mem.indexOfNone(u8, line[first_start + 1 ..], " \t") != null) {
+                return syntaxError("unexpected token after '}'", line_no);
+            }
+            if (pending != null) return syntaxError("missing '{' after previous declare", line_no);
             if (stack.items.len <= 1) return syntaxError("unmatched '}'", line_no);
             _ = stack.pop();
             continue;
         }
 
         // Item line: `<type> <name> <value>`.
+        if (pending != null) return syntaxError("item before '{' of folder", line_no);
+        const current = stack.items[stack.items.len - 1];
         try parseItem(current, line, first, line_no);
     }
 
-    if (stack.items.len != 1) return syntaxError("unclosed folder at end of input", line_no);
+    if (stack.items.len != 1 or pending != null) return syntaxError("unclosed folder at end of input", line_no);
     return cfg;
 }
 
@@ -456,6 +485,20 @@ fn freeValue(allocator: Allocator, value: Value) void {
     }
 }
 
+/// Names are emitted verbatim, and the text format tokenizes them on
+/// whitespace and treats `{` `}` `"` `\` `/` as syntax. Reject those at
+/// mutation time so any tree that can be built can also round-trip.
+fn validName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        switch (c) {
+            ' ', '\t', '{', '}', '"', '\\', '/' => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
 // ============================================================================
 // Escaping / encoding
 // ============================================================================
@@ -485,6 +528,11 @@ fn unquote(allocator: Allocator, value: []const u8) ![]u8 {
             out[n] = value[i];
             n += 1;
         } else if (c == '"') {
+            // Only whitespace may follow the closing quote; anything else
+            // means the value is malformed and would be silently dropped.
+            if (std.mem.indexOfNone(u8, value[i + 1 ..], " \t") != null) {
+                return Error.SyntaxError;
+            }
             return allocator.realloc(out, n);
         } else {
             out[n] = c;
@@ -710,6 +758,29 @@ test "server.cfg malformed input rejected" {
     try testing.expectError(Error.SyntaxError, parse(allocator, "declare\n"));
     try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\n{\n"));
     try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\n{\n\tstring A \"unterminated\n}\n"));
+
+    // Structural validation: `declare` needs its `{`, delimiters must stand
+    // alone, and a quoted value may not have trailing junk.
+    try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\n}\n"));
+    try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\nstring A v\n}\n"));
+    try testing.expectError(Error.SyntaxError, parse(allocator, "declare X {\n}\n"));
+    try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\n{ }\n"));
+    try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\n{\n\tstring A \"v\" trailing\n}\n"));
+    try testing.expectError(Error.SyntaxError, parse(allocator, "declare X\n"));
+}
+
+test "server.cfg rejects unsafe folder/item names" {
+    const allocator = testing.allocator;
+    const cfg = try Cfg.init(allocator);
+    defer cfg.deinit();
+
+    try testing.expectError(Error.SyntaxError, cfg.root.addFolder("bad name"));
+    try testing.expectError(Error.SyntaxError, cfg.root.addFolder("a/b"));
+    try testing.expectError(Error.SyntaxError, cfg.root.addFolder("x{y"));
+    var val: [1]u8 = .{'v'};
+    try testing.expectError(Error.SyntaxError, cfg.root.addItem("x y", .{ .string = &val }));
+    try testing.expectError(Error.SyntaxError, cfg.root.setStr("A/B", "v"));
+    try testing.expectError(Error.SyntaxError, cfg.root.setStr("", "v"));
 }
 
 test "server.cfg CFG_RW save/load with backup" {
