@@ -79,6 +79,15 @@ pub const bridge = struct {
     pub const engine = @import("bridge/engine.zig");
 };
 
+// Server core (M1 epic) — session keys, data-channel encryption, session loop,
+// TCP listener (issue #77)
+pub const server = struct {
+    pub const auth = @import("cedar/server/auth.zig");
+    pub const session = @import("cedar/server/session.zig");
+    pub const session_main = @import("cedar/server/session_main.zig");
+    pub const listener = @import("cedar/server/listener.zig");
+};
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
@@ -116,6 +125,7 @@ test "library exports" {
     _ = ReconnectConfig;
     _ = core;
     _ = bridge;
+    _ = server;
     _ = parseIpv4;
     _ = formatIpv4;
 }

@@ -9,6 +9,7 @@ const Allocator = mem.Allocator;
 const testing = std.testing;
 
 const session = @import("session.zig");
+const Protocol = @import("../protocol/softether_protocol.zig").Protocol;
 
 // Local crypto helpers
 fn randomBytes(buf: []u8) void {
@@ -42,11 +43,11 @@ pub const Config = struct {
     /// Maximum buffered packet size
     pub const max_buffering_packet_size: usize = 1024 * 1024;
 
-    /// Signature for SoftEther protocol
-    pub const protocol_signature = "SE Vu";
+    /// Signature for SoftEther protocol (delegated to protocol layer — single source of truth)
+    pub const protocol_signature = Protocol.protocol_signature;
 
-    /// Protocol version
-    pub const protocol_version: u32 = 0x00000413;
+    /// Protocol version (delegated to protocol layer — single source of truth)
+    pub const protocol_version: u32 = Protocol.protocol_version;
 };
 
 // ============================================================================
