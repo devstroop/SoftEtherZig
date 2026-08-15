@@ -1,10 +1,12 @@
 //! AF_PACKET L2 ingress port (L2 Network Bridge proposal §4.1, H-3/H-5/H-8).
 //!
-//! Linux-only NetPort implementation over AF_PACKET (SOCK_RAW, ETH_P_ALL)
+//! Linux-kernel NetPort implementation over AF_PACKET (SOCK_RAW, ETH_P_ALL)
 //! bound to a named interface, used by the bridge pump (issue #56) as the
-//! physical-side ingress. Mirrors `port.l3Port()`: the caller owns the
-//! `AfPacketPort` instance and the returned `NetPort` points at it; the pump
-//! drives open/close/read/write uniformly through the vtable.
+//! physical-side ingress. Runs on Linux and Android (same kernel; Android
+//! wires this up behind `ether_manager.zig`, issue #59). Mirrors
+//! `port.l3Port()`: the caller owns the `AfPacketPort` instance and the
+//! returned `NetPort` points at it; the pump drives open/close/read/write
+//! uniformly through the vtable.
 //!
 //! Design decisions (proposal §4.6, §6):
 //! - **CAP_NET_RAW detection (H-8):** `socket(AF_PACKET)` fails with EPERM
@@ -89,7 +91,7 @@ const IfreqHwaddr = extern struct {
 
 /// Errors specific to AF_PACKET port lifecycle.
 pub const AfPacketError = error{
-    /// Ports can only be opened on Linux.
+    /// Ports can only be opened on a Linux kernel (Linux/Android).
     NotLinux,
     /// Interface name invalid or not found.
     InterfaceNotFound,
@@ -146,8 +148,8 @@ pub const AfPacketPort = struct {
         // H-8: without CAP_NET_RAW, socket(2) fails with EPERM — detect at
         // open and fail cleanly.
         const sock = posix.socket(AF_PACKET, posix.SOCK.RAW | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, ethProtoAll()) catch |err| switch (builtin.os.tag) {
-            // EPERM maps to AccessDenied on Linux (incl. Android abi),
-            // PermissionDenied elsewhere. Only mention the name that
+            // EPERM maps to AccessDenied on the Linux kernel (incl. Android
+            // abi), PermissionDenied elsewhere. Only mention the name that
             // exists per target.
             .linux => switch (err) {
                 error.AccessDenied => return error.NoCapability,

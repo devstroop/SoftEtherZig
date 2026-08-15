@@ -52,12 +52,24 @@ they are called out under **Breaking** in each entry.
   drain in `runBridgeLoop` now reads ports whose `getFd()` is `invalid_fd`
   on every iteration (poll() skips fd -1), keeping the AF_PACKET path
   behavior unchanged.
-- **Per-OS ingress port dispatch in `runBridgeLoop`** (#60/#61). The bridge
+- **Android EthernetManager best-effort L2 port** (`adapter/ether_manager.zig`,
+  L2 Network Bridge proposal §4.1, H-8; issue #59). Android `NetPort`
+  implementation composed over the shared AF_PACKET core (same kernel):
+  `etherManagerPort(&impl, ifname)` mirrors the `afPacketPort` ownership
+  pattern. `open()` is Android-gated (`error.NotAndroid` elsewhere), resolves
+  the configured interface against getifaddrs(3) with a best-effort fallback
+  to the first wired NIC (`eth*`/`enx*`/`enp*`/`ens*`/`usb*`/`rndis*`) and
+  fails with `error.UnsupportedRole` when the platform exposes no NIC at all.
+  A missing CAP_NET_RAW grant surfaces as `error.NoCapability` (H-8) — clean,
+  enumerable degrades, **never a silent fallback to client mode**. Stock
+  unrooted Android is documented as unsupported (ops guide §2b).
+- **Per-OS ingress port dispatch in `runBridgeLoop`** (#60/#61/#59). The bridge
   pump's port construction is a comptime dispatch: Linux → AF_PACKET,
-  macOS → BPF, Windows → Npcap; other targets fail cleanly with
-  `error.AdapterConfigurationFailed`. No new FFI exports (76 total).
+  macOS → BPF, Windows → Npcap, Android → EthernetManager (linux kernel +
+  android ABI, the same convention as `mod.zig`); other targets fail cleanly
+  with `error.AdapterConfigurationFailed`. No new FFI exports (76 total).
 - **AF_PACKET L2 port** (`adapter/af_packet.zig`, L2 Network Bridge proposal
-  §4.1; issues H-3/H-5/H-8). Linux-only `NetPort` implementation over
+  §4.1; issues H-3/H-5/H-8). Linux-kernel `NetPort` implementation over
   AF_PACKET (SOCK_RAW, ETH_P_ALL): `afPacketPort(&impl, ifname)` mirrors the
   `l3Port` ownership pattern, `open()` binds to the named interface.
   CAP_NET_RAW detected at open (`error.NoCapability` on EPERM — never a
