@@ -10,6 +10,32 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- **BPF L2 port** (`adapter/bpf.zig`, L2 Network Bridge proposal §4.1, H-3/
+  H-5/H-7; issue #60). macOS `NetPort` implementation over `/dev/bpfN`:
+  `bpfPort(&impl, allocator, ifname)` mirrors the `afPacketPort` ownership
+  pattern; `open()` attaches with `BIOCSETIF`, enables `BIOCPROMISC` +
+  `BIOCIMMEDIATE` + `BIOCNONBLOCK` (pollable fd for the pump), clamps the
+  MTU to the 1514-byte `SESSION_FRAME_BUDGET` (H-3), warns when the ingress
+  NIC carries a host IP (H-5), and reads the MAC/MTU via `getifaddrs` +
+  `SIOCGIFMTU`. BPF coalesces frames, so `read()` parses the `bpf_hdr`
+  chain and serves exactly one frame per call (oversized frames counted as
+  drops). Direct open first (root); otherwise falls back to the setuid
+  helper's new `--bpf-open` mode (H-7).
+- **SUID helper `--bpf-open` mode** (`utun_helper_main.zig`, H-7; #60).
+  Tightly-scoped extension of `softether-utun-helper`: validates the
+  interface name against a conservative charset, opens only allowlisted
+  `/dev/bpf0..9`, configures capture, and passes the fd back via SCM_RIGHTS
+  — **no shell execution in this mode**. Parent side `escalatedBpfOpen`
+  in `utun_escalate.zig` reuses the size-staleness install check; without a
+  usable helper the port fails cleanly (`error.NoCapability`), never crashes.
+- **Per-OS ingress port dispatch in `runBridgeLoop`** (#60). The bridge
+  pump's port construction is now a comptime dispatch: Linux → AF_PACKET,
+  macOS → BPF (this PR); non-Linux/macOS targets fail cleanly with
+  `error.AdapterConfigurationFailed`. No new FFI exports (76 total).
+- **Bridge BPF live smoke on CI** (#60). The macOS matrix installs the
+  freshly-built SUID helper (passwordless sudo) and re-runs the suite so
+  `bpf.zig`'s live tests exercise a real `/dev/bpfN` attach + lo0
+  round-trip; without a privileged path the live tests skip cleanly.
 - **AF_PACKET L2 port** (`adapter/af_packet.zig`, L2 Network Bridge proposal
   §4.1; issues H-3/H-5/H-8). Linux-only `NetPort` implementation over
   AF_PACKET (SOCK_RAW, ETH_P_ALL): `afPacketPort(&impl, ifname)` mirrors the

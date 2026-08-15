@@ -700,6 +700,7 @@ pub fn build(b: *std.Build) void {
                 "cli.args",
                 "cli.config_manager",
                 "bridge.loop",
+                "bpfPort",
                 // auth.zig test blocks (cross-tree md4 import → run here)
                 "ClientAuth",
                 "Challenge generation",

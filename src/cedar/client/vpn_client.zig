@@ -3285,21 +3285,46 @@ pub const VpnClient = struct {
         single_sock.clearTimeouts();
         single_sock.setNonBlocking() catch |e| std.log.warn("setNonBlocking (bridge) failed: {}", .{e});
 
-        // === Open ingress ports (AF_PACKET; Linux-only) ===
+        // === Open ingress ports (per-OS L2 port; proposal §4.1) ===
         const ifnames = self.config.bridge.ingress_ifs;
         if (ifnames.len == 0) {
             std.log.err("bridge mode: no ingress interfaces configured (softether_add_ingress_interface)", .{});
             return ClientError.AdapterConfigurationFailed;
         }
-        if (builtin.os.tag != .linux) {
-            std.log.err("bridge mode requires Linux AF_PACKET ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos) {
+            std.log.err("bridge mode requires AF_PACKET (Linux) or BPF (macOS) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
             return ClientError.AdapterConfigurationFailed;
         }
 
         const af_packet = @import("../../adapter/af_packet.zig");
+        const bpf_mod = @import("../../adapter/bpf.zig");
+        // Per-OS ingress port implementation:
+        //   linux   → AF_PACKET (issue #53, merged)
+        //   macos   → BPF /dev/bpfN (issue #60 — fd granted by the setuid
+        //             helper in --bpf-open mode when not running as root)
+        //   windows → Npcap (issue #61 — lands on its own branch)
+        const Ingress = struct {
+            const Store = if (builtin.os.tag == .linux)
+                af_packet.AfPacketPort
+            else if (builtin.os.tag == .macos)
+                bpf_mod.BpfPort
+            else
+                u8;
+
+            fn make(store: *Store, allocator: std.mem.Allocator, name: []const u8) adapter_mod.NetPort {
+                if (builtin.os.tag == .linux) {
+                    return af_packet.afPacketPort(@as(*af_packet.AfPacketPort, @ptrCast(store)), name);
+                } else if (builtin.os.tag == .macos) {
+                    return bpf_mod.bpfPort(@as(*bpf_mod.BpfPort, @ptrCast(store)), allocator, name);
+                } else {
+                    unreachable;
+                }
+            }
+        };
+
         // Stable store: BridgeLoop dupes the NetPort array but the impl
         // pointers must stay valid for the whole pump lifetime.
-        const port_storage = try self.allocator.alloc(af_packet.AfPacketPort, ifnames.len);
+        const port_storage = try self.allocator.alloc(Ingress.Store, ifnames.len);
         defer self.allocator.free(port_storage);
         var net_ports = try self.allocator.alloc(adapter_mod.NetPort, ifnames.len);
         defer self.allocator.free(net_ports);
@@ -3309,7 +3334,7 @@ pub const VpnClient = struct {
         }
 
         for (port_storage, ifnames, 0..) |*store, ifname, i| {
-            net_ports[i] = af_packet.afPacketPort(store, ifname);
+            net_ports[i] = Ingress.make(store, self.allocator, ifname);
             net_ports[i].open() catch |err| {
                 std.log.err("bridge: failed to open ingress interface '{s}': {}", .{ ifname, err });
                 return ClientError.AdapterConfigurationFailed;
