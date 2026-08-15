@@ -90,6 +90,7 @@ pub const server = struct {
     pub const accept = @import("cedar/server/accept.zig");
     pub const cfg = @import("cedar/server/config/cfg.zig");
     pub const vpn_server_config = @import("cedar/server/config/vpn_server_config.zig");
+    pub const admin_rpc = @import("cedar/server/admin/rpc.zig");
 };
 
 // vpnserver executable bootstrap (issue #83) — TLS accept/cert primitives and
