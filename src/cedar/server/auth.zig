@@ -117,7 +117,7 @@ pub const Hub = struct {
         auth_type: UserAuthType,
         password: ?[]const u8,
     ) !*User {
-        if (self.users.contains(name)) return error.UserExists;
+        if (self.getUser(name) != null) return error.UserExists;
 
         const u = try self.allocator.create(User);
         errdefer self.allocator.destroy(u);
@@ -136,16 +136,24 @@ pub const Hub = struct {
         return u;
     }
 
+    /// Look up a user by name, matching case-insensitively (C: `AcGetUser` →
+    /// `SearchUser` with `StrCmpi`; SoftEther account names are not
+    /// case-sensitive).
     pub fn getUser(self: *Hub, name: []const u8) ?*User {
-        return self.users.get(name);
+        var it = self.users.iterator();
+        while (it.next()) |entry| {
+            if (eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
+        }
+        return null;
     }
 
-    /// Remove a user account, returning false if it did not exist.
+    /// Remove a user account, returning false if it did not exist. Matches
+    /// case-insensitively like `getUser`.
     pub fn removeUser(self: *Hub, name: []const u8) bool {
-        const u = self.users.get(name) orelse return false;
+        const u = self.getUser(name) orelse return false;
         // Remove from the map first: it reads the key (u.name) for its
         // equality check before we release it.
-        _ = self.users.remove(name);
+        _ = self.users.remove(u.name);
         u.deinit(self.allocator);
         self.allocator.destroy(u);
         return true;

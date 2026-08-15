@@ -91,7 +91,19 @@ pub const server = struct {
     pub const session_main = @import("cedar/server/session_main.zig");
     pub const hub = @import("cedar/server/hub.zig");
     pub const listener = @import("cedar/server/listener.zig");
+    pub const accept = @import("cedar/server/accept.zig");
 };
+
+// vpnserver executable bootstrap (issue #83) — TLS accept/cert primitives and
+// the shared first-run `--gen-cert` helper. The `exec/vpnserver/main.zig`
+// module root is nested below src/, so it reaches these through `lib` instead
+// of escaping relative imports (Zig 0.15 module-root rule).
+pub const server_tls = @import("mayaqua/network/tls.zig");
+pub const server_cert = @import("app/gen_cert.zig");
+
+// CLI display/args (used by the vpnserver executable, whose module root is
+// nested below src/ and reaches these through `lib`).
+pub const cli = @import("cli/mod.zig");
 
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
@@ -132,6 +144,9 @@ test "library exports" {
     _ = bridge;
     _ = monitor;
     _ = server;
+    _ = server_tls;
+    _ = server_cert;
+    _ = cli;
     _ = parseIpv4;
     _ = formatIpv4;
 }

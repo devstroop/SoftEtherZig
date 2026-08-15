@@ -21,15 +21,15 @@ const AppState = state_mod.AppState;
 
 const pid_filename = "softether.pid";
 
-fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8, filename: []const u8) ?[]const u8 {
     // Try XDG_RUNTIME_DIR first (e.g. /run/user/1000/)
     if (std.process.getEnvVarOwned(std.heap.page_allocator, "XDG_RUNTIME_DIR")) |dir| {
         defer std.heap.page_allocator.free(dir);
-        return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, pid_filename }) catch null;
+        return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, filename }) catch null;
     } else |_| {}
 
     // Fall back to /tmp
-    return std.fmt.bufPrint(buf, "/tmp/{s}", .{pid_filename}) catch null;
+    return std.fmt.bufPrint(buf, "/tmp/{s}", .{filename}) catch null;
 }
 
 fn getCurrentPid() u32 {
@@ -40,9 +40,9 @@ fn getCurrentPid() u32 {
     }
 }
 
-fn writePidFile(display_ctx: *cli.display.DisplayContext) bool {
+pub fn writePidFile(display_ctx: *cli.display.DisplayContext, filename: []const u8) bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const pid_path = getPidFilePath(&path_buf) orelse return false;
+    const pid_path = getPidFilePath(&path_buf, filename) orelse return false;
 
     // Check for stale PID file
     if (std.fs.cwd().openFile(pid_path, .{})) |file| {
@@ -79,9 +79,9 @@ fn writePidFile(display_ctx: *cli.display.DisplayContext) bool {
     return true;
 }
 
-fn removePidFile() void {
+pub fn removePidFile(filename: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const pid_path = getPidFilePath(&path_buf) orelse return;
+    const pid_path = getPidFilePath(&path_buf, filename) orelse return;
     std.fs.cwd().deleteFile(pid_path) catch {};
 }
 
@@ -161,11 +161,11 @@ pub fn run(state: *AppState) !void {
     cli.display.info(&state.display, "Running in daemon mode...", .{});
 
     // Write PID file (S-038)
-    if (!writePidFile(&state.display)) {
+    if (!writePidFile(&state.display, pid_filename)) {
         state.setExitCode(1);
         return;
     }
-    defer removePidFile();
+    defer removePidFile(pid_filename);
 
     // Create VPN client
     const config = config_mod.buildClientConfig(&state.cli_args) catch |err| {
