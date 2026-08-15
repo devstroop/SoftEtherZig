@@ -138,6 +138,21 @@ pub const Pack = struct {
         return &self.elements.items[self.elements.items.len - 1];
     }
 
+    /// Get or create an element whose values array is ensured to have room for
+    /// the given `index` (C `PackAdd*Ex` pre-sizes the element to `total` and
+    /// fills slot `index`; here any missing slots are padded with zero values
+    /// so that callers may write indices in any order).
+    fn getElementEx(self: *Self, name: []const u8, value_type: ValueType, index: usize) !*Element {
+        const elem = try self.getOrCreateElement(name, value_type);
+        if (elem.values.items.len > index) {
+            return error.DuplicateValue;
+        }
+        while (elem.values.items.len < index) {
+            try elem.values.append(self.allocator, zeroValue(value_type));
+        }
+        return elem;
+    }
+
     /// Add an integer value
     pub fn addInt(self: *Self, name: []const u8, value: u32) !void {
         const elem = try self.getOrCreateElement(name, .int);
@@ -174,6 +189,47 @@ pub const Pack = struct {
     /// Add a boolean (stored as int)
     pub fn addBool(self: *Self, name: []const u8, value: bool) !void {
         try self.addInt(name, if (value) 1 else 0);
+    }
+
+    /// C `PackAddIntEx` (Pack.c): append the `index`-th int value of an element.
+    pub fn addIntEx(self: *Self, name: []const u8, value: u32, index: usize) !void {
+        const elem = try self.getElementEx(name, .int, index);
+        try elem.values.append(self.allocator, .{ .int = value });
+    }
+
+    /// C `PackAddInt64Ex` (Pack.c).
+    pub fn addInt64Ex(self: *Self, name: []const u8, value: u64, index: usize) !void {
+        const elem = try self.getElementEx(name, .int64, index);
+        try elem.values.append(self.allocator, .{ .int64 = value });
+    }
+
+    /// C `PackAddStrEx` (Pack.c).
+    pub fn addStrEx(self: *Self, name: []const u8, value: []const u8, index: usize) !void {
+        const elem = try self.getElementEx(name, .str, index);
+        const copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(copy);
+        try elem.values.append(self.allocator, .{ .str = copy });
+    }
+
+    /// C `PackAddUniStrEx` (Pack.c).
+    pub fn addUniStrEx(self: *Self, name: []const u8, value: []const u8, index: usize) !void {
+        const elem = try self.getElementEx(name, .unistr, index);
+        const copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(copy);
+        try elem.values.append(self.allocator, .{ .unistr = copy });
+    }
+
+    /// C `PackAddDataEx` (Pack.c).
+    pub fn addDataEx(self: *Self, name: []const u8, value: []const u8, index: usize) !void {
+        const elem = try self.getElementEx(name, .data, index);
+        const copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(copy);
+        try elem.values.append(self.allocator, .{ .data = copy });
+    }
+
+    /// C `PackAddBoolEx` (Pack.c): bool stored as int.
+    pub fn addBoolEx(self: *Self, name: []const u8, value: bool, index: usize) !void {
+        try self.addIntEx(name, if (value) 1 else 0, index);
     }
 
     /// Get an integer value
@@ -220,6 +276,58 @@ pub const Pack = struct {
     /// Check if element exists
     pub fn contains(self: *const Self, name: []const u8) bool {
         return self.findElementConst(name) != null;
+    }
+
+    /// C `PackGetIndexCount` (Pack.c): the number of values on an element.
+    pub fn getValueCount(self: *const Self, name: []const u8) usize {
+        const elem = self.findElementConst(name) orelse return 0;
+        return elem.values.items.len;
+    }
+
+    /// C `PackGetIntEx` (Pack.c): the `index`-th int value of an element.
+    pub fn getIntEx(self: *const Self, name: []const u8, index: usize) ?u32 {
+        const elem = self.findElementConst(name) orelse return null;
+        if (elem.value_type != .int) return null;
+        if (index >= elem.values.items.len) return null;
+        return elem.values.items[index].int;
+    }
+
+    /// C `PackGetInt64Ex` (Pack.c).
+    pub fn getInt64Ex(self: *const Self, name: []const u8, index: usize) ?u64 {
+        const elem = self.findElementConst(name) orelse return null;
+        if (elem.value_type != .int64) return null;
+        if (index >= elem.values.items.len) return null;
+        return elem.values.items[index].int64;
+    }
+
+    /// C `PackGetStrEx` (Pack.c).
+    pub fn getStrEx(self: *const Self, name: []const u8, index: usize) ?[]const u8 {
+        const elem = self.findElementConst(name) orelse return null;
+        if (elem.value_type != .str) return null;
+        if (index >= elem.values.items.len) return null;
+        return elem.values.items[index].str;
+    }
+
+    /// C `PackGetUniStrEx` (Pack.c).
+    pub fn getUniStrEx(self: *const Self, name: []const u8, index: usize) ?[]const u8 {
+        const elem = self.findElementConst(name) orelse return null;
+        if (elem.value_type != .unistr) return null;
+        if (index >= elem.values.items.len) return null;
+        return elem.values.items[index].unistr;
+    }
+
+    /// C `PackGetDataEx` (Pack.c).
+    pub fn getDataEx(self: *const Self, name: []const u8, index: usize) ?[]const u8 {
+        const elem = self.findElementConst(name) orelse return null;
+        if (elem.value_type != .data) return null;
+        if (index >= elem.values.items.len) return null;
+        return elem.values.items[index].data;
+    }
+
+    /// C `PackGetBoolEx` (Pack.c): bool stored as int.
+    pub fn getBoolEx(self: *const Self, name: []const u8, index: usize) ?bool {
+        const v = self.getIntEx(name, index) orelse return null;
+        return v != 0;
     }
 
     /// Serialize the Pack to binary format
@@ -273,6 +381,17 @@ fn writeString(writer: anytype, str: []const u8) !void {
     try writer.writeInt(u32, @intCast(str.len + 1), .big); // +1 for null terminator (not written)
     try writer.writeAll(str);
     // Note: null terminator is NOT written to stream, just counted in length
+}
+
+/// A zero value of a given type (used to pad index gaps in `getElementEx`).
+fn zeroValue(value_type: ValueType) Value {
+    return switch (value_type) {
+        .int => .{ .int = 0 },
+        .int64 => .{ .int64 = 0 },
+        .data => .{ .data = "" },
+        .str => .{ .str = "" },
+        .unistr => .{ .unistr = "" },
+    };
 }
 
 // Write an element
@@ -543,4 +662,52 @@ test "Pack element not found" {
 
     try testing.expectEqual(@as(?u32, null), pack_obj.getInt("nonexistent"));
     try testing.expectEqual(@as(?[]const u8, null), pack_obj.getStr("nonexistent"));
+}
+
+test "Pack indexed accessors (PackGetIntEx/IndexCount)" {
+    const allocator = testing.allocator;
+
+    var p = Pack.init(allocator);
+    defer p.deinit();
+
+    try p.addInt("Ports", 443);
+    try p.addInt("Ports", 992);
+    try p.addInt("Ports", 5555);
+    try p.addStr("Names", "one");
+    try p.addStr("Names", "two");
+    try p.addBool("Flags", true);
+    try p.addBool("Flags", false);
+    try p.addInt64("Times", 1);
+    try p.addInt64("Times", 2);
+    try p.addUniStr("Notes", "x");
+    try p.addData("Blobs", &[_]u8{ 1, 2 });
+
+    try testing.expectEqual(@as(usize, 3), p.getValueCount("Ports"));
+    try testing.expectEqual(@as(usize, 0), p.getValueCount("Missing"));
+    try testing.expectEqual(@as(u32, 992), p.getIntEx("Ports", 1).?);
+    try testing.expectEqual(@as(?u32, null), p.getIntEx("Ports", 3));
+    try testing.expectEqualStrings("two", p.getStrEx("Names", 1).?);
+    try testing.expectEqual(@as(?bool, false), p.getBoolEx("Flags", 1));
+    try testing.expectEqual(@as(u64, 2), p.getInt64Ex("Times", 1).?);
+    try testing.expectEqualStrings("x", p.getUniStrEx("Notes", 0).?);
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 2 }, p.getDataEx("Blobs", 0).?);
+
+    try p.addIntEx("ExInts", 100, 0);
+    try p.addIntEx("ExInts", 200, 1);
+    try p.addStrEx("ExStrs", "alpha", 0);
+    try p.addStrEx("ExStrs", "beta", 1);
+    try p.addUniStrEx("ExUni", "gamma", 0);
+    try p.addDataEx("ExData", &[_]u8{ 9, 8 }, 0);
+    try p.addBoolEx("ExBools", true, 0);
+    try p.addBoolEx("ExBools", false, 1);
+    try p.addInt64Ex("ExTimes", 5, 0);
+
+    try testing.expectEqual(@as(usize, 2), p.getValueCount("ExInts"));
+    try testing.expectEqual(@as(u32, 100), p.getIntEx("ExInts", 0).?);
+    try testing.expectEqual(@as(u32, 200), p.getIntEx("ExInts", 1).?);
+    try testing.expectEqualStrings("beta", p.getStrEx("ExStrs", 1).?);
+    try testing.expectEqualStrings("gamma", p.getUniStrEx("ExUni", 0).?);
+    try testing.expectEqualSlices(u8, &[_]u8{ 9, 8 }, p.getDataEx("ExData", 0).?);
+    try testing.expectEqual(@as(?bool, false), p.getBoolEx("ExBools", 1));
+    try testing.expectEqual(@as(u64, 5), p.getInt64Ex("ExTimes", 0).?);
 }
