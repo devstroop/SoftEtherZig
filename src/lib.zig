@@ -77,6 +77,7 @@ pub const core = @import("mayaqua/kernel/mod.zig");
 pub const bridge = struct {
     pub const fdb = @import("bridge/fdb.zig");
     pub const engine = @import("bridge/engine.zig");
+    pub const loop = @import("bridge/loop.zig");
 };
 
 /// Parse an IPv4 address string to u32

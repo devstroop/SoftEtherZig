@@ -81,7 +81,9 @@ const IfreqMtu = extern struct {
 
 const IfreqHwaddr = extern struct {
     ifr_name: [IFNAMSIZ]u8,
-    ifr_hwaddr: posix.sockaddr,
+    // Raw 16-byte sockaddr region; `sa_data` naming differs per platform
+    // (Linux: `data`, BSDs: `sa_data`) so copy bytes 2..8 manually.
+    ifr_hwaddr: [16]u8,
     padding: [8]u8,
 };
 
@@ -97,6 +99,8 @@ pub const AfPacketError = error{
     BindFailed,
     /// setsockopt(PACKET_ADD/DROP_MEMBERSHIP) failed.
     PromiscFailed,
+    /// Port has been closed / fd is invalid.
+    DeviceClosed,
     /// Caller lacks CAP_NET_RAW (H-8); open() returned EPERM on socket(2).
     NoCapability,
     /// Frames larger than the session budget (1514) are not forwarded (H-3).
@@ -141,9 +145,18 @@ pub const AfPacketPort = struct {
 
         // H-8: without CAP_NET_RAW, socket(2) fails with EPERM — detect at
         // open and fail cleanly.
-        const sock = posix.socket(AF_PACKET, posix.SOCK.RAW | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, ethProtoAll()) catch |err| switch (err) {
-            error.PermissionDenied => return error.NoCapability,
-            else => return error.OpenFailed,
+        const sock = posix.socket(AF_PACKET, posix.SOCK.RAW | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, ethProtoAll()) catch |err| switch (builtin.os.tag) {
+            // EPERM maps to AccessDenied on Linux (incl. Android abi),
+            // PermissionDenied elsewhere. Only mention the name that
+            // exists per target.
+            .linux => switch (err) {
+                error.AccessDenied => return error.NoCapability,
+                else => return error.OpenFailed,
+            },
+            else => switch (err) {
+                error.PermissionDenied => return error.NoCapability,
+                else => return error.OpenFailed,
+            },
         };
         self.fd = sock;
         errdefer self.close();
@@ -187,7 +200,7 @@ pub const AfPacketPort = struct {
         @memcpy(req.ifr_name[0..self.ifname.len], self.ifname);
         if (std.c.ioctl(self.fd, SIOCGIFHWADDR, @intFromPtr(&req)) < 0) return error.InterfaceNotFound;
         var mac: [6]u8 = undefined;
-        @memcpy(&mac, &req.ifr_hwaddr.sa_data);
+        @memcpy(&mac, req.ifr_hwaddr[2..8]);
         return mac;
     }
 
@@ -268,7 +281,8 @@ pub const AfPacketPort = struct {
             .mr_address = [_]u8{0} ** 8,
         };
         const opt = if (on) PACKET_ADD_MEMBERSHIP else PACKET_DROP_MEMBERSHIP;
-        posix.setsockopt(self.fd, SOL_PACKET, opt, std.mem.asBytes(&req)) catch {
+        const optname: u32 = @intCast(opt);
+        posix.setsockopt(self.fd, SOL_PACKET, optname, std.mem.asBytes(&req)) catch {
             self.promisc = false;
             return error.PromiscFailed;
         };
@@ -355,8 +369,8 @@ const IfAddrs = extern struct {
 /// getifaddrs(3) — same shape as `nic_enumerate`.
 fn hostAddressesPresent(ifname: []const u8) bool {
     if (comptime builtin.os.tag != .linux) return false;
-    const getifaddrs = @extern(*const fn (?*?*IfAddrs) c_int, .{ .name = "getifaddrs" });
-    const freeifaddrs = @extern(*const fn (?*IfAddrs) void, .{ .name = "freeifaddrs" });
+    const getifaddrs = @extern(*const fn (?*?*IfAddrs) callconv(.c) c_int, .{ .name = "getifaddrs" });
+    const freeifaddrs = @extern(*const fn (?*IfAddrs) callconv(.c) void, .{ .name = "freeifaddrs" });
 
     var head: ?*IfAddrs = null;
     if (getifaddrs(&head) != 0) return false;
