@@ -703,6 +703,7 @@ pub fn build(b: *std.Build) void {
                 "bridge.loop",
                 "bpfPort",
                 "npcapPort",
+                "etherManagerPort",
                 // auth.zig test blocks (cross-tree md4 import → run here)
                 "ClientAuth",
                 "Challenge generation",

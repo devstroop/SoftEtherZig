@@ -23,6 +23,7 @@ pub const nic_enumerate = @import("nic_enumerate.zig");
 pub const af_packet = @import("af_packet.zig");
 pub const bpf = @import("bpf.zig");
 pub const npcap = @import("npcap.zig");
+pub const ether_manager = @import("ether_manager.zig");
 
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
@@ -46,6 +47,10 @@ pub const bpfPort = bpf.bpfPort;
 // L2 bridge port — Windows Npcap (issue #61, dynamic pcap.dll)
 pub const NpcapPort = npcap.NpcapPort;
 pub const npcapPort = npcap.npcapPort;
+
+// L2 bridge port — Android EthernetManager best-effort (issue #59)
+pub const EtherManagerPort = ether_manager.EtherManagerPort;
+pub const etherManagerPort = ether_manager.etherManagerPort;
 
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;

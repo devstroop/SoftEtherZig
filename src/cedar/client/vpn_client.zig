@@ -3292,13 +3292,17 @@ pub const VpnClient = struct {
             return ClientError.AdapterConfigurationFailed;
         }
         if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
-            std.log.err("bridge mode requires AF_PACKET (Linux), BPF (macOS) or Npcap (Windows) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
+            std.log.err("bridge mode requires AF_PACKET (Linux/Android), BPF (macOS) or Npcap (Windows) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
             return ClientError.AdapterConfigurationFailed;
         }
 
         const af_packet = @import("../../adapter/af_packet.zig");
         const bpf_mod = @import("../../adapter/bpf.zig");
         const npcap_mod = @import("../../adapter/npcap.zig");
+        const ether_manager = @import("../../adapter/ether_manager.zig");
+        // Zig has no .android OS tag — Android is linux + android ABI.
+        const is_android = builtin.os.tag == .linux and
+            (builtin.abi == .android or builtin.abi == .androideabi);
         // Per-OS ingress port implementation:
         //   linux   → AF_PACKET (issue #53, merged)
         //   macos   → BPF /dev/bpfN (issue #60 — fd granted by the setuid
@@ -3306,6 +3310,9 @@ pub const VpnClient = struct {
         //   windows → Npcap (issue #61 — dynamic pcap.dll, worker thread +
         //             SPSC ring; getFd() = invalid_fd, drained every pump
         //             iteration, see the LAN→session section below)
+        //   android → ether_manager (issue #59 — best-effort AF_PACKET
+        //             wrapper; clean "unsupported role" error when the
+        //             platform grants no NIC / no CAP_NET_RAW)
         const Ingress = struct {
             const Store = if (builtin.os.tag == .linux)
                 af_packet.AfPacketPort
@@ -3313,6 +3320,8 @@ pub const VpnClient = struct {
                 bpf_mod.BpfPort
             else if (builtin.os.tag == .windows)
                 npcap_mod.NpcapPort
+            else if (is_android)
+                ether_manager.EtherManagerPort
             else
                 u8;
 
@@ -3323,6 +3332,8 @@ pub const VpnClient = struct {
                     return bpf_mod.bpfPort(@as(*bpf_mod.BpfPort, @ptrCast(store)), allocator, name);
                 } else if (builtin.os.tag == .windows) {
                     return npcap_mod.npcapPort(@as(*npcap_mod.NpcapPort, @ptrCast(store)), allocator, name);
+                } else if (is_android) {
+                    return ether_manager.etherManagerPort(@as(*ether_manager.EtherManagerPort, @ptrCast(store)), name);
                 } else {
                     unreachable;
                 }

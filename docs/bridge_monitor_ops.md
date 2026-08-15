@@ -82,6 +82,35 @@ sudo ./zig-out/bin/vpnclient connect \
 flooded / blocked packets, LAN RX/TX, session RX/TX, drops. Zeroed when bridge
 mode is not active.
 
+## 2b. Bridge mode operation (Android — best-effort)
+
+Android bridge mode is **best-effort** (issue #59): the platform only exposes
+a usable NIC on specific topologies, so the port detects capability at open
+time and fails with a clean, enumerable error otherwise — it **never silently
+falls back to client mode**.
+
+### Supported topologies
+
+| Topology | How the raw socket is granted |
+|----------|-------------------------------|
+| Rooted device | app runs as root / with CAP_NET_RAW → `socket(AF_PACKET)` succeeds |
+| USB-Ethernet (OTG) + root | the wired NIC (`eth0`/`rndis0`/`enx…`) is the ingress |
+| Root-granted helper | same fd-passing pattern as the macOS `--bpf-open` helper (H-7) |
+| Stock, unrooted app | **not supported** — `error.NoCapability` at open |
+
+### Behavior
+
+- Interface selection: the configured name is validated against getifaddrs(3).
+  If it is absent (Android renames NICs across reboots / HAL versions), the
+  port best-effort falls back to the first wired NIC (`eth*`/`enx*`/`enp*`/
+  `ens*`/`usb*`/`rndis*`); no wired NIC at all → `error.UnsupportedRole`.
+- Capability: `socket(AF_PACKET)` EPERM → `error.NoCapability` (H-8).
+- The raw-socket machinery (MTU clamp H-3, host-IP warning H-5, promiscuous
+  membership) is the shared AF_PACKET core (`af_packet.zig`).
+- **Limitations (documented):** no root → unusable; OTG ethernet requires a
+  kernel with the right driver; vendor HAL variance is out of scope. Frames
+  above the 1514-byte session budget are dropped (H-3).
+
 ## 3. Monitor mode operation
 
 Passive capture of the hub's mirrored traffic (requires server support — the
@@ -156,8 +185,8 @@ sudo ./zig-out/bin/vpnclient connect \
   aging with injected clock, no-socket transport).
 - **PACKET_MMAP** RX ring for AF_PACKET ports is deferred — the port uses
   plain `read()` on the raw socket.
-- **Platform ports backlog:** Android `EthernetManager` (#59), macOS `bpf`
-  + SUID allowlist (#60), Windows `npcap` with graceful degrade (#61) — all
+- **Platform ports backlog:** macOS `bpf` + SUID allowlist (#60), Windows
+  `npcap` with graceful degrade (#61), Android `EthernetManager` (#59) — all
   behind the `NetPort` abstraction (issue #51).
 - **Bridge/monitor multi-connection** is backlog (issue #58) — v1 is
   single-TLS (I-14).
@@ -167,6 +196,7 @@ sudo ./zig-out/bin/vpnclient connect \
 | Symptom | Cause / fix |
 |---------|-------------|
 | `error.NoCapability` at port open | missing CAP_NET_RAW — `sudo` or `setcap cap_net_raw=ep` |
+| `error.UnsupportedRole` on Android | no wired NIC exposed (no root/OTG) — bridge mode unavailable on this device (best-effort, #59) |
 | `AdapterConfigurationFailed` on macOS/Windows | bridge mode is Linux-only (AF_PACKET) — use monitor instead |
 | WARN "interface has a host IP address" | ingress NIC carries an address — unnumber it (H-5) |
 | WARN "MTU > 1500 — jumbo frames unsupported" | frames > 1514 dropped (H-3) — lower the NIC MTU |
