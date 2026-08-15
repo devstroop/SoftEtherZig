@@ -596,10 +596,13 @@ test "bpfPort open degrades cleanly (no privilege / bad interface)" {
     // The client contract: a clean error, never a crash or hang.
     var port = BpfPort{ .allocator = std.testing.allocator };
     const p = bpfPort(&port, std.testing.allocator, "no-such-if-xyz");
-    const open_err = p.open() catch |e| e;
-    switch (open_err) {
+    var open_err: ?anyerror = null;
+    p.open() catch |e| {
+        open_err = e;
+    };
+    switch (open_err orelse return error.TestExpectedError) {
         error.NoCapability, error.HelperFailed, error.AttachFailed, error.InterfaceNotFound, error.NotMacos => {},
-        else => return open_err,
+        else => return open_err.?,
     }
     p.close();
 }
