@@ -10,10 +10,13 @@
 //!   fast RC4 / classic AES, per-connection cipher state)
 //! - `session_main.zig` — SessionMain data loop: ConnectionReceive/Send
 //!   framing orchestration over a TunnelConnection + hub PacketAdapter
+//! - `listener.zig` — Listener layer: per-port accept threads, DoS gate,
+//!   listener registry
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
 pub const session_main = @import("session_main.zig");
+pub const listener = @import("listener.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
@@ -32,6 +35,13 @@ pub const SessionConfig = session_main.SessionConfig;
 pub const SessionStats = session_main.SessionStats;
 pub const PacketAdapter = session_main.PacketAdapter;
 pub const SessionEnd = session_main.SessionEnd;
+pub const Listener = listener.Listener;
+pub const ListenerOptions = listener.ListenerOptions;
+pub const ListenerRegistry = listener.ListenerRegistry;
+pub const Protocol = listener.Protocol;
+pub const Status = listener.Status;
+pub const DosTable = listener.DosTable;
+pub const AcceptHandler = listener.AcceptHandler;
 
 // Tests
 test {
