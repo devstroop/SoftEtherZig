@@ -13,6 +13,7 @@ pub const config = @import("config.zig");
 pub const daemon = @import("daemon.zig");
 pub const interactive = @import("interactive.zig");
 pub const password_hash = @import("password_hash.zig");
+pub const gen_cert = @import("gen_cert.zig");
 
 // Re-export main types
 pub const AppState = state.AppState;
