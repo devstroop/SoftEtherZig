@@ -2,7 +2,7 @@
 
 > **Date:** 2026-08-15
 > **Author:** @devstroop
-> **Status:** Final (part 1 implemented in this PR; part 2 is #76)
+> **Status:** Final (both parts implemented — part 1 in #112, part 2 in the #76 PR)
 > **Plan ref:** SERVER_PLAN.md §11 #4, S5/S6
 
 ---
@@ -139,31 +139,60 @@ pub fn generateSelfSignedCert(allocator: Allocator, common_name: ?[]const u8) !S
 - `HttpServerSend` (Network.c:12695-12707): writes `HTTP/1.1 200 OK\r\n` +
   `Content-Length` + body with zero allocation.
 
-### API shape (planned)
+### API shape (as implemented)
 
 ```zig
+pub const vpn_content_type   = "application/octet-stream";   // HTTP_CONTENT_TYPE2
+pub const vpn_target         = "/vpnsvc/vpn.cgi";            // HTTP_VPN_TARGET
+pub const vpn_keep_alive     = "timeout=15; max=19";         // HTTP_KEEP_ALIVE
+pub const max_pack_body_len: usize  = 65536;                 // HTTP_PACK_MAX_SIZE
+pub const max_request_head_len: usize = 32 * 1024;           // whole-head cap
+
 pub const HttpRequest = struct {
-    method: []const u8,       // "POST"
-    uri: []const u8,          // "/"
-    headers: ...,             // minimal key/value list
-    body: []u8,               // exactly Content-Length bytes
+    method: []const u8,        // "POST" (validated)
+    uri: []const u8,           // canonical target (static literal)
+    version: []const u8,       // "HTTP/1.1" (validated)
+    content_length: usize,
+    body: []u8,                // exactly Content-Length bytes in caller's buf
 };
 
-pub fn readHttpRequest(tls: *TlsSocket, buf: []u8) !HttpRequest;   // head + body, cap enforced
-pub fn sendHttpResponse(tls: *TlsSocket, body: []const u8) !void;  // 200 + Content-Length
+pub fn readHttpRequest(tls: *TlsSocket, buf: []u8) !HttpRequest;  // head + body, cap enforced
+pub fn sendHttpResponse(tls: *TlsSocket, body: []const u8) !void;  // 200 + keep-alive + Content-Length
 ```
 
-### Design decisions
+### Design decisions (part 2, as implemented)
 
-- **Bounded reads.** A `MAX_HEADER_LEN` (C uses 32KB) cap on the header scan
-  and a `MAX_BODY_LEN` cap on the body keep a misbehaving client from forcing
-  unbounded allocation.
+- **Bounded reads.** A `max_request_head_len` (32KB) cap on the header scan
+  and the C `HTTP_PACK_MAX_SIZE` cap on Content-Length keep a misbehaving
+  client from forcing unbounded buffering.
 - **Reuse the read-ahead buffer.** `TlsSocket.read` already serves from a
-  64KB batch buffer; the header scan can read through the same read-ahead
+  64KB batch buffer; `readHttpRequest` scans through the same read-ahead
   machinery so `\r\n\r\n` spanning TLS record boundaries is handled for free.
-- **Synchronous control-plane semantics.** Like the client control plane, the
-  server handshake/RPC reads use the blocking path (`readBlocking`) on a
-  blocking socket; the data plane switches to non-blocking later in M2.
+- **Validation happens inside the envelope.** `readHttpRequest` mirrors C's
+  `HttpServerRecvEx` exactly: POST / HTTP/1.1, target `/vpnsvc/vpn.cgi`
+  (only), `Content-Type: application/octet-stream`, and `0 < Content-Length
+  <= HTTP_PACK_MAX_SIZE`. The `connect.cgi` POSTs (signature upload with
+  `image/jpeg`, the empty client hello) are plaintext-HTTP handshakes the
+  server handles *before* TLS (C: `ServerDownloadSignature`, Protocol.c:
+  7077) — they are deliberately outside this envelope, so accepting them here
+  would reject their real content types/lengths.
+- **Byte-exact reads keep keep-alive aligned.** The head is scanned
+  byte-by-byte and the body read to the exact Content-Length, so bytes beyond
+  the current request (the start of the next pipelined POST) stay in the
+  socket's read-ahead buffer and are served by the next `readHttpRequest`.
+  This mirrors C's `RecvLine`/`RecvAll`, which likewise never over-read into
+  the caller.
+- **Returned strings are canonical literals.** The head is validated and then
+  overwritten by the body, so `method`/`uri`/`version` are the static values
+  that passed validation, never slices into the (overwritten) buffer.
+- **Reply carries the C keep-alive headers.** `sendHttpResponse` emits
+  `HTTP/1.1 200 OK` + `Date` (RFC 1123) + `Keep-Alive: timeout=15; max=19`
+  + `Connection: Keep-Alive` + `Content-Type` + `Content-Length` + body
+  with zero allocation (stack-buffered head). The client's `HttpClientRecv`
+  requires Content-Type to echo `application/octet-stream`.
+- **NOOP/Pack semantics are Cedar's business** (per the architecture
+  boundary): the pencore padding (`CreateDummyValue`) and the `noop` loop
+  stay out of `mayaqua` and arrive with the RPC layer.
 
 ---
 
@@ -184,7 +213,9 @@ pub fn sendHttpResponse(tls: *TlsSocket, body: []const u8) !void;  // 200 + Cont
 
 ## References
 
-- `src/mayaqua/network/tls.zig` — connect-only TLS wrapper (this PR adds accept)
+- `src/mayaqua/network/tls.zig` — connect-only TLS wrapper (part 1 adds accept)
+- `src/mayaqua/network/http.zig` — client-only HTTP module (part 2 adds the
+  server envelope: `readHttpRequest` / `sendHttpResponse`)
 - `src/cedar/protocol/c_imports.zig` — shared OpenSSL cImport block (+x509v3.h)
 - `src/cli/args.zig`, `src/main.zig` — `--gen-cert` wiring
 - C refs: `SoftEtherVPN/src/Cedar/Server.c:2180-2218`, `Mayaqua/Encrypt.c:
