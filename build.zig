@@ -685,6 +685,7 @@ pub fn build(b: *std.Build) void {
                 "server.listener.",
                 "server.hub.",
                 "server.accept.",
+                "server.cfg.",
                 "client.state",
                 "client.stats",
                 "client.events",
