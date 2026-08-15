@@ -352,6 +352,14 @@ pub const Hub = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        // Reject frames from a session that is no longer attached: learning
+        // its MAC/IP would create table entries pointing at a freed adapter
+        // (use-after-free on later unicast delivery).
+        if (!src.attached) {
+            self.stats.dropped_frames += 1;
+            return;
+        }
+
         const parsed = parseEthernet(frame) orelse {
             self.stats.dropped_frames += 1;
             return;
@@ -430,32 +438,36 @@ pub const Hub = struct {
     // ---- MAC learning ------------------------------------------------------
 
     fn learnMac(self: *Hub, src: *SessionPa, mac: [6]u8, now: i64) void {
-        if (self.mac_table.count() >= MAX_MAC_TABLES) {
+        const gop = self.mac_table.getOrPut(self.allocator, mac) catch {
             self.stats.dropped_frames += 1;
             return;
+        };
+        if (gop.found_existing) {
+            // Existing entry: refresh/migrate regardless of table size (C
+            // Hub.c:4340-4420 — the `SearchHash` hit path never checks
+            // `MAX_MAC_TABLES`).
+            gop.value_ptr.session = src;
+            gop.value_ptr.updated = now;
+            return;
         }
+        // New entry: populate immediately so the expiry sweep cannot mistake
+        // the fresh (zero-initialized) slot for a stale one, then flush
+        // expired entries and enforce capacity (C order:
+        // `DeleteExpiredMacTableEntry` before the `MAX_MAC_TABLES` check).
+        gop.value_ptr.* = .{
+            .session = src,
+            .updated = now,
+            .created = now,
+        };
         if (self.last_mac_flush_tick == 0 or
             self.last_mac_flush_tick + MAC_FLUSH_INTERVAL < now)
         {
             self.last_mac_flush_tick = now;
             _ = self.flushExpiredMac(now);
         }
-        const gop = self.mac_table.getOrPut(self.allocator, mac) catch {
+        if (self.mac_table.count() > MAX_MAC_TABLES) {
+            _ = self.mac_table.remove(mac);
             self.stats.dropped_frames += 1;
-            return;
-        };
-        if (!gop.found_existing) {
-            gop.value_ptr.* = .{
-                .session = src,
-                .updated = now,
-                .created = now,
-            };
-        } else {
-            // Existing owner: refresh. If the MAC migrated to another session,
-            // adopt it (C default behaviour with `CheckMac` disabled —
-            // `UPDATE_FDB`, Hub.c:4373-4377).
-            gop.value_ptr.session = src;
-            gop.value_ptr.updated = now;
         }
     }
 
@@ -548,7 +560,10 @@ pub const Hub = struct {
         const st = &pa.storm;
         st.current_broadcast_num +|= 1;
 
-        if (st.check_start_tick == 0 or st.check_start_tick + STORM_CHECK_SPAN < now) {
+        if (st.check_start_tick == 0 or
+            st.check_start_tick > now or
+            st.check_start_tick + STORM_CHECK_SPAN < now)
+        {
             const rate = @as(u64, st.current_broadcast_num) * 1000 / @as(u64, STORM_CHECK_SPAN);
             const old_diff = if (now > st.check_start_tick) now - st.check_start_tick else 0;
             st.check_start_tick = now;
@@ -796,7 +811,7 @@ test "server.hub ip learning from ipv4 and arp" {
     @memcpy(f2b[0..6], &macBytes("020000000002"));
     @memcpy(f2b[6..12], &mac_a);
     mem.writeInt(u16, f2b[12..14], 0x0806, .big);
-    @memcpy(f2b[14..14 + 8], &arp_payload);
+    @memcpy(f2b[14 .. 14 + 8], &arp_payload);
     mem.writeInt(u32, f2b[14 + 14 ..][0..4], 0x0a000009, .big);
     hub.storePacket(a, f2b);
     try testing.expect(hub.ip_table.contains(0x0a000009));
@@ -864,11 +879,13 @@ test "server.hub broadcast storm limiter drops floods" {
     defer b.deinit();
     const mac_a = macBytes("020000000001");
 
-    // Arm the limiter: the first broadcast establishes the measurement window.
+    // C measures from the first packet (Hub.c:4017): one broadcast over the
+    // 500ms window == 2/s, already over a threshold of 1, so it is dropped.
     const f1 = try buildFrame(MAC_BROADCAST, mac_a, 0x0800, &.{});
     defer allocator.free(f1);
     hub.storePacket(a, f1);
     const first_window_ok = b.outbound.items.len;
+    try testing.expectEqual(@as(usize, 0), first_window_ok);
 
     // Directly raise the discard value (as a detected storm would) and verify
     // subsequent floods are refused.
@@ -889,10 +906,37 @@ test "server.hub broadcast storm limiter drops floods" {
         hub.storePacket(a, f);
         if (b.outbound.items.len > before_loop) delivered += 1;
     }
-    _ = first_window_ok;
     _ = before;
     // The limiter must have dropped at least some floods.
     try testing.expect(delivered < 100);
+}
+
+test "server.hub detached session frames are rejected" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    const f = try buildFrame(mac_b, mac_a, 0x0800, &.{});
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expect(hub.mac_table.contains(mac_a));
+
+    // After detach, a late frame from the session must be rejected and must
+    // not re-learn MAC/IP entries pointing at the detached adapter.
+    hub.detach(a);
+    const before = b.outbound.items.len;
+    const f2 = try buildFrame(mac_b, mac_a, 0x0800, &.{});
+    defer allocator.free(f2);
+    hub.storePacket(a, f2);
+    try testing.expect(!hub.mac_table.contains(mac_a));
+    try testing.expectEqual(before, b.outbound.items.len);
+    try testing.expect(hub.stats.dropped_frames > 0);
 }
 
 test "server.hub detach purges table entries" {
