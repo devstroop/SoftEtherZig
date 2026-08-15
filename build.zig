@@ -622,6 +622,7 @@ pub fn build(b: *std.Build) void {
                 "mayaqua_tls.",
                 "mayaqua_http.",
                 "session.",
+                "server.session.",
                 "client.state",
                 "client.stats",
                 "client.events",
