@@ -18,6 +18,9 @@
 //!   auth + welcome, then the session data plane (issue #78)
 //! - `config/cfg.zig` — Cfg text-format configuration tree: declare/{}/typed
 //!   items, Base64 byte, escaping, CFG_RW save/load with backup (issue #85)
+//! - `config/vpn_server_config.zig` — vpn_server.config load/save + autosave
+//!   thread: default config (hub DEFAULT, admin Administrator), C-faithful
+//!   item names, CFG_RW backup (issue #86)
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
@@ -26,6 +29,7 @@ pub const hub = @import("hub.zig");
 pub const listener = @import("listener.zig");
 pub const accept = @import("accept.zig");
 pub const cfg = @import("config/cfg.zig");
+pub const vpn_server_config = @import("config/vpn_server_config.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
