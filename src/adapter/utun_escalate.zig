@@ -173,6 +173,9 @@ pub fn escalatedUtunOpen(allocator: std.mem.Allocator) EscalationError!Escalated
     child.spawn() catch {
         return EscalationError.HelperLaunchFailed;
     };
+    defer {
+        _ = child.wait() catch {};
+    }
 
     // Accept connection from the helper. Fast path is near-instant (~50ms);
     // slow path needs up to 60s for user to type the admin password.
@@ -402,6 +405,9 @@ pub fn escalatedBpfOpen(allocator: std.mem.Allocator, ifname: []const u8) Escala
     child.spawn() catch {
         return EscalationError.HelperLaunchFailed;
     };
+    defer {
+        _ = child.wait() catch {};
+    }
 
     var poll_fds = [1]std.posix.pollfd{
         .{ .fd = listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
@@ -558,6 +564,9 @@ pub fn ensurePrivilegedChannel(allocator: std.mem.Allocator) void {
         posix.close(listen_fd);
         return;
     };
+    defer {
+        _ = child.wait() catch {};
+    }
 
     // Wait for helper to connect (5 s — setuid exec is near-instant).
     var poll_fds = [1]std.posix.pollfd{
