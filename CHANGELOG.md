@@ -10,6 +10,19 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- **Multi-connection bridge pump** (issue #58). The bridge pump now honors
+  `max_connections > 1` (I-14 relaxed for bridge only): `connect()` no
+  longer coerces bridge sessions to a single TLS connection, and
+  `runBridgeLoop` runs the same multi-connection data plane as client
+  mode — ConnectionManager poll set (`buildPollFds`), per-connection
+  inbound drain (`forEachReadable`), dead-connection cleanup
+  (`cleanupDead`), per-slot POLLOUT pending-write retry, least-loaded send
+  selection via the existing `SendTunnelHelper` fanout, and keepalives
+  across all send-capable connections. Monitor mode stays single-
+  connection (I-14 intact there). Covered by deterministic no-socket
+  fixtures (least-loaded selection, primary fallback, LAN→session fanout
+  through a scripted multi-connection helper) plus a `sessionMaxConnections`
+  unit test for the coercion.
 - **BPF L2 port** (`adapter/bpf.zig`, L2 Network Bridge proposal §4.1, H-3/
   H-5/H-7; issue #60). macOS `NetPort` implementation over `/dev/bpfN`:
   `bpfPort(&impl, allocator, ifname)` mirrors the `afPacketPort` ownership
