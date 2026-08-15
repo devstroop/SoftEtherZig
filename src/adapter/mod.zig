@@ -21,6 +21,7 @@ pub const wrapper = @import("wrapper.zig");
 pub const port = @import("port.zig");
 pub const nic_enumerate = @import("nic_enumerate.zig");
 pub const af_packet = @import("af_packet.zig");
+pub const bpf = @import("bpf.zig");
 
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
@@ -36,6 +37,10 @@ pub const NicInfo = nic_enumerate.NicInfo;
 pub const AfPacketPort = af_packet.AfPacketPort;
 pub const afPacketPort = af_packet.afPacketPort;
 pub const SESSION_FRAME_BUDGET = af_packet.SESSION_FRAME_BUDGET;
+
+// L2 bridge port — macOS BPF (/dev/bpfN, H-7 helper-granted fd)
+pub const BpfPort = bpf.BpfPort;
+pub const bpfPort = bpf.bpfPort;
 
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;
@@ -300,7 +305,7 @@ pub const VirtualAdapter = struct {
 
         if (is_android) {
             return error.UnsupportedPlatform; // Android must use openWithFd()
-} else if (builtin.os.tag == .linux) {
+        } else if (builtin.os.tag == .linux) {
             const dev = TunLinuxDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open Linux TUN device: {}", .{err});
                 return err;
