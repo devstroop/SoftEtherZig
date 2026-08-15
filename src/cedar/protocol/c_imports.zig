@@ -16,6 +16,7 @@ pub const c = if (builtin.os.tag == .windows)
         @cInclude("openssl/ssl.h");
         @cInclude("openssl/err.h");
         @cInclude("openssl/x509.h");
+        @cInclude("openssl/x509v3.h");
         @cInclude("openssl/pem.h");
         @cInclude("openssl/evp.h");
         @cInclude("openssl/bio.h");
@@ -28,6 +29,7 @@ else
         @cInclude("openssl/ssl.h");
         @cInclude("openssl/err.h");
         @cInclude("openssl/x509.h");
+        @cInclude("openssl/x509v3.h");
         @cInclude("openssl/pem.h");
         @cInclude("openssl/evp.h");
         @cInclude("openssl/bio.h");

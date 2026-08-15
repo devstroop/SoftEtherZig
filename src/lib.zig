@@ -83,6 +83,16 @@ pub const bridge = struct {
 // Monitor role (proposal §5.4) — ring + PCAP capture of session L2 frames
 pub const monitor = @import("monitor.zig");
 
+// Server core (M1 epic) — session keys, data-channel encryption, session loop,
+// TCP listener (issue #77)
+pub const server = struct {
+    pub const auth = @import("cedar/server/auth.zig");
+    pub const session = @import("cedar/server/session.zig");
+    pub const session_main = @import("cedar/server/session_main.zig");
+    pub const hub = @import("cedar/server/hub.zig");
+    pub const listener = @import("cedar/server/listener.zig");
+};
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
@@ -121,6 +131,7 @@ test "library exports" {
     _ = core;
     _ = bridge;
     _ = monitor;
+    _ = server;
     _ = parseIpv4;
     _ = formatIpv4;
 }
