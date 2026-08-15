@@ -36,7 +36,6 @@ const BridgeEngine = engine_mod.BridgeEngine;
 const ForwardAction = engine_mod.ForwardAction;
 const fdb_mod = @import("fdb.zig");
 const MacAddress = fdb_mod.MacAddress;
-const session_io = @import("../cedar/tunnel/session_io.zig");
 
 /// Must match `adapter/af_packet.zig`'s session L2 frame budget.
 pub const SESSION_FRAME_BUDGET: usize = 1514;
