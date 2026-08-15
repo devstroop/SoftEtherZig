@@ -620,6 +620,7 @@ pub fn build(b: *std.Build) void {
                 "core.",
                 "net.",
                 "mayaqua_tls.",
+                "mayaqua_http.",
                 "session.",
                 "client.state",
                 "client.stats",

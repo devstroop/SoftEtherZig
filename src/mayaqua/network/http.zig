@@ -4,6 +4,7 @@
 //! Handles HTTP CONNECT proxy and initial HTTP handshake.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const net = std.net;
@@ -11,6 +12,8 @@ const net = std.net;
 const socket = @import("socket.zig");
 const TcpSocket = socket.TcpSocket;
 const socks = @import("socks.zig");
+const tls_mod = @import("tls.zig");
+const TlsSocket = tls_mod.TlsSocket;
 
 /// HTTP method
 pub const Method = enum {
@@ -428,8 +431,345 @@ pub const SoftEtherHttpHandshake = struct {
 };
 
 // ============================================================================
+// SoftEther HTTP server envelope (HttpServerRecvEx / HttpServerSend parity)
+// ============================================================================
+
+/// Content-Type SoftEther clients send on every VPN POST and expect back on
+/// every server response (C: HTTP_CONTENT_TYPE2).
+pub const vpn_content_type = "application/octet-stream";
+/// Primary POST target for Pack exchanges (C: HTTP_VPN_TARGET).
+pub const vpn_target = "/vpnsvc/vpn.cgi";
+/// Secondary POST target used by the client's signature upload and RPC
+/// (C: HTTP_VPN_TARGET2).
+pub const vpn_target_connect = "/vpnsvc/connect.cgi";
+/// Keep-Alive header value the server echoes (C: HTTP_KEEP_ALIVE).
+pub const vpn_keep_alive = "timeout=15; max=19";
+/// Hard cap on a Pack body carried in a VPN HTTP exchange (C: HTTP_PACK_MAX_SIZE).
+pub const max_pack_body_len: usize = 65536;
+/// Cap on the request head (request line + headers) buffered while scanning
+/// for the terminating blank line. C caps each line at 4096; capping the whole
+/// head keeps a misbehaving client from forcing unbounded buffering.
+pub const max_request_head_len: usize = 32 * 1024;
+
+/// A validated SoftEther HTTP POST as received by the server (C: HttpServerRecvEx).
+/// `body` is exactly `content_length` bytes at the front of the caller's
+/// buffer. The head is validated inside the envelope and then overwritten by
+/// the body, so no header state is retained (C frees the HTTP_HEADER after
+/// reading the body).
+pub const HttpRequest = struct {
+    method: []const u8 = "POST",
+    uri: []const u8,
+    version: []const u8 = "HTTP/1.1",
+    content_length: usize,
+    body: []u8,
+};
+
+/// Parse and validate a request head (request line + headers, WITHOUT the
+/// terminating `\r\n\r\n`). Mirrors the checks in C's HttpServerRecvEx:
+/// POST / HTTP/1.1, the VPN content type, and a sane Content-Length.
+fn parseRequestHead(head: []const u8) !struct { uri: []const u8, content_length: usize } {
+    const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return error.InvalidRequest;
+    const request_line = head[0..line_end];
+
+    var tokens = std.mem.tokenizeAny(u8, request_line, " ");
+    const method = tokens.next() orelse return error.InvalidRequest;
+    const uri = tokens.next() orelse return error.InvalidRequest;
+    const version = tokens.next() orelse return error.InvalidRequest;
+    if (tokens.next() != null) return error.InvalidRequest;
+
+    if (!std.ascii.eqlIgnoreCase(method, "POST")) return error.UnsupportedMethod;
+    if (!std.ascii.eqlIgnoreCase(version, "HTTP/1.1")) return error.UnsupportedVersion;
+    if (!std.ascii.eqlIgnoreCase(uri, vpn_target) and !std.ascii.eqlIgnoreCase(uri, vpn_target_connect)) {
+        return error.InvalidUri;
+    }
+
+    var content_type_ok = false;
+    var content_length: usize = 0;
+    var lines = std.mem.splitSequence(u8, head[line_end + 2 ..], "\r\n");
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
+            content_type_ok = std.ascii.eqlIgnoreCase(value, vpn_content_type);
+        } else if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
+            content_length = std.fmt.parseInt(usize, value, 10) catch return error.InvalidContentLength;
+        }
+    }
+
+    if (!content_type_ok) return error.InvalidContentType;
+    if (content_length == 0 or content_length > max_pack_body_len) return error.InvalidContentLength;
+
+    return .{ .uri = uri, .content_length = content_length };
+}
+
+/// Read and validate one SoftEther HTTP POST from an accepted TLS socket
+/// (C: HttpServerRecvEx). The head is scanned through the socket's read-ahead
+/// buffer until the terminating blank line, then exactly Content-Length body
+/// bytes are read into `buf[0..content_length]`. `buf` must be at least
+/// `content_length` bytes (size it to `max_pack_body_len`).
+pub fn readHttpRequest(sock: *TlsSocket, buf: []u8) !HttpRequest {
+    const head_cap = @min(buf.len, max_request_head_len);
+    var head_len: usize = 0;
+    var search_from: usize = 0;
+    while (true) {
+        if (head_len >= head_cap) return error.HeaderTooLarge;
+        const n = try sock.readBlocking(buf[head_len..head_cap]);
+        if (n == 0) return error.EndOfStream;
+        head_len += n;
+        if (std.mem.indexOfPos(u8, buf[0..head_len], search_from, "\r\n\r\n")) |head_end| {
+            const parsed = try parseRequestHead(buf[0..head_end]);
+            if (parsed.content_length > buf.len) return error.BufferTooSmall;
+            const body = buf[0..parsed.content_length];
+            // Bytes already buffered after the head belong to the body.
+            const pre = @min(parsed.content_length, head_len -| (head_end + 4));
+            std.mem.copyForwards(u8, body[0..pre], buf[head_end + 4 .. head_end + 4 + pre]);
+            var got = pre;
+            while (got < body.len) {
+                const m = try sock.readBlocking(body[got..]);
+                if (m == 0) return error.EndOfStream;
+                got += m;
+            }
+            return .{
+                .uri = parsed.uri,
+                .content_length = parsed.content_length,
+                .body = body,
+            };
+        }
+        search_from = if (head_len > 3) head_len - 3 else 0;
+    }
+}
+
+/// Format an RFC 1123 date like C's GetHttpDateStr ("Sat, 20 Dec 2025 ... GMT").
+fn httpDateStr(buf: []u8) []const u8 {
+    const wday = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+    const now_ts = std.time.timestamp();
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(now_ts) };
+    const day_secs = epoch.getDaySeconds();
+    const epoch_day = epoch.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const hour = day_secs.getHoursIntoDay();
+    const minute = day_secs.getMinutesIntoHour();
+    const second = day_secs.getSecondsIntoMinute();
+    const month_day = year_day.calculateMonthDay();
+    const day: u32 = month_day.day_index + 1;
+    const month_idx: usize = @intFromEnum(month_day.month) - 1;
+    const year = year_day.year;
+    const weekday_idx: usize = @intCast(@mod(@as(i64, @intCast(epoch_day.day)) + 3, 7));
+
+    return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        wday[weekday_idx], day, months[month_idx], year, hour, minute, second,
+    }) catch unreachable;
+}
+
+/// Build the response head (status line + headers + blank line) for a body of
+/// `body_len` bytes. The client requires Content-Type application/octet-stream
+/// and Content-Length, so both are emitted alongside the C keep-alive headers.
+fn buildResponseHead(buf: []u8, body_len: usize) []const u8 {
+    var date_buf: [64]u8 = undefined;
+    return std.fmt.bufPrint(
+        buf,
+        "HTTP/1.1 200 OK\r\n" ++
+            "Date: {s}\r\n" ++
+            "Keep-Alive: {s}\r\n" ++
+            "Connection: Keep-Alive\r\n" ++
+            "Content-Type: {s}\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "\r\n",
+        .{ httpDateStr(&date_buf), vpn_keep_alive, vpn_content_type, body_len },
+    ) catch unreachable;
+}
+
+/// Write an HTTP/1.1 200 OK response carrying `body` (C: HttpServerSend).
+pub fn sendHttpResponse(sock: *TlsSocket, body: []const u8) !void {
+    var head_buf: [512]u8 = undefined;
+    const head = buildResponseHead(&head_buf, body.len);
+    try sock.writeAll(head);
+    try sock.writeAll(body);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
+
+test "mayaqua_http.request head parsing" {
+    const allocator = testing.allocator;
+
+    // Canonical request: POST /vpnsvc/vpn.cgi, matches C HttpClientSend.
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "POST /vpnsvc/vpn.cgi HTTP/1.1\r\n" ++
+            "Host: vpn\r\n" ++
+            "Content-Type: application/octet-stream\r\n" ++
+            "Content-Length: {d}\r\n",
+        .{17},
+    );
+    defer allocator.free(req);
+    const parsed = try parseRequestHead(req);
+    try testing.expectEqualStrings(vpn_target, parsed.uri);
+    try testing.expectEqual(@as(usize, 17), parsed.content_length);
+
+    // The connect.cgi target (signature upload) is accepted too.
+    const req2 = "POST /vpnsvc/connect.cgi HTTP/1.1\r\n" ++
+        "Content-Type: application/octet-stream\r\n" ++
+        "Content-Length: 4\r\n";
+    try testing.expectEqualStrings(vpn_target_connect, (try parseRequestHead(req2)).uri);
+
+    try testing.expectError(error.UnsupportedMethod, parseRequestHead("GET /vpnsvc/vpn.cgi HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n"));
+    try testing.expectError(error.UnsupportedVersion, parseRequestHead("POST /vpnsvc/vpn.cgi HTTP/1.0\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n"));
+    try testing.expectError(error.InvalidUri, parseRequestHead("POST /other HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n"));
+    try testing.expectError(error.InvalidContentType, parseRequestHead("POST /vpnsvc/vpn.cgi HTTP/1.1\r\nContent-Type: text/html\r\nContent-Length: 4\r\n"));
+    try testing.expectError(error.InvalidContentLength, parseRequestHead("POST /vpnsvc/vpn.cgi HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 0\r\n"));
+    try testing.expectError(error.InvalidContentLength, parseRequestHead("POST /vpnsvc/vpn.cgi HTTP/1.1\r\nContent-Type: application/octet-stream\r\nContent-Length: 65537\r\n"));
+    try testing.expectError(error.InvalidRequest, parseRequestHead("POST /vpnsvc/vpn.cgi\r\nContent-Length: 4\r\n"));
+}
+
+test "mayaqua_http.response head build" {
+    var buf: [512]u8 = undefined;
+    const head = buildResponseHead(&buf, 42);
+    try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, head, "Content-Type: application/octet-stream\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Content-Length: 42\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Keep-Alive: timeout=15; max=19\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, head, "\r\n\r\n"));
+}
+
+var test_dial_fd: std.posix.socket_t = -1;
+
+fn testDial(host: [*:0]const u8, port: u16) callconv(.c) c_int {
+    _ = host;
+    _ = port;
+    return test_dial_fd;
+}
+
+/// Server side of the roundtrip: TLS accept, read one POST, echo the body back.
+const ServerEnvelopeCtx = struct {
+    allocator: Allocator,
+    fd: std.posix.socket_t,
+    cert_pem: []const u8,
+    key_pem: []const u8,
+    err: ?anyerror = null,
+};
+
+fn serverEnvelopeThread(ctx: *ServerEnvelopeCtx) void {
+    var sock = TlsSocket.accept(ctx.allocator, ctx.fd, .{
+        .cert_pem = ctx.cert_pem,
+        .key_pem = ctx.key_pem,
+        .timeout_ms = 10000,
+    }) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    defer sock.close();
+
+    var buf: [4096]u8 = undefined;
+    const req = readHttpRequest(&sock, &buf) catch |err| {
+        ctx.err = err;
+        return;
+    };
+    sendHttpResponse(&sock, req.body) catch |err| {
+        ctx.err = err;
+        return;
+    };
+}
+
+test "mayaqua_http.server envelope roundtrip over TLS accept" {
+    // Requires AF_UNIX socketpair, only guaranteed on Linux.
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+
+    const cert = try tls_mod.generateSelfSignedCert(allocator, "http.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var fds: [2]std.posix.socket_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    if (std.os.linux.E.init(rc) != .SUCCESS) return error.SocketPairFailed;
+
+    // Server side: TLS accept + envelope read/echo on fds[0] from its own
+    // thread (the blocking handshake must run parallel to the client connect).
+    var server_ctx = ServerEnvelopeCtx{
+        .allocator = allocator,
+        .fd = fds[0],
+        .cert_pem = cert.cert_pem,
+        .key_pem = cert.key_pem,
+    };
+    const server_thread = try std.Thread.spawn(.{}, serverEnvelopeThread, .{&server_ctx});
+    var thread_joined = false;
+    defer if (!thread_joined) server_thread.join();
+
+    // Client side: TLS connect on fds[1] via the host dial callback, then POST
+    // a canned Pack body exactly like the C client (head + body in one write).
+    test_dial_fd = @intCast(fds[1]);
+    var client = TlsSocket.connect(allocator, "http-sni.example", 443, .{
+        .allow_self_signed = true,
+        .timeout_ms = 10000,
+        .external_tcp_dial = testDial,
+    }) catch |err| {
+        std.posix.close(fds[1]);
+        return err;
+    };
+    test_dial_fd = -1;
+    defer client.close();
+
+    const request_body = "canned pack body 1234";
+    const request = try std.fmt.allocPrint(
+        allocator,
+        "POST /vpnsvc/vpn.cgi HTTP/1.1\r\n" ++
+            "Host: http.test\r\n" ++
+            "Keep-Alive: timeout=15; max=19\r\n" ++
+            "Connection: Keep-Alive\r\n" ++
+            "Content-Type: application/octet-stream\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "\r\n" ++
+            "{s}",
+        .{ request_body.len, request_body },
+    );
+    defer allocator.free(request);
+    try client.writeAll(request);
+
+    server_thread.join();
+    thread_joined = true;
+    if (server_ctx.err) |err| return err;
+
+    // Read the 200 response head, then the echoed body.
+    var resp_buf: [4096]u8 = undefined;
+    var resp_len: usize = 0;
+    while (resp_len < resp_buf.len) {
+        const n = try client.readBlocking(resp_buf[resp_len..]);
+        if (n == 0) return error.EndOfStream;
+        resp_len += n;
+        const end = std.mem.indexOf(u8, resp_buf[0..resp_len], "\r\n\r\n") orelse continue;
+        const resp_head = resp_buf[0..end];
+        try testing.expect(std.mem.startsWith(u8, resp_head, "HTTP/1.1 200 OK"));
+        try testing.expect(std.mem.indexOf(u8, resp_head, "Content-Type: application/octet-stream") != null);
+
+        var content_length: usize = 0;
+        var lines = std.mem.splitSequence(u8, resp_head, "\r\n");
+        while (lines.next()) |line| {
+            if (std.ascii.startsWithIgnoreCase(line, "Content-Length:")) {
+                const value = std.mem.trim(u8, line["Content-Length:".len..], " \t");
+                content_length = try std.fmt.parseInt(usize, value, 10);
+            }
+        }
+        try testing.expectEqual(request_body.len, content_length);
+
+        // Drain the remainder of the body, then verify it echoes the request.
+        const body_start = end + 4;
+        while (resp_len < body_start + content_length) {
+            const m = try client.readBlocking(resp_buf[resp_len..]);
+            if (m == 0) return error.EndOfStream;
+            resp_len += m;
+        }
+        try testing.expectEqualStrings(request_body, resp_buf[body_start .. body_start + content_length]);
+        return;
+    }
+    return error.ResponseTooLarge;
+}
 
 test "StatusCode classifications" {
     try testing.expect(StatusCode.ok.isSuccess());
