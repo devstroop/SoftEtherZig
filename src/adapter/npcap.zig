@@ -432,10 +432,13 @@ test "npcapPort open degrades cleanly without Npcap" {
     // Bare CI runners have no pcap.dll → NpcapNotInstalled; with Npcap
     // installed, the bogus name must fail name resolution cleanly. The
     // client contract: a clean error, never a crash or hang.
-    const open_err = p.open() catch |e| e;
-    switch (open_err) {
+    var open_err: ?anyerror = null;
+    p.open() catch |e| {
+        open_err = e;
+    };
+    switch (open_err orelse return error.TestExpectedError) {
         error.NpcapNotInstalled, error.InterfaceNotFound, error.OpenFailed, error.NotWindows => {},
-        else => return open_err,
+        else => return open_err.?,
     }
     p.close();
 }
