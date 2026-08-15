@@ -95,6 +95,11 @@ const IfAddrs = extern struct {
 /// Kernel-generic (works on any getifaddrs host — tests run on Linux CI);
 /// the Android-only gate lives in `open()`.
 fn resolveWiredIfname(name: []const u8, buf: []u8) EtherManagerError![]const u8 {
+    // getifaddrs(3) exists on Linux/Android/macOS/iOS only — on other
+    // targets the @extern below must not be analyzed (Windows link error).
+    if (comptime builtin.os.tag != .linux and
+        builtin.os.tag != .macos and
+        builtin.os.tag != .ios) return error.UnsupportedRole;
     const getifaddrs = @extern(*const fn (?*?*IfAddrs) callconv(.c) c_int, .{ .name = "getifaddrs" });
     const freeifaddrs = @extern(*const fn (?*IfAddrs) callconv(.c) void, .{ .name = "freeifaddrs" });
 
@@ -276,12 +281,19 @@ test "etherManagerPort wired-NIC name classification" {
 test "etherManagerPort best-effort resolution (kernel-generic)" {
     // Runs on any getifaddrs host (Linux CI included). The loopback
     // interface exists on every host — the configured name wins. Its
-    // spelling differs per OS: "lo" (Linux) / "lo0" (macOS).
+    // spelling differs per OS: "lo" (Linux) / "lo0" (macOS); targets
+    // without getifaddrs (Windows) degrade to UnsupportedRole.
     var buf: [af_packet.IFNAMSIZ]u8 = undefined;
-    const r = resolveWiredIfname("lo", &buf) catch {
-        const r0 = try resolveWiredIfname("lo0", &buf);
-        try std.testing.expectEqualStrings("lo0", r0);
-        return;
+    const r = resolveWiredIfname("lo", &buf) catch |err| switch (err) {
+        error.UnsupportedRole => {
+            const r0 = resolveWiredIfname("lo0", &buf) catch |err0| {
+                try std.testing.expectEqual(EtherManagerError.UnsupportedRole, err0);
+                return;
+            };
+            try std.testing.expectEqualStrings("lo0", r0);
+            return;
+        },
+        else => return err,
     };
     try std.testing.expectEqualStrings("lo", r);
 
