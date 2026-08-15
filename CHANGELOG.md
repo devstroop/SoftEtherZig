@@ -51,6 +51,10 @@ they are called out under **Breaking** in each entry.
   layout mirrors `BridgeStats`; `VpnClient.bridge_stats` snapshot updated at
   1 Hz by the bridge pump; zeroed when bridge mode is inactive.
   `softether_bridge_stats_t` added to `include/softether.h`.
+- **Review fixes** (#113): no-echo/write-rejection drops counted once (port
+  layer only — `getStats` sums per-port stats, no double count); UDP
+  acceleration gated for bridge mode only, so monitor mode keeps its
+  negotiated UDP data channel.
 
 ### Added
 

@@ -207,10 +207,11 @@ pub fn run(client: *VpnClient) !void {
     // Apply server-overridden session parameters (C: Protocol.c:4720-4741)
     applyServerOverrides(client, auth_result);
 
-    // Initialize UDP acceleration if server supports it. Client mode
-    // only: the bridge/monitor pumps don't carry a UDP data channel yet
-    // (proposal §4.6, UDP acceleration applies to the client data path).
-    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.network_mode == .client) {
+    // Initialize UDP acceleration if server supports it. Bridge mode
+    // only: the bridge pump (loop.zig) carries no UDP data channel yet
+    // (proposal §4.6). Monitor mode inherits the classic runDataLoop,
+    // which polls `udp_accel` — so it must keep UDP acceleration.
+    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.network_mode != .bridge) {
         startUdpAcceleration(client, auth_result);
     }
 

@@ -123,7 +123,11 @@ pub const BridgeLoop = struct {
         self.* = undefined;
     }
 
-    /// Live snapshot of the bridge's aggregated stats.
+    /// Live cumulative snapshot of the bridge's aggregated stats since the
+    /// pump started. `forwarded`/`flooded`/`blocked` come from the engine's
+    /// per-port counters (never loop-tracked), LAN traffic from per-port
+    /// stats, session traffic from the loop's own counters — each event is
+    /// counted in exactly one place, so repeated polling never inflates.
     pub fn getStats(self: *const BridgeLoop) BridgeStats {
         var s = self.stats;
         s.fdb_entries = @intCast(self.engine.fdb.len());
@@ -230,12 +234,10 @@ pub const BridgeLoop = struct {
 
     fn writePort(self: *BridgeLoop, port_index: u16, frame: []const u8, action: ForwardAction) void {
         const p = &self.ports[port_index];
-        _ = p.write(frame) catch |err| {
-            if (err == error.FrameTooLarge) {
-                self.stats.drops += 1;
-            }
-            return; // TxBusy / DeviceClosed — port layer counted what it can
-        };
+        // FrameTooLarge is already counted by the port layer's own stats,
+        // which getStats() sums — no loop-side double count. TxBusy /
+        // DeviceClosed: the port layer counted what it can.
+        _ = p.write(frame) catch return;
         self.engine.noteForwarded(port_index, action);
     }
 
