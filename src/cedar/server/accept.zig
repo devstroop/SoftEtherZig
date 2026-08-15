@@ -75,6 +75,11 @@ const max_head_size: usize = 4096;
 pub const initial_timeout_ms: u32 = 15000;
 /// Default session timeout in ms (C policy TimeOut = 20 s).
 pub const timeout_default_ms: u32 = 20000;
+/// Data-plane read poll in ms. `TlsConn.read` waits at most this long for
+/// inbound bytes before returning `error.WouldBlock`, so `SessionMain` can run
+/// keep-alives and enforce `timeout_default_ms` instead of blocking on the
+/// socket (which has no SO_RCVTIMEO after the handshake).
+const session_poll_ms: u32 = 250;
 
 /// Wire error codes (C: Cedar.h `ERR_*`).
 const error_hub_not_found: u32 = 8;
@@ -403,7 +408,25 @@ const TlsConn = struct {
 
     fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
         const self: *TlsConn = @ptrCast(@alignCast(ctx));
-        return self.sock.readBlocking(buf);
+        const sock = self.sock;
+
+        // Serve decrypted data OpenSSL may already hold buffered — the fd
+        // poll below would not see it (read-ahead + SSL_pending).
+        if (sock.hasPending()) return sock.read(buf);
+
+        // Bounded wait for inbound bytes. The accepted socket is blocking
+        // with no SO_RCVTIMEO (tls.zig drops it after the handshake), so a
+        // direct read would block forever and starve SessionMain's
+        // keep-alive and inactivity-timeout checks. Polling briefly and
+        // returning error.WouldBlock on idle keeps those running.
+        var pfd = [_]std.posix.pollfd{.{
+            .fd = sock.tcp_fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const pr = std.posix.poll(&pfd, session_poll_ms) catch 0;
+        if (pr == 0) return error.WouldBlock;
+        return sock.read(buf);
     }
 
     fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
@@ -588,6 +611,88 @@ test "server.accept rejects wrong password" {
 
     try testing.expect(!result.auth.success);
     try testing.expectEqual(error_auth_failed, result.auth.error_code);
+
+    e2e.client.close();
+    e2e.client_closed = true;
+}
+
+test "server.accept authenticates case-insensitive username" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    // Account registered as "Alice"; the client connects as "alice". SoftEther
+    // matches account names case-insensitively (C: `SearchUser`/`StrCmpi`).
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+    _ = try auth_hub.addUser("Alice", .password, "hunter2");
+
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e.deinit();
+
+    var io = ClientIo{ .sock = &e2e.client };
+    const writer = protocol_mod.Writer{ .context = &io, .writeFn = ClientIo.write };
+    const reader = protocol_mod.Reader{ .context = &io, .readFn = ClientIo.read };
+
+    var result = try protocol_mod.performHandshake(allocator, writer, reader, "accept.test", "VPN", "alice", "hunter2", false);
+    defer result.hello.deinit(allocator);
+    defer result.auth.deinit(allocator);
+
+    try testing.expect(result.auth.success);
+
+    e2e.client.close();
+    e2e.client_closed = true;
+}
+
+test "server.accept idle session emits keep-alive (bounded data-plane read)" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const tunnel_mod = @import("../protocol/tunnel.zig");
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+    _ = try auth_hub.addUser("alice", .password, "hunter2");
+
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e.deinit();
+
+    var io = ClientIo{ .sock = &e2e.client };
+    const writer = protocol_mod.Writer{ .context = &io, .writeFn = ClientIo.write };
+    const reader = protocol_mod.Reader{ .context = &io, .readFn = ClientIo.read };
+
+    var result = try protocol_mod.performHandshake(allocator, writer, reader, "accept.test", "VPN", "alice", "hunter2", false);
+    defer result.hello.deinit(allocator);
+    defer result.auth.deinit(allocator);
+    try testing.expect(result.auth.success);
+
+    // Keep the client open and idle. The server session loop's first action on
+    // an idle wire is to send a tunnel keep-alive (SessionMain starts with
+    // `next_keepalive_time = 0`). A blocking data-plane read would sit in
+    // `readBlocking` forever and never reach the keep-alive — receiving it
+    // proves the bounded read lets keep-alives and timeouts run.
+    var ka_buf: [40]u8 = undefined;
+    var ka_have: usize = 0;
+    const deadline = std.time.milliTimestamp() + 5000;
+    while (ka_have < ka_buf.len and std.time.milliTimestamp() < deadline) {
+        const n = e2e.client.readBlocking(ka_buf[ka_have..]) catch 0;
+        if (n == 0) break;
+        ka_have += n;
+    }
+    try testing.expect(ka_have >= 8);
+    try testing.expectEqual(tunnel_mod.KEEP_ALIVE_MAGIC, mem.readInt(u32, ka_buf[0..4], .big));
 
     e2e.client.close();
     e2e.client_closed = true;
