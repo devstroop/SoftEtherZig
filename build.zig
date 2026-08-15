@@ -640,6 +640,7 @@ pub fn build(b: *std.Build) void {
                 "protocol.rpc",
                 "cli.args",
                 "cli.config_manager",
+                "bridge.loop",
                 // auth.zig test blocks (cross-tree md4 import → run here)
                 "ClientAuth",
                 "Challenge generation",
