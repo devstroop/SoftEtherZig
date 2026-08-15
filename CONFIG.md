@@ -126,3 +126,9 @@ The SoftEther VPN server uses these field names in the auth handshake
 ## Gaps (not equally placed)
 
 All gaps resolved — every property has complete coverage across all six layers.
+
+## Bridge & Monitor Modes
+
+Operating semantics (security boundary, MTU rules, FFI behavior, errata) for
+`mode: bridge` and `mode: monitor` are documented in
+[docs/bridge_monitor_ops.md](docs/bridge_monitor_ops.md) (issue #57).
