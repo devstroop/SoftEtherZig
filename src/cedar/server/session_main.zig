@@ -142,8 +142,8 @@ pub const SessionMain = struct {
     pa: PacketAdapter,
     config: SessionConfig,
 
-    /// Set by `requestStop`; the loop ends with `error.Stopped`.
-    halt: bool = false,
+    /// Set by `requestStop` (any thread); the loop ends with `error.Stopped`.
+    halt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     last_comm_time: i64 = 0,
     next_keepalive_time: i64 = 0,
@@ -165,13 +165,18 @@ pub const SessionMain = struct {
     ) !SessionMain {
         const recv_out = try allocator.alloc([]u8, MAX_RECV_BLOCKS);
         errdefer allocator.free(recv_out);
-        const recv_scratch = try allocator.alloc(u8, MAX_RECV_BLOCKS * 1600);
+        // receiveBlocksBatch admits blocks up to MAX_PACKET_SIZE * 2 each
+        // (wire and decompressed), so the scratch must budget that per slot.
+        const recv_scratch = try allocator.alloc(u8, MAX_RECV_BLOCKS * (MAX_PACKET_SIZE * 2));
         errdefer allocator.free(recv_scratch);
 
         const max_batch = if (config.max_send_batch == 0) DEFAULT_MAX_SEND_BATCH else config.max_send_batch;
         const send_batch = try allocator.alloc([]const u8, max_batch);
         errdefer allocator.free(send_batch);
-        const send_buf = try allocator.alloc(u8, max_batch * (MAX_PACKET_SIZE * 2 + 4));
+        // sendBlocksZeroCopy writes a 4-byte batch-count header, then per
+        // block a 4-byte size header + up to MAX_PACKET_SIZE * 2 payload
+        // bytes (compressed frames can expand up to that bound).
+        const send_buf = try allocator.alloc(u8, 4 + max_batch * (MAX_PACKET_SIZE * 2 + 4));
         errdefer allocator.free(send_buf);
 
         return .{
@@ -194,9 +199,10 @@ pub const SessionMain = struct {
         self.* = undefined;
     }
 
-    /// Ask the loop to stop; `run` returns `error.Stopped`.
+    /// Ask the loop to stop; `run` returns `error.Stopped`. Thread-safe:
+    /// `run` polls this flag each iteration.
     pub fn requestStop(self: *SessionMain) void {
-        self.halt = true;
+        self.halt.store(true, .seq_cst);
     }
 
     /// Run the session loop until stop requested, transport closed, or an
@@ -211,36 +217,50 @@ pub const SessionMain = struct {
         // immediately sends a keep-alive (NAT hole punching / warmup).
         self.next_keepalive_time = 0;
 
-        while (!self.halt) {
+        while (!self.halt.load(.seq_cst)) {
             var progress = false;
 
-            // 1+2. Receive from the wire, hand each block to the hub.
-            const recv_start = self.tunnel.total_recv;
-            const recv_count = self.tunnel.receiveBlocksBatch(self.recv_out, self.recv_scratch) catch |err| switch (err) {
-                error.WouldBlock => 0, // no full message yet — normal
-                error.ConnectionClosed => return error.ConnectionClosed,
-                else => return err,
-            };
-            if (recv_count > 0) {
-                for (self.recv_out[0..recv_count]) |frame| {
-                    self.stats.rx_blocks += 1;
-                    self.stats.rx_bytes += frame.len;
-                    if (!self.pa.put(self.pa.ctx, frame)) return error.PacketAdapterPutFailed;
+            // 1+2. Receive from the wire, hand each block to the hub. Drain as
+            // many complete messages as are buffered (C's ConnectionReceive
+            // consumes everything the socket has), but keep the loop bounded
+            // so the outbound path and keep-alive are serviced too.
+            var recv_batches: usize = 0;
+            while (true) {
+                const recv_start = self.tunnel.total_recv;
+                const recv_count = self.tunnel.receiveBlocksBatch(self.recv_out, self.recv_scratch) catch |err| switch (err) {
+                    error.WouldBlock => break, // no full message yet — normal
+                    error.ConnectionClosed => return error.ConnectionClosed,
+                    else => return err,
+                };
+                if (recv_count > 0) {
+                    for (self.recv_out[0..recv_count]) |frame| {
+                        self.stats.rx_blocks += 1;
+                        self.stats.rx_bytes += frame.len;
+                        if (!self.pa.put(self.pa.ctx, frame)) return error.PacketAdapterPutFailed;
+                    }
                 }
+                if (self.tunnel.total_recv > recv_start) {
+                    // Any bytes consumed from the wire (frames, a keep-alive,
+                    // or a zero-block message) count as communication — C
+                    // updates LastCommTime on every socket read
+                    // (Connection.c:2099).
+                    self.stats.keepalives_recv = self.tunnel.keepalives_recv;
+                    self.touchComm();
+                    progress = true;
+                }
+                // A keep-alive or empty message was consumed; keep draining.
+                if (recv_count == 0) continue;
+                recv_batches += 1;
+                // Cap the drain so a flooding peer cannot starve outbound
+                // traffic, keep-alives, or the timeout check.
+                if (recv_batches >= MAX_RECV_BLOCKS) break;
+                if (self.halt.load(.seq_cst)) break;
             }
             // C calls `pa->PutPacket(s, NULL, 0)` every iteration for server
             // sessions (Session.c:440-449) — the hub flush hook.
             if (!self.pa.flush(self.pa.ctx)) return error.PacketAdapterFlushFailed;
-            if (self.tunnel.total_recv > recv_start) {
-                // Any bytes consumed from the wire (frames, a keep-alive, or a
-                // zero-block message) count as communication — C updates
-                // LastCommTime on every socket read (Connection.c:2099).
-                self.stats.keepalives_recv = self.tunnel.keepalives_recv;
-                self.touchComm();
-                progress = true;
-            }
 
-            if (self.halt) break;
+            if (self.halt.load(.seq_cst)) break;
 
             // 3. Keep-alive on idle wire — C sends it at the top of
             //    ConnectionSend, BEFORE the data batch (Connection.c:1080-1088).
