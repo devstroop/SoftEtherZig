@@ -14,12 +14,15 @@
 //!   + flood), per-session SessionPa PacketAdapter
 //! - `listener.zig` — Listener layer: per-port accept threads, DoS gate,
 //!   listener registry
+//! - `accept.zig` — connection accept: TLS handshake, signature upload, hello,
+//!   auth + welcome, then the session data plane (issue #78)
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
 pub const session_main = @import("session_main.zig");
 pub const hub = @import("hub.zig");
 pub const listener = @import("listener.zig");
+pub const accept = @import("accept.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
@@ -48,6 +51,8 @@ pub const Protocol = listener.Protocol;
 pub const Status = listener.Status;
 pub const DosTable = listener.DosTable;
 pub const AcceptHandler = listener.AcceptHandler;
+pub const ServerContext = accept.ServerContext;
+pub const acceptConnection = accept.acceptConnection;
 
 // Tests
 test {
