@@ -92,6 +92,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !CliArg
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
+        // Skip empty argv tokens (e.g. `--gen-cert ""`) instead of indexing
+        // past the string terminator or rejecting them outright.
+        if (a.len == 0) continue;
         if (std.mem.eql(u8, a, "--config")) {
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
@@ -104,7 +107,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !CliArg
             result.version = true;
         } else if (std.mem.eql(u8, a, "--gen-cert")) {
             result.gen_cert = true;
-            if (i + 1 < args.len and args[i + 1][0] != '-') {
+            // Optional CN: next token if present and non-empty (an empty token
+            // like `--gen-cert ""` would OOB-panic on `[0]`).
+            if (i + 1 < args.len and args[i + 1].len > 0 and args[i + 1][0] != '-') {
                 i += 1;
                 result.gen_cert_name = args[i];
             }
@@ -126,7 +131,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !CliArg
 pub const ServerState = struct {
     allocator: std.mem.Allocator,
     cli_args: CliArgs,
-    running: bool = true,
+    /// Atomic so the signal handler's write is race-free against the run
+    /// loop's read (plain bool would be a data race under the Zig model).
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     /// Persist a first-run generated cert (off in unit tests).
     persist_cert: bool = true,
     cert_pem: ?[]u8 = null,
@@ -141,12 +148,12 @@ pub const ServerState = struct {
     }
 
     pub fn isRunning(self: *const ServerState) bool {
-        return self.running;
+        return self.running.load(.acquire);
     }
 
     /// Flip the stop flag (async-signal-safe; called from the signal handler).
     pub fn stop(self: *ServerState) void {
-        self.running = false;
+        self.running.store(false, .release);
     }
 
     /// Full teardown. Stops listeners first so no new connection threads
@@ -227,46 +234,73 @@ fn getCurrentPid() u32 {
     return @intCast(std.c.getpid());
 }
 
+/// Read the PID stored in `pid_path` (null if absent/unparsable).
+fn readPidOwner(pid_path: []const u8) ?u32 {
+    const file = std.fs.cwd().openFile(pid_path, .{}) catch return null;
+    defer file.close();
+    var read_buf: [32]u8 = undefined;
+    const n = file.readAll(&read_buf) catch return null;
+    if (n == 0) return null;
+    const content = std.mem.trim(u8, read_buf[0..n], " \n\r\t");
+    return std.fmt.parseInt(u32, content, 10) catch null;
+}
+
+/// Whether a process is running. `kill(pid, 0)` probes without signalling;
+/// EPERM means the process exists but is not ours — treat as alive.
+fn processAlive(pid: u32) bool {
+    if (builtin.os.tag == .windows) return true; // conservative: refuse
+    if (std.posix.kill(@as(i32, @intCast(pid)), 0)) {
+        return true;
+    } else |err| {
+        return err == error.PermissionDenied;
+    }
+}
+
 /// Write `vpnserver.pid` (XDG_RUNTIME_DIR or /tmp), refusing if another live
 /// instance already owns it. Mirrors `app/daemon.zig` `writePidFile` (S-038).
+/// The claim is atomic (`O_CREAT|O_EXCL`): two concurrent launches can't both
+/// pass the stale check and then overwrite the same file.
 fn writePidFile() bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pid_path = getPidFilePath(&path_buf) orelse return false;
 
-    if (std.fs.cwd().openFile(pid_path, .{})) |file| {
-        defer file.close();
-        var read_buf: [32]u8 = undefined;
-        const n = file.readAll(&read_buf) catch 0;
-        if (n > 0) {
-            const content = std.mem.trim(u8, read_buf[0..n], " \n\r\t");
-            if (std.fmt.parseInt(u32, content, 10)) |old_pid| {
-                if (builtin.os.tag != .windows) {
-                    if (std.posix.kill(@as(i32, @intCast(old_pid)), 0)) {
-                        log.err("another instance is running (PID {d})", .{old_pid});
-                        return false;
-                    } else |_| {}
-                }
-            } else |_| {}
-        }
-    } else |_| {}
-
     const pid = getCurrentPid();
-    const file = std.fs.cwd().createFile(pid_path, .{}) catch |err| {
-        log.warn("could not write PID file: {s}", .{@errorName(err)});
-        return true; // Non-fatal
-    };
-    defer file.close();
-
     var pid_buf: [32]u8 = undefined;
     const pid_str = std.fmt.bufPrint(&pid_buf, "{d}\n", .{pid}) catch return true;
-    file.writeAll(pid_str) catch {};
-    log.info("PID file: {s} (PID {d})", .{ pid_path, pid });
-    return true;
+
+    // EEXIST → live owner = refusal; stale owner = remove and retry once.
+    var attempt: u2 = 0;
+    while (attempt < 2) : (attempt += 1) {
+        if (std.fs.cwd().createFile(pid_path, .{ .exclusive = true })) |file| {
+            file.writeAll(pid_str) catch {};
+            file.close();
+            log.info("PID file: {s} (PID {d})", .{ pid_path, pid });
+            return true;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => {
+                if (readPidOwner(pid_path)) |old_pid| {
+                    if (processAlive(old_pid)) {
+                        log.err("another instance is running (PID {d})", .{old_pid});
+                        return false;
+                    }
+                }
+                std.fs.cwd().deleteFile(pid_path) catch {};
+            },
+            else => {
+                log.warn("could not write PID file: {s}", .{@errorName(err)});
+                return true; // Non-fatal
+            },
+        }
+    }
+    log.warn("could not claim PID file after retry", .{});
+    return false;
 }
 
 fn removePidFile() void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const pid_path = getPidFilePath(&path_buf) orelse return;
+    // Only delete if we still own it — never a successor's file.
+    if (readPidOwner(pid_path) != getCurrentPid()) return;
     std.fs.cwd().deleteFile(pid_path) catch {};
 }
 
@@ -274,7 +308,9 @@ fn removePidFile() void {
 // Server bootstrap — mirrors StInit → StStartServer
 // ============================================================================
 
-fn persistPem(path: []const u8, data: []const u8, mode: u32) void {
+/// `File.Mode` (= `posix.mode_t`) is u16 on macOS and u32/u64 on Linux, so a
+/// fixed-width int here would break cross-platform CI.
+fn persistPem(path: []const u8, data: []const u8, mode: std.fs.File.Mode) void {
     const file = std.fs.cwd().createFile(path, .{ .truncate = true, .mode = mode }) catch |err| {
         log.warn("could not write {s}: {s}", .{ path, @errorName(err) });
         return;
@@ -362,6 +398,21 @@ fn stopListeners(state: *ServerState) void {
     state.listeners.clearRetainingCapacity();
 }
 
+/// Wait up to `timeout_ms` for at least one listener to reach `.listening`.
+/// `Listener.start` only spawns the accept thread — binding happens
+/// asynchronously (with retry) inside it, so a non-empty `listeners` array
+/// does not prove any port is reachable.
+fn waitForListening(state: *ServerState, timeout_ms: i64) bool {
+    const deadline = std.time.milliTimestamp() + timeout_ms;
+    while (std.time.milliTimestamp() < deadline) {
+        for (state.listeners.items) |listener| {
+            if (listener.getStatus() == .listening) return true;
+        }
+        std.Thread.sleep(50 * std.time.ns_per_ms);
+    }
+    return false;
+}
+
 /// Boot the server and run until a signal flips `running` (mirrors
 /// `app/daemon.zig`'s run-until-stopped loop).
 pub fn run(state: *ServerState) !void {
@@ -370,6 +421,10 @@ pub fn run(state: *ServerState) !void {
 
     if (state.listeners.items.len == 0) {
         log.err("no listeners could be started", .{});
+        return error.NoListenersStarted;
+    }
+    if (!waitForListening(state, 5_000)) {
+        log.err("no listener reached listening state", .{});
         return error.NoListenersStarted;
     }
 
@@ -436,7 +491,10 @@ pub fn main() !void {
     var daemon_pid = false;
     if (cli_args.daemon) {
         if (!writePidFile()) {
-            cli.display.failure(&display, "could not start: {s} already running (see /tmp/{s})", .{ server_name, pid_filename });
+            // Show the resolved path (XDG_RUNTIME_DIR first, else /tmp).
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const pid_path = getPidFilePath(&path_buf) orelse pid_filename;
+            cli.display.failure(&display, "could not start: {s} already running (see {s})", .{ server_name, pid_path });
             std.process.exit(1);
         }
         daemon_pid = true;
@@ -489,6 +547,20 @@ test "server.exe parse --gen-cert" {
     const args = [_][]const u8{ server_name, "--gen-cert" };
     const cli_args = try parseArgs(std.testing.allocator, &args);
     try std.testing.expect(cli_args.gen_cert);
+}
+
+test "server.exe parse --gen-cert empty common name" {
+    const args = [_][]const u8{ server_name, "--gen-cert", "" };
+    const cli_args = try parseArgs(std.testing.allocator, &args);
+    try std.testing.expect(cli_args.gen_cert);
+    try std.testing.expect(cli_args.gen_cert_name == null);
+}
+
+test "server.exe parse --gen-cert common name" {
+    const args = [_][]const u8{ server_name, "--gen-cert", "myhost" };
+    const cli_args = try parseArgs(std.testing.allocator, &args);
+    try std.testing.expect(cli_args.gen_cert);
+    try std.testing.expectEqualStrings("myhost", cli_args.gen_cert_name.?);
 }
 
 test "server.exe bootstrap creates DEFAULT hub with Administrator" {
