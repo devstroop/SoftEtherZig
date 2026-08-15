@@ -80,6 +80,9 @@ pub const bridge = struct {
     pub const loop = @import("bridge/loop.zig");
 };
 
+// Monitor role (proposal §5.4) — ring + PCAP capture of session L2 frames
+pub const monitor = @import("monitor.zig");
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
@@ -117,6 +120,7 @@ test "library exports" {
     _ = ReconnectConfig;
     _ = core;
     _ = bridge;
+    _ = monitor;
     _ = parseIpv4;
     _ = formatIpv4;
 }

@@ -179,6 +179,10 @@ pub const SessionOptions = struct {
     qos: bool = true,
     use_encrypt: bool = true,
     use_compress: bool = false,
+    /// Monitor session request (H-4): when true the auth pack carries
+    /// `require_monitor_mode=true` so the server sets up a monitor session
+    /// mirroring hub traffic back to this client (proposal §5.4).
+    monitor_mode: bool = false,
     /// Optional protocol fingerprint overrides for anti-fingerprinting.
     /// When null, hardcoded Protocol constants and getOsInfo() are used.
     fingerprint: ?*const ProtocolFingerprint = null,
@@ -655,7 +659,7 @@ pub fn buildPasswordAuth(
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     try auth_pack.addBool("require_bridge_routing_mode", false);
-    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("require_monitor_mode", opts.monitor_mode);
 
     try auth_pack.addBool("qos", opts.qos);
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
@@ -754,7 +758,7 @@ pub fn buildPlainsPasswordAuth(
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     try auth_pack.addBool("require_bridge_routing_mode", false);
-    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("require_monitor_mode", opts.monitor_mode);
     try auth_pack.addBool("qos", opts.qos);
     try auth_pack.addBool("support_bulk_on_rudp", udp_accel);
     try auth_pack.addBool("support_hmac_on_bulk_of_rudp", udp_accel);
@@ -879,7 +883,7 @@ pub fn buildPasswordAuthWithHash(
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     try auth_pack.addBool("require_bridge_routing_mode", false);
-    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("require_monitor_mode", opts.monitor_mode);
 
     try auth_pack.addBool("qos", opts.qos);
 
@@ -980,7 +984,7 @@ pub fn buildAnonymousAuth(
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     try auth_pack.addBool("require_bridge_routing_mode", false);
-    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("require_monitor_mode", opts.monitor_mode);
 
     try auth_pack.addBool("qos", opts.qos);
 
@@ -1056,7 +1060,7 @@ pub fn buildCertificateAuth(
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     try auth_pack.addBool("require_bridge_routing_mode", false);
-    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("require_monitor_mode", opts.monitor_mode);
 
     try auth_pack.addBool("qos", opts.qos);
 
@@ -1158,7 +1162,7 @@ pub fn buildTicketAuth(
     try auth_pack.addBool("half_connection", opts.half_connection);
 
     try auth_pack.addBool("require_bridge_routing_mode", false);
-    try auth_pack.addBool("require_monitor_mode", false);
+    try auth_pack.addBool("require_monitor_mode", opts.monitor_mode);
 
     try auth_pack.addBool("qos", opts.qos);
 

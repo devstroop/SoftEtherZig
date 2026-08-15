@@ -16,8 +16,10 @@ const lib = @import("lib.zig");
 // L2 bridge pump tests live in the whole-package test target; force
 // analysis of lib.bridge.loop so its `bridge.loop.*` test blocks are
 // compiled into that binary (fdb/engine run standalone in test_sources).
+// Same for lib.monitor (`monitor.*` ring/PCAP tests).
 comptime {
     _ = lib.bridge.loop;
+    _ = lib.monitor;
 }
 
 // ============================================================================
@@ -296,6 +298,18 @@ pub const CBridgeStats = extern struct {
     session_rx: u64,
     session_tx: u64,
     session_tx_errors: u64,
+};
+
+/// Aggregate monitor-mode stats (C layout, mirrors `MonitorStats`).
+pub const CMonitorStats = extern struct {
+    frames_captured: u64,
+    frames_dropped: u64,
+    bytes_captured: u64,
+    ring_used: u32,
+    _pad0: u32 = 0,
+    pcap_records: u64,
+    pcap_bytes: u64,
+    pcap_write_errors: u64,
 };
 
 /// Connection state (C-compatible enum)
@@ -592,6 +606,50 @@ export fn softether_get_bridge_stats(client: ?*const VpnClient, out: ?*CBridgeSt
         .session_tx_errors = st.session_tx_errors,
     };
     return 0;
+}
+
+/// Get monitor-mode stats (zeroed when monitor mode is not active or the
+/// pump is not running). Returns 0 on success.
+export fn softether_get_monitor_stats(client: ?*const VpnClient, out: ?*CMonitorStats) c_int {
+    const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const s = out orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const st = c.monitor_stats;
+    s.* = .{
+        .frames_captured = st.frames_captured,
+        .frames_dropped = st.frames_dropped,
+        .bytes_captured = st.bytes_captured,
+        .ring_used = st.ring_used,
+        .pcap_records = st.pcap_records,
+        .pcap_bytes = st.pcap_bytes,
+        .pcap_write_errors = st.pcap_write_errors,
+    };
+    return 0;
+}
+
+/// Frames currently held in the monitor ring (0 = ring empty or not
+/// running). Returns -1 on invalid client / monitor pump not running.
+export fn softether_monitor_frame_count(client: ?*VpnClient) i64 {
+    const c = client orelse return -1;
+    c.mutex.lock();
+    defer c.mutex.unlock();
+    const loop = c.monitor_loop orelse return -1;
+    return loop.frameCount();
+}
+
+/// Copy one captured frame (index 0 = oldest) into `out`. Returns the
+/// number of bytes copied (0 when index is out of range or `out_cap` is
+/// 0), or -1 when the client is invalid or the monitor pump is not
+/// running. The frame data is copied under the loop mutex, so it is a
+/// stable snapshot even while the pump keeps capturing.
+export fn softether_monitor_get_frame(client: ?*VpnClient, index: i64, out: ?[*]u8, out_cap: usize) i64 {
+    const c = client orelse return -1;
+    if (index < 0) return 0;
+    const dst = (out orelse return 0)[0..out_cap];
+    if (dst.len == 0) return 0;
+    c.mutex.lock();
+    defer c.mutex.unlock();
+    const loop = c.monitor_loop orelse return -1;
+    return @intCast(loop.readFrame(@intCast(index), dst) orelse 0);
 }
 
 /// Get connection statistics. Returns 0 on success.
@@ -1370,18 +1428,20 @@ export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int
 }
 
 // ============================================================================
-// Network mode (L2 bridge proposal §5.1) — storage plumbing only; runtime
-// bridge/monitor support lands in later milestones. All three setters are
-// safe to call before connect(); the connect path ignores the mode today.
+// Network mode (L2 bridge proposal §5.1) — runtime support landed: bridge
+// (issue #56) and monitor (issue #55) both run their own data pumps:
+// bridge → runBridgeLoopThread (AF_PACKET ingress), monitor →
+// runMonitorLoopThread (mirror-only capture). All three setters are safe
+// to call before connect(); the connect path branches on the mode flag.
 // ============================================================================
 
 /// Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
 /// Invalid values are ignored. Storage-only: this updates the client's
 /// config AND the session flag; the connect path branches on the flag.
-/// bridge/monitor runtime is not implemented yet, so a connect in those
-/// modes logs a warning and runs the client data loop. If called mid-
-/// session (after connect), the running loop is unaffected — the flag
-/// applies on the next connect.
+/// bridge mode is Linux-only (AF_PACKET); monitor mode is portable and
+/// captures mirrored hub frames into a bounded ring (+ optional PCAP).
+/// If called mid-session (after connect), the running loop is unaffected
+/// — the flag applies on the next connect.
 export fn softether_set_network_mode(client: ?*VpnClient, mode: c_int) void {
     const c = client orelse return;
     const NetworkMode = client_mod.NetworkMode;
@@ -1472,6 +1532,26 @@ export fn softether_remove_ingress_interface(client: ?*VpnClient, name: ?[*:0]co
         for (old) |e| c.allocator.free(e);
         c.allocator.free(old);
     }
+    return 0;
+}
+
+/// Set the monitor-mode PCAP capture path (owned copy; "" or NULL clears
+/// it). The file is opened when the monitor pump starts (next connect);
+/// a bad path aborts the monitor session with the raw file error.
+/// Returns 0 on success, -1 on invalid client / OOM.
+export fn softether_set_monitor_pcap(client: ?*VpnClient, path: ?[*:0]const u8) c_int {
+    const c = client orelse return -1;
+    const s = std.mem.span(path orelse "");
+
+    if (c.config.monitor.pcap_file_owned) {
+        if (c.config.monitor.pcap_file) |f| c.allocator.free(f);
+        c.config.monitor.pcap_file = null;
+        c.config.monitor.pcap_file_owned = false;
+    }
+    if (s.len == 0) return 0; // cleared
+
+    c.config.monitor.pcap_file = c.allocator.dupe(u8, s) catch return -1;
+    c.config.monitor.pcap_file_owned = true;
     return 0;
 }
 
@@ -1811,4 +1891,54 @@ test "ffi add ingress never frees borrowed config lists" {
     // Remove — replacements must also not free the literal
     try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en1"));
     try std.testing.expectEqual(@as(usize, 2), c.config.bridge.ingress_ifs.len);
+}
+
+test "ffi monitor pcap setter owned lifecycle" {
+    // A borrowed literal pcap path from VpnClient.init must survive the
+    // setter without being freed (borrowed semantics, mirrors ingress).
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+        .monitor = .{ .pcap_file = "capture.pcap" },
+    });
+    defer c.deinit();
+    try std.testing.expect(!c.config.monitor.pcap_file_owned);
+
+    // Replace with an owned copy — borrowed string must not be freed.
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, "new.pcap"));
+    try std.testing.expect(c.config.monitor.pcap_file_owned);
+    try std.testing.expectEqualStrings("new.pcap", c.config.monitor.pcap_file.?);
+
+    // Replacing an owned string frees the previous owned copy (leak-safe).
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, "final.pcap"));
+    try std.testing.expectEqualStrings("final.pcap", c.config.monitor.pcap_file.?);
+
+    // Empty string clears without freeing a borrowed literal.
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, ""));
+    try std.testing.expect(c.config.monitor.pcap_file == null);
+    try std.testing.expect(!c.config.monitor.pcap_file_owned);
+
+    // NULL path after a clear is idempotent; NULL client is invalid.
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, null));
+    try std.testing.expect(c.config.monitor.pcap_file == null);
+    try std.testing.expectEqual(@as(c_int, -1), softether_set_monitor_pcap(null, "x.pcap"));
+}
+
+test "ffi monitor frame getters require a running pump" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    // No monitor pump running → -1 for both getters (and a no-op out
+    // buffer must never be dereferenced).
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(i64, -1), softether_monitor_frame_count(&c));
+    try std.testing.expectEqual(@as(i64, -1), softether_monitor_get_frame(&c, 0, &buf, buf.len));
+    try std.testing.expectEqual(@as(i64, 0), softether_monitor_get_frame(&c, 0, null, 0));
 }
