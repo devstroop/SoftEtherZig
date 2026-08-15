@@ -19,17 +19,20 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const c = @cImport(@cInclude("zlib.h"));
 
+/// Wire framing constants — single source of truth lives in softether_protocol.zig
+const Protocol = @import("softether_protocol.zig").Protocol;
+
 /// Magic number indicating keep-alive packet (same as SoftEther's KEEP_ALIVE_MAGIC)
-pub const KEEP_ALIVE_MAGIC: u32 = 0xFFFFFFFF;
+pub const KEEP_ALIVE_MAGIC: u32 = Protocol.keep_alive_magic;
 
 /// Maximum packet size (Ethernet frame)
-pub const MAX_PACKET_SIZE: usize = 1514;
+pub const MAX_PACKET_SIZE: usize = Protocol.max_packet_size;
 
 /// Maximum keep-alive data size
 pub const MAX_KEEPALIVE_SIZE: usize = 512;
 
 /// Maximum number of blocks to receive at once
-pub const MAX_RECV_BLOCKS: usize = 512; // Server can send many blocks at once
+pub const MAX_RECV_BLOCKS: usize = Protocol.max_recv_blocks; // Server can send many blocks at once
 
 /// Block read from tunnel
 pub const Block = struct {

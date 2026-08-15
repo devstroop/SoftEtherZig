@@ -82,6 +82,31 @@ pub const Protocol = struct {
 
     /// Client build number (match official client)
     pub const client_build: u32 = 9807;
+
+    // ------------------------------------------------------------------
+    // Wire protocol constants — SINGLE SOURCE OF TRUTH.
+    // Client and server must produce identical values. Consumers in
+    // cedar/session and cedar/protocol/tunnel re-export these; the C
+    // reference defines the same values in Protocol.c / Network.h / Cedar.h.
+    // ------------------------------------------------------------------
+
+    /// Protocol signature sent at connection start (C: "SE Vu", Protocol.c)
+    pub const protocol_signature = "SE Vu";
+
+    /// Protocol version (C: 0x00000413, Protocol.c)
+    pub const protocol_version: u32 = 0x00000413;
+
+    /// Magic number indicating a keep-alive frame (C: KEEP_ALIVE_MAGIC, Cedar.h:392)
+    pub const keep_alive_magic: u32 = 0xFFFFFFFF;
+
+    /// Maximum Ethernet frame size carried in one block (C: MAX_PACKET_SIZE 1514)
+    pub const max_packet_size: usize = 1514;
+
+    /// Maximum number of blocks per frame (C: MAX_RECV_BLOCKS 512)
+    pub const max_recv_blocks: usize = 512;
+
+    /// HTTP Keep-Alive header value (C: HTTP_KEEP_ALIVE "timeout=15; max=19", Network.h:1000)
+    pub const keep_alive_header = "timeout=15; max=19";
 };
 
 /// Import WaterMark from dedicated file for visual verification
@@ -396,7 +421,7 @@ fn buildPackHttpHeader(allocator: Allocator, host: []const u8, body_len: usize, 
         second,
     });
     try writer.print("Host: {s}\r\n", .{host});
-    try writer.writeAll("Keep-Alive: timeout=15; max=19\r\n");
+    try writer.print("Keep-Alive: {s}\r\n", .{Protocol.keep_alive_header});
     try writer.writeAll("Connection: Keep-Alive\r\n");
     try writer.print("Content-Type: {s}\r\n", .{content_type});
     try writer.print("Content-Length: {d}\r\n", .{body_len});
