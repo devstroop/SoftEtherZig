@@ -590,6 +590,20 @@ test "bpfPort frame chain parser (root-free)" {
     try std.testing.expectEqual(@as(u8, 0xbb), last_byte);
 }
 
+test "bpfPort open degrades cleanly (no privilege / bad interface)" {
+    // On a bare CI runner there is no setuid helper → NoCapability; with
+    // root or a helper the attach must fail cleanly on a bogus interface.
+    // The client contract: a clean error, never a crash or hang.
+    var port = BpfPort{ .allocator = std.testing.allocator };
+    const p = bpfPort(&port, std.testing.allocator, "no-such-if-xyz");
+    const open_err = p.open() catch |e| e;
+    switch (open_err) {
+        error.NoCapability, error.HelperFailed, error.AttachFailed, error.InterfaceNotFound, error.NotMacos => {},
+        else => return open_err,
+    }
+    p.close();
+}
+
 test "bpfPort frame chain parsing serves one frame per read" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var port = BpfPort{ .allocator = std.testing.allocator };
