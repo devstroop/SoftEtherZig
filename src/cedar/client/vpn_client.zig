@@ -84,6 +84,10 @@ const auth_handler = @import("auth_handler.zig");
 // Session setup — session creation + multi-connection establishment.
 const session_setup = @import("session_setup.zig");
 
+// L2 network bridge — pump (loop.zig), forwarding engine (engine.zig),
+// and AF_PACKET ingress ports. Only reachable when network_mode == .bridge.
+const bridge_mod = @import("../../bridge/mod.zig");
+
 // Windows multimedia timer API (for high-resolution poll timeouts)
 const winmm = if (builtin.os.tag == .windows) struct {
     extern "winmm" fn timeBeginPeriod(uPeriod: c_uint) callconv(.winapi) c_uint;
@@ -219,6 +223,45 @@ fn tunFlush(ctx_: *anyopaque) void {
     if (dc.tun_write_batch_count.* > 0) {
         dc.self.flushTunWriteBatch(dc.adapter, dc.tun_write_batch[0..dc.tun_write_batch_count.*]);
         dc.tun_write_batch_count.* = 0;
+    }
+}
+
+// ============================================================================
+// BRIDGE MODE closures (issue #56) — session-side I/O for the L2 pump
+// ============================================================================
+
+/// Closure state for the bridge pump's LAN → session sink: wraps
+/// SendTunnelHelper so `bridgeSendToSession` delivers one complete Ethernet
+/// frame into the session tunnel (softether framing).
+const BridgeSinkCtx = struct {
+    helper: *session_io.SendTunnelHelper,
+};
+
+fn bridgeSendToSession(ctx_: *anyopaque, frame: []const u8) anyerror!void {
+    const b: *BridgeSinkCtx = @ptrCast(@alignCast(ctx_));
+    const blocks = [_][]const u8{frame};
+    try b.helper.get().sendBlocks(&blocks);
+}
+
+/// Closure state for the inbound drain: session blocks land in the
+/// BridgeLoop which floods/unicasts them to the LAN ports.
+const BridgeDrainCtx = struct {
+    loop: *bridge_mod.BridgeLoop,
+};
+
+fn bridgeOnBlock(ctx_: *anyopaque, block_data: []u8) void {
+    const b: *BridgeDrainCtx = @ptrCast(@alignCast(ctx_));
+    b.loop.dispatchSessionBlock(block_data);
+}
+
+fn bridgeOnFlush(ctx_: *anyopaque) void {
+    _ = ctx_; // no TUN batching in bridge mode — frames are written immediately
+}
+
+fn bridgeOnDead(ctx_: *anyopaque, reason: session_io.DeadReason, err: anyerror) void {
+    _ = ctx_;
+    if (reason == .connection_closed) {
+        std.log.info("Bridge session closed: {s}", .{@errorName(err)});
     }
 }
 
@@ -479,6 +522,9 @@ pub const VpnClient = struct {
     config: ClientConfig,
     state: ClientState,
     stats: ConnectionStats,
+    /// Live bridge pump stats snapshot (updated at 1 Hz by the bridge
+    /// loop; `{}=` default when bridge mode is not active).
+    bridge_stats: bridge_mod.BridgeStats = .{},
     disconnect_reason: DisconnectReason,
 
     adapter_ctx: ?AdapterWrapper,
@@ -756,6 +802,14 @@ pub const VpnClient = struct {
             self.config.use_encrypt = true;
         }
 
+        // I-14: the bridge pump is single-connection (one TLS session port).
+        // Coerce max_connections>1 down to 1 instead of silently dropping the
+        // extra TCP connections later.
+        if (self.network_mode == .bridge and self.config.max_connections > 1) {
+            std.log.warn("bridge mode: max_connections={d} is not supported (I-14); using a single connection", .{self.config.max_connections});
+            self.config.max_connections = 1;
+        }
+
         self.should_stop = false;
         self.disconnect_reason = .none;
         self.last_error = null;
@@ -782,11 +836,11 @@ pub const VpnClient = struct {
         // with thread startup and incorrectly return immediately.
         @atomicStore(bool, &self.data_loop_running, true, .release);
 
-        // Network operating mode branch (issue #52). Only .client has a
-        // runtime data loop today; .bridge and .monitor fall back to the
-        // client loop so connect() works end-to-end while the bridge pump
-        // and monitor capture are being implemented in later milestones.
-        if (self.network_mode != .client) {
+        // Network operating mode branch (issue #52). Bridge mode runs its
+        // own L2 pump (bridge/loop.zig) over the ingress ports; monitor
+        // capture is not implemented yet and falls back to the client loop.
+        const is_bridge_mode = self.network_mode == .bridge;
+        if (!is_bridge_mode and self.network_mode != .client) {
             std.log.warn("network mode '{s}' runtime not implemented yet — falling back to client data loop", .{@tagName(self.network_mode)});
         }
 
@@ -794,11 +848,18 @@ pub const VpnClient = struct {
         // The data loop runs decoupled from any Dart Isolate.run() thread,
         // avoiding the ARM 32-bit FFI trampoline corruption bug that
         // occurs when calling native functions from a second temp isolate.
-        self.data_loop_thread = std.Thread.spawn(.{}, runDataLoopThread, .{self}) catch |err| blk: {
-            std.log.err("Failed to spawn data loop thread: {}", .{err});
-            @atomicStore(bool, &self.data_loop_running, false, .release);
-            break :blk null;
-        };
+        self.data_loop_thread = if (is_bridge_mode)
+            std.Thread.spawn(.{}, runBridgeLoopThread, .{self}) catch |err| blk: {
+                std.log.err("Failed to spawn bridge data loop thread: {}", .{err});
+                @atomicStore(bool, &self.data_loop_running, false, .release);
+                break :blk null;
+            }
+        else
+            std.Thread.spawn(.{}, runDataLoopThread, .{self}) catch |err| blk: {
+                std.log.err("Failed to spawn data loop thread: {}", .{err});
+                @atomicStore(bool, &self.data_loop_running, false, .release);
+                break :blk null;
+            };
         self.mutex.unlock();
     }
 
@@ -1130,11 +1191,18 @@ pub const VpnClient = struct {
             return ClientError.OperationCancelled;
         }
 
-        self.transitionState(.configuring_adapter);
-        self.configureAdapter() catch {
-            self.disconnect_reason = .configuration_error;
-            return ClientError.AdapterConfigurationFailed;
-        };
+        if (self.network_mode == .client) {
+            self.transitionState(.configuring_adapter);
+            self.configureAdapter() catch {
+                self.disconnect_reason = .configuration_error;
+                return ClientError.AdapterConfigurationFailed;
+            };
+        } else {
+            // Bridge/monitor modes have no TUN device, DHCP, or static IP —
+            // the L2 pump owns the data plane (issue #52). Session is live.
+            std.log.info("network mode '{s}': skipping adapter configuration", .{@tagName(self.network_mode)});
+            self.transitionState(.configuring_adapter);
+        }
 
         self.transitionState(.connected);
         const connect_total = std.time.milliTimestamp() - self.stats.connect_time_ms;
@@ -3076,6 +3144,238 @@ pub const VpnClient = struct {
         }
 
         std.log.info("Data channel loop ended", .{});
+    }
+
+    // ====================================================================
+    // BRIDGE MODE (L2 pump, issue #56)
+    // ====================================================================
+
+    /// Bridge pump thread entry (network_mode == .bridge).
+    ///
+    /// Mirrors `runDataLoopThread`'s lifecycle: runs the pump, then cleans
+    /// up in the same order (no adapter in bridge mode — the TUN device,
+    /// DHCP and static-IP configuration were skipped in performConnection),
+    /// signals the run flags, fires events, and schedules reconnect.
+    fn runBridgeLoopThread(self: *Self) void {
+        self.runBridgeLoop() catch |err| {
+            std.log.err("Bridge data loop thread exited with error: {}", .{err});
+        };
+
+        // Stop UDP acceleration (never started in bridge mode, but be safe)
+        if (self.udp_accel) |*ua| {
+            ua.stop();
+        }
+        self.udp_accel = null;
+
+        // Close session
+        if (self.session) |*sess| sess.disconnect();
+
+        // Close all TLS connections
+        if (self.conn_manager) |*cm| {
+            cm.deinit();
+            self.conn_manager = null;
+        }
+        if (self.tls_socket) |*sock| {
+            sock.close();
+            self.tls_socket = null;
+        }
+
+        self.state = .disconnected;
+
+        // === SIGNAL DONE (last thing — after all cleanup) ===
+        self.data_loop_thread = null;
+        @atomicStore(bool, &self.data_loop_running, false, .release);
+
+        // === Fire disconnect events + auto-reconnect ===
+        if (self.event_callback) |cb| {
+            cb(.{ .state_changed = .{
+                .old_state = .connected,
+                .new_state = .disconnected,
+            } }, self.event_user_data);
+            cb(.{ .disconnected = .{ .reason = self.disconnect_reason } }, self.event_user_data);
+        }
+
+        if (self.config.reconnect.enabled and
+            self.disconnect_reason != .user_requested and
+            self.disconnect_reason.shouldReconnect())
+        {
+            self.scheduleReconnect();
+        }
+    }
+
+    /// Bridge data pump (issue #56). Single TLS session; LAN ingress ports
+    /// (AF_PACKET on Linux) polled alongside the TLS socket. Inbound session
+    /// blocks are dispatched to the LAN ports via the BridgeLoop; frames
+    /// received on LAN ports are forwarded into the session over the same
+    /// TunnelConnection the client loop uses (softether Ethernet framing).
+    fn runBridgeLoop(self: *Self) !void {
+        if (!self.isConnected()) return ClientError.NotConnected;
+
+        @atomicStore(bool, &self.data_loop_running, true, .release);
+        defer @atomicStore(bool, &self.data_loop_running, false, .release);
+
+        // Single-connection bridge pump (I-14): max_connections was coerced
+        // to 1 in connect(). conn_manager stays null.
+        const single_sock: *tls.TlsSocket = &(self.tls_socket orelse return ClientError.NotConnected);
+        single_sock.clearTimeouts();
+        single_sock.setNonBlocking() catch |e| std.log.warn("setNonBlocking (bridge) failed: {}", .{e});
+
+        // === Open ingress ports (AF_PACKET; Linux-only) ===
+        const ifnames = self.config.bridge.ingress_ifs;
+        if (ifnames.len == 0) {
+            std.log.err("bridge mode: no ingress interfaces configured (softether_add_ingress_interface)", .{});
+            return ClientError.AdapterConfigurationFailed;
+        }
+        if (builtin.os.tag != .linux) {
+            std.log.err("bridge mode requires Linux AF_PACKET ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
+            return ClientError.AdapterConfigurationFailed;
+        }
+
+        const af_packet = @import("../../adapter/af_packet.zig");
+        // Stable store: BridgeLoop dupes the NetPort array but the impl
+        // pointers must stay valid for the whole pump lifetime.
+        const port_storage = try self.allocator.alloc(af_packet.AfPacketPort, ifnames.len);
+        defer self.allocator.free(port_storage);
+        var net_ports = try self.allocator.alloc(adapter_mod.NetPort, ifnames.len);
+        defer self.allocator.free(net_ports);
+        var opened: usize = 0;
+        errdefer {
+            for (net_ports[0..opened]) |p| p.close();
+        }
+
+        for (port_storage, ifnames, 0..) |*store, ifname, i| {
+            net_ports[i] = af_packet.afPacketPort(store, ifname);
+            net_ports[i].open() catch |err| {
+                std.log.err("bridge: failed to open ingress interface '{s}': {}", .{ ifname, err });
+                return ClientError.AdapterConfigurationFailed;
+            };
+            opened += 1;
+            std.log.info("bridge: ingress port {d} '{s}'", .{ i, ifname });
+        }
+
+        // === Tunnel connection (session side) ===
+        const single_tunnel = try self.allocator.create(protocol_tunnel_mod.TunnelConnection);
+        defer {
+            single_tunnel.deinit();
+            self.allocator.destroy(single_tunnel);
+        }
+        single_tunnel.* = protocol_tunnel_mod.TunnelConnection.init(
+            self.allocator,
+            @ptrCast(single_sock),
+            struct {
+                fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                    return s.read(buf);
+                }
+            }.read,
+            struct {
+                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
+                    const s = @as(*tls.TlsSocket, @ptrCast(@alignCast(ctx)));
+                    s.writeAllNonBlocking(data) catch |e| switch (e) {
+                        error.WouldBlock => return data.len,
+                        else => |err| return err,
+                    };
+                    return data.len;
+                }
+            }.write,
+        );
+        single_tunnel.use_compress = self.config.use_compress;
+        single_tunnel.initCompression();
+
+        // === BridgeLoop + session sink ===
+        // File-scope closure ctx (see BridgeSinkCtx below): send() wraps
+        // sendBlocks so the pump hands one complete Ethernet frame to the
+        // session tunnel.
+        var send_helper = session_io.SendTunnelHelper{
+            .cm_ptr = null,
+            .single_ptr = single_tunnel,
+        };
+        var bridge_sink_ctx = BridgeSinkCtx{ .helper = &send_helper };
+        var bridge_loop = try bridge_mod.BridgeLoop.init(
+            self.allocator,
+            net_ports,
+            .{ .ctx = &bridge_sink_ctx, .send = bridgeSendToSession },
+            self.config.bridge.fdb_max,
+            self.config.bridge.fdb_aging_s,
+        );
+        defer bridge_loop.deinit();
+
+        // === Buffers (heap; isolate threads have small stacks) ===
+        const recv_scratch = try self.allocator.alloc(u8, 512 * 1600);
+        defer self.allocator.free(recv_scratch);
+        const recv_slices = try self.allocator.alloc([]u8, 512);
+        defer self.allocator.free(recv_slices);
+        const port_buf = try self.allocator.alloc(u8, 1600);
+        defer self.allocator.free(port_buf);
+
+        // Aging cadence + drain diagnostics
+        var last_age_sec: i64 = 0;
+        var drain_diag = session_io.DrainDiag{};
+        var timing = tunnel_mod.data_loop.TimingState.init();
+
+        std.log.info("Bridge data channel started ({d} ingress ports)", .{net_ports.len});
+
+        while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
+            const now = std.time.milliTimestamp();
+
+            // Build poll fds: TLS socket + one per ingress port.
+            const max_fds: usize = 1 + net_ports.len;
+            var poll_fds: [64]std.posix.pollfd = undefined;
+            poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+            for (net_ports, 0..) |*p, i| {
+                poll_fds[1 + i] = .{ .fd = p.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+            }
+            _ = std.posix.poll(poll_fds[0..@intCast(max_fds)], 10) catch 0;
+
+            // INBOUND: drain session blocks → LAN ports.
+            if ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or single_sock.hasPending() or single_sock.kernelRecvQueue() > 0) {
+                var drain_ctx = BridgeDrainCtx{ .loop = &bridge_loop };
+                drain_diag = .{};
+                const result = session_io.drainReceived(
+                    single_tunnel,
+                    single_sock,
+                    recv_slices,
+                    recv_scratch,
+                    session_io.MAX_INBOUND_DRAIN,
+                    &self.should_stop,
+                    &drain_diag,
+                    .{
+                        .ctx = &drain_ctx,
+                        .onBlock = bridgeOnBlock,
+                        .onFlush = bridgeOnFlush,
+                        .onDead = bridgeOnDead,
+                    },
+                );
+                if (result.dead) {
+                    self.disconnect_reason = .network_error;
+                    return error.ConnectionLost;
+                }
+            }
+
+            // LAN → session: read frames from ready ports and dispatch.
+            for (net_ports, 1..) |*p, i| {
+                if ((poll_fds[i].revents & std.posix.POLL.IN) == 0) continue;
+                while (true) {
+                    const n = p.read(port_buf) catch |err| {
+                        if (err == error.WouldBlock or err == error.DeviceClosed) break;
+                        std.log.debug("bridge: port read error: {}", .{err});
+                        break;
+                    } orelse break;
+                    bridge_loop.dispatchPortFrame(@intCast(i - 1), port_buf[0..n]);
+                }
+            }
+
+            // 1Hz upkeep: FDB aging + keepalive.
+            if (now - last_age_sec >= 1000) {
+                last_age_sec = now;
+                const aged = bridge_loop.age(@intCast(@divFloor(now, 1000)));
+                if (aged > 0) std.log.debug("bridge: aged out {d} FDB entries", .{aged});
+                self.bridge_stats = bridge_loop.getStats();
+                session_io.maybeSendKeepalive(null, single_tunnel, &timing, now, @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000));
+            }
+        }
+
+        std.log.info("Bridge data channel ended", .{});
     }
 };
 
