@@ -129,7 +129,10 @@ pub const Hub = struct {
         if (password) |pw| {
             u.password_hash = hashPassword(pw, name);
         }
-        try self.users.put(self.allocator, name, u);
+        // Key the map with the hub-owned copy so the registry never holds a
+        // reference to caller-owned storage (freeing `u.name` releases the
+        // key in `deinit`/`removeUser`).
+        try self.users.put(self.allocator, u.name, u);
         return u;
     }
 
@@ -140,9 +143,11 @@ pub const Hub = struct {
     /// Remove a user account, returning false if it did not exist.
     pub fn removeUser(self: *Hub, name: []const u8) bool {
         const u = self.users.get(name) orelse return false;
+        // Remove from the map first: it reads the key (u.name) for its
+        // equality check before we release it.
+        _ = self.users.remove(name);
         u.deinit(self.allocator);
         self.allocator.destroy(u);
-        _ = self.users.remove(name);
         return true;
     }
 };
@@ -333,6 +338,28 @@ fn buildPasswordAuthPack(
     const secure = protocol_auth.computeSecurePassword(&password_hash, random);
     try pack.addData("secure_password", &secure);
     return pack.toBytes(allocator);
+}
+
+test "server.auth hub registry owns its keys" {
+    var hub = try Hub.init(testing.allocator, "VPN");
+    defer hub.deinit();
+
+    // Caller-mutable buffer — the hub must not retain a reference to it.
+    var name_buf: [8]u8 = undefined;
+    const name = name_buf[0..5];
+    @memcpy(name, "alice");
+    _ = try hub.addUser(name, .password, "hunter2");
+
+    // Mutate the caller's buffer after registration.
+    @memcpy(name, "EVIL!");
+
+    // Lookups with the original name still resolve to the stored copy.
+    try testing.expect(hub.getUser("alice") != null);
+    try testing.expect(hub.getUser(name) == null);
+
+    // Removal works via the original name and frees the stored key.
+    try testing.expect(hub.removeUser("alice"));
+    try testing.expect(hub.getUser("alice") == null);
 }
 
 test "server.auth hashPassword matches the Zig client" {
