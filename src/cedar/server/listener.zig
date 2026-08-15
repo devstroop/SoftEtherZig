@@ -24,8 +24,8 @@ const log = std.log.scoped(.cedar_server);
 // Constants (Cedar.h:457-489, Listener.c)
 // ============================================================================
 
-/// Retry interval when `listen` fails (C `LISTEN_RETRY_TIME` = 2s).
-pub const LISTEN_RETRY_TIME_MS: u64 = 2 * 1000;
+/// Retry interval when `listen` fails (C `LISTEN_RETRY_TIME` = 200ms).
+pub const LISTEN_RETRY_TIME_MS: u64 = 200;
 /// Initial expiry span of a DOS record (C `DOS_TABLE_EXPIRES_FIRST` = 250ms).
 pub const DOS_TABLE_EXPIRES_FIRST: i64 = 250;
 /// Max expiry span of a DOS record (C `DOS_TABLE_EXPIRES_MAX` = 1000ms).
