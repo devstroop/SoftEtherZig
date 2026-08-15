@@ -33,6 +33,24 @@ they are called out under **Breaking** in each entry.
   - Wired into `lib.zig` (`softether.bridge`) and standalone test sources.
     15 new tests (learn/age/refresh/overflow-flood/re-learn/move/bcast/
     unknown-unicast/counters/no-echo/single-port): 265/265 total.
+- **Bridge data pump** (`src/bridge/loop.zig`, proposal §4.3; #56). Runtime
+  half of the L2 bridge: `BridgeLoop` owns the shared forwarding engine and
+  aggregates per-port + session counters into `BridgeStats`; `SessionSink`
+  delivers LAN → VPN frames into the session tunnel; `dispatchSessionBlock`
+  floods/unicasts session frames to the LAN ports (no-echo guard);
+  5 deterministic tests (flood/unicast/no-echo/sink counters/stats).
+- **Bridge mode dispatch in VpnClient** (#56). `connect()` spawns
+  `runBridgeLoopThread` in bridge mode (monitor warns and falls back to the
+  client loop): single TLS socket + `TunnelConnection` (I-14 —
+  `max_connections` coerced to 1), AF_PACKET ingress ports opened from
+  `config.bridge.ingress_ifs` into stable heap storage, poll over TLS fd +
+  port fds, 1 Hz FDB aging + keepalive; `performConnection` skips adapter
+  setup for non-client modes; UDP acceleration gated to client mode.
+  Linux-gated; non-Linux targets fail cleanly (`error.AdapterConfigurationFailed`).
+- **`softether_get_bridge_stats` FFI** (71st export). `CBridgeStats` C
+  layout mirrors `BridgeStats`; `VpnClient.bridge_stats` snapshot updated at
+  1 Hz by the bridge pump; zeroed when bridge mode is inactive.
+  `softether_bridge_stats_t` added to `include/softether.h`.
 
 ### Added
 
