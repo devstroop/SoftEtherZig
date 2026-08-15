@@ -697,3 +697,139 @@ test "server.accept idle session emits keep-alive (bounded data-plane read)" {
     e2e.client.close();
     e2e.client_closed = true;
 }
+
+/// Build an ARP-broadcast Ethernet frame for the loopback acceptance test
+/// (src MAC is a valid unicast address, dst is the broadcast address). Padded
+/// to the Ethernet minimum frame size (60 bytes, FCS excluded) so the gate
+/// exercises a valid frame rather than a sub-minimum one.
+fn buildLoopbackFrame() ![]u8 {
+    const allocator = testing.allocator;
+    const dst = [_]u8{0xff} ** 6;
+    const src = [6]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+    const payload = [_]u8{
+        // ARP request: htype=1, ptype=0x0800, hlen=6, plen=4, op=1,
+        // sha=11:22:33:44:55:66, spa=10.0.0.1, tha=00..00, tpa=10.0.0.2
+        0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x0a, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0a, 0x00, 0x00, 0x02,
+    };
+    const min_frame_len = 60;
+    const f = try allocator.alloc(u8, min_frame_len);
+    @memset(f, 0);
+    @memcpy(f[0..6], &dst);
+    @memcpy(f[6..12], &src);
+    mem.writeInt(u16, f[12..14], 0x0806, .big);
+    @memcpy(f[14..][0..payload.len], &payload);
+    return f;
+}
+
+test "server.accept two sessions exchange a frame through the hub" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const tunnel_mod = @import("../protocol/tunnel.zig");
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+    _ = try auth_hub.addUser("alice", .password, "hunter2");
+
+    // One L2 switch hub shared by both sessions — the M1 gate: two clients on
+    // the same hub see each other's frames switched at L2.
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e_a = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e_a.deinit();
+    var e2e_b = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e_b.deinit();
+
+    // Handshake both clients against the server (same account, same hub).
+    var io_a = ClientIo{ .sock = &e2e_a.client };
+    var io_b = ClientIo{ .sock = &e2e_b.client };
+    const writer_a = protocol_mod.Writer{ .context = &io_a, .writeFn = ClientIo.write };
+    const reader_a = protocol_mod.Reader{ .context = &io_a, .readFn = ClientIo.read };
+    const writer_b = protocol_mod.Writer{ .context = &io_b, .writeFn = ClientIo.write };
+    const reader_b = protocol_mod.Reader{ .context = &io_b, .readFn = ClientIo.read };
+
+    var ha = try protocol_mod.performHandshake(allocator, writer_a, reader_a, "accept.test", "VPN", "alice", "hunter2", false);
+    defer ha.hello.deinit(allocator);
+    defer ha.auth.deinit(allocator);
+    try testing.expect(ha.auth.success);
+
+    var hb = try protocol_mod.performHandshake(allocator, writer_b, reader_b, "accept.test", "VPN", "alice", "hunter2", false);
+    defer hb.hello.deinit(allocator);
+    defer hb.auth.deinit(allocator);
+    try testing.expect(hb.auth.success);
+
+    // Both server sessions must be attached to the hub before A sends — a
+    // broadcast flood reaches nobody otherwise. Attach happens on the accept
+    // thread right after the handshake, so wait (bounded, under the hub
+    // mutex) for both.
+    var attached: usize = 0;
+    const attach_deadline = std.time.milliTimestamp() + 5000;
+    while (attached < 2 and std.time.milliTimestamp() < attach_deadline) {
+        switch_hub.mutex.lock();
+        attached = switch_hub.sessions.items.len;
+        switch_hub.mutex.unlock();
+        if (attached < 2) std.Thread.sleep(2 * std.time.ns_per_ms);
+    }
+    try testing.expectEqual(@as(usize, 2), attached);
+
+    // Wrap each client socket as a TunnelConnection (M1 negotiates plaintext,
+    // so the data plane is raw block framing over TLS).
+    var tunnel_a = tunnel_mod.TunnelConnection.init(allocator, &io_a, ClientIo.read, ClientIo.write);
+    var tunnel_b = tunnel_mod.TunnelConnection.init(allocator, &io_b, ClientIo.read, ClientIo.write);
+
+    // Client A sends one Ethernet frame as a tunnel block; the hub floods the
+    // broadcast to B, and B's SessionMain pushes it back down the wire.
+    const frame = try buildLoopbackFrame();
+    defer allocator.free(frame);
+    const blocks = [_][]const u8{frame};
+    var send_buf: [tunnel_mod.MAX_PACKET_SIZE * 2]u8 = undefined;
+    try tunnel_a.sendBlocksZeroCopy(&blocks, &send_buf);
+
+    // Client B must receive the exact frame. receiveBlocksBatch reads through
+    // readBlocking, which polls the fd for 30s — never enter it without known
+    // data, or the 8s deadline is not actually enforced. Poll the raw fd (or
+    // OpenSSL's already-buffered data) with a short timeout first. Returns 0
+    // for keep-alives (the server sends one on an idle wire), so loop until a
+    // data batch arrives.
+    var out_data: [1][]u8 = undefined;
+    var scratch: [tunnel_mod.MAX_PACKET_SIZE * 2]u8 = undefined;
+    var received: ?[]const u8 = null;
+    const recv_deadline = std.time.milliTimestamp() + 8000;
+    while (received == null and std.time.milliTimestamp() < recv_deadline) {
+        while (!e2e_b.client.hasPending() and std.time.milliTimestamp() < recv_deadline) {
+            var pfd = [_]std.posix.pollfd{.{
+                .fd = e2e_b.client.tcp_fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            if ((std.posix.poll(&pfd, 50) catch 0) == 0) {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
+            break;
+        }
+        if (std.time.milliTimestamp() >= recv_deadline) break;
+        const n = tunnel_b.receiveBlocksBatch(&out_data, &scratch) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n > 0) {
+            received = out_data[0];
+            break;
+        }
+    }
+    try testing.expect(received != null);
+    try testing.expectEqualSlices(u8, frame, received.?);
+
+    e2e_a.client.close();
+    e2e_a.client_closed = true;
+    e2e_b.client.close();
+    e2e_b.client_closed = true;
+}
