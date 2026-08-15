@@ -23,6 +23,8 @@
 //!   item names, CFG_RW backup (issue #86)
 //! - `admin/rpc.zig` — admin RPC transport: TLS connection, `[u32 size][Pack]`
 //!   frames, dispatch on `function_name`, error/error_code replies (issue #87)
+//! - `admin/structs.zig` — admin RPC `RPC_*` structs + Pack (de)serialization
+//!   in dispatch order: Core, Listeners, Hubs (issue #89)
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
@@ -33,6 +35,7 @@ pub const accept = @import("accept.zig");
 pub const cfg = @import("config/cfg.zig");
 pub const vpn_server_config = @import("config/vpn_server_config.zig");
 pub const admin_rpc = @import("admin/rpc.zig");
+pub const admin_structs = @import("admin/structs.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
