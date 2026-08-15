@@ -22,6 +22,7 @@ pub const port = @import("port.zig");
 pub const nic_enumerate = @import("nic_enumerate.zig");
 pub const af_packet = @import("af_packet.zig");
 pub const bpf = @import("bpf.zig");
+pub const npcap = @import("npcap.zig");
 
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
@@ -41,6 +42,10 @@ pub const SESSION_FRAME_BUDGET = af_packet.SESSION_FRAME_BUDGET;
 // L2 bridge port — macOS BPF (/dev/bpfN, H-7 helper-granted fd)
 pub const BpfPort = bpf.BpfPort;
 pub const bpfPort = bpf.bpfPort;
+
+// L2 bridge port — Windows Npcap (issue #61, dynamic pcap.dll)
+pub const NpcapPort = npcap.NpcapPort;
+pub const npcapPort = npcap.npcapPort;
 
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;

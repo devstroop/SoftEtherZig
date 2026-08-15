@@ -3291,23 +3291,28 @@ pub const VpnClient = struct {
             std.log.err("bridge mode: no ingress interfaces configured (softether_add_ingress_interface)", .{});
             return ClientError.AdapterConfigurationFailed;
         }
-        if (builtin.os.tag != .linux and builtin.os.tag != .macos) {
-            std.log.err("bridge mode requires AF_PACKET (Linux) or BPF (macOS) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .windows) {
+            std.log.err("bridge mode requires AF_PACKET (Linux), BPF (macOS) or Npcap (Windows) ingress ports — unsupported on {s}", .{@tagName(builtin.os.tag)});
             return ClientError.AdapterConfigurationFailed;
         }
 
         const af_packet = @import("../../adapter/af_packet.zig");
         const bpf_mod = @import("../../adapter/bpf.zig");
+        const npcap_mod = @import("../../adapter/npcap.zig");
         // Per-OS ingress port implementation:
         //   linux   → AF_PACKET (issue #53, merged)
         //   macos   → BPF /dev/bpfN (issue #60 — fd granted by the setuid
         //             helper in --bpf-open mode when not running as root)
-        //   windows → Npcap (issue #61 — lands on its own branch)
+        //   windows → Npcap (issue #61 — dynamic pcap.dll, worker thread +
+        //             SPSC ring; getFd() = invalid_fd, drained every pump
+        //             iteration, see the LAN→session section below)
         const Ingress = struct {
             const Store = if (builtin.os.tag == .linux)
                 af_packet.AfPacketPort
             else if (builtin.os.tag == .macos)
                 bpf_mod.BpfPort
+            else if (builtin.os.tag == .windows)
+                npcap_mod.NpcapPort
             else
                 u8;
 
@@ -3316,6 +3321,8 @@ pub const VpnClient = struct {
                     return af_packet.afPacketPort(@as(*af_packet.AfPacketPort, @ptrCast(store)), name);
                 } else if (builtin.os.tag == .macos) {
                     return bpf_mod.bpfPort(@as(*bpf_mod.BpfPort, @ptrCast(store)), allocator, name);
+                } else if (builtin.os.tag == .windows) {
+                    return npcap_mod.npcapPort(@as(*npcap_mod.NpcapPort, @ptrCast(store)), allocator, name);
                 } else {
                     unreachable;
                 }
@@ -3402,6 +3409,11 @@ pub const VpnClient = struct {
         // array could overflow with 63+ configured interfaces (review #119).
         const poll_fds = try self.allocator.alloc(std.posix.pollfd, 1 + net_ports.len);
         defer self.allocator.free(poll_fds);
+        // Maps poll_fds slot (1..) back to the net_ports index for ports
+        // that are pollable; non-pollable ports (Npcap, issue #61) are not
+        // in the array and are drained every loop iteration instead.
+        const slot_of = try self.allocator.alloc(usize, net_ports.len);
+        defer self.allocator.free(slot_of);
 
         // Aging cadence + drain diagnostics
         var last_age_sec: i64 = 0;
@@ -3413,16 +3425,25 @@ pub const VpnClient = struct {
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             const now = std.time.milliTimestamp();
 
-            // Build poll fds: TLS socket + one per ingress port. Register POLLOUT
-            // interest when the TLS socket is blocked on pending writes so
-            // the sndbuf drain below can flush them.
-            const max_fds: usize = 1 + net_ports.len;
+            // Build poll fds: TLS socket + one per pollable ingress port.
+            // Register POLLOUT interest when the TLS socket is blocked on
+            // pending writes so the sndbuf drain below can flush them.
+            var n_fds: usize = 1;
             poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
             if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
             for (net_ports, 0..) |*p, i| {
-                poll_fds[1 + i] = .{ .fd = p.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+                const fd = p.getFd();
+                if (fd == adapter_mod.NetPort.invalid_fd) continue;
+                slot_of[i] = n_fds;
+                poll_fds[n_fds] = .{
+                    // pollfd.fd is a SOCKET pointer on Windows, not an int.
+                    .fd = if (comptime builtin.os.tag == .windows) @ptrCast(fd) else fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                };
+                n_fds += 1;
             }
-            _ = std.posix.poll(poll_fds[0..max_fds], 10) catch 0;
+            _ = std.posix.poll(poll_fds[0..n_fds], 10) catch 0;
 
             // Drain pending outbound data when the kernel sndbuf frees up.
             // The TLS write closure stores WouldBlock'd data in
@@ -3462,15 +3483,18 @@ pub const VpnClient = struct {
             }
 
             // LAN → session: read frames from ready ports and dispatch.
-            for (net_ports, 1..) |*p, i| {
-                if ((poll_fds[i].revents & std.posix.POLL.IN) == 0) continue;
+            // Non-pollable ports (getFd() == invalid_fd — Npcap, issue #61)
+            // are drained every iteration instead; poll() skips fd -1.
+            for (net_ports, 0..) |*p, i| {
+                const pollable = p.getFd() != adapter_mod.NetPort.invalid_fd;
+                if (pollable and (poll_fds[slot_of[i]].revents & std.posix.POLL.IN) == 0) continue;
                 while (true) {
                     const n = p.read(port_buf) catch |err| {
                         if (err == error.WouldBlock or err == error.DeviceClosed) break;
                         std.log.debug("bridge: port read error: {}", .{err});
                         break;
                     } orelse break;
-                    bridge_loop.dispatchPortFrame(@intCast(i - 1), port_buf[0..n]);
+                    bridge_loop.dispatchPortFrame(@intCast(i), port_buf[0..n]);
                 }
             }
 
