@@ -301,5 +301,6 @@ test "etherManagerPort delegates I/O to the AF_PACKET core" {
     // Not open — the AF_PACKET core's DeviceClosed must surface through
     // the delegation (proves read/write reach the shared machinery).
     try std.testing.expectError(error.DeviceClosed, p.write(&[_]u8{0} ** 64));
-    try std.testing.expectError(error.DeviceClosed, p.read(&[_]u8{0} ** 64));
+    var buf: [64]u8 = undefined;
+    try std.testing.expectError(error.DeviceClosed, p.read(&buf));
 }
