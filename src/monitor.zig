@@ -38,6 +38,10 @@ pub const MonitorRing = struct {
     pub fn init(allocator: std.mem.Allocator, capacity: u32) !MonitorRing {
         if (capacity == 0) return error.EmptyRingCapacity;
         const slots = try allocator.alloc(FrameSlot, capacity);
+        // alloc() leaves memory undefined — a partially filled ring must
+        // still have well-defined slots, otherwise deinit() frees garbage
+        // optionals (review #119, critical).
+        for (slots) |*slot| slot.* = .{};
         return .{
             .allocator = allocator,
             .capacity = capacity,
@@ -115,6 +119,9 @@ pub const PcapWriter = struct {
     records: u64 = 0,
     bytes: u64 = 0,
     write_errors: u64 = 0,
+    /// Set after a record is interrupted mid-payload: blocks future
+    /// appends so the capture never mixes partial records with valid ones.
+    faulted: bool = false,
 
     pub const GLOBAL_HEADER_LEN = 24;
     pub const RECORD_HEADER_LEN = 16;
@@ -149,6 +156,14 @@ pub const PcapWriter = struct {
     /// Append one Ethernet frame as a pcap record. Failures are counted,
     /// never fatal.
     pub fn writeFrame(self: *PcapWriter, frame: []const u8) void {
+        if (self.faulted) {
+            // A previous record was interrupted mid-write and the file was
+            // truncated back to the last good boundary — appending now
+            // would corrupt the capture structure, so keep rejecting.
+            self.write_errors += 1;
+            return;
+        }
+        const rec_start = self.bytes;
         var hdr: [RECORD_HEADER_LEN]u8 = undefined;
         const ts = std.time.microTimestamp();
         const ts_sec: u32 = @truncate(@as(u64, @intCast(@max(ts, 0))) / 1_000_000);
@@ -164,6 +179,11 @@ pub const PcapWriter = struct {
         };
         self.file.writeAll(frame) catch {
             self.write_errors += 1;
+            // Partial record: truncate back to the last good record
+            // boundary so the file stays parseable, then stop appending
+            // (subsequent records would be misaligned) (review #119).
+            self.file.setEndPos(rec_start) catch {};
+            self.faulted = true;
             return;
         };
         self.records += 1;

@@ -586,11 +586,14 @@ pub const VpnClient = struct {
     tun_eagain_count: u64 = 0,
 
     /// Network operating mode captured at init from `config.mode` (or via
-    /// `softether_set_network_mode` before connect). The connect path branches
-    /// on this flag: client runs the classic data loop, bridge (issue #56)
-    /// runs the AF_PACKET L2 pump, monitor (issue #55) runs the mirror-only
-    /// capture pump.
+    /// `softether_set_network_mode` before connect).
     network_mode: NetworkMode = .client,
+    /// Network operating mode frozen once per connect() call (set under the
+    /// client mutex at connect entry). The auth pack (`require_monitor_mode`,
+    /// auth_handler.zig) and the pump dispatch read THIS value so a
+    /// `softether_set_network_mode` call racing with connect() can never
+    /// establish one session type while starting a different pump.
+    session_mode: NetworkMode = .client,
 
     event_callback: ?EventCallback,
     event_user_data: ?*anyopaque,
@@ -757,8 +760,9 @@ pub const VpnClient = struct {
 
     /// Network operating mode this session was created with. Fixed at
     /// connect time — changes via `softether_set_network_mode` afterwards
-    /// take effect on the next connect. Storage-only today: the runtime
-    /// bridge/monitor loops are not implemented yet.
+    /// take effect on the next connect. The connect path freezes this into
+    /// `session_mode` (auth + pump dispatch), so mid-connect changes never
+    /// affect the running connection.
     pub fn getNetworkMode(self: *const Self) NetworkMode {
         const mutable = @constCast(self);
         mutable.mutex.lock();
@@ -827,6 +831,12 @@ pub const VpnClient = struct {
             return ClientError.AlreadyConnected;
         }
 
+        // Freeze the network operating mode for this connection. Auth and
+        // pump dispatch both read `session_mode`, so a concurrent
+        // softether_set_network_mode mid-connect can't split the session
+        // type from the data pump (mode is immutable for this connect).
+        self.session_mode = self.network_mode;
+
         // use_encrypt=false is not supported: SoftEther drops TLS on the data
         // channel and continues raw over the same TCP socket when encryption is
         // disabled, but this client keeps doing SSL_read/SSL_write on the data
@@ -844,8 +854,8 @@ pub const VpnClient = struct {
         // I-14: the bridge/monitor pumps are single-connection (one TLS
         // session port). Coerce max_connections>1 down to 1 instead of
         // silently dropping the extra TCP connections later.
-        if ((self.network_mode == .bridge or self.network_mode == .monitor) and self.config.max_connections > 1) {
-            std.log.warn("{s} mode: max_connections={d} is not supported (I-14); using a single connection", .{ @tagName(self.network_mode), self.config.max_connections });
+        if ((self.session_mode == .bridge or self.session_mode == .monitor) and self.config.max_connections > 1) {
+            std.log.warn("{s} mode: max_connections={d} is not supported (I-14); using a single connection", .{ @tagName(self.session_mode), self.config.max_connections });
             self.config.max_connections = 1;
         }
 
@@ -879,7 +889,7 @@ pub const VpnClient = struct {
         // L2 pump (bridge/loop.zig) over the ingress ports; monitor runs
         // the mirror-only capture pump (monitor.zig ring + PCAP). Client
         // mode runs the classic TUN data loop.
-        const is_bridge_mode = self.network_mode == .bridge;
+        const is_bridge_mode = self.session_mode == .bridge;
 
         // Spawn the data loop on a native pthread with its own stack.
         // The data loop runs decoupled from any Dart Isolate.run() thread,
@@ -891,7 +901,7 @@ pub const VpnClient = struct {
                 @atomicStore(bool, &self.data_loop_running, false, .release);
                 break :blk null;
             }
-        else if (self.network_mode == .monitor)
+        else if (self.session_mode == .monitor)
             std.Thread.spawn(.{}, runMonitorLoopThread, .{self}) catch |err| blk: {
                 std.log.err("Failed to spawn monitor data loop thread: {}", .{err});
                 @atomicStore(bool, &self.data_loop_running, false, .release);
@@ -1234,7 +1244,7 @@ pub const VpnClient = struct {
             return ClientError.OperationCancelled;
         }
 
-        if (self.network_mode == .client) {
+        if (self.session_mode == .client) {
             self.transitionState(.configuring_adapter);
             self.configureAdapter() catch {
                 self.disconnect_reason = .configuration_error;
@@ -1243,7 +1253,7 @@ pub const VpnClient = struct {
         } else {
             // Bridge/monitor modes have no TUN device, DHCP, or static IP —
             // the L2 pump owns the data plane (issue #52). Session is live.
-            std.log.info("network mode '{s}': skipping adapter configuration", .{@tagName(self.network_mode)});
+            std.log.info("network mode '{s}': skipping adapter configuration", .{@tagName(self.session_mode)});
             self.transitionState(.configuring_adapter);
         }
 
@@ -3225,6 +3235,12 @@ pub const VpnClient = struct {
 
         self.state = .disconnected;
 
+        // Zero the mode-specific stats so FFI getters (documented as
+        // "zeroed when the pump is not running") never expose a previous
+        // session's counters after teardown.
+        self.bridge_stats = .{};
+        self.monitor_stats = .{};
+
         // === SIGNAL DONE (last thing — after all cleanup) ===
         self.data_loop_thread = null;
         @atomicStore(bool, &self.data_loop_running, false, .release);
@@ -3351,6 +3367,11 @@ pub const VpnClient = struct {
         const port_buf = try self.allocator.alloc(u8, 1600);
         defer self.allocator.free(port_buf);
 
+        // Poll array sized by the ingress count — the fixed 64-entry stack
+        // array could overflow with 63+ configured interfaces (review #119).
+        const poll_fds = try self.allocator.alloc(std.posix.pollfd, 1 + net_ports.len);
+        defer self.allocator.free(poll_fds);
+
         // Aging cadence + drain diagnostics
         var last_age_sec: i64 = 0;
         var drain_diag = session_io.DrainDiag{};
@@ -3361,14 +3382,28 @@ pub const VpnClient = struct {
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             const now = std.time.milliTimestamp();
 
-            // Build poll fds: TLS socket + one per ingress port.
+            // Build poll fds: TLS socket + one per ingress port. Register POLLOUT
+            // interest when the TLS socket is blocked on pending writes so
+            // the sndbuf drain below can flush them.
             const max_fds: usize = 1 + net_ports.len;
-            var poll_fds: [64]std.posix.pollfd = undefined;
             poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+            if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
             for (net_ports, 0..) |*p, i| {
                 poll_fds[1 + i] = .{ .fd = p.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
             }
-            _ = std.posix.poll(poll_fds[0..@intCast(max_fds)], 10) catch 0;
+            _ = std.posix.poll(poll_fds[0..max_fds], 10) catch 0;
+
+            // Drain pending outbound data when the kernel sndbuf frees up.
+            // The TLS write closure stores WouldBlock'd data in
+            // pending_outbound and reports delivery; without this drain the
+            // LAN→session frames would sit unflushed (or be lost once
+            // needs_pollout blocks new writes).
+            if (single_sock.needs_pollout and (poll_fds[0].revents & std.posix.POLL.OUT) != 0) {
+                _ = single_sock.retryPendingWrite() catch |e| blk: {
+                    std.log.warn("bridge: pending write retry failed: {}", .{e});
+                    break :blk false;
+                };
+            }
 
             // INBOUND: drain session blocks → LAN ports.
             if ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or single_sock.hasPending() or single_sock.kernelRecvQueue() > 0) {
@@ -3455,6 +3490,12 @@ pub const VpnClient = struct {
         }
 
         self.state = .disconnected;
+
+        // Zero the mode-specific stats so FFI getters (documented as
+        // "zeroed when the pump is not running") never expose a previous
+        // session's counters after teardown.
+        self.bridge_stats = .{};
+        self.monitor_stats = .{};
 
         // === SIGNAL DONE (last thing — after all cleanup) ===
         self.data_loop_thread = null;
@@ -3562,10 +3603,22 @@ pub const VpnClient = struct {
             const now = std.time.milliTimestamp();
 
             // Single TLS socket poll — the monitor pump has no ingress
-            // ports to multiplex (mirror-only).
+            // ports to multiplex (mirror-only). Register POLLOUT when the
+            // TLS socket has pending writes (keepalive backpressure).
             var poll_fds: [1]std.posix.pollfd = undefined;
             poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+            if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
             _ = std.posix.poll(poll_fds[0..], 10) catch 0;
+
+            // Drain pending outbound data (e.g. keepalives) when the kernel
+            // sndbuf frees up; without this they would sit unflushed once
+            // needs_pollout blocks new writes (review #119).
+            if (single_sock.needs_pollout and (poll_fds[0].revents & std.posix.POLL.OUT) != 0) {
+                _ = single_sock.retryPendingWrite() catch |e| blk: {
+                    std.log.warn("monitor: pending write retry failed: {}", .{e});
+                    break :blk false;
+                };
+            }
 
             // INBOUND: drain session blocks → MonitorLoop capture.
             if ((poll_fds[0].revents & std.posix.POLL.IN) != 0 or single_sock.hasPending() or single_sock.kernelRecvQueue() > 0) {
