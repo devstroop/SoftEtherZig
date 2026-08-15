@@ -3409,6 +3409,11 @@ if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != 
         // array could overflow with 63+ configured interfaces (review #119).
         const poll_fds = try self.allocator.alloc(std.posix.pollfd, 1 + net_ports.len);
         defer self.allocator.free(poll_fds);
+        // Maps poll_fds slot (1..) back to the net_ports index for ports
+        // that are pollable; non-pollable ports (Npcap, issue #61) are not
+        // in the array and are drained every loop iteration instead.
+        const slot_of = try self.allocator.alloc(usize, net_ports.len);
+        defer self.allocator.free(slot_of);
 
         // Aging cadence + drain diagnostics
         var last_age_sec: i64 = 0;
@@ -3420,16 +3425,19 @@ if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != 
         while (!@atomicLoad(bool, &self.should_stop, .acquire) and self.isConnected()) {
             const now = std.time.milliTimestamp();
 
-            // Build poll fds: TLS socket + one per ingress port. Register POLLOUT
-            // interest when the TLS socket is blocked on pending writes so
-            // the sndbuf drain below can flush them.
-            const max_fds: usize = 1 + net_ports.len;
+            // Build poll fds: TLS socket + one per pollable ingress port.
+            // Register POLLOUT interest when the TLS socket is blocked on
+            // pending writes so the sndbuf drain below can flush them.
+            var n_fds: usize = 1;
             poll_fds[0] = .{ .fd = single_sock.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
             if (single_sock.needs_pollout) poll_fds[0].events |= std.posix.POLL.OUT;
             for (net_ports, 0..) |*p, i| {
-                poll_fds[1 + i] = .{ .fd = p.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+                if (p.getFd() == adapter_mod.NetPort.invalid_fd) continue;
+                slot_of[i] = n_fds;
+                poll_fds[n_fds] = .{ .fd = p.getFd(), .events = std.posix.POLL.IN, .revents = 0 };
+                n_fds += 1;
             }
-            _ = std.posix.poll(poll_fds[0..max_fds], 10) catch 0;
+            _ = std.posix.poll(poll_fds[0..n_fds], 10) catch 0;
 
             // Drain pending outbound data when the kernel sndbuf frees up.
             // The TLS write closure stores WouldBlock'd data in
@@ -3473,7 +3481,7 @@ if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != 
             // are drained every iteration instead; poll() skips fd -1.
             for (net_ports, 1..) |*p, i| {
                 const pollable = p.getFd() != adapter_mod.NetPort.invalid_fd;
-                if (pollable and (poll_fds[i].revents & std.posix.POLL.IN) == 0) continue;
+                if (pollable and (poll_fds[slot_of[i]].revents & std.posix.POLL.IN) == 0) continue;
                 while (true) {
                     const n = p.read(port_buf) catch |err| {
                         if (err == error.WouldBlock or err == error.DeviceClosed) break;

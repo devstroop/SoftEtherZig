@@ -84,21 +84,16 @@ const PcapApi = struct {
             std.log.warn("npcap: pcap.dll not found — Npcap is not installed", .{});
             return NpcapError.NpcapNotInstalled;
         }
-        const addr = struct {
-            fn f(d: ?*anyopaque, name: [*:0]const u8) ?*anyopaque {
-                return kernel32.GetProcAddress(d, name);
-            }
-        }.f;
         return .{
             .dll = dll,
-            .openLive = @ptrCast(addr(dll, "pcap_open_live") orelse return NpcapError.NpcapNotInstalled),
-            .nextEx = @ptrCast(addr(dll, "pcap_next_ex") orelse return NpcapError.NpcapNotInstalled),
-            .sendPacket = @ptrCast(addr(dll, "pcap_sendpacket") orelse return NpcapError.NpcapNotInstalled),
-            .close = @ptrCast(addr(dll, "pcap_close") orelse return NpcapError.NpcapNotInstalled),
-            .getErr = @ptrCast(addr(dll, "pcap_geterr") orelse return NpcapError.NpcapNotInstalled),
-            .dataLink = @ptrCast(addr(dll, "pcap_datalink") orelse return NpcapError.NpcapNotInstalled),
-            .findalldevs = @ptrCast(addr(dll, "pcap_findalldevs") orelse return NpcapError.NpcapNotInstalled),
-            .freealldevs = @ptrCast(addr(dll, "pcap_freealldevs") orelse return NpcapError.NpcapNotInstalled),
+            .openLive = @ptrCast(kernel32.GetProcAddress(dll, "pcap_open_live") orelse return NpcapError.NpcapNotInstalled),
+            .nextEx = @ptrCast(kernel32.GetProcAddress(dll, "pcap_next_ex") orelse return NpcapError.NpcapNotInstalled),
+            .sendPacket = @ptrCast(kernel32.GetProcAddress(dll, "pcap_sendpacket") orelse return NpcapError.NpcapNotInstalled),
+            .close = @ptrCast(kernel32.GetProcAddress(dll, "pcap_close") orelse return NpcapError.NpcapNotInstalled),
+            .getErr = @ptrCast(kernel32.GetProcAddress(dll, "pcap_geterr") orelse return NpcapError.NpcapNotInstalled),
+            .dataLink = @ptrCast(kernel32.GetProcAddress(dll, "pcap_datalink") orelse return NpcapError.NpcapNotInstalled),
+            .findalldevs = @ptrCast(kernel32.GetProcAddress(dll, "pcap_findalldevs") orelse return NpcapError.NpcapNotInstalled),
+            .freealldevs = @ptrCast(kernel32.GetProcAddress(dll, "pcap_freealldevs") orelse return NpcapError.NpcapNotInstalled),
         };
     }
 };
@@ -243,7 +238,7 @@ pub const NpcapPort = struct {
             self.handle = null;
         }
         if (self.api) |api| {
-            if (api.dll) |dll| _ = kernel32.FreeLibrary(dll);
+            if (api.dll) |dll| _ = kernel32.FreeLibrary(@as([*c]kernel32.struct_HINSTANCE__, @ptrCast(dll)));
             self.api = null;
         }
         self.head.store(0, .monotonic);
