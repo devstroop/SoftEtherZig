@@ -98,6 +98,7 @@ pub fn run(client: *VpnClient) !void {
         .half_connection = client.config.half_connection,
         .qos = client.config.qos,
         .use_encrypt = client.config.use_encrypt,
+        .use_fast_rc4 = client.config.use_fast_rc4,
         .use_compress = client.config.use_compress,
         // H-4: monitor sessions pack require_monitor_mode=true so the
         // server mirrors hub traffic back (proposal §5.4). Client and
@@ -502,6 +503,16 @@ fn applyServerOverrides(client: *VpnClient, result: softether_proto.AuthResult) 
     client.config.half_connection = effective_half;
     client.config.use_compress = result.server_use_compress;
     client.config.use_encrypt = result.server_use_encrypt;
+
+    // Fast RC4 session encryption: store what the server negotiated. When the
+    // server enabled it and sent a key pair, the session is set up with the
+    // legacy RC4 stream cipher instead of AES-256-CBC.
+    client.auth_use_fast_rc4 = result.server_use_fast_rc4;
+    client.auth_rc4_c2s_key = result.rc4_client_to_server_key;
+    client.auth_rc4_s2c_key = result.rc4_server_to_client_key;
+    if (result.server_use_fast_rc4) {
+        std.log.info("Server negotiated fast RC4 session encryption", .{});
+    }
 
     // NOTE: policy:NoRouting must NOT disable full-tunnel. In SoftEther that
     // policy forbids the SESSION from acting as an IPv4 router (forwarding

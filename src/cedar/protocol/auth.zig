@@ -29,6 +29,7 @@ const Allocator = mem.Allocator;
 const testing = std.testing;
 
 const ssl = @import("c_imports.zig").c;
+const md4 = @import("md4");
 
 /// SHA-0 digest length
 pub const sha0_digest_length = 20;
@@ -317,21 +318,9 @@ pub const MsChapV2 = struct {
     /// Used only for SoftEther MS-CHAPv2 compatibility.
     /// DO NOT use for any other purpose.
     pub fn ntHash(password: []const u8) [16]u8 {
-        // Convert password to UTF-16LE
-        var utf16_buf: [256]u8 = undefined;
-        var utf16_len: usize = 0;
-
-        for (password) |c| {
-            if (utf16_len + 2 > utf16_buf.len) break;
-            utf16_buf[utf16_len] = c;
-            utf16_buf[utf16_len + 1] = 0;
-            utf16_len += 2;
-        }
-
-        // MD4 hash via OpenSSL (deprecated but still present in OpenSSL 3.x)
-        var hash: [16]u8 = undefined;
-        _ = ssl.MD4(@ptrCast(&utf16_buf), @intCast(utf16_len), &hash);
-        return hash;
+        // NT hash = MD4(UTF-16LE password), pure-Zig (mayaqua/encrypt/md4.zig).
+        // Matches C GenerateNtPasswordHash (Mayaqua/TcpIp.c:4514).
+        return md4.generateNtPasswordHash(password);
     }
 
     /// Generate NT response for MS-CHAPv2

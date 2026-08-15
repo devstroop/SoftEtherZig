@@ -438,6 +438,7 @@ pub const ClientConfig = struct {
     max_connections: u8 = 1,
     use_compress: bool = false,
     use_encrypt: bool = true,
+    use_fast_rc4: bool = false,
     udp_acceleration: bool = false,
     half_connection: bool = false,
     qos: bool = false,
@@ -633,6 +634,11 @@ pub const VpnClient = struct {
     auth_credentials: ?auth_mod.ClientAuth,
     auth_session_key: ?[20]u8,
     auth_hello_random: ?[20]u8,
+
+    // Fast RC4 session encryption (server-negotiated, `use_fast_rc4` path)
+    auth_use_fast_rc4: bool = false,
+    auth_rc4_c2s_key: ?[16]u8 = null,
+    auth_rc4_s2c_key: ?[16]u8 = null,
 
     // (keepalive tracking uses loop_state.timing.last_keepalive in runDataLoop)
 
@@ -3689,6 +3695,11 @@ pub const ClientConfigBuilder = struct {
 
     pub fn setEncryption(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
         self.config.use_encrypt = enabled;
+        return self;
+    }
+
+    pub fn setFastRc4(self: *ClientConfigBuilder, enabled: bool) *ClientConfigBuilder {
+        self.config.use_fast_rc4 = enabled;
         return self;
     }
 
