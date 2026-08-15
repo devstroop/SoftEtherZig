@@ -57,6 +57,12 @@ pub const EtherManagerError = error{
     NoCapability,
     /// Frames larger than the session budget (1514) are not forwarded (H-3).
     FrameTooLarge,
+    /// Delegated from the AF_PACKET core (`AfPacketError`); unreachable on
+    /// Android but present so the error set covers the inner port's
+    /// declared set.
+    NotLinux,
+    /// setsockopt(PACKET_ADD/DROP_MEMBERSHIP) failed (delegated).
+    PromiscFailed,
 };
 
 /// Wired-NIC name prefixes on Android (EthernetManager / USB ethernet /
@@ -88,10 +94,11 @@ const IfAddrs = extern struct {
 /// Walk getifaddrs(3) once. Returns:
 ///   - `name` itself when it is a present interface,
 ///   - otherwise the first wired NIC (best-effort fallback),
-///   - `error.UnsupportedRole` when no wired NIC is exposed at all,
-///   - `error.InterfaceNotFound` when the configured name does not exist and
-///     enumeration itself failed (platform hid everything).
+///   - `error.InterfaceNotFound` for an invalid configured name
+///     (empty / too long for IFNAMSIZ),
+///   - `error.UnsupportedRole` when no wired NIC is exposed at all.
 ///
+/// The resolved name is copied into `buf` (caller owns its lifetime).
 /// Kernel-generic (works on any getifaddrs host — tests run on Linux CI);
 /// the Android-only gate lives in `open()`.
 fn resolveWiredIfname(name: []const u8, buf: []u8) EtherManagerError![]const u8 {
@@ -147,6 +154,11 @@ fn resolveWiredIfname(name: []const u8, buf: []u8) EtherManagerError![]const u8 
 pub const EtherManagerPort = struct {
     inner: af_packet.AfPacketPort = .{},
     ifname: []const u8 = "",
+    /// Port-owned storage for the resolved interface name. `inner.ifname`
+    /// points here for the port's lifetime — never at a caller/stack buffer
+    /// that dies when `open()` returns.
+    resolved_name: [af_packet.IFNAMSIZ]u8 = undefined,
+    resolved_len: usize = 0,
 
     pub fn open(self: *EtherManagerPort) EtherManagerError!void {
         if (comptime !is_android) return error.NotAndroid;
@@ -154,11 +166,13 @@ pub const EtherManagerPort = struct {
         // Best-effort NIC resolution (EthernetManager-style enumeration).
         var name_buf: [af_packet.IFNAMSIZ]u8 = undefined;
         const resolved = try resolveWiredIfname(self.ifname, &name_buf);
-        std.log.info("ether_manager: android ingress interface '{s}'", .{resolved});
+        self.resolved_len = resolved.len;
+        @memcpy(self.resolved_name[0..self.resolved_len], resolved);
+        std.log.info("ether_manager: android ingress interface '{s}'", .{self.resolved_name[0..self.resolved_len]});
 
         // Delegate to the AF_PACKET core: socket(AF_PACKET) probe surfaces
         // EPERM (no CAP_NET_RAW — unrooted device) as error.NoCapability.
-        self.inner.ifname = resolved;
+        self.inner.ifname = self.resolved_name[0..self.resolved_len];
         try self.inner.open();
     }
 
