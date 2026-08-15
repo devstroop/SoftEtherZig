@@ -21,6 +21,8 @@
 //! - `config/vpn_server_config.zig` — vpn_server.config load/save + autosave
 //!   thread: default config (hub DEFAULT, admin Administrator), C-faithful
 //!   item names, CFG_RW backup (issue #86)
+//! - `admin/rpc.zig` — admin RPC transport: TLS connection, `[u32 size][Pack]`
+//!   frames, dispatch on `function_name`, error/error_code replies (issue #87)
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
@@ -30,6 +32,7 @@ pub const hub = @import("hub.zig");
 pub const accept = @import("accept.zig");
 pub const cfg = @import("config/cfg.zig");
 pub const vpn_server_config = @import("config/vpn_server_config.zig");
+pub const admin_rpc = @import("admin/rpc.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
