@@ -412,6 +412,10 @@ pub fn build(b: *std.Build) void {
     } else if (target_os == .windows) {
         softether_mod.addIncludePath(.{ .cwd_relative = win_openssl_include });
     }
+    // tunnel.zig @cInclude("zlib.h") in the module tree; Windows has no
+    // system zlib, so the bundled header must reach the module's c import
+    // (same zlib the exe links via addZlib — harmless elsewhere).
+    softether_mod.addIncludePath(b.path("deps/zlib"));
 
     const vpnserver = b.addExecutable(.{
         .name = "vpnserver",
