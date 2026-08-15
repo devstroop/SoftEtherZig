@@ -13,6 +13,14 @@ const log = std.log.scoped(.ffi);
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const lib = @import("lib.zig");
+// L2 bridge pump tests live in the whole-package test target; force
+// analysis of lib.bridge.loop so its `bridge.loop.*` test blocks are
+// compiled into that binary (fdb/engine run standalone in test_sources).
+// Same for lib.monitor (`monitor.*` ring/PCAP tests).
+comptime {
+    _ = lib.bridge.loop;
+    _ = lib.monitor;
+}
 
 // ============================================================================
 // Android logging bridge (routes std.log -> __android_log_print)
@@ -202,6 +210,14 @@ const ConnectionStats = client_mod.ConnectionStats;
 const AuthMethod = client_mod.AuthMethod;
 const ReconnectConfig = client_mod.ReconnectConfig;
 
+// Server-core modules (epic #71). Imported here so the whole-package test
+// runner collects `server.session.*` tests (decls are lazily analyzed).
+const server_mod = @import("cedar/server/mod.zig");
+
+comptime {
+    _ = server_mod;
+}
+
 // ============================================================================
 // Opaque Handle
 // ============================================================================
@@ -273,6 +289,35 @@ pub const CStats = extern struct {
     connect_time_ms: i64,
     reconnect_count: u32,
     _padding: u32 = 0,
+};
+
+/// Aggregate bridge-mode stats (C layout, mirrors `BridgeStats`).
+pub const CBridgeStats = extern struct {
+    fdb_entries: u32,
+    _pad0: u32 = 0,
+    forwarded: u64,
+    flooded: u64,
+    blocked: u64,
+    lan_rx_pkts: u64,
+    lan_tx_pkts: u64,
+    lan_rx_bytes: u64,
+    lan_tx_bytes: u64,
+    drops: u64,
+    session_rx: u64,
+    session_tx: u64,
+    session_tx_errors: u64,
+};
+
+/// Aggregate monitor-mode stats (C layout, mirrors `MonitorStats`).
+pub const CMonitorStats = extern struct {
+    frames_captured: u64,
+    frames_dropped: u64,
+    bytes_captured: u64,
+    ring_used: u32,
+    _pad0: u32 = 0,
+    pcap_records: u64,
+    pcap_bytes: u64,
+    pcap_write_errors: u64,
 };
 
 /// Connection state (C-compatible enum)
@@ -546,6 +591,80 @@ export fn softether_get_state(client: ?*const VpnClient) c_int {
 export fn softether_is_connected(client: ?*const VpnClient) bool {
     const c = client orelse return false;
     return c.isConnected();
+}
+
+/// Get bridge-mode stats (zeroed when bridge mode is not active or the
+/// pump is not running). Returns 0 on success.
+export fn softether_get_bridge_stats(client: ?*const VpnClient, out: ?*CBridgeStats) c_int {
+    const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const s = out orelse return @intFromEnum(SoftetherError.invalid_argument);
+    // Contract: zeroed when bridge mode is not active or the pump is not
+    // running (the pump also resets the cached snapshot at teardown, but
+    // the flag guard covers the pre-start / post-stop windows too).
+    const st = if (c.session_mode == .bridge and c.data_loop_running) c.bridge_stats else lib.bridge.loop.BridgeStats{};
+    s.* = .{
+        .fdb_entries = st.fdb_entries,
+        .forwarded = st.forwarded,
+        .flooded = st.flooded,
+        .blocked = st.blocked,
+        .lan_rx_pkts = st.lan_rx_pkts,
+        .lan_tx_pkts = st.lan_tx_pkts,
+        .lan_rx_bytes = st.lan_rx_bytes,
+        .lan_tx_bytes = st.lan_tx_bytes,
+        .drops = st.drops,
+        .session_rx = st.session_rx,
+        .session_tx = st.session_tx,
+        .session_tx_errors = st.session_tx_errors,
+    };
+    return 0;
+}
+
+/// Get monitor-mode stats (zeroed when monitor mode is not active or the
+/// pump is not running). Returns 0 on success.
+export fn softether_get_monitor_stats(client: ?*const VpnClient, out: ?*CMonitorStats) c_int {
+    const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const s = out orelse return @intFromEnum(SoftetherError.invalid_argument);
+    // Contract: zeroed when monitor mode is not active or the pump is not
+    // running (the pump also resets the cached snapshot at teardown, but
+    // the flag guard covers the pre-start / post-stop windows too).
+    const st = if (c.session_mode == .monitor and c.data_loop_running) c.monitor_stats else lib.monitor.MonitorStats{};
+    s.* = .{
+        .frames_captured = st.frames_captured,
+        .frames_dropped = st.frames_dropped,
+        .bytes_captured = st.bytes_captured,
+        .ring_used = st.ring_used,
+        .pcap_records = st.pcap_records,
+        .pcap_bytes = st.pcap_bytes,
+        .pcap_write_errors = st.pcap_write_errors,
+    };
+    return 0;
+}
+
+/// Frames currently held in the monitor ring; 0 means an empty ring.
+/// Returns -1 when the client is invalid or the monitor pump is not
+/// running.
+export fn softether_monitor_frame_count(client: ?*VpnClient) i64 {
+    const c = client orelse return -1;
+    c.mutex.lock();
+    defer c.mutex.unlock();
+    const loop = c.monitor_loop orelse return -1;
+    return loop.frameCount();
+}
+
+/// Copy one captured frame (index 0 = oldest) into `out`. Returns the
+/// number of bytes copied (0 when index is out of range or `out_cap` is
+/// 0), or -1 when the client is invalid or the monitor pump is not
+/// running. The frame data is copied under the loop mutex, so it is a
+/// stable snapshot even while the pump keeps capturing.
+export fn softether_monitor_get_frame(client: ?*VpnClient, index: i64, out: ?[*]u8, out_cap: usize) i64 {
+    const c = client orelse return -1;
+    if (index < 0) return 0;
+    const dst = (out orelse return 0)[0..out_cap];
+    if (dst.len == 0) return 0;
+    c.mutex.lock();
+    defer c.mutex.unlock();
+    const loop = c.monitor_loop orelse return -1;
+    return @intCast(loop.readFrame(@intCast(index), dst) orelse 0);
 }
 
 /// Get connection statistics. Returns 0 on success.
@@ -1266,12 +1385,234 @@ export fn softether_version() [*:0]const u8 {
 }
 
 // ============================================================================
+// NIC enumeration
+// ============================================================================
+
+/// C-ABI NIC entry (softether_nic_info in include/softether.h).
+pub const SoftEtherNicInfo = extern struct {
+    /// Interface name: POSIX ifname (≤15 chars) or the Windows adapter GUID
+    /// string ("{...}", ≤39 chars). NUL-padded.
+    name: [64]u8,
+    /// Hardware address; zeroed when the interface has none (e.g. utun).
+    mac: [6]u8,
+    /// Platform interface index.
+    index: u32,
+};
+
+/// Enumerate the host's network interfaces.
+///
+/// Fills `out[0..cap]` with {name, mac, index} entries, loopback excluded.
+/// Returns the number of entries written; if the host has more than `cap`
+/// interfaces the return value is `-(full_count + 2)` (snprintf-style,
+/// offset past the reserved error codes), so callers can grow their buffer
+/// and retry. Returns -1 on invalid arguments (null out, cap <= 0) and -2
+/// on enumeration failure.
+///
+/// Stable id semantics (see include/softether.h): `mac` — or the Windows
+/// GUID in `name` — is the stable identity across interface renames; POSIX
+/// `name` and `index` alone are not stable. Interfaces without a hardware
+/// address carry a zeroed `mac` and have NO stable identity (each
+/// enumeration may order them differently; key on `name` + `index` only
+/// for the duration of one enumeration).
+export fn softether_list_interfaces(out: ?[*]SoftEtherNicInfo, cap: c_int) c_int {
+    if (out == null or cap <= 0) return -1;
+
+    const adapter_mod = @import("adapter/mod.zig");
+    var list = adapter_mod.nic_enumerate.listNics(ffi_allocator) catch return -2;
+    defer list.deinit();
+
+    const n = @min(list.items.len, @as(usize, @intCast(cap)));
+    for (list.items[0..n], 0..) |item, i| {
+        const dst = &out.?[i];
+        @memset(&dst.name, 0);
+        const name_len = @min(item.name.len, dst.name.len);
+        @memcpy(dst.name[0..name_len], item.name[0..name_len]);
+        dst.mac = item.mac orelse [_]u8{0} ** 6;
+        dst.index = item.index;
+    }
+
+    if (list.items.len > n) {
+        // Truncated: report the full count as a negative, offset by 2 so
+        // the value can never collide with the reserved -1/-2 error codes
+        // (a host with exactly 2 interfaces and cap=1 must not look like
+        // an enumeration failure).
+        const full = @min(list.items.len, @as(usize, std.math.maxInt(c_int)));
+        return -@as(c_int, @intCast(full)) - 2;
+    }
+    return @intCast(n);
+}
+
+// ============================================================================
+// Network mode (L2 bridge proposal §5.1) — runtime support landed: bridge
+// (issue #56) and monitor (issue #55) both run their own data pumps:
+// bridge → runBridgeLoopThread (AF_PACKET ingress), monitor →
+// runMonitorLoopThread (mirror-only capture). All three setters are safe
+// to call before connect(); the connect path branches on the mode flag.
+// ============================================================================
+
+/// Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
+/// Invalid values are ignored. Storage-only: this updates the client's
+/// config AND the session flag; the connect path branches on the flag.
+/// bridge mode is Linux-only (AF_PACKET); monitor mode is portable and
+/// captures mirrored hub frames into a bounded ring (+ optional PCAP).
+/// If called mid-session (after connect), the running loop is unaffected
+/// — the flag applies on the next connect.
+export fn softether_set_network_mode(client: ?*VpnClient, mode: c_int) void {
+    const c = client orelse return;
+    const NetworkMode = client_mod.NetworkMode;
+    const parsed: NetworkMode = switch (mode) {
+        0 => NetworkMode.client,
+        1 => NetworkMode.bridge,
+        2 => NetworkMode.monitor,
+        else => return,
+    };
+    // Lock the client mutex so a setter racing with connect()'s mode read
+    // (and with getNetworkMode) cannot observe a torn/inconsistent mode.
+    c.mutex.lock();
+    defer c.mutex.unlock();
+    c.config.mode = parsed;
+    c.network_mode = parsed;
+}
+
+/// Append an ingress interface to the bridge list (deduped, owned copy).
+/// Returns 0 on success, -1 on invalid client / empty name / OOM.
+/// The resulting list is fully owned by the client: every prior entry is
+/// re-duplicated so mixed borrowed/owned states cannot arise.
+export fn softether_add_ingress_interface(client: ?*VpnClient, name: ?[*:0]const u8) c_int {
+    const c = client orelse return -1;
+    const iface = std.mem.span(name orelse return -1);
+    if (iface.len == 0) return -1;
+
+    for (c.config.bridge.ingress_ifs) |existing| {
+        if (std.mem.eql(u8, existing, iface)) return 0;
+    }
+
+    const old = c.config.bridge.ingress_ifs;
+    const old_owned = c.config.bridge.ingress_ifs_owned;
+
+    const new_list = c.allocator.alloc([]const u8, old.len + 1) catch return -1;
+    var i: usize = 0;
+    for (old) |existing| {
+        new_list[i] = c.allocator.dupe(u8, existing) catch {
+            for (new_list[0..i]) |e| c.allocator.free(e);
+            c.allocator.free(new_list);
+            return -1;
+        };
+        i += 1;
+    }
+    new_list[old.len] = c.allocator.dupe(u8, iface) catch {
+        for (new_list[0..i]) |e| c.allocator.free(e);
+        c.allocator.free(new_list);
+        return -1;
+    };
+
+    c.config.bridge.ingress_ifs = new_list;
+    c.config.bridge.ingress_ifs_owned = true;
+    if (old_owned) {
+        for (old) |e| c.allocator.free(e);
+        c.allocator.free(old);
+    }
+    return 0;
+}
+
+/// Remove an ingress interface from the bridge list.
+/// Returns 0 on success (or if not present), -1 on invalid client / OOM.
+export fn softether_remove_ingress_interface(client: ?*VpnClient, name: ?[*:0]const u8) c_int {
+    const c = client orelse return -1;
+    const iface = std.mem.span(name orelse return -1);
+    const old = c.config.bridge.ingress_ifs;
+    const old_owned = c.config.bridge.ingress_ifs_owned;
+
+    var keep: usize = 0;
+    for (old) |existing| {
+        if (!std.mem.eql(u8, existing, iface)) keep += 1;
+    }
+    if (keep == old.len) return 0; // not present
+
+    const new_list = c.allocator.alloc([]const u8, keep) catch return -1;
+    var j: usize = 0;
+    for (old) |existing| {
+        if (std.mem.eql(u8, existing, iface)) continue;
+        new_list[j] = c.allocator.dupe(u8, existing) catch {
+            for (new_list[0..j]) |e| c.allocator.free(e);
+            c.allocator.free(new_list);
+            return -1;
+        };
+        j += 1;
+    }
+
+    c.config.bridge.ingress_ifs = new_list;
+    c.config.bridge.ingress_ifs_owned = true;
+    if (old_owned) {
+        for (old) |e| c.allocator.free(e);
+        c.allocator.free(old);
+    }
+    return 0;
+}
+
+/// Set the monitor-mode PCAP capture path (owned copy; "" or NULL clears
+/// it). The file is opened when the monitor pump starts (next connect);
+/// a bad path aborts the monitor session with the raw file error.
+/// Returns 0 on success, -1 on invalid client / OOM.
+export fn softether_set_monitor_pcap(client: ?*VpnClient, path: ?[*:0]const u8) c_int {
+    const c = client orelse return -1;
+    const s = std.mem.span(path orelse "");
+
+    if (c.config.monitor.pcap_file_owned) {
+        if (c.config.monitor.pcap_file) |f| c.allocator.free(f);
+        c.config.monitor.pcap_file = null;
+        c.config.monitor.pcap_file_owned = false;
+    }
+    if (s.len == 0) return 0; // cleared
+
+    c.config.monitor.pcap_file = c.allocator.dupe(u8, s) catch return -1;
+    c.config.monitor.pcap_file_owned = true;
+    return 0;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 test "ffi error mapping" {
     const err = mapClientError(ClientError.ConnectionFailed);
     try std.testing.expectEqual(SoftetherError.connection_failed, err);
+}
+
+test "softether_list_interfaces enumerates host NICs" {
+    var buf: [64]SoftEtherNicInfo = undefined;
+    const n = softether_list_interfaces(&buf, buf.len);
+    try std.testing.expect(n > 0);
+
+    // Entries must carry a name, a plausible index, and a MAC or zeros.
+    for (buf[0..@intCast(n)]) |entry| {
+        try std.testing.expect(entry.name[0] != 0);
+        // Loopback must have been filtered out on all platforms.
+        try std.testing.expect(!std.mem.startsWith(u8, &entry.name, "lo"));
+        try std.testing.expect(std.mem.indexOfScalar(u8, &entry.name, 0) != null); // NUL-terminated
+    }
+}
+
+test "softether_list_interfaces rejects invalid arguments" {
+    var buf: [4]SoftEtherNicInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_list_interfaces(null, 4));
+    try std.testing.expectEqual(@as(c_int, -1), softether_list_interfaces(&buf, 0));
+    try std.testing.expectEqual(@as(c_int, -1), softether_list_interfaces(&buf, -3));
+}
+
+test "softether_list_interfaces truncation reports full count" {
+    // cap=1 must either fit the host (returns 1) or report truncation
+    // with the offset encoding -(full + 2) — never -1/-2.
+    var one: [1]SoftEtherNicInfo = undefined;
+    const r = softether_list_interfaces(&one, 1);
+    try std.testing.expect(r == 1 or r < -2);
+    if (r == 1) {
+        try std.testing.expect(one[0].name[0] != 0);
+    } else {
+        // The exact amount is unknowable in a unit test, but the encoding
+        // must be -(full + 2): reconstruct and sanity-check the sign.
+        try std.testing.expect(r <= -4); // full >= 2 always when truncated
+    }
 }
 
 test "ffi callback context routes to per-client user_data" {
@@ -1456,4 +1797,163 @@ test "ffi set_dns_servers list freed by client deinit" {
         .static_ip = .{ .dns_servers = &borrowed },
     });
     c2.deinit();
+}
+
+test "ffi network mode setter" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    const NetworkMode = client_mod.NetworkMode;
+    try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.client, c.getNetworkMode());
+
+    softether_set_network_mode(&c, 1);
+    try std.testing.expectEqual(NetworkMode.bridge, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.bridge, c.getNetworkMode());
+    softether_set_network_mode(&c, 2);
+    try std.testing.expectEqual(NetworkMode.monitor, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.monitor, c.getNetworkMode());
+    softether_set_network_mode(&c, 0);
+    try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.client, c.getNetworkMode());
+
+    // Invalid values are ignored
+    softether_set_network_mode(&c, 7);
+    try std.testing.expectEqual(NetworkMode.client, c.config.mode);
+    try std.testing.expectEqual(NetworkMode.client, c.getNetworkMode());
+}
+
+test "ffi add ingress interfaces owned lifecycle" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+    const NetworkMode = client_mod.NetworkMode;
+    softether_set_network_mode(&c, 1);
+    try std.testing.expectEqual(NetworkMode.bridge, c.config.mode);
+
+    // Empty name rejected
+    try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(&c, ""));
+    // Null client rejected
+    try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(null, "en0"));
+    // NULL name pointer from C must not dereference
+    const null_name: ?[*:0]const u8 = null;
+    try std.testing.expectEqual(@as(c_int, -1), softether_add_ingress_interface(&c, null_name));
+    try std.testing.expectEqual(@as(c_int, -1), softether_remove_ingress_interface(&c, null_name));
+
+    // Add two
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en0"));
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en1"));
+    var list = c.config.bridge.ingress_ifs;
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("en0", list[0]);
+    try std.testing.expectEqualStrings("en1", list[1]);
+    try std.testing.expect(c.config.bridge.ingress_ifs_owned);
+
+    // Duplicate is a no-op
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en0"));
+    try std.testing.expectEqual(@as(usize, 2), c.config.bridge.ingress_ifs.len);
+
+    // Remove one; strings + arrays must be freed correctly (testing allocator)
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en0"));
+    list = c.config.bridge.ingress_ifs;
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("en1", list[0]);
+
+    // Remove absent is a no-op success
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "wlan0"));
+
+    // Remove last — empty owned list
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en1"));
+    try std.testing.expectEqual(@as(usize, 0), c.config.bridge.ingress_ifs.len);
+    try std.testing.expect(c.config.bridge.ingress_ifs_owned);
+
+    // Remaining list freed by deinit — no leak (defer c.deinit())
+}
+
+test "ffi add ingress never frees borrowed config lists" {
+    // A literal ingress list from VpnClient.init must survive add/remove
+    // without being freed (borrowed semantics, mirrors dns_servers contract).
+    const borrowed = [_][]const u8{ "en0", "en1" };
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+        .bridge = .{ .ingress_ifs = &borrowed },
+    });
+    defer c.deinit();
+    try std.testing.expect(!c.config.bridge.ingress_ifs_owned);
+
+    // Add replaces the whole list with owned copies — borrowed entries must
+    // not be freed (would panic under testing.allocator)
+    try std.testing.expectEqual(@as(c_int, 0), softether_add_ingress_interface(&c, "en2"));
+    const list = c.config.bridge.ingress_ifs;
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+    try std.testing.expectEqualStrings("en0", list[0]);
+    try std.testing.expectEqualStrings("en1", list[1]);
+    try std.testing.expectEqualStrings("en2", list[2]);
+    try std.testing.expect(c.config.bridge.ingress_ifs_owned);
+
+    // Remove — replacements must also not free the literal
+    try std.testing.expectEqual(@as(c_int, 0), softether_remove_ingress_interface(&c, "en1"));
+    try std.testing.expectEqual(@as(usize, 2), c.config.bridge.ingress_ifs.len);
+}
+
+test "ffi monitor pcap setter owned lifecycle" {
+    // A borrowed literal pcap path from VpnClient.init must survive the
+    // setter without being freed (borrowed semantics, mirrors ingress).
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+        .monitor = .{ .pcap_file = "capture.pcap" },
+    });
+    defer c.deinit();
+    try std.testing.expect(!c.config.monitor.pcap_file_owned);
+
+    // Replace with an owned copy — borrowed string must not be freed.
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, "new.pcap"));
+    try std.testing.expect(c.config.monitor.pcap_file_owned);
+    try std.testing.expectEqualStrings("new.pcap", c.config.monitor.pcap_file.?);
+
+    // Replacing an owned string frees the previous owned copy (leak-safe).
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, "final.pcap"));
+    try std.testing.expectEqualStrings("final.pcap", c.config.monitor.pcap_file.?);
+
+    // Empty string clears without freeing a borrowed literal.
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, ""));
+    try std.testing.expect(c.config.monitor.pcap_file == null);
+    try std.testing.expect(!c.config.monitor.pcap_file_owned);
+
+    // NULL path after a clear is idempotent; NULL client is invalid.
+    try std.testing.expectEqual(@as(c_int, 0), softether_set_monitor_pcap(&c, null));
+    try std.testing.expect(c.config.monitor.pcap_file == null);
+    try std.testing.expectEqual(@as(c_int, -1), softether_set_monitor_pcap(null, "x.pcap"));
+}
+
+test "ffi monitor frame getters require a running pump" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    // No monitor pump running → -1 for both getters (and a no-op out
+    // buffer must never be dereferenced).
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(i64, -1), softether_monitor_frame_count(&c));
+    try std.testing.expectEqual(@as(i64, -1), softether_monitor_get_frame(&c, 0, &buf, buf.len));
+    try std.testing.expectEqual(@as(i64, 0), softether_monitor_get_frame(&c, 0, null, 0));
 }

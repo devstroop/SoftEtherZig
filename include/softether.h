@@ -89,6 +89,35 @@ typedef struct {
     uint32_t _padding;
 } softether_stats_t;
 
+/** Aggregate bridge-mode statistics (softether_get_bridge_stats). */
+typedef struct {
+    uint32_t fdb_entries;
+    uint32_t _pad0;
+    uint64_t forwarded;
+    uint64_t flooded;
+    uint64_t blocked;
+    uint64_t lan_rx_pkts;
+    uint64_t lan_tx_pkts;
+    uint64_t lan_rx_bytes;
+    uint64_t lan_tx_bytes;
+    uint64_t drops;
+    uint64_t session_rx;
+    uint64_t session_tx;
+    uint64_t session_tx_errors;
+} softether_bridge_stats_t;
+
+/** Aggregate monitor-mode statistics (softether_get_monitor_stats). */
+typedef struct {
+    uint64_t frames_captured;
+    uint64_t frames_dropped;
+    uint64_t bytes_captured;
+    uint32_t ring_used;
+    uint32_t _pad0;
+    uint64_t pcap_records;
+    uint64_t pcap_bytes;
+    uint64_t pcap_write_errors;
+} softether_monitor_stats_t;
+
 /* ========================================================================== */
 /* Callback                                                                   */
 /* ========================================================================== */
@@ -174,6 +203,34 @@ bool softether_is_connected(const softether_client_t client);
 
 /** Fill stats struct. Returns 0 on success. */
 int softether_get_stats(const softether_client_t client, softether_stats_t* out);
+
+/**
+ * Fill bridge-mode stats (zeroed when bridge mode is not active or the
+ * pump is not running). Returns 0 on success.
+ */
+int softether_get_bridge_stats(const softether_client_t client, softether_bridge_stats_t* out);
+
+/**
+ * Fill monitor-mode stats (zeroed when monitor mode is not active or the
+ * pump is not running). Returns 0 on success.
+ */
+int softether_get_monitor_stats(const softether_client_t client, softether_monitor_stats_t* out);
+
+/**
+ * Frames currently held in the monitor ring; 0 means an empty ring.
+ * Returns -1 when the client is invalid or the monitor pump is not
+ * running.
+ */
+int64_t softether_monitor_frame_count(const softether_client_t client);
+
+/**
+ * Copy one captured frame (index 0 = oldest) into out.
+ * Returns bytes copied (0 when index is out of range or out_cap is 0),
+ * or -1 when the client is invalid / monitor pump not running. The copy
+ * is a stable snapshot taken under the loop mutex.
+ */
+int64_t softether_monitor_get_frame(const softether_client_t client, int64_t index,
+                                    uint8_t* out, uintptr_t out_cap);
 
 /** Get assigned VPN IP (host byte order, 0 if not assigned). */
 uint32_t softether_get_assigned_ip(const softether_client_t client);
@@ -364,6 +421,88 @@ void softether_set_bind_interface(const char* ifname);
  */
 typedef int (*softether_tcp_dial_callback_t)(const char* host, uint16_t port);
 void softether_set_tcp_dial_callback(softether_tcp_dial_callback_t cb);
+
+/* ========================================================================== */
+/* NIC enumeration                                                            */
+/* ========================================================================== */
+
+/**
+ * Single NIC entry returned by softether_list_interfaces().
+ *
+ * Stable-id semantics: `mac` (hardware address) — or the Windows adapter
+ * GUID carried in `name` — is the stable identity of an interface across
+ * renames. POSIX device names (en0/eth1) and `index` alone are NOT stable:
+ * the OS may rename interfaces or reuse indices across boots, while the MAC
+ * (or GUID) identifies the same physical/virtual interface regardless.
+ *
+ * Interfaces WITHOUT a hardware address (e.g. utun on macOS) carry an
+ * all-zero `mac` and have NO stable identity: do not use them as merge
+ * keys. Treat entries with a zeroed `mac` as identity-on-name only for the
+ * duration of a single enumeration.
+ */
+typedef struct {
+    /* Interface name: POSIX ifname (NUL-terminated, <= 15 chars) or the
+     * Windows adapter GUID string ("{...}", <= 39 chars). NUL-padded. */
+    char name[64];
+    /* Hardware address (6 bytes); all zeros for interfaces without one. */
+    uint8_t mac[6];
+    /* Platform interface index. */
+    uint32_t index;
+} softether_nic_info;
+
+/**
+ * Enumerate the host's network interfaces (loopback excluded).
+ *
+ * Fills out[0..cap] with {name, mac, index} entries.
+ *
+ * Returns:
+ *   > 0        number of entries written into `out`
+ *   < -2       truncated — the host has more than `cap` interfaces;
+ *              the exact value is -(full_count + 2), so the buffer can be
+ *              grown to `full_count` entries and the call retried. The
+ *              offset guarantees truncation never collides with the
+ *              reserved error codes below, even when the full count is 2.
+ *   -1         invalid arguments (NULL out, cap <= 0)
+ *   -2         enumeration failed
+ */
+int softether_list_interfaces(softether_nic_info* out, int cap);
+
+/* ========================================================================== */
+/* Network mode (L2 bridge proposal §5.1)                                     */
+/* ========================================================================== */
+
+/**
+ * Set the network operating mode: 0=client (default), 1=bridge, 2=monitor.
+ * Invalid values are ignored.
+ *
+ * The client stores the mode in its config AND its session flag, and the
+ * connect path branches on the flag. Runtime is implemented for all three
+ * modes: client runs the classic TUN data loop, bridge (issue #56) runs a
+ * Linux AF_PACKET L2 pump, monitor (issue #55) runs a mirror-only capture
+ * pump (bounded ring + optional PCAP). Calling this after connect() does
+ * not affect the running session; the mode is applied on the next connect.
+ */
+void softether_set_network_mode(softether_client_t client, int mode);
+
+/**
+ * Append an ingress interface to the bridge list (deduped, owned copy).
+ * Returns 0 on success, -1 on invalid client / empty name / OOM.
+ */
+int softether_add_ingress_interface(softether_client_t client, const char* name);
+
+/**
+ * Remove an ingress interface from the bridge list.
+ * Returns 0 on success (or if not present), -1 on invalid client / OOM.
+ */
+int softether_remove_ingress_interface(softether_client_t client, const char* name);
+
+/**
+ * Set the monitor-mode PCAP capture path (owned copy; "" or NULL clears
+ * it). The file is opened when the monitor pump starts (next connect);
+ * a bad path aborts the monitor session with the raw file error.
+ * Returns 0 on success, -1 on invalid client / OOM.
+ */
+int softether_set_monitor_pcap(softether_client_t client, const char* path);
 
 /* ========================================================================== */
 /* Version                                                                    */

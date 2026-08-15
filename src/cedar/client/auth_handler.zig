@@ -98,7 +98,14 @@ pub fn run(client: *VpnClient) !void {
         .half_connection = client.config.half_connection,
         .qos = client.config.qos,
         .use_encrypt = client.config.use_encrypt,
+        .use_fast_rc4 = client.config.use_fast_rc4,
         .use_compress = client.config.use_compress,
+        // H-4: monitor sessions pack require_monitor_mode=true so the
+        // server mirrors hub traffic back (proposal §5.4). Client and
+        // bridge sessions leave it false. Reads the mode frozen at connect
+        // entry (session_mode) — never the mutable network_mode flag, so a
+        // setter racing mid-connect can't split auth from pump dispatch.
+        .monitor_mode = client.session_mode == .monitor,
         .fingerprint = if (client.config.fingerprint) |*fp| fp else null,
     };
 
@@ -207,8 +214,13 @@ pub fn run(client: *VpnClient) !void {
     // Apply server-overridden session parameters (C: Protocol.c:4720-4741)
     applyServerOverrides(client, auth_result);
 
-    // Initialize UDP acceleration if server supports it
-    if (auth_result.udp_accel_enabled and client.config.udp_acceleration) {
+    // Initialize UDP acceleration if server supports it. Client mode only:
+    // the bridge pump (loop.zig) and the monitor pump (monitor.zig) carry
+    // no UDP data channel in v1 (proposal §4.6) — their pumps poll a
+    // single TLS socket. Monitor inherits the mirror-only drain.
+    // getNetworkMode() reads under the client mutex (connect() released
+    // it while authenticating; softether_set_network_mode may acquire it).
+    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.getNetworkMode() == .client) {
         startUdpAcceleration(client, auth_result);
     }
 
@@ -491,6 +503,16 @@ fn applyServerOverrides(client: *VpnClient, result: softether_proto.AuthResult) 
     client.config.half_connection = effective_half;
     client.config.use_compress = result.server_use_compress;
     client.config.use_encrypt = result.server_use_encrypt;
+
+    // Fast RC4 session encryption: store what the server negotiated. When the
+    // server enabled it and sent a key pair, the session is set up with the
+    // legacy RC4 stream cipher instead of AES-256-CBC.
+    client.auth_use_fast_rc4 = result.server_use_fast_rc4;
+    client.auth_rc4_c2s_key = result.rc4_client_to_server_key;
+    client.auth_rc4_s2c_key = result.rc4_server_to_client_key;
+    if (result.server_use_fast_rc4) {
+        std.log.info("Server negotiated fast RC4 session encryption", .{});
+    }
 
     // NOTE: policy:NoRouting must NOT disable full-tunnel. In SoftEther that
     // policy forbids the SESSION from acting as an IPv4 router (forwarding

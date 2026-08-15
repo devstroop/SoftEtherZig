@@ -18,9 +18,39 @@ pub const utun_escalate = @import("utun_escalate.zig");
 pub const route = @import("route.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const wrapper = @import("wrapper.zig");
+pub const port = @import("port.zig");
+pub const nic_enumerate = @import("nic_enumerate.zig");
+pub const af_packet = @import("af_packet.zig");
+pub const bpf = @import("bpf.zig");
+pub const npcap = @import("npcap.zig");
+pub const ether_manager = @import("ether_manager.zig");
 
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
+
+// NetPort interface (proposal §4.1)
+pub const NetPort = port.NetPort;
+pub const PortLayer = port.PortLayer;
+pub const PortStats = port.PortStats;
+pub const NicList = nic_enumerate.NicList;
+pub const NicInfo = nic_enumerate.NicInfo;
+
+// L2 bridge port (proposal §4.1) — Linux AF_PACKET
+pub const AfPacketPort = af_packet.AfPacketPort;
+pub const afPacketPort = af_packet.afPacketPort;
+pub const SESSION_FRAME_BUDGET = af_packet.SESSION_FRAME_BUDGET;
+
+// L2 bridge port — macOS BPF (/dev/bpfN, H-7 helper-granted fd)
+pub const BpfPort = bpf.BpfPort;
+pub const bpfPort = bpf.bpfPort;
+
+// L2 bridge port — Windows Npcap (issue #61, dynamic pcap.dll)
+pub const NpcapPort = npcap.NpcapPort;
+pub const npcapPort = npcap.npcapPort;
+
+// L2 bridge port — Android EthernetManager best-effort (issue #59)
+pub const EtherManagerPort = ether_manager.EtherManagerPort;
+pub const etherManagerPort = ether_manager.etherManagerPort;
 
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;
@@ -215,11 +245,20 @@ pub const deleteRoute = route.deleteRoute;
 pub const configureDns = route.configureDns;
 pub const clearDns = route.clearDns;
 
-/// Virtual adapter state combining utun device with routing
+/// Virtual adapter state combining a NetPort with routing, DHCP and ARP.
+/// The l3 client role is composed over the port: I/O, metadata and stats go
+/// through the `NetPort` interface; l3-only lifecycle operations
+/// (configure/configureIpv6) reach the concrete device via `port.impl`.
 pub const VirtualAdapter = struct {
     allocator: std.mem.Allocator,
-    device: ?*PlatformDevice,
+    port: ?NetPort,
     routes: RouteManager,
+
+    // Serializes fd replacement (mobile replaceFd) against the data pump's
+    // fd snapshot + poll window (see runDataLoop in vpn_client.zig). The pump
+    // holds this lock from snapshot through poll() so it can never poll a
+    // descriptor mid-swap.
+    fd_guard: std.Thread.Mutex = .{},
 
     // DHCP state
     dhcp_xid: u32,
@@ -244,7 +283,7 @@ pub const VirtualAdapter = struct {
 
         return .{
             .allocator = allocator,
-            .device = null,
+            .port = null,
             .routes = RouteManager.init(allocator),
             .dhcp_xid = xid,
             .dhcp_state = .init,
@@ -262,43 +301,58 @@ pub const VirtualAdapter = struct {
         self.close();
     }
 
+    /// The concrete platform device behind the port. Only valid for ports
+    /// created by this module (`l3Port(PlatformDevice, ...)`); l2 ports
+    /// (future milestones) must never be cast here.
+    fn platformDevice(self: *const VirtualAdapter) ?*PlatformDevice {
+        const p = self.port orelse return null;
+        return @as(*PlatformDevice, @ptrCast(@alignCast(p.impl)));
+    }
+
     /// Open the virtual adapter (platform-specific)
     pub fn open(self: *VirtualAdapter) !void {
-        if (self.device != null) return;
+        if (self.port != null) return;
 
         if (is_android) {
             return error.UnsupportedPlatform; // Android must use openWithFd()
         } else if (builtin.os.tag == .linux) {
-            self.device = TunLinuxDevice.open(self.allocator) catch |err| {
+            const dev = TunLinuxDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open Linux TUN device: {}", .{err});
                 return err;
             };
-            try self.device.?.configureTemporary();
+            errdefer dev.close(); // device owns an open fd until wrapped
+            try dev.configureTemporary();
+            self.port = port.l3Port(PlatformDevice, dev, MAX_PACKET_SIZE);
         } else if (builtin.os.tag == .macos) {
-            self.device = UtunDevice.open(self.allocator) catch |direct_err| {
+            const direct_dev = UtunDevice.open(self.allocator) catch |direct_err| {
                 // Direct utun creation failed (likely EPERM) — try privilege escalation
                 std.log.warn("Direct utun open failed ({}) — attempting privilege escalation...", .{direct_err});
                 const escalated = utun_escalate.escalatedUtunOpen(self.allocator) catch |esc_err| {
                     std.log.err("Privilege escalation also failed: esc_err={}, returning direct_err={}", .{ esc_err, direct_err });
                     return direct_err;
                 };
-                self.device = UtunDevice.fromFd(self.allocator, escalated.fd, escalated.device_name, escalated.device_name_len) catch |fd_err| {
+                const esc_dev = UtunDevice.fromFd(self.allocator, escalated.fd, escalated.device_name, escalated.device_name_len) catch |fd_err| {
                     std.log.err("Failed to wrap escalated utun fd: {}", .{fd_err});
                     return fd_err;
                 };
                 // Already configured by helper — skip configureTemporary
+                self.port = port.l3Port(PlatformDevice, esc_dev, MAX_PACKET_SIZE);
                 return;
             };
+            errdefer direct_dev.close(); // device owns an open fd until wrapped
             // Direct utun open succeeded. Still need the privileged command channel
             // so that route add/delete commands run as root during tunnel setup.
             utun_escalate.ensurePrivilegedChannel(self.allocator);
-            try self.device.?.configureTemporary();
+            try direct_dev.configureTemporary();
+            self.port = port.l3Port(PlatformDevice, direct_dev, MAX_PACKET_SIZE);
         } else if (builtin.os.tag == .windows) {
-            self.device = TapWindowsDevice.open(self.allocator) catch |err| {
+            const dev = TapWindowsDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open Windows TUN adapter (Wintun): {}", .{err});
                 return err;
             };
-            try self.device.?.configureTemporary();
+            errdefer dev.close(); // device owns an open handle until wrapped
+            try dev.configureTemporary();
+            self.port = port.l3Port(PlatformDevice, dev, MAX_PACKET_SIZE);
         } else if (builtin.os.tag == .ios) {
             return error.UnsupportedPlatform; // iOS must use openWithFd()
         } else {
@@ -313,12 +367,13 @@ pub const VirtualAdapter = struct {
         if (PlatformDevice != FdAdapter) {
             return error.UnsupportedPlatform;
         }
-        if (self.device != null) return;
+        if (self.port != null) return;
 
-        self.device = FdAdapter.initWithFd(self.allocator, fd, name) catch |err| {
+        const dev = FdAdapter.initWithFd(self.allocator, fd, name) catch |err| {
             std.log.err("Failed to wrap external fd={d}: {}", .{ fd, err });
             return err;
         };
+        self.port = port.l3Port(PlatformDevice, dev, MAX_PACKET_SIZE);
     }
 
     /// Open with separate read (UL) and write (DL) file descriptors.
@@ -329,12 +384,13 @@ pub const VirtualAdapter = struct {
         if (PlatformDevice != FdAdapter) {
             return error.UnsupportedPlatform;
         }
-        if (self.device != null) return;
+        if (self.port != null) return;
 
-        self.device = FdAdapter.initWithFds(self.allocator, rx_fd, tx_fd, name) catch |err| {
+        const dev = FdAdapter.initWithFds(self.allocator, rx_fd, tx_fd, name) catch |err| {
             std.log.err("Failed to wrap external fds rx_fd={d} tx_fd={d}: {}", .{ rx_fd, tx_fd, err });
             return err;
         };
+        self.port = port.l3Port(PlatformDevice, dev, MAX_PACKET_SIZE);
     }
 
     /// Close the virtual adapter and restore routing
@@ -347,47 +403,62 @@ pub const VirtualAdapter = struct {
             utun_escalate.closePrivilegedChannel();
         }
 
-        if (self.device) |dev| {
+        if (self.platformDevice()) |dev| {
             dev.close();
-            self.device = null;
         }
+        self.port = null;
 
         self.dhcp_state = .init;
     }
 
     /// Check if adapter is open
     pub fn isOpen(self: *const VirtualAdapter) bool {
-        return self.device != null and self.device.?.isOpen();
+        const dev = self.platformDevice() orelse return false;
+        return dev.isOpen();
     }
 
     /// Get device name
     pub fn getName(self: *const VirtualAdapter) ?[]const u8 {
-        if (self.device) |dev| {
-            return dev.getName();
+        if (self.port) |p| {
+            return p.getName();
         }
         return null;
     }
 
     /// Get MAC address
     pub fn getMac(self: *const VirtualAdapter) ?[6]u8 {
-        if (self.device) |dev| {
-            return dev.getMac();
+        if (self.port) |p| {
+            return p.getMac();
         }
         return null;
+    }
+
+    /// Get the pollable fd of the underlying device (data pump seam — the
+    /// pump never reaches into device internals).
+    pub fn getFd(self: *const VirtualAdapter) std.posix.fd_t {
+        if (self.port) |p| {
+            return p.getFd();
+        }
+        return port.NetPort.invalid_fd;
     }
 
     /// Replace the wrapped file descriptor (mobile only). Used after DHCP
     /// completes and the platform has re-created the TUN with the assigned IP.
     pub fn replaceFd(self: *VirtualAdapter, new_fd: i32) !void {
         if (PlatformDevice != FdAdapter) return error.UnsupportedPlatform;
-        const dev = self.device orelse return error.DeviceNotOpen;
+        const dev = self.platformDevice() orelse return error.DeviceNotOpen;
+        // Serialize against the pump's snapshot+poll window (fd_guard held
+        // by runDataLoop from getFd() through poll()); the swap must never
+        // land mid-poll on the data-loop thread.
+        self.fd_guard.lock();
+        defer self.fd_guard.unlock();
         try dev.replaceFd(new_fd);
     }
 
     /// Read a packet from the adapter
     pub fn read(self: *VirtualAdapter, buffer: []u8) !?usize {
-        if (self.device) |dev| {
-            return dev.read(buffer);
+        if (self.port) |p| {
+            return p.read(buffer);
         }
         if (builtin.os.tag == .linux) {
             return TunLinuxError.DeviceNotOpen;
@@ -400,8 +471,8 @@ pub const VirtualAdapter = struct {
 
     /// Write a packet to the adapter
     pub fn write(self: *VirtualAdapter, data: []const u8) !usize {
-        if (self.device) |dev| {
-            return dev.write(data);
+        if (self.port) |p| {
+            return p.write(data);
         }
         if (builtin.os.tag == .linux) {
             return TunLinuxError.DeviceNotOpen;
@@ -412,9 +483,23 @@ pub const VirtualAdapter = struct {
         }
     }
 
+    /// Configure the device IP (l3 client role — device-level configuration).
+    pub fn configure(self: *VirtualAdapter, ip: u32, mask: u32, gateway: u32) !void {
+        const dev = self.platformDevice() orelse {
+            if (builtin.os.tag == .linux) {
+                return TunLinuxError.DeviceNotOpen;
+            } else if (builtin.os.tag == .windows) {
+                return TapWindowsError.DeviceNotOpen;
+            } else {
+                return UtunError.DeviceNotOpen;
+            }
+        };
+        try dev.configure(ip, mask, gateway);
+    }
+
     /// Configure full-tunnel VPN routing
     pub fn configureFullTunnel(self: *VirtualAdapter, vpn_gateway: u32, vpn_server: u32) !void {
-        const dev = self.device orelse {
+        const dev = self.platformDevice() orelse {
             if (builtin.os.tag == .linux) {
                 return TunLinuxError.DeviceNotOpen;
             } else if (builtin.os.tag == .windows) {
@@ -429,7 +514,7 @@ pub const VirtualAdapter = struct {
     /// Configure split-tunnel VPN routing (only specified networks through VPN).
     /// `routes_str` is a newline-separated list of CIDR notations.
     pub fn configureSplitTunnel(self: *VirtualAdapter, vpn_gateway: u32, routes_str: []const u8) !void {
-        _ = self.device orelse {
+        _ = self.platformDevice() orelse {
             if (builtin.os.tag == .linux) {
                 return TunLinuxError.DeviceNotOpen;
             } else if (builtin.os.tag == .windows) {
@@ -444,7 +529,7 @@ pub const VirtualAdapter = struct {
     /// Add custom IPv6 split-tunnel routes through a gateway.
     /// `routes_str` is a newline-separated list of IPv6 CIDR notations.
     pub fn addIpv6Routes(self: *VirtualAdapter, gateway: []const u8, routes_str: []const u8) !void {
-        _ = self.device orelse {
+        _ = self.platformDevice() orelse {
             if (builtin.os.tag == .linux) {
                 return TunLinuxError.DeviceNotOpen;
             } else if (builtin.os.tag == .windows) {
@@ -463,7 +548,7 @@ pub const VirtualAdapter = struct {
     ///   - Linux:    ✓ TUN  (ip -6 addr add)
     ///   - Windows:  ✗ TAP  (netsh interface ipv6 or IP Helper API — not yet ported)
     pub fn configureIpv6(self: *VirtualAdapter, address: [16]u8, prefix_len: u8, gateway: []const u8) !void {
-        const dev = self.device orelse return UtunError.DeviceNotOpen;
+        const dev = self.platformDevice() orelse return UtunError.DeviceNotOpen;
 
         // Delegate to device-specific IPv6 configuration (macOS utun, Linux TUN).
         // Windows TAP does not yet implement configureIpv6; IPv6 will be
@@ -489,7 +574,7 @@ pub const VirtualAdapter = struct {
 
     /// Get traffic statistics
     pub fn getStats(self: *const VirtualAdapter) ?TunStats {
-        if (self.device) |dev| {
+        if (self.platformDevice()) |dev| {
             return dev.getStats();
         }
         return null;
@@ -498,9 +583,9 @@ pub const VirtualAdapter = struct {
     /// Get total dropped packet count from the device's ring buffer.
     /// Returns 0 for non-FdAdapter devices (desktop utun/tun have no ring).
     pub fn getTxDrops(self: *const VirtualAdapter) u64 {
-        const device = self.device orelse return 0;
-        if (@hasDecl(@TypeOf(device.*), "getTxDrops")) {
-            return device.getTxDrops();
+        const dev = self.platformDevice() orelse return 0;
+        if (@hasDecl(@TypeOf(dev.*), "getTxDrops")) {
+            return dev.getTxDrops();
         }
         return 0;
     }
@@ -578,7 +663,7 @@ pub const VirtualAdapter = struct {
                     self.dhcp_config = response.config;
                     self.dhcp_state = .configured;
 
-                    if (self.device) |dev| {
+                    if (self.platformDevice()) |dev| {
                         try dev.configure(
                             response.config.ip_address,
                             response.config.subnet_mask,
