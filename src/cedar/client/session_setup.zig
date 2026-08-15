@@ -24,7 +24,16 @@ pub fn run(client: *VpnClient) void {
 }
 
 fn createSession(client: *VpnClient) void {
-    if (client.config.use_encrypt and client.auth_session_key != null and client.auth_hello_random != null) {
+    // The fast-RC4 and AES-256-CBC prerequisites are independent: RC4 needs
+    // only the negotiated key pair (C Protocol.c:6083-6093), AES needs the
+    // session key + server challenge. An encrypted session is possible when
+    // either set of material is present.
+    const rc4_ready = client.auth_use_fast_rc4 and
+        client.auth_rc4_c2s_key != null and
+        client.auth_rc4_s2c_key != null;
+    const aes_ready = client.auth_session_key != null and client.auth_hello_random != null;
+
+    if (client.config.use_encrypt and (rc4_ready or aes_ready)) {
         const username = switch (client.config.auth) {
             .password => |p| p.username,
             .plain_password => |p| p.username,
@@ -43,23 +52,27 @@ fn createSession(client: *VpnClient) void {
         client.session = SessionWrapper.initWithOptions(client.allocator, options);
 
         if (client.session) |*sess| {
-            if (client.auth_use_fast_rc4) {
-                if (client.auth_rc4_c2s_key) |c2s| {
-                    if (client.auth_rc4_s2c_key) |s2c| {
-                        sess.initFastRc4(&c2s, &s2c);
-                        std.log.info("Session established with fast RC4 encryption", .{});
-                        return;
-                    }
-                }
-                std.log.warn("Server negotiated fast RC4 but key pair was missing — falling back to AES-256-CBC", .{});
+            if (rc4_ready) {
+                sess.initFastRc4(&client.auth_rc4_c2s_key.?, &client.auth_rc4_s2c_key.?);
+                std.log.info("Session established with fast RC4 encryption", .{});
+                return;
             }
-            sess.initEncryption(&client.auth_session_key.?, &client.auth_hello_random.?);
+            if (client.auth_use_fast_rc4) {
+                std.log.warn("Server negotiated fast RC4 but the key pair was missing — falling back to AES-256-CBC", .{});
+            }
+            if (aes_ready) {
+                sess.initEncryption(&client.auth_session_key.?, &client.auth_hello_random.?);
+                std.log.info("Session established with AES-256-CBC encryption", .{});
+                return;
+            }
         }
-        std.log.info("Session established with AES-256-CBC encryption", .{});
-    } else {
-        client.session = SessionWrapper.init(client.allocator, false);
-        std.log.info("Session established without encryption", .{});
     }
+
+    client.session = SessionWrapper.init(client.allocator, false);
+    if (client.auth_use_fast_rc4) {
+        std.log.warn("Server negotiated fast RC4 but the key pair was missing — falling back to unencrypted transport", .{});
+    }
+    std.log.info("Session established without encryption", .{});
 }
 
 fn establishAdditionalConnections(client: *VpnClient) void {
