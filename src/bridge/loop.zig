@@ -279,7 +279,7 @@ const FakePort = struct {
         return data.len;
     }
     fn getFd(_: *anyopaque) std.posix.fd_t {
-        return -1;
+        return NetPort.invalid_fd;
     }
     fn getName(ctx: *anyopaque) []const u8 {
         const self: *FakePort = @ptrCast(@alignCast(ctx));
