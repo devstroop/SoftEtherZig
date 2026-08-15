@@ -33,8 +33,78 @@ they are called out under **Breaking** in each entry.
   - Wired into `lib.zig` (`softether.bridge`) and standalone test sources.
     15 new tests (learn/age/refresh/overflow-flood/re-learn/move/bcast/
     unknown-unicast/counters/no-echo/single-port): 265/265 total.
+- **Bridge data pump** (`src/bridge/loop.zig`, proposal §4.3; #56). Runtime
+  half of the L2 bridge: `BridgeLoop` owns the shared forwarding engine and
+  aggregates per-port + session counters into `BridgeStats`; `SessionSink`
+  delivers LAN → VPN frames into the session tunnel; `dispatchSessionBlock`
+  floods/unicasts session frames to the LAN ports (no-echo guard);
+  5 deterministic tests (flood/unicast/no-echo/sink counters/stats).
+- **Bridge mode dispatch in VpnClient** (#56). `connect()` spawns
+  `runBridgeLoopThread` in bridge mode (monitor warns and falls back to the
+  client loop): single TLS socket + `TunnelConnection` (I-14 —
+  `max_connections` coerced to 1), AF_PACKET ingress ports opened from
+  `config.bridge.ingress_ifs` into stable heap storage, poll over TLS fd +
+  port fds, 1 Hz FDB aging + keepalive; `performConnection` skips adapter
+  setup for non-client modes; UDP acceleration gated to client mode.
+  Linux-gated; non-Linux targets fail cleanly (`error.AdapterConfigurationFailed`).
+- **`softether_get_bridge_stats` FFI** (71st export). `CBridgeStats` C
+  layout mirrors `BridgeStats`; `VpnClient.bridge_stats` snapshot updated at
+  1 Hz by the bridge pump; zeroed when bridge mode is inactive.
+  `softether_bridge_stats_t` added to `include/softether.h`.
+- **Review fixes** (#113): no-echo/write-rejection drops counted once (port
+  layer only — `getStats` sums per-port stats, no double count); UDP
+  acceleration gated for bridge mode only, so monitor mode keeps its
+  negotiated UDP data channel.
 
 ### Added
+
+### Added
+
+- **Monitor-mode runtime** (issue #55) — mirror-only capture pump. `connect()`
+  now fully branches on the session network-mode flag: client runs the
+  classic TUN data loop, bridge (issue #56) the AF_PACKET L2 pump, monitor
+  this new pump. `runMonitorLoop` (single TLS session, `max_connections`
+  coerced to 1 per I-14) drains inbound session blocks through the existing
+  `session_io.drainReceived` into the `MonitorLoop` capture path — bounded
+  ring (default 4096 frames, drop-and-count) + optional PCAP writer opened
+  from `config.monitor.pcap_file` (a bad path aborts the monitor session
+  with the raw file error). Mirror-only by design: nothing is forwarded back
+  into the session. UDP acceleration is now gated to client mode only (the
+  monitor pump, like the bridge pump, polls a single TLS socket); lifecycle,
+  events, and reconnect policy mirror `runBridgeLoopThread`. The monitor
+  loop is published on `VpnClient.monitor_loop` (set/cleared under the
+  client mutex) and serialized internally with its own mutex so FFI readers
+  can safely snapshot the ring while the pump captures.
+- **FFI: monitor frame retrieval** (`softether_monitor_frame_count`,
+  `softether_monitor_get_frame`) per CONFIG.md row — thread-safe snapshots
+  of the live ring (index 0 = oldest; truncated copies honor `out_cap`;
+  -1 when the pump is not running). `softether_monitor_stats_t` and both
+  getters added to `include/softether.h` (previous `get_monitor_stats`
+  export was missing from the header).
+- **FFI: `softether_set_monitor_pcap`** — owned-copy pcap path setter
+  ("" / NULL clears; the previous owned path is freed; borrowed paths from
+  `VpnClient.init` are never freed). Completes the 6-layer config matrix
+  for `pcap_file` (CONFIG.md row 50 FFI column).
+- **Monitor drain fixture test** — scripted in-memory transport (no socket,
+  no TLS, no thread) hand-encoding the session block wire format; verifies
+  receiveBlocksBatch → monitor closure → ring capture → stats + `readFrame`
+  readback, mirroring `test/integration`'s ScriptedTransport philosophy.
+- Stale "runtime not implemented / storage-only" comments updated across
+  `ffi.zig`, `include/softether.h`, `config.example.json`, and the
+  `network_mode` field doc after the bridge/monitor runtimes landed.
+- **Review fixes (#119)**: the network operating mode is frozen per connect
+  in `session_mode` (auth + pump dispatch read one immutable value — no
+  setter race mid-connect); bridge/monitor pumps now poll `POLL.OUT` and
+  drain `retryPendingWrite` so WouldBlock'd LAN→session frames / keepalives
+  flush instead of sticking; bridge pump poll array is allocated from the
+  ingress count (fixed 64-entry stack array overflowed with 63+ interfaces);
+  bridge/monitor stats are zeroed at pump teardown and the FFI getters
+  return zeroed structs when the pump is not running (header contract);
+  `MonitorRing` slots are initialized on alloc (deinit previously freed
+  uninitialized optionals — critical); the PCAP writer truncates partial
+  records and stops appending after an interrupted write instead of
+  corrupting the capture; `softether_monitor_frame_count` header/FFI docs
+  no longer claim 0 for a non-running pump.
 
 ### Added
 

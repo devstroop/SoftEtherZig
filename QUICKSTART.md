@@ -116,6 +116,23 @@ zig build -Dtarget=x86_64-windows --release=fast
 
 ---
 
+## Bridge / Monitor Modes (Linux)
+
+Bridge mode transparently bridges the hub's L2 domain onto physical NIC(s)
+(AF_PACKET; requires root or `CAP_NET_RAW`). Monitor mode captures mirrored hub
+traffic into a bounded ring + optional PCAP (portable).
+
+```bash
+# Bridge: bridge eth0 into the VPN hub
+sudo ./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u user -P pass --mode bridge --ingress eth0
+
+# Monitor: capture hub traffic to a tcpdump-readable PCAP
+sudo ./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u user -P pass --mode monitor --pcap capture.pcap
+```
+
+See [docs/bridge_monitor_ops.md](docs/bridge_monitor_ops.md) for the security
+boundary, MTU rules, FFI semantics, and troubleshooting.
+
 ## Config File
 
 Any platform, instead of CLI args:
