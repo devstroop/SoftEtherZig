@@ -885,6 +885,8 @@ fn getDataFixed(p: *const Pack, name: []const u8, index: usize, len: usize) ?[20
 /// `ntlm_secure_hash` carry the password auth data (C `AUTHPASSWORD`,
 /// serialized by `OutRpcAuthData`); `auth_password` is the plaintext
 /// fallback the client may send for `CreateUser` (C InRpcAuthData:13544).
+/// There is no `use_policy` flag: `UsePolicy` is derived from `policy`
+/// being non-null, exactly like C `OutRpcSetUser` (Admin.c:13695).
 pub const RpcSetUser = struct {
     hub_name: []const u8 = "",
     name: []const u8 = "",
@@ -900,7 +902,6 @@ pub const RpcSetUser = struct {
     auth_password: []const u8 = "",
     num_login: u32 = 0,
     traffic: Traffic = .{},
-    use_policy: bool = false,
     policy: ?*Policy = null,
 
     pub fn inRpc(self: *RpcSetUser, allocator: Allocator, p: *const Pack) !void {
@@ -919,8 +920,7 @@ pub const RpcSetUser = struct {
         self.auth_password = try dupStr(allocator, p.getStr("Auth_Password"));
         self.num_login = p.getInt("NumLogin") orelse 0;
         self.traffic.inRpc(p);
-        self.use_policy = p.getBool("UsePolicy") orelse false;
-        if (self.use_policy) {
+        if (p.getBool("UsePolicy") orelse false) {
             const policy = try allocator.create(Policy);
             policy.* = .{};
             policy.inRpc(p);
@@ -1374,7 +1374,6 @@ test "server.admin_structs RpcSetUser round-trip" {
         .ntlm_secure_hash = @as([20]u8, .{2} ** 20),
         .num_login = 5,
         .traffic = .{ .send_unicast_bytes = 42 },
-        .use_policy = true,
     };
     var policy = Policy{ .max_connection = 8 };
     v.policy = &policy;
@@ -1388,7 +1387,7 @@ test "server.admin_structs RpcSetUser round-trip" {
     try testing.expectEqual(@as(u32, 1), r.auth_type);
     try testing.expectEqualSlices(u8, &v.hashed_key.?, &r.hashed_key.?);
     try testing.expectEqual(@as(u64, 42), r.traffic.send_unicast_bytes);
-    try testing.expect(r.use_policy);
+    try testing.expect(r.policy != null);
     try testing.expectEqual(@as(u32, 8), r.policy.?.max_connection);
 }
 
