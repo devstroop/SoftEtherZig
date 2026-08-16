@@ -65,6 +65,9 @@ pub const err_listener_not_found: u32 = 53;
 pub const err_listener_already_exists: u32 = 54;
 pub const err_hub_already_exists: u32 = 57;
 pub const err_too_many_hubs: u32 = 58;
+pub const err_too_many_user: u32 = 63;
+pub const err_user_already_exists: u32 = 66;
+pub const err_not_supported_auth_on_opensource: u32 = 143;
 
 // ============================================================================
 // Server type / hub type constants (C: Server.h:397, Cedar.h:411)
@@ -121,6 +124,34 @@ pub const ServerListener = struct {
     disable_dos: bool = false,
 };
 
+/// C `USER` subset backing the user endpoints. All string fields are owned
+/// (always duplicated on creation), so `free` may release them unconditionally.
+pub const ServerUser = struct {
+    name: []const u8 = "",
+    group_name: []const u8 = "",
+    realname: []const u8 = "",
+    note: []const u8 = "",
+    auth_type: auth.UserAuthType = .anonymous,
+    /// `auth.hashPassword(password, name)` digest for `password` accounts
+    /// (C `AUTHPASSWORD.HashedKey`). Null = no known password (login fails).
+    password_hash: ?[auth.digest_length]u8 = null,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+    expire_time: u64 = 0,
+    num_login: u32 = 0,
+    last_login_time: u64 = 0,
+    deny_access: bool = false,
+    traffic: structs.Traffic = .{},
+
+    fn free(self: *ServerUser, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.group_name);
+        allocator.free(self.realname);
+        allocator.free(self.note);
+        self.* = .{};
+    }
+};
+
 /// C `HUB` subset used by EnumHub / CreateHub / SetHub / GetHubStatus.
 pub const ServerHub = struct {
     name: []const u8 = "",
@@ -140,6 +171,41 @@ pub const ServerHub = struct {
     created_time: u64 = 0,
     num_login: u32 = 0,
     traffic: structs.Traffic = .{},
+    users: std.ArrayListUnmanaged(ServerUser) = .{},
+
+    /// Look up a user by name, matching case-insensitively (C `SearchUser`
+    /// with `StrCmpi`; account names are not case-sensitive).
+    fn findUser(self: *ServerHub, name: []const u8) ?*ServerUser {
+        for (self.users.items) |*user| {
+            if (std.ascii.eqlIgnoreCase(user.name, name)) return user;
+        }
+        return null;
+    }
+
+    /// Append a user, keeping `num_users` in sync. `u` must already be owned
+    /// by the caller (dup'd strings); ownership transfers to the hub.
+    fn addUser(self: *ServerHub, allocator: Allocator, u: ServerUser) !void {
+        try self.users.append(allocator, u);
+        self.num_users +%= 1;
+    }
+
+    /// Remove a user by name, releasing it. Returns false when absent.
+    fn removeUser(self: *ServerHub, allocator: Allocator, name: []const u8) bool {
+        for (self.users.items, 0..) |*user, i| {
+            if (std.ascii.eqlIgnoreCase(user.name, name)) {
+                var removed = self.users.swapRemove(i);
+                removed.free(allocator);
+                self.num_users -%= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn deinitUsers(self: *ServerHub, allocator: Allocator) void {
+        for (self.users.items) |*user| user.free(allocator);
+        self.users.deinit(allocator);
+    }
 };
 
 /// C `SERVER` subset covering the 13 dispatch endpoints. `param` of the RPC
@@ -203,7 +269,10 @@ pub const Server = struct {
         allocator.free(self.family_name);
         allocator.free(self.host_name);
         self.os_info.free(allocator);
-        for (self.hubs.items) |hub| allocator.free(hub.name);
+        for (self.hubs.items) |*hub| {
+            hub.deinitUsers(allocator);
+            allocator.free(hub.name);
+        }
         self.hubs.deinit(allocator);
         self.listeners.deinit(allocator);
         self.sessions.deinit();
@@ -302,6 +371,14 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcEnumConnection, &a, allocator, request, ret, stEnumConnection);
     } else if (mem.eql(u8, function_name, "DisconnectConnection")) {
         err = dispatchCall(structs.RpcDisconnectConnection, &a, allocator, request, ret, stDisconnectConnection);
+    } else if (mem.eql(u8, function_name, "EnumUser")) {
+        err = dispatchCall(structs.RpcEnumUser, &a, allocator, request, ret, stEnumUser);
+    } else if (mem.eql(u8, function_name, "CreateUser")) {
+        err = dispatchCall(structs.RpcSetUser, &a, allocator, request, ret, stCreateUser);
+    } else if (mem.eql(u8, function_name, "SetUser")) {
+        err = dispatchCall(structs.RpcSetUser, &a, allocator, request, ret, stSetUser);
+    } else if (mem.eql(u8, function_name, "DeleteUser")) {
+        err = dispatchCall(structs.RpcDeleteUser, &a, allocator, request, ret, stDeleteUser);
     } else {
         err = err_not_supported;
     }
@@ -358,6 +435,9 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcDeleteSession => try t.inRpc(allocator, p),
         structs.RpcEnumConnection => try t.inRpc(allocator, p),
         structs.RpcDisconnectConnection => try t.inRpc(allocator, p),
+        structs.RpcEnumUser => try t.inRpc(allocator, p),
+        structs.RpcSetUser => try t.inRpc(allocator, p),
+        structs.RpcDeleteUser => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -380,6 +460,9 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcDeleteSession => try t.outRpc(p),
         structs.RpcEnumConnection => try t.outRpc(p),
         structs.RpcDisconnectConnection => try t.outRpc(p),
+        structs.RpcEnumUser => try t.outRpc(p),
+        structs.RpcSetUser => try t.outRpc(p),
+        structs.RpcDeleteUser => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -407,6 +490,9 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcDeleteSession => t.free(allocator),
         structs.RpcEnumConnection => t.free(allocator),
         structs.RpcDisconnectConnection => t.free(allocator),
+        structs.RpcEnumUser => t.free(allocator),
+        structs.RpcSetUser => t.free(allocator),
+        structs.RpcDeleteUser => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
@@ -720,7 +806,8 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     if (!a.server_admin) return err_not_enough_right;
 
     const index = findHubIndex(s, t.hub_name) orelse return err_hub_not_found;
-    const removed = s.hubs.swapRemove(index);
+    var removed = s.hubs.swapRemove(index);
+    removed.deinitUsers(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
     return err_no_error;
@@ -902,6 +989,167 @@ fn stDisconnectConnection(a: *AdminCtx, t: *structs.RpcDisconnectConnection, all
     if (t.name.len == 0) return err_invalid_parameter;
     if (!a.server_admin) return err_not_enough_right;
     if (!s.sessions.requestStopByConnection(t.name)) return err_object_not_found;
+    return err_no_error;
+}
+
+// ============================================================================
+// Users (C `StEnumUser` / `StCreateUser` / `StSetUser` / `StDeleteUser`)
+// ============================================================================
+
+/// C `InRpcAuthData` AUTHTYPE_PASSWORD (Admin.c:13522): the client's
+/// `HashedKey` (a 20-byte `HashPassword` digest) wins; a zero/absent key
+/// falls back to hashing the optional `Auth_Password` plaintext against the
+/// account name. Returns null when neither is present.
+fn resolvePasswordHash(t: *const structs.RpcSetUser) ?[auth.digest_length]u8 {
+    if (t.hashed_key) |key| {
+        var nonzero = false;
+        for (key) |byte| {
+            if (byte != 0) {
+                nonzero = true;
+                break;
+            }
+        }
+        if (nonzero) return key;
+    }
+    if (t.auth_password.len != 0) {
+        return auth.hashPassword(t.auth_password, t.name);
+    }
+    return null;
+}
+
+/// Map a wire `AuthType` to the model's supported set. The opensource build
+/// defines `GSF_DISABLE_RADIUS_AUTH`, so certificate / RADIUS / NT accounts
+/// are rejected (C `StCreateUser` Admin.c:6262).
+fn resolveAuthType(wire_auth_type: u32) ?auth.UserAuthType {
+    return switch (wire_auth_type) {
+        @intFromEnum(auth.UserAuthType.anonymous) => .anonymous,
+        @intFromEnum(auth.UserAuthType.password) => .password,
+        else => null,
+    };
+}
+
+/// C `StEnumUser` (Admin.c:5911). Hub-scoped: server admins target the
+/// requested hub, hub admins are locked to their own.
+fn stEnumUser(a: *AdminCtx, t: *structs.RpcEnumUser, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    t.users = allocator.alloc(structs.EnumUserItem, hub.users.items.len) catch return err_internal_error;
+    for (hub.users.items, 0..) |*user, i| {
+        const e = &t.users[i];
+        e.* = .{};
+        e.name = dupStr(allocator, user.name) catch return err_internal_error;
+        e.group_name = dupStr(allocator, user.group_name) catch return err_internal_error;
+        e.realname = dupStr(allocator, user.realname) catch return err_internal_error;
+        e.note = dupStr(allocator, user.note) catch return err_internal_error;
+        e.auth_type = @intFromEnum(user.auth_type);
+        e.last_login_time = user.last_login_time;
+        e.num_login = user.num_login;
+        e.deny_access = user.deny_access;
+        e.is_traffic_filled = true;
+        e.traffic = user.traffic;
+        e.is_expires_filled = true;
+        e.expires = user.expire_time;
+    }
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StCreateUser` (Admin.c:6262).
+fn stCreateUser(a: *AdminCtx, t: *structs.RpcSetUser, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isUserName(t.name)) return err_invalid_parameter;
+    if (isWildcardName(t.name)) return err_invalid_parameter;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+
+    const auth_type = resolveAuthType(t.auth_type) orelse return err_not_supported_auth_on_opensource;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (hub.findUser(t.name) != null) return err_user_already_exists;
+    if (hub.users.items.len >= max_users) return err_too_many_user;
+
+    const now = nowMs();
+    var user = ServerUser{
+        .name = dupStr(allocator, t.name) catch return err_internal_error,
+        .group_name = dupStr(allocator, t.group_name) catch return err_internal_error,
+        .realname = dupStr(allocator, t.realname) catch return err_internal_error,
+        .note = dupStr(allocator, t.note) catch return err_internal_error,
+        .auth_type = auth_type,
+        .created_time = now,
+        .updated_time = now,
+        .expire_time = t.expire_time,
+    };
+    if (auth_type == .password) {
+        user.password_hash = resolvePasswordHash(t);
+    }
+    hub.addUser(allocator, user) catch return err_internal_error;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StSetUser` (Admin.c:6129). Divergence from C: when a password account is
+/// edited without new auth data the existing hash is kept (C randomizes it,
+/// locking the account out).
+fn stSetUser(a: *AdminCtx, t: *structs.RpcSetUser, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isUserName(t.name)) return err_invalid_parameter;
+    if (isWildcardName(t.name)) return err_invalid_parameter;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+
+    const auth_type = resolveAuthType(t.auth_type) orelse return err_not_supported_auth_on_opensource;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    const user = hub.findUser(t.name) orelse return err_object_not_found;
+
+    const group_name = dupStr(allocator, t.group_name) catch return err_internal_error;
+    const realname = dupStr(allocator, t.realname) catch return err_internal_error;
+    const note = dupStr(allocator, t.note) catch return err_internal_error;
+
+    allocator.free(user.group_name);
+    allocator.free(user.realname);
+    allocator.free(user.note);
+    user.group_name = group_name;
+    user.realname = realname;
+    user.note = note;
+    user.auth_type = auth_type;
+    if (auth_type == .password) {
+        if (resolvePasswordHash(t)) |hash| {
+            user.password_hash = hash;
+        }
+    } else {
+        user.password_hash = null;
+    }
+    user.expire_time = t.expire_time;
+    user.num_login = t.num_login;
+    user.traffic = t.traffic;
+    user.updated_time = nowMs();
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteUser` (Admin.c:5992).
+fn stDeleteUser(a: *AdminCtx, t: *structs.RpcDeleteUser, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isUserName(t.name)) return err_invalid_parameter;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!hub.removeUser(allocator, t.name)) return err_object_not_found;
+    s.config_revision +%= 1;
     return err_no_error;
 }
 
@@ -1104,6 +1352,32 @@ fn isSafeStr(s: []const u8) bool {
     if (s.len != 0 and s[0] == ' ') return false;
     if (s.len != 0 and s[s.len - 1] == ' ') return false;
     return true;
+}
+
+/// C `IsUserName` (Account.c:340): trimmed, then a safe, non-reserved account
+/// name. `"*"` passes here but is reserved for RADIUS/NT wildcard accounts
+/// (the handlers reject it for the supported auth types).
+fn isUserName(s: []const u8) bool {
+    const t = std.mem.trim(u8, s, " \t");
+    if (t.len == 0) return false;
+    if (std.ascii.eqlIgnoreCase(t, "*")) return true;
+    if (!isSafeStr(t)) return false;
+    if (std.ascii.eqlIgnoreCase(t, "link") or
+        std.ascii.eqlIgnoreCase(t, "Link") or
+        std.ascii.eqlIgnoreCase(t, "securenat") or
+        std.ascii.eqlIgnoreCase(t, "SecureNAT") or
+        std.ascii.eqlIgnoreCase(t, "localbridge") or
+        std.ascii.eqlIgnoreCase(t, "Local Bridge") or
+        std.ascii.eqlIgnoreCase(t, "administrator")) return false;
+    if (std.mem.startsWith(u8, t, "L3SW_")) return false;
+    return true;
+}
+
+/// True when the trimmed name is the RADIUS/NT wildcard `"*"`, which the
+/// supported auth types can't back (C `StIsSafeName(name, false)` rejects the
+/// trimmed wildcard too, since `IsUserName` trims in place).
+fn isWildcardName(s: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, s, " \t"), "*");
 }
 
 fn findListenerIndex(s: *Server, port: u32) ?usize {
@@ -1615,6 +1889,37 @@ test "server.admin_dispatch DeleteHub removes and reports missing" {
     try assertErr(miss_resp, err_hub_not_found);
 }
 
+test "server.admin_dispatch DeleteHub frees the hub's users" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var create = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    const hash = auth.hashPassword("s3cret", "Alice");
+    try create.addData("HashedKey", &hash);
+    try create.addInt("AuthType", 1);
+    var create_resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        create_resp.deinit();
+        allocator.destroy(create_resp);
+    }
+    try assertOk(create_resp);
+
+    var req = try makeRequest(allocator, "DeleteHub");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    var resp = try call(allocator, &server, true, "", "DeleteHub", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqual(@as(usize, 0), server.hubs.items.len);
+}
+
 test "server.admin_dispatch GetHubStatus returns a hub snapshot" {
     const allocator = testing.allocator;
     var server = try Server.init(allocator);
@@ -1715,6 +2020,428 @@ test "server.admin_dispatch non-server-admin is rejected for admin-only endpoint
     try assertErr(resp, err_not_enough_right);
 }
 
+test "server.admin_dispatch isUserName accepts safe names and rejects reserved" {
+    try testing.expect(isUserName("Alice"));
+    try testing.expect(isUserName("user-1"));
+    try testing.expect(isUserName("user name"));
+    try testing.expect(isUserName("*"));
+
+    try testing.expect(!isUserName(""));
+    try testing.expect(!isUserName(" "));
+    try testing.expect(!isUserName(" link"));
+    try testing.expect(!isUserName("link"));
+    try testing.expect(!isUserName("Link"));
+    try testing.expect(!isUserName("securenat"));
+    try testing.expect(!isUserName("SecureNAT"));
+    try testing.expect(!isUserName("localbridge"));
+    try testing.expect(!isUserName("Local Bridge"));
+    try testing.expect(!isUserName("administrator"));
+    try testing.expect(!isUserName("L3SW_foo"));
+    try testing.expect(!isUserName("bad$char"));
+}
+
+/// Build a `CreateUser`/`SetUser` request carrying the full `RPC_SET_USER`
+/// payload. Realname/Note default to `"Real {name}"` / `"note"`.
+fn makeSetUserRequest(allocator: Allocator, hub_name: []const u8, name: []const u8) !Pack {
+    var req = try makeRequest(allocator, "CreateUser");
+    try req.addStr("HubName", hub_name);
+    try req.addStr("Name", name);
+    try req.addStr("GroupName", "Engineering");
+    var buf: [256]u8 = undefined;
+    const realname = std.fmt.bufPrint(&buf, "Real {s}", .{name}) catch "Real";
+    try req.addUniStr("Realname", realname);
+    try req.addUniStr("Note", "note");
+    return req;
+}
+
+test "server.admin_dispatch CreateUser adds and validates a user" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    const revision_before = server.config_revision;
+
+    // Password user with a client-computed hash.
+    var create = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    const hash = auth.hashPassword("s3cret", "Alice");
+    try create.addData("HashedKey", &hash);
+    try create.addInt("AuthType", 1);
+
+    var resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqual(revision_before + 1, server.config_revision);
+
+    const hub = findHub(&server, "VPN").?;
+    try testing.expectEqual(@as(u32, 1), hub.num_users);
+    const alice = hub.findUser("Alice").?;
+    try testing.expectEqual(auth.UserAuthType.password, alice.auth_type);
+    try testing.expectEqualSlices(u8, &hash, &alice.password_hash.?);
+    try testing.expectEqualStrings("Engineering", alice.group_name);
+    try testing.expectEqualStrings("Real Alice", alice.realname);
+    try testing.expectEqualStrings("note", alice.note);
+
+    // Duplicate name.
+    var dup = try makeSetUserRequest(allocator, "VPN", "alice");
+    defer dup.deinit();
+    try dup.addStr("function_name", "CreateUser");
+    try dup.addInt("AuthType", 0);
+    var dup_resp = try call(allocator, &server, true, "", "CreateUser", &dup);
+    defer {
+        dup_resp.deinit();
+        allocator.destroy(dup_resp);
+    }
+    try assertErr(dup_resp, err_user_already_exists);
+}
+
+test "server.admin_dispatch CreateUser hashes a plaintext Auth_Password" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var create = try makeSetUserRequest(allocator, "VPN", "Bob");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    try create.addData("HashedKey", &([_]u8{0} ** 20));
+    try create.addStr("Auth_Password", "hunter2");
+    try create.addInt("AuthType", 1);
+
+    var resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    const bob = findHub(&server, "VPN").?.findUser("Bob").?;
+    try testing.expectEqualSlices(u8, &auth.hashPassword("hunter2", "Bob"), &bob.password_hash.?);
+}
+
+test "server.admin_dispatch CreateUser validates name, hub and auth type" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Invalid / reserved names.
+    var bad_name = try makeSetUserRequest(allocator, "VPN", "administrator");
+    defer bad_name.deinit();
+    var bad_name_resp = try call(allocator, &server, true, "", "CreateUser", &bad_name);
+    defer {
+        bad_name_resp.deinit();
+        allocator.destroy(bad_name_resp);
+    }
+    try assertErr(bad_name_resp, err_invalid_parameter);
+
+    // Wildcard names need RADIUS/NT, which the opensource model rejects.
+    var star = try makeSetUserRequest(allocator, "VPN", "*");
+    defer star.deinit();
+    var star_resp = try call(allocator, &server, true, "", "CreateUser", &star);
+    defer {
+        star_resp.deinit();
+        allocator.destroy(star_resp);
+    }
+    try assertErr(star_resp, err_invalid_parameter);
+
+    // A padded wildcard is the same reserved name after trimming.
+    var padded_star = try makeSetUserRequest(allocator, "VPN", " * ");
+    defer padded_star.deinit();
+    var padded_star_resp = try call(allocator, &server, true, "", "CreateUser", &padded_star);
+    defer {
+        padded_star_resp.deinit();
+        allocator.destroy(padded_star_resp);
+    }
+    try assertErr(padded_star_resp, err_invalid_parameter);
+
+    // Certificate auth is unavailable in the opensource model.
+    var cert = try makeSetUserRequest(allocator, "VPN", "Carol");
+    defer cert.deinit();
+    try cert.addInt("AuthType", 2);
+    var cert_resp = try call(allocator, &server, true, "", "CreateUser", &cert);
+    defer {
+        cert_resp.deinit();
+        allocator.destroy(cert_resp);
+    }
+    try assertErr(cert_resp, err_not_supported_auth_on_opensource);
+
+    // Unknown hub.
+    var no_hub = try makeSetUserRequest(allocator, "NOPE", "Dana");
+    defer no_hub.deinit();
+    var no_hub_resp = try call(allocator, &server, true, "", "CreateUser", &no_hub);
+    defer {
+        no_hub_resp.deinit();
+        allocator.destroy(no_hub_resp);
+    }
+    try assertErr(no_hub_resp, err_hub_not_found);
+
+    // Hub admins are locked to their own hub.
+    var locked = try makeSetUserRequest(allocator, "OTHER", "Eve");
+    defer locked.deinit();
+    var locked_resp = try call(allocator, &server, false, "VPN", "CreateUser", &locked);
+    defer {
+        locked_resp.deinit();
+        allocator.destroy(locked_resp);
+    }
+    try assertErr(locked_resp, err_not_enough_right);
+}
+
+test "server.admin_dispatch EnumUser lists only the requested hub's users" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("TEST", hub_type_standalone);
+
+    var alice = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer alice.deinit();
+    try alice.addStr("function_name", "CreateUser");
+    try alice.addData("HashedKey", &auth.hashPassword("p", "Alice"));
+    try alice.addInt("AuthType", 1);
+    var a_resp = try call(allocator, &server, true, "", "CreateUser", &alice);
+    defer {
+        a_resp.deinit();
+        allocator.destroy(a_resp);
+    }
+    try assertOk(a_resp);
+
+    var bob = try makeSetUserRequest(allocator, "TEST", "Bob");
+    defer bob.deinit();
+    try bob.addStr("function_name", "CreateUser");
+    try bob.addInt("AuthType", 0);
+    var b_resp = try call(allocator, &server, true, "", "CreateUser", &bob);
+    defer {
+        b_resp.deinit();
+        allocator.destroy(b_resp);
+    }
+    try assertOk(b_resp);
+
+    var req = try makeRequest(allocator, "EnumUser");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+
+    var resp = try call(allocator, &server, true, "", "EnumUser", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+    try testing.expectEqual(@as(usize, 1), resp.getValueCount("Name"));
+    try testing.expectEqualStrings("Alice", resp.getStrEx("Name", 0).?);
+    try testing.expectEqualStrings("Engineering", resp.getStrEx("GroupName", 0).?);
+    try testing.expectEqualStrings("Real Alice", resp.getUniStrEx("Realname", 0).?);
+    try testing.expectEqual(@as(u32, 1), resp.getIntEx("AuthType", 0).?);
+    try testing.expectEqual(@as(bool, true), resp.getBoolEx("IsExpiresFilled", 0).?);
+    try testing.expectEqual(@as(u64, 0), resp.getInt64Ex("Expires", 0).?);
+}
+
+test "server.admin_dispatch EnumUser is hub-scoped for non-server-admin" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("TEST", hub_type_standalone);
+
+    // Own hub is fine.
+    var own = try makeRequest(allocator, "EnumUser");
+    defer own.deinit();
+    try own.addStr("HubName", "VPN");
+    var own_resp = try call(allocator, &server, false, "VPN", "EnumUser", &own);
+    defer {
+        own_resp.deinit();
+        allocator.destroy(own_resp);
+    }
+    try assertOk(own_resp);
+
+    // Another hub is rejected.
+    var other = try makeRequest(allocator, "EnumUser");
+    defer other.deinit();
+    try other.addStr("HubName", "TEST");
+    var other_resp = try call(allocator, &server, false, "VPN", "EnumUser", &other);
+    defer {
+        other_resp.deinit();
+        allocator.destroy(other_resp);
+    }
+    try assertErr(other_resp, err_not_enough_right);
+
+    // Unknown hub.
+    var missing = try makeRequest(allocator, "EnumUser");
+    defer missing.deinit();
+    try missing.addStr("HubName", "NOPE");
+    var missing_resp = try call(allocator, &server, true, "", "EnumUser", &missing);
+    defer {
+        missing_resp.deinit();
+        allocator.destroy(missing_resp);
+    }
+    try assertErr(missing_resp, err_hub_not_found);
+}
+
+test "server.admin_dispatch SetUser updates a user" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hash = auth.hashPassword("oldpass", "Alice");
+    var create = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    try create.addData("HashedKey", &hash);
+    try create.addInt("AuthType", 1);
+    var create_resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        create_resp.deinit();
+        allocator.destroy(create_resp);
+    }
+    try assertOk(create_resp);
+
+    // Change password + metadata.
+    var set = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer set.deinit();
+    try set.addStr("function_name", "SetUser");
+    try set.addStrEx("GroupName", "Security", 0);
+    try set.addUniStrEx("Realname", "Alice Smith", 0);
+    try set.addUniStrEx("Note", "rotated", 0);
+    const new_hash = auth.hashPassword("newpass", "Alice");
+    try set.addData("HashedKey", &new_hash);
+    try set.addInt("AuthType", 1);
+
+    var set_resp = try call(allocator, &server, true, "", "SetUser", &set);
+    defer {
+        set_resp.deinit();
+        allocator.destroy(set_resp);
+    }
+    try assertOk(set_resp);
+
+    const alice = findHub(&server, "VPN").?.findUser("Alice").?;
+    try testing.expectEqualStrings("Security", alice.group_name);
+    try testing.expectEqualStrings("Alice Smith", alice.realname);
+    try testing.expectEqualStrings("rotated", alice.note);
+    try testing.expectEqualSlices(u8, &new_hash, &alice.password_hash.?);
+
+    // Unknown user.
+    var miss = try makeSetUserRequest(allocator, "VPN", "Nobody");
+    defer miss.deinit();
+    try miss.addStr("function_name", "SetUser");
+    var miss_resp = try call(allocator, &server, true, "", "SetUser", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_object_not_found);
+}
+
+test "server.admin_dispatch SetUser switches auth type and keeps password" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hash = auth.hashPassword("s3cret", "Alice");
+    var create = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    try create.addData("HashedKey", &hash);
+    try create.addInt("AuthType", 1);
+    var create_resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        create_resp.deinit();
+        allocator.destroy(create_resp);
+    }
+    try assertOk(create_resp);
+
+    // Downgrade to anonymous.
+    var anon = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer anon.deinit();
+    try anon.addStr("function_name", "SetUser");
+    try anon.addInt("AuthType", 0);
+    var anon_resp = try call(allocator, &server, true, "", "SetUser", &anon);
+    defer {
+        anon_resp.deinit();
+        allocator.destroy(anon_resp);
+    }
+    try assertOk(anon_resp);
+    var alice = findHub(&server, "VPN").?.findUser("Alice").?;
+    try testing.expectEqual(auth.UserAuthType.anonymous, alice.auth_type);
+    try testing.expectEqual(@as(?[auth.digest_length]u8, null), alice.password_hash);
+
+    // Upgrade back to password without auth data: the (null) existing hash is
+    // kept rather than randomized (divergence from C's lockout behavior).
+    var upgrade = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer upgrade.deinit();
+    try upgrade.addStr("function_name", "SetUser");
+    try upgrade.addInt("AuthType", 1);
+    var upgrade_resp = try call(allocator, &server, true, "", "SetUser", &upgrade);
+    defer {
+        upgrade_resp.deinit();
+        allocator.destroy(upgrade_resp);
+    }
+    try assertOk(upgrade_resp);
+    alice = findHub(&server, "VPN").?.findUser("Alice").?;
+    try testing.expectEqual(auth.UserAuthType.password, alice.auth_type);
+    try testing.expectEqual(@as(?[auth.digest_length]u8, null), alice.password_hash);
+}
+
+test "server.admin_dispatch DeleteUser removes and reports missing" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var create = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    try create.addData("HashedKey", &auth.hashPassword("p", "Alice"));
+    try create.addInt("AuthType", 1);
+    var create_resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        create_resp.deinit();
+        allocator.destroy(create_resp);
+    }
+    try assertOk(create_resp);
+
+    var del = try makeRequest(allocator, "DeleteUser");
+    defer del.deinit();
+    try del.addStr("HubName", "VPN");
+    try del.addStr("Name", "alice");
+    var del_resp = try call(allocator, &server, true, "", "DeleteUser", &del);
+    defer {
+        del_resp.deinit();
+        allocator.destroy(del_resp);
+    }
+    try assertOk(del_resp);
+    try testing.expectEqual(@as(u32, 0), findHub(&server, "VPN").?.num_users);
+    try testing.expect(findHub(&server, "VPN").?.findUser("Alice") == null);
+
+    // Deleting again reports the account is gone.
+    var again = try makeRequest(allocator, "DeleteUser");
+    defer again.deinit();
+    try again.addStr("HubName", "VPN");
+    try again.addStr("Name", "Alice");
+    var again_resp = try call(allocator, &server, true, "", "DeleteUser", &again);
+    defer {
+        again_resp.deinit();
+        allocator.destroy(again_resp);
+    }
+    try assertErr(again_resp, err_object_not_found);
+
+    // Invalid name.
+    var bad = try makeRequest(allocator, "DeleteUser");
+    defer bad.deinit();
+    try bad.addStr("HubName", "VPN");
+    try bad.addStr("Name", "administrator");
+    var bad_resp = try call(allocator, &server, true, "", "DeleteUser", &bad);
+    defer {
+        bad_resp.deinit();
+        allocator.destroy(bad_resp);
+    }
+    try assertErr(bad_resp, err_invalid_parameter);
+}
 /// Stands in for `SessionMain` in admin tests: `requestStop` flips `halt`, and
 /// the padding makes the store land in the fake's `halt` (same layout trick as
 /// the session_registry tests).
