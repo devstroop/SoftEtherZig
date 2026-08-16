@@ -10,10 +10,12 @@
 //!   fast RC4 / classic AES, per-connection cipher state)
 //! - `session_main.zig` — SessionMain data loop: ConnectionReceive/Send
 //!   framing orchestration over a TunnelConnection + hub PacketAdapter
-//! - `hub.zig` — Virtual Hub L2 switch: StorePacket (MAC/IP tables, unicast
-//!   + flood), per-session SessionPa PacketAdapter
+//! - `session_registry.zig` — live session/connection registry + force-stop
+//!   (feeds the admin RPC dispatcher, issue #88)
 //! - `listener.zig` — Listener layer: per-port accept threads, DoS gate,
 //!   listener registry
+//! - `hub.zig` — Virtual Hub L2 switch: StorePacket (MAC/IP tables, unicast
+//!   + flood), per-session SessionPa PacketAdapter
 //! - `accept.zig` — connection accept: TLS handshake, signature upload, hello,
 //!   auth + welcome, then the session data plane (issue #78)
 //! - `config/cfg.zig` — Cfg text-format configuration tree: declare/{}/typed
@@ -21,15 +23,25 @@
 //! - `config/vpn_server_config.zig` — vpn_server.config load/save + autosave
 //!   thread: default config (hub DEFAULT, admin Administrator), C-faithful
 //!   item names, CFG_RW backup (issue #86)
+//! - `admin/rpc.zig` — admin RPC transport: TLS connection, `[u32 size][Pack]`
+//!   frames, dispatch on `function_name`, error/error_code replies (issue #87)
+//! - `admin/structs.zig` — admin RPC `RPC_*` structs + Pack (de)serialization
+//!   in dispatch order: Core, Listeners, Hubs (issue #89)
+//! - `admin/dispatch.zig` — admin RPC dispatch: server state model + the St*
+//!   handlers for the Core/Listeners/Hubs endpoints (issue #88)
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
 pub const session_main = @import("session_main.zig");
-pub const hub = @import("hub.zig");
+pub const session_registry = @import("session_registry.zig");
 pub const listener = @import("listener.zig");
+pub const hub = @import("hub.zig");
 pub const accept = @import("accept.zig");
 pub const cfg = @import("config/cfg.zig");
 pub const vpn_server_config = @import("config/vpn_server_config.zig");
+pub const admin_rpc = @import("admin/rpc.zig");
+pub const admin_structs = @import("admin/structs.zig");
+pub const admin_dispatch = @import("admin/dispatch.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
