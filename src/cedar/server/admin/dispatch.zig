@@ -45,6 +45,9 @@ const rpc_mod = @import("rpc.zig");
 const structs = @import("structs.zig");
 const hash_mod = @import("../../../mayaqua/encrypt/hash.zig");
 const auth = @import("../auth.zig");
+const session_registry = @import("../session_registry.zig");
+const session_main = @import("../session_main.zig");
+const types_mod = @import("../../../mayaqua/kernel/types.zig");
 
 // ============================================================================
 // Error codes (C: Cedar.h)
@@ -53,6 +56,7 @@ const auth = @import("../auth.zig");
 pub const err_no_error: u32 = 0;
 pub const err_hub_not_found: u32 = 8;
 pub const err_internal_error: u32 = 23;
+pub const err_object_not_found: u32 = 29;
 pub const err_not_supported: u32 = 33;
 pub const err_invalid_parameter: u32 = 38;
 pub const err_not_farm_controller: u32 = 46;
@@ -73,6 +77,10 @@ pub const server_type_farm_member: u32 = 2;
 pub const hub_type_standalone: u32 = 0;
 pub const hub_type_farm_static: u32 = 1;
 pub const hub_type_farm_dynamic: u32 = 2;
+
+pub const connection_type_client: u32 = 0;
+pub const connecting_connected: u32 = 4;
+pub const connecting_disconnecting: u32 = 5;
 
 // ============================================================================
 // Capability constants (C: Cedar.h / MayaType.h)
@@ -165,9 +173,18 @@ pub const Server = struct {
     listeners: std.ArrayListUnmanaged(ServerListener) = .{},
     hubs: std.ArrayListUnmanaged(ServerHub) = .{},
 
+    /// Live sessions (C `SERVER->SessionList` + `ConnectionList` subset).
+    /// `accept.zig`'s data-plane sessions register into their own registry; the
+    /// admin dispatch model keeps a standalone one so `EnumSession` &
+    /// friends can run against `SessionMain`-backed test records.
+    sessions: session_registry.SessionRegistry,
+
     /// Create a standalone server with default identity strings.
     pub fn init(allocator: Allocator) !Server {
-        var s: Server = .{ .allocator = allocator };
+        var s: Server = .{
+            .allocator = allocator,
+            .sessions = session_registry.SessionRegistry.init(allocator),
+        };
         errdefer s.deinit();
         s.product_name = try allocator.dupe(u8, default_product_name);
         s.version_string = try allocator.dupe(u8, default_version_string);
@@ -189,7 +206,11 @@ pub const Server = struct {
         for (self.hubs.items) |hub| allocator.free(hub.name);
         self.hubs.deinit(allocator);
         self.listeners.deinit(allocator);
-        self.* = .{ .allocator = allocator };
+        self.sessions.deinit();
+        self.* = .{
+            .allocator = allocator,
+            .sessions = session_registry.SessionRegistry.init(allocator),
+        };
     }
 
     /// Append a listener (test/bootstrap helper).
@@ -271,6 +292,16 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcDeleteHub, &a, allocator, request, ret, stDeleteHub);
     } else if (mem.eql(u8, function_name, "GetHubStatus")) {
         err = dispatchCall(structs.RpcHubStatus, &a, allocator, request, ret, stGetHubStatus);
+    } else if (mem.eql(u8, function_name, "EnumSession")) {
+        err = dispatchCall(structs.RpcEnumSession, &a, allocator, request, ret, stEnumSession);
+    } else if (mem.eql(u8, function_name, "GetSessionStatus")) {
+        err = dispatchCall(structs.RpcSessionStatus, &a, allocator, request, ret, stGetSessionStatus);
+    } else if (mem.eql(u8, function_name, "DeleteSession")) {
+        err = dispatchCall(structs.RpcDeleteSession, &a, allocator, request, ret, stDeleteSession);
+    } else if (mem.eql(u8, function_name, "EnumConnection")) {
+        err = dispatchCall(structs.RpcEnumConnection, &a, allocator, request, ret, stEnumConnection);
+    } else if (mem.eql(u8, function_name, "DisconnectConnection")) {
+        err = dispatchCall(structs.RpcDisconnectConnection, &a, allocator, request, ret, stDisconnectConnection);
     } else {
         err = err_not_supported;
     }
@@ -322,6 +353,11 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcEnumHub => try t.inRpc(allocator, p),
         structs.RpcDeleteHub => try t.inRpc(allocator, p),
         structs.RpcHubStatus => try t.inRpc(allocator, p),
+        structs.RpcEnumSession => try t.inRpc(allocator, p),
+        structs.RpcSessionStatus => try t.inRpc(allocator, p),
+        structs.RpcDeleteSession => try t.inRpc(allocator, p),
+        structs.RpcEnumConnection => try t.inRpc(allocator, p),
+        structs.RpcDisconnectConnection => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -339,6 +375,11 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcEnumHub => try t.outRpc(p),
         structs.RpcDeleteHub => try t.outRpc(p),
         structs.RpcHubStatus => try t.outRpc(p),
+        structs.RpcEnumSession => try t.outRpc(p),
+        structs.RpcSessionStatus => try t.outRpc(p),
+        structs.RpcDeleteSession => try t.outRpc(p),
+        structs.RpcEnumConnection => try t.outRpc(p),
+        structs.RpcDisconnectConnection => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -361,6 +402,11 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcEnumHub => t.free(allocator),
         structs.RpcDeleteHub => t.free(allocator),
         structs.RpcHubStatus => t.free(allocator),
+        structs.RpcEnumSession => t.free(allocator),
+        structs.RpcSessionStatus => t.free(allocator),
+        structs.RpcDeleteSession => t.free(allocator),
+        structs.RpcEnumConnection => t.free(allocator),
+        structs.RpcDisconnectConnection => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
@@ -707,6 +753,155 @@ fn stGetHubStatus(a: *AdminCtx, t: *structs.RpcHubStatus, allocator: Allocator) 
     t.last_login_time = hub.last_login_time;
     t.num_login = hub.num_login;
     t.created_time = hub.created_time;
+    return err_no_error;
+}
+
+// ============================================================================
+// Sessions (C `StEnumSession`, Admin.c:5448)
+// ============================================================================
+
+/// C `StEnumSession`. CHECK_RIGHT first, then the hub must exist. A non-server
+/// admin only ever sees sessions on the hub it authenticated against.
+fn stEnumSession(a: *AdminCtx, t: *structs.RpcEnumSession, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+
+    const req_hub = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = req_hub;
+
+    const snaps = s.sessions.snapshot(allocator) catch return err_internal_error;
+    defer session_registry.SessionRegistry.freeSnapshot(allocator, snaps);
+
+    var count: usize = 0;
+    for (snaps) |*snap| {
+        if (std.ascii.eqlIgnoreCase(snap.hub_name, t.hub_name)) count += 1;
+    }
+    t.sessions = allocator.alloc(structs.EnumSessionItem, count) catch return err_internal_error;
+    var i: usize = 0;
+    for (snaps) |*snap| {
+        if (!std.ascii.eqlIgnoreCase(snap.hub_name, t.hub_name)) continue;
+        const e = &t.sessions[i];
+        e.* = .{};
+        e.name = dupStr(allocator, snap.session_name) catch return err_internal_error;
+        e.username = dupStr(allocator, snap.username) catch return err_internal_error;
+        e.ip = snap.peer_ip;
+        e.client_ip = types_mod.IpAddress.fromU32(snap.peer_ip);
+        e.max_num_tcp = 1;
+        e.current_num_tcp = 1;
+        // The registry does not track per-session traffic; report 0 rather
+        // than fabricating counters. `last_comm_time` is the session's
+        // initial value (a session that has not communicated yet).
+        e.packet_size = 0;
+        e.packet_num = 0;
+        e.link_mode = false;
+        e.secure_nat_mode = false;
+        e.bridge_mode = false;
+        e.layer3_mode = false;
+        e.client_bridge_mode = false;
+        e.client_monitor_mode = false;
+        e.vlan_id = 0;
+        e.is_dormant_enabled = false;
+        e.is_dormant = false;
+        e.created_time = @intCast(@max(snap.created_time, 0));
+        e.last_comm_time = e.created_time;
+        i += 1;
+    }
+    return err_no_error;
+}
+
+/// C `StGetSessionStatus` (Admin.c:5302). Same check order as
+/// `StDeleteSession`: empty name, CHECK_RIGHT, hub, then session lookup.
+fn stGetSessionStatus(a: *AdminCtx, t: *structs.RpcSessionStatus, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+
+    const snaps = s.sessions.snapshot(allocator) catch return err_internal_error;
+    defer session_registry.SessionRegistry.freeSnapshot(allocator, snaps);
+
+    var found: ?*session_registry.SessionSnapshot = null;
+    for (snaps) |*snap| {
+        if (std.ascii.eqlIgnoreCase(snap.hub_name, t.hub_name) and
+            std.ascii.eqlIgnoreCase(snap.session_name, t.name))
+        {
+            found = snap;
+            break;
+        }
+    }
+    const snap = found orelse return err_object_not_found;
+
+    const req_hub = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    const req_name = dupStr(allocator, t.name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = req_hub;
+    t.name = req_name;
+    t.username = dupStr(allocator, snap.username) catch return err_internal_error;
+    t.client_ip = snap.peer_ip;
+    t.client_ip_address = types_mod.IpAddress.fromU32(snap.peer_ip);
+    t.status.session_name = dupStr(allocator, snap.session_name) catch return err_internal_error;
+    t.status.connection_name = dupStr(allocator, snap.connection_name) catch return err_internal_error;
+    // A session whose stop was requested is mid-teardown (C `EndSession` only
+    // flips the stop flag; the record remains until the session thread exits),
+    // so report it as disconnecting instead of fully connected.
+    t.status.active = !snap.stop_requested;
+    t.status.connected = !snap.stop_requested;
+    t.status.session_status = if (snap.stop_requested) connecting_disconnecting else connecting_connected;
+    t.status.max_tcp_connections = 1;
+    t.status.num_tcp_connections = 1;
+    t.status.start_time = @intCast(@max(snap.created_time, 0));
+    return err_no_error;
+}
+
+/// C `StDeleteSession` (Admin.c:5202). Empty name is checked before
+/// CHECK_RIGHT; the session is looked up on the target hub and stopped.
+fn stDeleteSession(a: *AdminCtx, t: *structs.RpcDeleteSession, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+    if (!s.sessions.requestStopOnHub(t.hub_name, t.name)) return err_object_not_found;
+    return err_no_error;
+}
+
+/// C `StEnumConnection` (Admin.c:8725). `SERVER_ADMIN_ONLY`; every live
+/// connection in the registry is listed (the model only tracks sessions, so a
+/// connection row exists per session).
+fn stEnumConnection(a: *AdminCtx, t: *structs.RpcEnumConnection, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    t.free(allocator);
+    t.* = .{};
+    const snaps = s.sessions.snapshot(allocator) catch return err_internal_error;
+    defer session_registry.SessionRegistry.freeSnapshot(allocator, snaps);
+    t.connections = allocator.alloc(structs.EnumConnectionItem, snaps.len) catch return err_internal_error;
+    for (snaps, 0..) |*snap, i| {
+        const e = &t.connections[i];
+        e.* = .{};
+        e.name = dupStr(allocator, snap.connection_name) catch return err_internal_error;
+        e.hostname = dupStr(allocator, "") catch return err_internal_error;
+        e.ip = snap.peer_ip;
+        e.port = snap.peer_port;
+        e.connected_time = @intCast(@max(snap.created_time, 0));
+        e.connection_type = connection_type_client;
+    }
+    return err_no_error;
+}
+
+/// C `StDisconnectConnection` (Admin.c:8683). Empty name, then
+/// `SERVER_ADMIN_ONLY`, then the server-wide connection lookup.
+fn stDisconnectConnection(a: *AdminCtx, t: *structs.RpcDisconnectConnection, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+    if (!a.server_admin) return err_not_enough_right;
+    if (!s.sessions.requestStopByConnection(t.name)) return err_object_not_found;
     return err_no_error;
 }
 
@@ -1518,4 +1713,356 @@ test "server.admin_dispatch non-server-admin is rejected for admin-only endpoint
     }
 
     try assertErr(resp, err_not_enough_right);
+}
+
+/// Stands in for `SessionMain` in admin tests: `requestStop` flips `halt`, and
+/// the padding makes the store land in the fake's `halt` (same layout trick as
+/// the session_registry tests).
+const FakeMain = struct {
+    _pad: [@offsetOf(session_main.SessionMain, "halt")]u8 = [_]u8{0} ** @offsetOf(session_main.SessionMain, "halt"),
+    halt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn wasStopped(self: *const FakeMain) bool {
+        return self.halt.load(.acquire);
+    }
+};
+
+/// Register a fake live session (mirrors `accept.zig`'s `runSession`
+/// registration). `hub_name` is borrowed and must outlive the registry.
+fn registerTestSession(
+    allocator: Allocator,
+    server: *Server,
+    fake: *FakeMain,
+    hub_name: []const u8,
+    session_name: []const u8,
+    connection_name: []const u8,
+    username: []const u8,
+) !void {
+    const rec = try allocator.create(session_registry.SessionRecord);
+    rec.* = .{
+        .session_name = try allocator.dupe(u8, session_name),
+        .connection_name = try allocator.dupe(u8, connection_name),
+        .username = try allocator.dupe(u8, username),
+        .hub_name = hub_name,
+        .peer_ip = 0x0A000001,
+        .peer_port = 40000,
+        .created_time = 12345,
+        .main = @ptrCast(@alignCast(fake)),
+    };
+    try server.sessions.register(rec);
+}
+
+test "server.admin_dispatch EnumSession lists only the requested hub" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("TEST", hub_type_standalone);
+
+    var bob: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &bob, "VPN", "SID-BOB", "CONN-1", "Bob");
+    var carol: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &carol, "TEST", "SID-CAROL", "CONN-2", "Carol");
+    var alice: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &alice, "VPN", "SID-ALICE", "CONN-3", "Alice");
+
+    var req = try makeRequest(allocator, "EnumSession");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+
+    var resp = try call(allocator, &server, true, "", "EnumSession", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
+    try assertOk(resp);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+    try testing.expectEqual(@as(usize, 2), resp.getValueCount("Name"));
+    try testing.expectEqualStrings("SID-BOB", resp.getStrEx("Name", 0).?);
+    try testing.expectEqualStrings("Bob", resp.getStrEx("Username", 0).?);
+    try testing.expectEqualStrings("SID-ALICE", resp.getStrEx("Name", 1).?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getIntEx("Ip", 0).?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getInt("ClientIP").?);
+    try testing.expectEqual(@as(u64, 12345), resp.getInt64Ex("CreatedTime", 0).?);
+}
+
+test "server.admin_dispatch EnumSession is hub-scoped for non-server-admin" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("TEST", hub_type_standalone);
+
+    // A hub admin may enumerate its own hub...
+    var own = try makeRequest(allocator, "EnumSession");
+    defer own.deinit();
+    try own.addStr("HubName", "VPN");
+    var own_resp = try call(allocator, &server, false, "VPN", "EnumSession", &own);
+    defer {
+        own_resp.deinit();
+        allocator.destroy(own_resp);
+    }
+    try assertOk(own_resp);
+
+    // ...but not another hub (CHECK_RIGHT), and a missing hub still errors.
+    var other = try makeRequest(allocator, "EnumSession");
+    defer other.deinit();
+    try other.addStr("HubName", "TEST");
+    var other_resp = try call(allocator, &server, false, "VPN", "EnumSession", &other);
+    defer {
+        other_resp.deinit();
+        allocator.destroy(other_resp);
+    }
+    try assertErr(other_resp, err_not_enough_right);
+
+    var miss = try makeRequest(allocator, "EnumSession");
+    defer miss.deinit();
+    try miss.addStr("HubName", "NOPE");
+    var miss_resp = try call(allocator, &server, true, "", "EnumSession", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_hub_not_found);
+}
+
+test "server.admin_dispatch GetSessionStatus returns a live session snapshot" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var bob: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &bob, "VPN", "SID-BOB", "CONN-1", "Bob");
+
+    var req = try makeRequest(allocator, "GetSessionStatus");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    try req.addStr("Name", "SID-BOB");
+
+    var resp = try call(allocator, &server, true, "", "GetSessionStatus", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
+    try assertOk(resp);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+    try testing.expectEqualStrings("SID-BOB", resp.getStr("Name").?);
+    try testing.expectEqualStrings("Bob", resp.getStr("Username").?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getInt("SessionStatus_ClientIp").?);
+    try testing.expectEqualStrings("SID-BOB", resp.getStr("SessionName").?);
+    try testing.expectEqualStrings("CONN-1", resp.getStr("ConnectionName").?);
+    try testing.expectEqual(@as(u32, 1), resp.getInt("Active").?);
+    try testing.expectEqual(@as(u32, 1), resp.getInt("Connected").?);
+    try testing.expectEqual(@as(u32, connecting_connected), resp.getInt("SessionStatus").?);
+    try testing.expectEqual(@as(u64, 12345), resp.getInt64("StartTime").?);
+}
+
+test "server.admin_dispatch GetSessionStatus validates name and membership" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var bob: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &bob, "VPN", "SID-BOB", "CONN-1", "Bob");
+
+    // Empty name is rejected before any rights/hub checks.
+    var empty = try makeRequest(allocator, "GetSessionStatus");
+    defer empty.deinit();
+    try empty.addStr("HubName", "VPN");
+    try empty.addStr("Name", "");
+    var empty_resp = try call(allocator, &server, true, "", "GetSessionStatus", &empty);
+    defer {
+        empty_resp.deinit();
+        allocator.destroy(empty_resp);
+    }
+    try assertErr(empty_resp, err_invalid_parameter);
+
+    // Unknown session on an existing hub.
+    var miss = try makeRequest(allocator, "GetSessionStatus");
+    defer miss.deinit();
+    try miss.addStr("HubName", "VPN");
+    try miss.addStr("Name", "SID-NOPE");
+    var miss_resp = try call(allocator, &server, true, "", "GetSessionStatus", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_object_not_found);
+
+    // Missing hub.
+    var nohub = try makeRequest(allocator, "GetSessionStatus");
+    defer nohub.deinit();
+    try nohub.addStr("HubName", "NOPE");
+    try nohub.addStr("Name", "SID-BOB");
+    var nohub_resp = try call(allocator, &server, true, "", "GetSessionStatus", &nohub);
+    defer {
+        nohub_resp.deinit();
+        allocator.destroy(nohub_resp);
+    }
+    try assertErr(nohub_resp, err_hub_not_found);
+}
+
+test "server.admin_dispatch DeleteSession stops a session on its hub" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("TEST", hub_type_standalone);
+
+    var bob: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &bob, "VPN", "SID-BOB", "CONN-1", "Bob");
+    var carol: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &carol, "TEST", "SID-CAROL", "CONN-2", "Carol");
+
+    // The same session name on another hub is not stopped (C GetSessionByName).
+    var wrong = try makeRequest(allocator, "DeleteSession");
+    defer wrong.deinit();
+    try wrong.addStr("HubName", "VPN");
+    try wrong.addStr("Name", "SID-CAROL");
+    var wrong_resp = try call(allocator, &server, true, "", "DeleteSession", &wrong);
+    defer {
+        wrong_resp.deinit();
+        allocator.destroy(wrong_resp);
+    }
+    try assertErr(wrong_resp, err_object_not_found);
+    try testing.expect(!carol.wasStopped());
+
+    // Correct hub + name stops the session.
+    var ok = try makeRequest(allocator, "DeleteSession");
+    defer ok.deinit();
+    try ok.addStr("HubName", "VPN");
+    try ok.addStr("Name", "SID-BOB");
+    var ok_resp = try call(allocator, &server, true, "", "DeleteSession", &ok);
+    defer {
+        ok_resp.deinit();
+        allocator.destroy(ok_resp);
+    }
+    try assertOk(ok_resp);
+    try testing.expect(bob.wasStopped());
+
+    // A stopped session is mid-teardown: status reports it as disconnecting,
+    // not fully connected, while the record is still registered.
+    var status = try makeRequest(allocator, "GetSessionStatus");
+    defer status.deinit();
+    try status.addStr("HubName", "VPN");
+    try status.addStr("Name", "SID-BOB");
+    var status_resp = try call(allocator, &server, true, "", "GetSessionStatus", &status);
+    defer {
+        status_resp.deinit();
+        allocator.destroy(status_resp);
+    }
+    try assertOk(status_resp);
+    try testing.expectEqual(@as(u32, 0), status_resp.getInt("Active").?);
+    try testing.expectEqual(@as(u32, 0), status_resp.getInt("Connected").?);
+    try testing.expectEqual(@as(u32, connecting_disconnecting), status_resp.getInt("SessionStatus").?);
+
+    // Empty name is checked before everything else.
+    var empty = try makeRequest(allocator, "DeleteSession");
+    defer empty.deinit();
+    try empty.addStr("HubName", "VPN");
+    try empty.addStr("Name", "");
+    var empty_resp = try call(allocator, &server, true, "", "DeleteSession", &empty);
+    defer {
+        empty_resp.deinit();
+        allocator.destroy(empty_resp);
+    }
+    try assertErr(empty_resp, err_invalid_parameter);
+
+    // A stopped/missing session reports ERR_OBJECT_NOT_FOUND.
+    var miss = try makeRequest(allocator, "DeleteSession");
+    defer miss.deinit();
+    try miss.addStr("HubName", "VPN");
+    try miss.addStr("Name", "SID-NOPE");
+    var miss_resp = try call(allocator, &server, true, "", "DeleteSession", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_object_not_found);
+}
+
+test "server.admin_dispatch EnumConnection lists connections for server admin" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var bob: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &bob, "VPN", "SID-BOB", "CONN-1", "Bob");
+    var alice: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &alice, "VPN", "SID-ALICE", "CONN-2", "Alice");
+
+    var req = try makeRequest(allocator, "EnumConnection");
+    defer req.deinit();
+
+    var resp = try call(allocator, &server, true, "", "EnumConnection", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
+    try assertOk(resp);
+    try testing.expectEqual(@as(usize, 2), resp.getValueCount("Name"));
+    try testing.expectEqualStrings("CONN-1", resp.getStrEx("Name", 0).?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getIntEx("Ip", 0).?);
+    try testing.expectEqual(@as(u32, 40000), resp.getIntEx("Port", 0).?);
+    try testing.expectEqual(@as(u32, connection_type_client), resp.getIntEx("Type", 0).?);
+    try testing.expectEqual(@as(u64, 12345), resp.getInt64Ex("ConnectedTime", 0).?);
+}
+
+test "server.admin_dispatch DisconnectConnection stops a connection" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var bob: FakeMain align(@alignOf(session_main.SessionMain)) = .{};
+    try registerTestSession(allocator, &server, &bob, "VPN", "SID-BOB", "CONN-1", "Bob");
+
+    var ok = try makeRequest(allocator, "DisconnectConnection");
+    defer ok.deinit();
+    try ok.addStr("Name", "CONN-1");
+    var ok_resp = try call(allocator, &server, true, "", "DisconnectConnection", &ok);
+    defer {
+        ok_resp.deinit();
+        allocator.destroy(ok_resp);
+    }
+    try assertOk(ok_resp);
+    try testing.expect(bob.wasStopped());
+
+    // Unknown connection.
+    var miss = try makeRequest(allocator, "DisconnectConnection");
+    defer miss.deinit();
+    try miss.addStr("Name", "CONN-9");
+    var miss_resp = try call(allocator, &server, true, "", "DisconnectConnection", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_object_not_found);
+
+    // Empty name, then SERVER_ADMIN_ONLY.
+    var empty = try makeRequest(allocator, "DisconnectConnection");
+    defer empty.deinit();
+    try empty.addStr("Name", "");
+    var empty_resp = try call(allocator, &server, true, "", "DisconnectConnection", &empty);
+    defer {
+        empty_resp.deinit();
+        allocator.destroy(empty_resp);
+    }
+    try assertErr(empty_resp, err_invalid_parameter);
+
+    var no_admin = try makeRequest(allocator, "DisconnectConnection");
+    defer no_admin.deinit();
+    try no_admin.addStr("Name", "CONN-1");
+    var no_admin_resp = try call(allocator, &server, false, "VPN", "DisconnectConnection", &no_admin);
+    defer {
+        no_admin_resp.deinit();
+        allocator.destroy(no_admin_resp);
+    }
+    try assertErr(no_admin_resp, err_not_enough_right);
 }
