@@ -80,6 +80,7 @@ pub const hub_type_farm_dynamic: u32 = 2;
 
 pub const connection_type_client: u32 = 0;
 pub const connecting_connected: u32 = 4;
+pub const connecting_disconnecting: u32 = 5;
 
 // ============================================================================
 // Capability constants (C: Cedar.h / MayaType.h)
@@ -790,8 +791,11 @@ fn stEnumSession(a: *AdminCtx, t: *structs.RpcEnumSession, allocator: Allocator)
         e.client_ip = types_mod.IpAddress.fromU32(snap.peer_ip);
         e.max_num_tcp = 1;
         e.current_num_tcp = 1;
-        e.packet_size = max_packet_size;
-        e.packet_num = 1;
+        // The registry does not track per-session traffic; report 0 rather
+        // than fabricating counters. `last_comm_time` is the session's
+        // initial value (a session that has not communicated yet).
+        e.packet_size = 0;
+        e.packet_num = 0;
         e.link_mode = false;
         e.secure_nat_mode = false;
         e.bridge_mode = false;
@@ -841,9 +845,12 @@ fn stGetSessionStatus(a: *AdminCtx, t: *structs.RpcSessionStatus, allocator: All
     t.client_ip_address = types_mod.IpAddress.fromU32(snap.peer_ip);
     t.status.session_name = dupStr(allocator, snap.session_name) catch return err_internal_error;
     t.status.connection_name = dupStr(allocator, snap.connection_name) catch return err_internal_error;
-    t.status.active = true;
-    t.status.connected = true;
-    t.status.session_status = connecting_connected;
+    // A session whose stop was requested is mid-teardown (C `EndSession` only
+    // flips the stop flag; the record remains until the session thread exits),
+    // so report it as disconnecting instead of fully connected.
+    t.status.active = !snap.stop_requested;
+    t.status.connected = !snap.stop_requested;
+    t.status.session_status = if (snap.stop_requested) connecting_disconnecting else connecting_connected;
     t.status.max_tcp_connections = 1;
     t.status.num_tcp_connections = 1;
     t.status.start_time = @intCast(@max(snap.created_time, 0));
@@ -1936,6 +1943,22 @@ test "server.admin_dispatch DeleteSession stops a session on its hub" {
     }
     try assertOk(ok_resp);
     try testing.expect(bob.wasStopped());
+
+    // A stopped session is mid-teardown: status reports it as disconnecting,
+    // not fully connected, while the record is still registered.
+    var status = try makeRequest(allocator, "GetSessionStatus");
+    defer status.deinit();
+    try status.addStr("HubName", "VPN");
+    try status.addStr("Name", "SID-BOB");
+    var status_resp = try call(allocator, &server, true, "", "GetSessionStatus", &status);
+    defer {
+        status_resp.deinit();
+        allocator.destroy(status_resp);
+    }
+    try assertOk(status_resp);
+    try testing.expectEqual(@as(u32, 0), status_resp.getInt("Active").?);
+    try testing.expectEqual(@as(u32, 0), status_resp.getInt("Connected").?);
+    try testing.expectEqual(@as(u32, connecting_disconnecting), status_resp.getInt("SessionStatus").?);
 
     // Empty name is checked before everything else.
     var empty = try makeRequest(allocator, "DeleteSession");

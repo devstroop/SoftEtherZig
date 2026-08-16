@@ -61,6 +61,9 @@ pub const SessionSnapshot = struct {
     peer_ip: u32 = 0,
     peer_port: u16 = 0,
     created_time: i64 = 0,
+    /// True once `requestStop` was called on the live session; the record can
+    /// still be registered while the session thread tears itself down.
+    stop_requested: bool = false,
 
     fn free(self: *SessionSnapshot, allocator: Allocator) void {
         allocator.free(self.session_name);
@@ -169,6 +172,7 @@ pub const SessionRegistry = struct {
                 .peer_ip = rec.peer_ip,
                 .peer_port = rec.peer_port,
                 .created_time = rec.created_time,
+                .stop_requested = rec.main.isStopRequested(),
             };
             errdefer snap.free(allocator);
             try out.append(allocator, snap);
@@ -269,6 +273,11 @@ test "server.session_registry register/unregister" {
     try testing.expect(reg.requestStop("sid-alice-0"));
     try testing.expect(fake.wasStopped());
     try testing.expect(!reg.requestStop("SID-NOPE"));
+
+    // The snapshot reflects the stop request while the record is registered.
+    const snap2 = try reg.snapshot(allocator);
+    defer SessionRegistry.freeSnapshot(allocator, snap2);
+    try testing.expect(snap2[0].stop_requested);
 
     // Duplicate registration rejected.
     const dup = try allocator.create(SessionRecord);
