@@ -152,6 +152,26 @@ pub const ServerUser = struct {
     }
 };
 
+/// C `GROUP` (Account.h:156) subset backing the group endpoints. The stored
+/// model keeps a copy of the group policy (all value types, no heap inside
+/// `Policy`); `num_users` is computed on the fly in `stEnumGroup` by
+/// counting users whose `group_name` matches.
+pub const ServerGroup = struct {
+    name: []const u8 = "",
+    realname: []const u8 = "",
+    note: []const u8 = "",
+    deny_access: bool = false,
+    traffic: structs.Traffic = .{},
+    policy: ?structs.Policy = null,
+
+    fn free(self: *ServerGroup, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.realname);
+        allocator.free(self.note);
+        self.* = .{};
+    }
+};
+
 /// C `MAC_TABLE_ENTRY` (Hub.c:57) subset held by the admin model.
 pub const MacTableEntry = struct {
     key: u32 = 0,
@@ -193,6 +213,7 @@ pub const ServerHub = struct {
     traffic: structs.Traffic = .{},
 
     users: std.ArrayListUnmanaged(ServerUser) = .{},
+    groups: std.ArrayListUnmanaged(ServerGroup) = .{},
     /// Learned MAC table (C `HUB->MacHashTable` subset). The admin model is
     /// self-contained: entries are bootstrapped by tests / callers, the
     /// data-plane integration is a separate follow-up.
@@ -232,6 +253,40 @@ pub const ServerHub = struct {
     fn deinitUsers(self: *ServerHub, allocator: Allocator) void {
         for (self.users.items) |*user| user.free(allocator);
         self.users.deinit(allocator);
+    }
+
+    /// Look up a group by name, matching case-insensitively (C `SearchGroup`
+    /// with `StrCmpi`; group names are not case-sensitive).
+    fn findGroup(self: *ServerHub, name: []const u8) ?*ServerGroup {
+        for (self.groups.items) |*group| {
+            if (std.ascii.eqlIgnoreCase(group.name, name)) return group;
+        }
+        return null;
+    }
+
+    /// Append a group, keeping `num_groups` in sync. Ownership of `g`
+    /// transfers to the hub.
+    fn addGroup(self: *ServerHub, allocator: Allocator, g: ServerGroup) !void {
+        try self.groups.append(allocator, g);
+        self.num_groups +%= 1;
+    }
+
+    /// Remove a group by name, releasing it. Returns false when absent.
+    fn removeGroup(self: *ServerHub, allocator: Allocator, name: []const u8) bool {
+        for (self.groups.items, 0..) |*group, i| {
+            if (std.ascii.eqlIgnoreCase(group.name, name)) {
+                var removed = self.groups.swapRemove(i);
+                removed.free(allocator);
+                self.num_groups -%= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn deinitGroups(self: *ServerHub, allocator: Allocator) void {
+        for (self.groups.items) |*group| group.free(allocator);
+        self.groups.deinit(allocator);
     }
 
     /// Release the owned table entry names (test/bootstrap helper).
@@ -327,6 +382,7 @@ pub const Server = struct {
         self.os_info.free(allocator);
         for (self.hubs.items) |*hub| {
             hub.deinitUsers(allocator);
+            hub.deinitGroups(allocator);
             hub.freeTables(allocator);
             allocator.free(hub.name);
         }
@@ -442,6 +498,16 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcDeleteUser, &a, allocator, request, ret, stDeleteUser);
     } else if (mem.eql(u8, function_name, "SetPassword")) {
         err = dispatchCall(structs.RpcSetUserPassword, &a, allocator, request, ret, stSetPassword);
+    } else if (mem.eql(u8, function_name, "EnumGroup")) {
+        err = dispatchCall(structs.RpcEnumGroup, &a, allocator, request, ret, stEnumGroup);
+    } else if (mem.eql(u8, function_name, "CreateGroup")) {
+        err = dispatchCall(structs.RpcSetGroup, &a, allocator, request, ret, stCreateGroup);
+    } else if (mem.eql(u8, function_name, "SetGroup")) {
+        err = dispatchCall(structs.RpcSetGroup, &a, allocator, request, ret, stSetGroup);
+    } else if (mem.eql(u8, function_name, "GetGroup")) {
+        err = dispatchCall(structs.RpcSetGroup, &a, allocator, request, ret, stGetGroup);
+    } else if (mem.eql(u8, function_name, "DeleteGroup")) {
+        err = dispatchCall(structs.RpcDeleteUser, &a, allocator, request, ret, stDeleteGroup);
     } else if (mem.eql(u8, function_name, "EnumMacTable")) {
         err = dispatchCall(structs.RpcEnumMacTable, &a, allocator, request, ret, stEnumMacTable);
     } else if (mem.eql(u8, function_name, "EnumIpTable")) {
@@ -510,6 +576,8 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcSetUser => try t.inRpc(allocator, p),
         structs.RpcDeleteUser => try t.inRpc(allocator, p),
         structs.RpcSetUserPassword => try t.inRpc(allocator, p),
+        structs.RpcSetGroup => try t.inRpc(allocator, p),
+        structs.RpcEnumGroup => try t.inRpc(allocator, p),
         structs.RpcEnumLogFile => try t.inRpc(allocator, p),
         structs.RpcGetTraffic => try t.inRpc(allocator, p),
         structs.RpcEnumMacTable => try t.inRpc(allocator, p),
@@ -540,6 +608,8 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcSetUser => try t.outRpc(p),
         structs.RpcDeleteUser => try t.outRpc(p),
         structs.RpcSetUserPassword => try t.outRpc(p),
+        structs.RpcSetGroup => try t.outRpc(p),
+        structs.RpcEnumGroup => try t.outRpc(p),
         structs.RpcEnumLogFile => try t.outRpc(p),
         structs.RpcGetTraffic => try t.outRpc(p),
         structs.RpcEnumMacTable => try t.outRpc(p),
@@ -575,6 +645,8 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcSetUser => t.free(allocator),
         structs.RpcDeleteUser => t.free(allocator),
         structs.RpcSetUserPassword => t.free(allocator),
+        structs.RpcSetGroup => t.free(allocator),
+        structs.RpcEnumGroup => t.free(allocator),
         structs.RpcEnumLogFile => t.free(allocator),
         structs.RpcGetTraffic => t.free(allocator),
         structs.RpcEnumMacTable => t.free(allocator),
@@ -894,6 +966,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     const index = findHubIndex(s, t.hub_name) orelse return err_hub_not_found;
     var removed = s.hubs.swapRemove(index);
     removed.deinitUsers(allocator);
+    removed.deinitGroups(allocator);
     removed.freeTables(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
@@ -1410,6 +1483,145 @@ fn stSetPassword(a: *AdminCtx, t: *structs.RpcSetUserPassword, allocator: Alloca
 }
 
 // ============================================================================
+// Groups (C: Admin.c StCreateGroup / StSetGroup / StDeleteGroup / StGetGroup /
+// StEnumGroup)
+// ============================================================================
+
+/// Count users on `hub` whose `group_name` matches `group_name`.
+fn countGroupMembers(hub: *ServerHub, group_name: []const u8) u32 {
+    var count: u32 = 0;
+    for (hub.users.items) |user| {
+        if (std.mem.eql(u8, user.group_name, group_name)) count += 1;
+    }
+    return count;
+}
+
+/// C `StEnumGroup` (Admin.c:6735). Hub-scoped: server admins target the
+/// requested hub, hub admins are locked to their own.
+fn stEnumGroup(a: *AdminCtx, t: *structs.RpcEnumGroup, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    t.groups = allocator.alloc(structs.EnumGroupItem, hub.groups.items.len) catch return err_internal_error;
+    for (hub.groups.items, 0..) |*group, i| {
+        const e = &t.groups[i];
+        e.* = .{};
+        e.name = dupStr(allocator, group.name) catch return err_internal_error;
+        e.realname = dupStr(allocator, group.realname) catch return err_internal_error;
+        e.note = dupStr(allocator, group.note) catch return err_internal_error;
+        e.num_users = countGroupMembers(hub, group.name);
+        e.deny_access = group.deny_access;
+    }
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StCreateGroup` (Admin.c:6823).
+fn stCreateGroup(a: *AdminCtx, t: *structs.RpcSetGroup, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isGroupName(t.name)) return err_invalid_parameter;
+    if (isWildcardName(t.name)) return err_invalid_parameter;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    _ = canonicalizeGroupName(t, allocator);
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (hub.findGroup(t.name) != null) return err_user_already_exists;
+
+    const group = ServerGroup{
+        .name = dupStr(allocator, t.name) catch return err_internal_error,
+        .realname = dupStr(allocator, t.realname) catch return err_internal_error,
+        .note = dupStr(allocator, t.note) catch return err_internal_error,
+        .deny_access = t.policy != null,
+        .traffic = t.traffic,
+        .policy = if (t.policy) |pol| pol.* else null,
+    };
+    hub.addGroup(allocator, group) catch return err_internal_error;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StSetGroup` (Admin.c:6916).
+fn stSetGroup(a: *AdminCtx, t: *structs.RpcSetGroup, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isGroupName(t.name)) return err_invalid_parameter;
+    if (isWildcardName(t.name)) return err_invalid_parameter;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    const group = hub.findGroup(t.name) orelse return err_object_not_found;
+
+    const realname = dupStr(allocator, t.realname) catch return err_internal_error;
+    const note = dupStr(allocator, t.note) catch return err_internal_error;
+
+    allocator.free(group.realname);
+    allocator.free(group.note);
+    group.realname = realname;
+    group.note = note;
+    group.traffic = t.traffic;
+    group.deny_access = t.policy != null;
+    group.policy = if (t.policy) |pol| pol.* else null;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StGetGroup` (Admin.c:6993). Returns the group settings in a
+/// `RPC_SET_GROUP`, including the persisted policy (if any).
+fn stGetGroup(a: *AdminCtx, t: *structs.RpcSetGroup, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isGroupName(t.name)) return err_invalid_parameter;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    const group = hub.findGroup(t.name) orelse return err_object_not_found;
+
+    const realname = dupStr(allocator, group.realname) catch return err_internal_error;
+    const note = dupStr(allocator, group.note) catch return err_internal_error;
+
+    allocator.free(t.realname);
+    allocator.free(t.note);
+    if (t.policy) |pol| allocator.destroy(pol);
+    t.realname = realname;
+    t.note = note;
+    t.traffic = group.traffic;
+    if (group.policy) |pol| {
+        const cloned = allocator.create(structs.Policy) catch return err_internal_error;
+        cloned.* = pol;
+        t.policy = cloned;
+    } else {
+        t.policy = null;
+    }
+    return err_no_error;
+}
+
+/// C `StDeleteGroup` (Admin.c:6684). Reuses `RPC_DELETE_USER` on the wire.
+fn stDeleteGroup(a: *AdminCtx, t: *structs.RpcDeleteUser, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isGroupName(t.name)) return err_invalid_parameter;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!hub.removeGroup(allocator, t.name)) return err_object_not_found;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+// ============================================================================
 // Capabilities (C `GetServerCapsMain`, Server.c:1432)
 // ============================================================================
 
@@ -1636,11 +1848,39 @@ fn isWildcardName(s: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.mem.trim(u8, s, " \t"), "*");
 }
 
+/// True when the trimmed name is a valid group name. Group names follow the
+/// same rules as user names (C `IsGroupName` → `IsSafeStr` + reserved list).
+fn isGroupName(s: []const u8) bool {
+    const t = std.mem.trim(u8, s, " \t");
+    if (t.len == 0) return false;
+    if (!isSafeStr(t)) return false;
+    if (std.ascii.eqlIgnoreCase(t, "link") or
+        std.ascii.eqlIgnoreCase(t, "Link") or
+        std.ascii.eqlIgnoreCase(t, "securenat") or
+        std.ascii.eqlIgnoreCase(t, "SecureNAT") or
+        std.ascii.eqlIgnoreCase(t, "localbridge") or
+        std.ascii.eqlIgnoreCase(t, "Local Bridge") or
+        std.ascii.eqlIgnoreCase(t, "administrator")) return false;
+    if (std.ascii.startsWithIgnoreCase(t, "L3SW_")) return false;
+    return true;
+}
+
 /// Replace the request name with its trimmed canonical form (C `IsUserName`
 /// validates the trimmed name, so the stored/hashed identity must match).
 /// The raw allocation is freed and the trimmed copy adopted, so padded names
 /// like `" Alice "` can't create a distinct account from `Alice`.
 fn canonicalizeUserName(t: *structs.RpcSetUser, allocator: Allocator) bool {
+    const trimmed = std.mem.trim(u8, t.name, " \t");
+    if (trimmed.len == t.name.len) return true;
+    const owned = allocator.dupe(u8, trimmed) catch return false;
+    allocator.free(t.name);
+    t.name = owned;
+    return true;
+}
+
+/// Replace the request name with its trimmed canonical form. Mirrors
+/// `canonicalizeUserName` for group names.
+fn canonicalizeGroupName(t: *structs.RpcSetGroup, allocator: Allocator) bool {
     const trimmed = std.mem.trim(u8, t.name, " \t");
     if (trimmed.len == t.name.len) return true;
     const owned = allocator.dupe(u8, trimmed) catch return false;
@@ -3697,4 +3937,355 @@ test "server.admin_dispatch GetTraffic returns the hub traffic snapshot" {
         allocator.destroy(nohub_resp);
     }
     try assertErr(nohub_resp, err_hub_not_found);
+}
+
+// ============================================================================
+// Group endpoint tests
+// ============================================================================
+
+test "server.admin_dispatch CreateGroup adds and validates a group" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Create succeeds
+    var req = try makeRequest(allocator, "CreateGroup");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    try req.addStr("Name", "Managers");
+    try req.addUniStr("Realname", "Management");
+    try req.addUniStr("Note", "Management team");
+    var resp = try call(allocator, &server, true, "", "CreateGroup", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+
+    // Enumerate: the group shows up
+    var enq = try makeRequest(allocator, "EnumGroup");
+    defer enq.deinit();
+    try enq.addStr("HubName", "VPN");
+    var enresp = try call(allocator, &server, true, "", "EnumGroup", &enq);
+    defer {
+        enresp.deinit();
+        allocator.destroy(enresp);
+    }
+    try assertOk(enresp);
+    try testing.expectEqual(@as(u32, 1), enresp.getInt("NumGroup").?);
+    try testing.expectEqualStrings("Managers", (enresp.getStrEx("Name", 0)).?);
+    try testing.expectEqualStrings("Management", (enresp.getUniStrEx("Realname", 0)).?);
+    try testing.expectEqualStrings("Management team", (enresp.getUniStrEx("Note", 0)).?);
+
+    // Duplicate name -> error
+    var dup = try makeRequest(allocator, "CreateGroup");
+    defer dup.deinit();
+    try dup.addStr("HubName", "VPN");
+    try dup.addStr("Name", "Managers");
+    var dupresp = try call(allocator, &server, true, "", "CreateGroup", &dup);
+    defer {
+        dupresp.deinit();
+        allocator.destroy(dupresp);
+    }
+    try assertErr(dupresp, err_user_already_exists);
+
+    // Invalid name (reserved)
+    var bad = try makeRequest(allocator, "CreateGroup");
+    defer bad.deinit();
+    try bad.addStr("HubName", "VPN");
+    try bad.addStr("Name", "administrator");
+    var badresp = try call(allocator, &server, true, "", "CreateGroup", &bad);
+    defer {
+        badresp.deinit();
+        allocator.destroy(badresp);
+    }
+    try assertErr(badresp, err_invalid_parameter);
+
+    // Missing hub
+    var nohub = try makeRequest(allocator, "CreateGroup");
+    defer nohub.deinit();
+    try nohub.addStr("HubName", "Elsewhere");
+    try nohub.addStr("Name", "Foo");
+    var nohubresp = try call(allocator, &server, true, "", "CreateGroup", &nohub);
+    defer {
+        nohubresp.deinit();
+        allocator.destroy(nohubresp);
+    }
+    try assertErr(nohubresp, err_hub_not_found);
+
+    // Canonicalization: padded name is trimmed before storage
+    var pad = try makeRequest(allocator, "CreateGroup");
+    defer pad.deinit();
+    try pad.addStr("HubName", "VPN");
+    try pad.addStr("Name", "Padded  ");
+    try pad.addUniStr("Realname", "Padded Group");
+    var padresp = try call(allocator, &server, true, "", "CreateGroup", &pad);
+    defer {
+        padresp.deinit();
+        allocator.destroy(padresp);
+    }
+    try assertOk(padresp);
+    // Look up as trimmed — should succeed
+    var get = try makeRequest(allocator, "GetGroup");
+    defer get.deinit();
+    try get.addStr("HubName", "VPN");
+    try get.addStr("Name", "Padded");
+    var getresp = try call(allocator, &server, true, "", "GetGroup", &get);
+    defer {
+        getresp.deinit();
+        allocator.destroy(getresp);
+    }
+    try assertOk(getresp);
+    try testing.expectEqualStrings("Padded Group", (getresp.getUniStr("Realname")).?);
+}
+
+test "server.admin_dispatch SetGroup updates a group" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Create first
+    var create = try makeRequest(allocator, "CreateGroup");
+    defer create.deinit();
+    try create.addStr("HubName", "VPN");
+    try create.addStr("Name", "Workers");
+    var cr = try call(allocator, &server, true, "", "CreateGroup", &create);
+    defer {
+        cr.deinit();
+        allocator.destroy(cr);
+    }
+    try assertOk(cr);
+
+    // Set
+    var req = try makeRequest(allocator, "SetGroup");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    try req.addStr("Name", "Workers");
+    try req.addUniStr("Realname", "Worker Group");
+    try req.addUniStr("Note", "Regular workers");
+    var resp = try call(allocator, &server, true, "", "SetGroup", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+
+    // Get confirms
+    var get = try makeRequest(allocator, "GetGroup");
+    defer get.deinit();
+    try get.addStr("HubName", "VPN");
+    try get.addStr("Name", "Workers");
+    var gresp = try call(allocator, &server, true, "", "GetGroup", &get);
+    defer {
+        gresp.deinit();
+        allocator.destroy(gresp);
+    }
+    try assertOk(gresp);
+    try testing.expectEqualStrings("Worker Group", (gresp.getUniStr("Realname")).?);
+    try testing.expectEqualStrings("Regular workers", (gresp.getUniStr("Note")).?);
+
+    // Missing group
+    var miss = try makeRequest(allocator, "SetGroup");
+    defer miss.deinit();
+    try miss.addStr("HubName", "VPN");
+    try miss.addStr("Name", "Nonexistent");
+    var missresp = try call(allocator, &server, true, "", "SetGroup", &miss);
+    defer {
+        missresp.deinit();
+        allocator.destroy(missresp);
+    }
+    try assertErr(missresp, err_object_not_found);
+}
+
+test "server.admin_dispatch GetGroup returns group settings" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Create with policy
+    var create = try makeRequest(allocator, "CreateGroup");
+    defer create.deinit();
+    try create.addStr("HubName", "VPN");
+    try create.addStr("Name", "Testers");
+    try create.addUniStr("Realname", "QA Team");
+    try create.addBool("UsePolicy", true);
+    try create.addBool("Access", false);
+    var cr = try call(allocator, &server, true, "", "CreateGroup", &create);
+    defer {
+        cr.deinit();
+        allocator.destroy(cr);
+    }
+    try assertOk(cr);
+
+    // Get confirms policy is persisted
+    var req = try makeRequest(allocator, "GetGroup");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    try req.addStr("Name", "Testers");
+    var resp = try call(allocator, &server, true, "", "GetGroup", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqualStrings("Testers", (resp.getStr("Name")).?);
+    try testing.expectEqualStrings("QA Team", (resp.getUniStr("Realname")).?);
+    try testing.expect(resp.getBool("UsePolicy") orelse false);
+    try testing.expect(!(resp.getBool("Access") orelse true));
+
+    // Get does NOT echo an unrelated policy from the request itself
+    var echo = try makeRequest(allocator, "GetGroup");
+    defer echo.deinit();
+    try echo.addStr("HubName", "VPN");
+    try echo.addStr("Name", "Testers");
+    try echo.addBool("UsePolicy", true);
+    try echo.addBool("NoRouting", true);
+    var eresp = try call(allocator, &server, true, "", "GetGroup", &echo);
+    defer {
+        eresp.deinit();
+        allocator.destroy(eresp);
+    }
+    try assertOk(eresp);
+    // UsePolicy reflects stored state (true), but NoRouting from request is NOT echoed
+    try testing.expect(eresp.getBool("UsePolicy") orelse false);
+    try testing.expect(!(eresp.getBool("NoRouting") orelse true));
+
+    // Invalid name
+    var bad = try makeRequest(allocator, "GetGroup");
+    defer bad.deinit();
+    try bad.addStr("HubName", "VPN");
+    try bad.addStr("Name", "");
+    var badresp = try call(allocator, &server, true, "", "GetGroup", &bad);
+    defer {
+        badresp.deinit();
+        allocator.destroy(badresp);
+    }
+    try assertErr(badresp, err_invalid_parameter);
+
+    // Missing group
+    var miss = try makeRequest(allocator, "GetGroup");
+    defer miss.deinit();
+    try miss.addStr("HubName", "VPN");
+    try miss.addStr("Name", "Nonexistent");
+    var missresp = try call(allocator, &server, true, "", "GetGroup", &miss);
+    defer {
+        missresp.deinit();
+        allocator.destroy(missresp);
+    }
+    try assertErr(missresp, err_object_not_found);
+}
+
+test "server.admin_dispatch DeleteGroup removes and reports missing" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Create
+    var create = try makeRequest(allocator, "CreateGroup");
+    defer create.deinit();
+    try create.addStr("HubName", "VPN");
+    try create.addStr("Name", "Temp");
+    var cr = try call(allocator, &server, true, "", "CreateGroup", &create);
+    defer {
+        cr.deinit();
+        allocator.destroy(cr);
+    }
+    try assertOk(cr);
+
+    // Delete
+    var req = try makeRequest(allocator, "DeleteGroup");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    try req.addStr("Name", "Temp");
+    var resp = try call(allocator, &server, true, "", "DeleteGroup", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+
+    // Enumerate: empty
+    var enq = try makeRequest(allocator, "EnumGroup");
+    defer enq.deinit();
+    try enq.addStr("HubName", "VPN");
+    var enresp = try call(allocator, &server, true, "", "EnumGroup", &enq);
+    defer {
+        enresp.deinit();
+        allocator.destroy(enresp);
+    }
+    try assertOk(enresp);
+    try testing.expectEqual(@as(u32, 0), enresp.getInt("NumGroup").?);
+
+    // Delete again -> not found
+    var miss = try makeRequest(allocator, "DeleteGroup");
+    defer miss.deinit();
+    try miss.addStr("HubName", "VPN");
+    try miss.addStr("Name", "Temp");
+    var missresp = try call(allocator, &server, true, "", "DeleteGroup", &miss);
+    defer {
+        missresp.deinit();
+        allocator.destroy(missresp);
+    }
+    try assertErr(missresp, err_object_not_found);
+
+    // Invalid name
+    var bad = try makeRequest(allocator, "DeleteGroup");
+    defer bad.deinit();
+    try bad.addStr("HubName", "VPN");
+    try bad.addStr("Name", "administrator");
+    var badresp = try call(allocator, &server, true, "", "DeleteGroup", &bad);
+    defer {
+        badresp.deinit();
+        allocator.destroy(badresp);
+    }
+    try assertErr(badresp, err_invalid_parameter);
+}
+
+test "server.admin_dispatch EnumGroup is hub-scoped for non-server-admin" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("OTHER", hub_type_standalone);
+
+    // Create groups in both hubs
+    for (&[_][]const u8{ "VPN", "OTHER" }) |hub_name| {
+        var cr = try makeRequest(allocator, "CreateGroup");
+        defer cr.deinit();
+        try cr.addStr("HubName", hub_name);
+        try cr.addStr("Name", "Grp1");
+        var r = try call(allocator, &server, true, "", "CreateGroup", &cr);
+        defer {
+            r.deinit();
+            allocator.destroy(r);
+        }
+        try assertOk(r);
+    }
+
+    // Hub admin on VPN: can see VPN's group
+    var req = try makeRequest(allocator, "EnumGroup");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    var resp = try call(allocator, &server, false, "VPN", "EnumGroup", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqual(@as(u32, 1), resp.getInt("NumGroup").?);
+
+    // But not OTHER's
+    var other = try makeRequest(allocator, "EnumGroup");
+    defer other.deinit();
+    try other.addStr("HubName", "OTHER");
+    var oresp = try call(allocator, &server, false, "VPN", "EnumGroup", &other);
+    defer {
+        oresp.deinit();
+        allocator.destroy(oresp);
+    }
+    try assertErr(oresp, err_not_enough_right);
 }
