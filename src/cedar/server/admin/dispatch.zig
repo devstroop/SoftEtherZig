@@ -498,7 +498,6 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcDeleteSession => try t.inRpc(allocator, p),
         structs.RpcEnumConnection => try t.inRpc(allocator, p),
         structs.RpcDisconnectConnection => try t.inRpc(allocator, p),
-<<<<<<< HEAD
         structs.RpcEnumUser => try t.inRpc(allocator, p),
         structs.RpcSetUser => try t.inRpc(allocator, p),
         structs.RpcDeleteUser => try t.inRpc(allocator, p),
@@ -526,7 +525,6 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcDeleteSession => try t.outRpc(p),
         structs.RpcEnumConnection => try t.outRpc(p),
         structs.RpcDisconnectConnection => try t.outRpc(p),
-<<<<<<< HEAD
         structs.RpcEnumUser => try t.outRpc(p),
         structs.RpcSetUser => try t.outRpc(p),
         structs.RpcDeleteUser => try t.outRpc(p),
@@ -559,7 +557,6 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcDeleteSession => t.free(allocator),
         structs.RpcEnumConnection => t.free(allocator),
         structs.RpcDisconnectConnection => t.free(allocator),
-<<<<<<< HEAD
         structs.RpcEnumUser => t.free(allocator),
         structs.RpcSetUser => t.free(allocator),
         structs.RpcDeleteUser => t.free(allocator),
@@ -880,6 +877,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     const index = findHubIndex(s, t.hub_name) orelse return err_hub_not_found;
     var removed = s.hubs.swapRemove(index);
     removed.deinitUsers(allocator);
+    removed.freeTables(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
     return err_no_error;
@@ -1066,13 +1064,15 @@ fn stDisconnectConnection(a: *AdminCtx, t: *structs.RpcDisconnectConnection, all
 
 /// C `StEnumMacTable` (Admin.c:5152). Hub-scoped: a server admin targets the
 /// requested hub, a hub admin is locked to the hub named in their session.
-/// Farm-controller remote items are not modelled (standalone): entries are
-/// always local. Does not touch `config_revision`.
+/// Standalone only: a farm controller would adjoin remote member entries
+/// (C `SiCallEnumMacTable`), which the model does not implement, so non-
+/// standalone types are rejected rather than returning a misleading local-only
+/// enumeration. Does not touch `config_revision`.
 fn stEnumMacTable(a: *AdminCtx, t: *structs.RpcEnumMacTable, allocator: Allocator) u32 {
     const s = a.server;
     if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
     if (s.is_bridge) return err_not_supported;
-    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (s.server_type != server_type_standalone) return err_not_supported;
 
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
 
@@ -1103,7 +1103,7 @@ fn stEnumIpTable(a: *AdminCtx, t: *structs.RpcEnumIpTable, allocator: Allocator)
     const s = a.server;
     if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
     if (s.is_bridge) return err_not_supported;
-    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (s.server_type != server_type_standalone) return err_not_supported;
 
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
 
@@ -2106,6 +2106,42 @@ test "server.admin_dispatch DeleteHub frees the hub's users" {
         resp.deinit();
         allocator.destroy(resp);
     }
+    try assertOk(resp);
+    try testing.expectEqual(@as(usize, 0), server.hubs.items.len);
+}
+
+test "server.admin_dispatch DeleteHub releases a populated hub's tables" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.hubs.items[0].addMacTableEntry(allocator, .{
+        .key = 1,
+        .session_name = "SID-ALICE",
+        .mac_address = .{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 },
+        .vlan_id = 3,
+        .created_time = 111,
+        .updated_time = 222,
+    });
+    try server.hubs.items[0].addIpTableEntry(allocator, .{
+        .key = 2,
+        .session_name = "SID-BOB",
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .dhcp_allocated = true,
+        .created_time = 111,
+        .updated_time = 222,
+    });
+
+    var req = try makeRequest(allocator, "DeleteHub");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+
+    var resp = try call(allocator, &server, true, "", "DeleteHub", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
     try assertOk(resp);
     try testing.expectEqual(@as(usize, 0), server.hubs.items.len);
 }
@@ -3249,4 +3285,19 @@ test "server.admin_dispatch EnumMacTable and EnumIpTable validate hub and rights
         allocator.destroy(own_resp);
     }
     try assertOk(own_resp);
+
+    // Farm controller and farm member are not standalone: remote entries are
+    // not modelled, so the enumeration is rejected rather than misleading.
+    for ([_]u32{ server_type_farm_controller, server_type_farm_member }) |server_type| {
+        server.server_type = server_type;
+        var farm = try makeRequest(allocator, "EnumMacTable");
+        defer farm.deinit();
+        try farm.addStr("HubName", "VPN");
+        var farm_resp = try call(allocator, &server, true, "", "EnumMacTable", &farm);
+        defer {
+            farm_resp.deinit();
+            allocator.destroy(farm_resp);
+        }
+        try assertErr(farm_resp, err_not_supported);
+    }
 }
