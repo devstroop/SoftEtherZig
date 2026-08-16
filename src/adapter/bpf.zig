@@ -67,21 +67,18 @@ const IfreqSetif = extern struct {
     ifru_pad: [16]u8,
 };
 
-/// bpf_hdr as the kernel writes it on macOS 64-bit: struct timeval (16) +
-/// bh_caplen (4) + bh_datalen (4) + bh_hdrlen (2) + pad (2) = 28 bytes.
-/// Field offsets follow the 64-bit ABI (time_t is 8 bytes), so caplen sits
-/// at 16 and hdrlen at 24 — NOT the 32-bit layout the old code assumed
-/// (caplen@8, hdrlen@16) (PR #150 review).
-const BpfHdrSize: usize = 28;
-const BpfCaplenOffset: usize = 16;
-const BpfHdrlenOffset: usize = 24;
-
-/// Normalized record header that parseFrames re-encodes into scratch
-/// (caplen@8, datalen@12, hdrlen@16), 20 bytes, so nextPendingFrame walks
-/// the chain uniformly regardless of the raw kernel layout.
-const PendingHdrSize: usize = 20;
-const PendingCaplenOffset: usize = 8;
-const PendingHdrlenOffset: usize = 16;
+/// bpf_hdr as the kernel writes it on macOS: a COMPACT 8-byte timeval
+/// (4-byte tv_sec + 4-byte tv_usec, NOT the 64-bit 16-byte struct timeval)
+/// followed by bh_caplen (4), bh_datalen (4), bh_hdrlen (2) and 2 padding
+/// bytes = 20 bytes; the kernel sets bh_hdrlen = BPF_WORDALIGN(18) = 20.
+/// Field offsets therefore match the 32-bit layout: caplen@8, hdrlen@16.
+/// Confirmed empirically from kernel-captured bytes on a macOS runner:
+/// `91a6816a 0f640c00 2c000000 2c000000 1400 0200` (caplen/datalen 44,
+/// hdrlen 20). (PR #150 review claimed a 16-byte timeval/28-byte header —
+/// that ABI is NOT what the macOS BPF stack emits.)
+const BpfHdrSize: usize = 20;
+const BpfCaplenOffset: usize = 8;
+const BpfHdrlenOffset: usize = 16;
 
 /// BPF_WORDALIGN from <net/bpf.h>: records in the kernel chain start at
 /// 4-byte-aligned boundaries (sizeof(int)), not the raw record length.
@@ -305,28 +302,30 @@ pub const BpfPort = struct {
         var off: usize = 0;
         var write_off: usize = 0;
         while (off + BpfHdrSize <= n) {
-            // Raw kernel bpf_hdr (macOS 64-bit): caplen@16, hdrlen@24.
+            // Raw kernel bpf_hdr (macOS compact timeval): caplen@8, hdrlen@16.
             const hdr = self.scratch[off .. off + BpfHdrSize];
             const hdrlen = @as(usize, hdr[BpfHdrlenOffset]) | (@as(usize, hdr[BpfHdrlenOffset + 1]) << 8);
             const caplen = @as(usize, hdr[BpfCaplenOffset]) | (@as(usize, hdr[BpfCaplenOffset + 1]) << 8) |
                 (@as(usize, hdr[BpfCaplenOffset + 2]) << 16) | (@as(usize, hdr[BpfCaplenOffset + 3]) << 24);
             if (hdrlen < BpfHdrSize or hdrlen + caplen > n - off) break; // malformed tail
             const frame = self.scratch[off + hdrlen .. off + hdrlen + caplen];
-            if (write_off + PendingHdrSize + caplen > self.scratch.len) break;
-            // Synthetic header (normalized layout: caplen@8, datalen@12, hdrlen@16).
-            const out = self.scratch[write_off .. write_off + PendingHdrSize];
+            if (write_off + BpfHdrSize + caplen > self.scratch.len) break;
+            // Re-encode each record with a fresh (zeroed) header so the
+            // scratch chain is back-to-back [hdr][frame][hdr][frame]...
+            // (no word-align padding) for nextPendingFrame to walk.
+            const out = self.scratch[write_off .. write_off + BpfHdrSize];
             @memset(out, 0);
-            out[PendingCaplenOffset] = @intCast(caplen & 0xFF);
-            out[PendingCaplenOffset + 1] = @intCast((caplen >> 8) & 0xFF);
-            out[PendingCaplenOffset + 2] = @intCast((caplen >> 16) & 0xFF);
-            out[PendingCaplenOffset + 3] = @intCast((caplen >> 24) & 0xFF);
-            out[PendingCaplenOffset + 4] = out[PendingCaplenOffset];
-            out[PendingCaplenOffset + 5] = out[PendingCaplenOffset + 1];
-            out[PendingCaplenOffset + 6] = out[PendingCaplenOffset + 2];
-            out[PendingCaplenOffset + 7] = out[PendingCaplenOffset + 3];
-            out[PendingHdrlenOffset] = PendingHdrSize;
-            std.mem.copyForwards(u8, self.scratch[write_off + PendingHdrSize ..][0..caplen], frame);
-            write_off += PendingHdrSize + caplen;
+            out[BpfCaplenOffset] = @intCast(caplen & 0xFF);
+            out[BpfCaplenOffset + 1] = @intCast((caplen >> 8) & 0xFF);
+            out[BpfCaplenOffset + 2] = @intCast((caplen >> 16) & 0xFF);
+            out[BpfCaplenOffset + 3] = @intCast((caplen >> 24) & 0xFF);
+            out[BpfCaplenOffset + 4] = out[BpfCaplenOffset];
+            out[BpfCaplenOffset + 5] = out[BpfCaplenOffset + 1];
+            out[BpfCaplenOffset + 6] = out[BpfCaplenOffset + 2];
+            out[BpfCaplenOffset + 7] = out[BpfCaplenOffset + 3];
+            out[BpfHdrlenOffset] = BpfHdrSize;
+            std.mem.copyForwards(u8, self.scratch[write_off + BpfHdrSize ..][0..caplen], frame);
+            write_off += BpfHdrSize + caplen;
             // Kernel chains separate records with BPF_WORDALIGN(len), not
             // the raw record length (PR #150 review).
             off += bpfWordAlign(hdrlen + caplen);
@@ -335,21 +334,21 @@ pub const BpfPort = struct {
     }
 
     /// Pop the next frame from the pending remainder (frames are stored
-    /// back-to-back in scratch as normalized [hdr][frame] records; the
-    /// parser restores the header chain).
+    /// back-to-back in scratch as [hdr][frame] records; the parser restores
+    /// the header chain and drops word-align padding).
     fn nextPendingFrame(self: *BpfPort) ?[]const u8 {
         if (self.pending_len == 0) return null;
         const off = self.pending_start;
         const n = off + self.pending_len;
-        if (off + PendingHdrSize > n) {
+        if (off + BpfHdrSize > n) {
             self.pending_len = 0;
             return null;
         }
-        const hdr = self.scratch[off .. off + PendingHdrSize];
-        const hdrlen = @as(usize, hdr[PendingHdrlenOffset]) | (@as(usize, hdr[PendingHdrlenOffset + 1]) << 8);
-        const caplen = @as(usize, hdr[PendingCaplenOffset]) | (@as(usize, hdr[PendingCaplenOffset + 1]) << 8) |
-            (@as(usize, hdr[PendingCaplenOffset + 2]) << 16) | (@as(usize, hdr[PendingCaplenOffset + 3]) << 24);
-        if (hdrlen < PendingHdrSize or hdrlen + caplen > n - off) {
+        const hdr = self.scratch[off .. off + BpfHdrSize];
+        const hdrlen = @as(usize, hdr[BpfHdrlenOffset]) | (@as(usize, hdr[BpfHdrlenOffset + 1]) << 8);
+        const caplen = @as(usize, hdr[BpfCaplenOffset]) | (@as(usize, hdr[BpfCaplenOffset + 1]) << 8) |
+            (@as(usize, hdr[BpfCaplenOffset + 2]) << 16) | (@as(usize, hdr[BpfCaplenOffset + 3]) << 24);
+        if (hdrlen < BpfHdrSize or hdrlen + caplen > n - off) {
             self.pending_len = 0;
             return null;
         }
@@ -613,11 +612,11 @@ test "bpfPort session frame budget drop accounting" {
 }
 
 test "bpfPort frame chain parser (root-free)" {
-    // Craft a kernel-style buffer in the real macOS 64-bit layout (28-byte
-    // bpf_hdr with caplen@16, datalen@20, hdrlen@24): [hdr caplen 41]
-    // [41B][hdr caplen 20][20B] followed by a malformed tail, and verify
-    // parseFrames re-encodes it (advancing records by BPF_WORDALIGN) so
-    // nextPendingFrame pops one frame per call, in order.
+    // Craft a kernel-style buffer in the real macOS bpf_hdr layout (20-byte
+    // header, compact 8-byte timeval, caplen@8, datalen@12, hdrlen@16):
+    // [hdr caplen 41][41B][hdr caplen 20][20B] followed by a malformed
+    // tail, and verify parseFrames re-encodes it (advancing records by
+    // BPF_WORDALIGN) so nextPendingFrame pops one frame per call, in order.
     var port = BpfPort{ .allocator = std.testing.allocator };
     port.scratch = try std.testing.allocator.alloc(u8, 4096);
     defer std.testing.allocator.free(port.scratch);
@@ -626,21 +625,21 @@ test "bpfPort frame chain parser (root-free)" {
     @memset(&raw, 0);
     const mk_hdr = struct {
         fn f(buf: []u8, caplen: usize) usize {
-            std.mem.writeInt(u32, buf[16..20], @intCast(caplen), .little);
-            std.mem.writeInt(u32, buf[20..24], @intCast(caplen), .little);
-            std.mem.writeInt(u16, buf[24..26], 28, .little);
-            return 28 + caplen;
+            std.mem.writeInt(u32, buf[8..12], @intCast(caplen), .little);
+            std.mem.writeInt(u32, buf[12..16], @intCast(caplen), .little);
+            std.mem.writeInt(u16, buf[16..18], 20, .little);
+            return 20 + caplen;
         }
     }.f;
     var off: usize = 0;
     off += mk_hdr(raw[off..], 41); // odd length — next record is word-aligned
     @memset(raw[off - 41 .. off], 0xaa);
-    off = bpfWordAlign(off); // 28 + 41 = 69 → aligned to 72
+    off = bpfWordAlign(off); // 20 + 41 = 61 → aligned to 64
     off += mk_hdr(raw[off..], 20);
     @memset(raw[off - 20 .. off], 0xbb);
     off += mk_hdr(raw[off..], 200); // caplen exceeds remaining — malformed
     // parseFrames walks self.scratch (the BPF read buffer) — feed it the
-    // crafted chain (120 valid bytes; the malformed tail is cut off).
+    // crafted chain (104 valid bytes; the malformed tail is cut off).
     @memcpy(port.scratch[0..160], raw[0..160]);
     port.pending_start = 0;
     port.pending_len = port.parseFrames(160);
