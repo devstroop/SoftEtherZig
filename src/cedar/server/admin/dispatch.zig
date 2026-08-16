@@ -26,10 +26,13 @@
 //! ## Error convention
 //!
 //! Mirrors C: every dispatch call returns a response Pack; on failure it
-//! carries `error = <raw error code>` (never `error = 1 / error_code`). An
-//! unknown `function_name` yields `error = ERR_NOT_SUPPORTED`. The transport
-//! (`rpc.zig`) treats a null return as "not supported" — that path is only a
-//! safety net (e.g. out-of-memory while building the response Pack).
+//! carries `error = <raw error code>` (the field C's `AdminDispatch` writes,
+//! and what `getErrorFromPack` reads) plus `error_code = <raw error code>` so
+//! the transport helpers `rpcIsOk`/`rpcGetError` (which read `error`/`error_code`)
+//! also see the real code. An unknown `function_name` yields
+//! `error = ERR_NOT_SUPPORTED`. The transport (`rpc.zig`) treats a null return
+//! as "not supported" — that path is only a safety net (e.g. out-of-memory
+//! while building the response Pack).
 
 const std = @import("std");
 const mem = std.mem;
@@ -135,6 +138,10 @@ pub const ServerHub = struct {
 /// session points at this (via `rpc.zig`'s `Rpc.param`).
 pub const Server = struct {
     allocator: Allocator,
+    /// Serializes access to the mutable collections (`hubs`/`listeners`,
+    /// `config_revision`): the transport accept path is per-connection
+    /// threaded, so concurrent admin connections share this state.
+    mutex: std.Thread.Mutex = .{},
 
     hashed_password: [sha1_size]u8 = [_]u8{0} ** sha1_size,
     server_type: u32 = server_type_standalone,
@@ -226,6 +233,11 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         .hub_name = rpc_self.hub_name,
     };
 
+    // Serialize concurrent admin connections against the shared hub/listener
+    // collections and `config_revision` (see `Server.mutex`).
+    server.mutex.lock();
+    defer server.mutex.unlock();
+
     const ret = allocator.create(Pack) catch return null;
     errdefer allocator.destroy(ret);
     ret.* = Pack.init(allocator);
@@ -265,6 +277,7 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
 
     if (err != err_no_error) {
         ret.addInt("error", err) catch return null;
+        ret.addInt("error_code", err) catch return null;
     }
     return ret;
 }
@@ -446,10 +459,12 @@ fn stGetServerStatus(a: *AdminCtx, t: *structs.RpcServerStatus, allocator: Alloc
 
 /// C `StSetServerPassword` (Admin.c:9765): a zero `hashed_password` (or a
 /// plain text password) is hashed with SHA-1 (`HashAdminPassword`), then the
-/// 20-byte hash is stored and the config revision bumped.
+/// 20-byte hash is stored and the config revision bumped. A non-empty hash
+/// that is not exactly `SHA1_SIZE` bytes is rejected (no silent truncation).
 fn stSetServerPassword(a: *AdminCtx, t: *structs.RpcSetPassword, allocator: Allocator) u32 {
     _ = allocator;
     if (!a.server_admin) return err_not_enough_right;
+    if (!validHash(t.hashed_password)) return err_invalid_parameter;
     var hashed: [sha1_size]u8 = [_]u8{0} ** sha1_size;
     copyToFixed(&hashed, t.hashed_password);
     if (isZero(&hashed)) {
@@ -528,14 +543,14 @@ fn stEnumHub(a: *AdminCtx, t: *structs.RpcEnumHub, allocator: Allocator) u32 {
 
     var count: usize = 0;
     for (a.server.hubs.items) |*hub| {
-        if (!a.server_admin and !mem.eql(u8, hub.name, a.hub_name)) continue;
+        if (!a.server_admin and !std.ascii.eqlIgnoreCase(hub.name, a.hub_name)) continue;
         count += 1;
     }
 
     t.hubs = allocator.alloc(structs.EnumHubItem, count) catch return err_internal_error;
     var i: usize = 0;
     for (a.server.hubs.items) |*hub| {
-        if (!a.server_admin and !mem.eql(u8, hub.name, a.hub_name)) continue;
+        if (!a.server_admin and !std.ascii.eqlIgnoreCase(hub.name, a.hub_name)) continue;
         const e = &t.hubs[i];
         e.* = .{};
         e.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
@@ -575,8 +590,9 @@ fn stCreateHub(a: *AdminCtx, t: *structs.RpcCreateHub, allocator: Allocator) u32
         return err_invalid_parameter;
     }
 
-    if (s.hubs.items.len > server_max_hubs) return err_too_many_hubs;
+    if (s.hubs.items.len >= server_max_hubs) return err_too_many_hubs;
     if (findHub(s, name) != null) return err_hub_already_exists;
+    if (!validHash(t.hashed_password) or !validHash(t.secure_password)) return err_invalid_parameter;
 
     var hashed: [sha1_size]u8 = [_]u8{0} ** sha1_size;
     var secure: [sha1_size]u8 = [_]u8{0} ** sha1_size;
@@ -610,7 +626,7 @@ fn stSetHub(a: *AdminCtx, t: *structs.RpcCreateHub, allocator: Allocator) u32 {
     const s = a.server;
     if (s.server_type == server_type_farm_member) return err_not_farm_controller;
     if (t.hub_name.len == 0 or !isSafeStr(t.hub_name)) return err_invalid_parameter;
-    if (!a.server_admin and !mem.eql(u8, a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
     if (t.hub_name.len == 0) return err_invalid_parameter;
     if (s.is_bridge) return err_not_supported;
     if (s.server_type == server_type_standalone and t.hub_type != hub_type_standalone) return err_invalid_parameter;
@@ -618,6 +634,7 @@ fn stSetHub(a: *AdminCtx, t: *structs.RpcCreateHub, allocator: Allocator) u32 {
 
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
     if (hub.hub_type != t.hub_type) return err_not_supported;
+    if (!validHash(t.hashed_password) or !validHash(t.secure_password)) return err_invalid_parameter;
 
     var hashed: [sha1_size]u8 = [_]u8{0} ** sha1_size;
     var secure: [sha1_size]u8 = [_]u8{0} ** sha1_size;
@@ -666,7 +683,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
 /// C `StGetHubStatus` (Admin.c:7935). CHECK_RIGHT, then a snapshot of the hub.
 fn stGetHubStatus(a: *AdminCtx, t: *structs.RpcHubStatus, allocator: Allocator) u32 {
     const s = a.server;
-    if (!a.server_admin and !mem.eql(u8, a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
     if (t.hub_name.len == 0) return err_invalid_parameter;
 
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
@@ -857,6 +874,12 @@ fn isZero(bytes: *const [sha1_size]u8) bool {
     return mem.allEqual(u8, bytes, 0);
 }
 
+/// A packed password hash is either empty ("derive from plain text") or
+/// exactly `SHA1_SIZE` bytes; anything else would be silently truncated.
+fn validHash(s: []const u8) bool {
+    return s.len == 0 or s.len == sha1_size;
+}
+
 fn copyToFixed(dst: *[sha1_size]u8, src: []const u8) void {
     @memset(dst, 0);
     const n = @min(src.len, sha1_size);
@@ -897,7 +920,7 @@ fn findListenerIndex(s: *Server, port: u32) ?usize {
 
 fn findHubIndex(s: *Server, name: []const u8) ?usize {
     for (s.hubs.items, 0..) |*hub, i| {
-        if (mem.eql(u8, hub.name, name)) return i;
+        if (std.ascii.eqlIgnoreCase(hub.name, name)) return i;
     }
     return null;
 }
@@ -944,6 +967,7 @@ fn assertOk(resp: *const Pack) !void {
 
 fn assertErr(resp: *const Pack, expected: u32) !void {
     try testing.expectEqual(expected, resp.getInt("error") orelse 0);
+    try testing.expectEqual(expected, resp.getInt("error_code") orelse 0);
 }
 
 test "server.admin_dispatch Test echoes IntValue into StrValue" {
@@ -1287,6 +1311,18 @@ test "server.admin_dispatch CreateHub adds a hub and validates input" {
     }
     try assertErr(dup_resp, err_hub_already_exists);
 
+    // Duplicate that differs only by case is still rejected (StrCmpi).
+    var case_req = try makeRequest(allocator, "CreateHub");
+    defer case_req.deinit();
+    try case_req.addStr("HubName", "vpn");
+    try case_req.addInt("HubType", hub_type_standalone);
+    var case_resp = try call(allocator, &server, true, "", "CreateHub", &case_req);
+    defer {
+        case_resp.deinit();
+        allocator.destroy(case_resp);
+    }
+    try assertErr(case_resp, err_hub_already_exists);
+
     // Empty hub name.
     var bad = try makeRequest(allocator, "CreateHub");
     defer bad.deinit();
@@ -1414,6 +1450,37 @@ test "server.admin_dispatch GetHubStatus returns a hub snapshot" {
     try testing.expectEqual(@as(u32, 3), resp.getInt("NumLogin").?);
     try testing.expectEqual(@as(u64, 1234), resp.getInt64("CreatedTime").?);
     try testing.expectEqual(@as(u64, 77), resp.getInt64("Send.UnicastBytes").?);
+}
+
+test "server.admin_dispatch rejects malformed credential hashes" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+
+    // SetServerPassword: a non-empty hash that is not exactly 20 bytes.
+    var pw = try makeRequest(allocator, "SetServerPassword");
+    defer pw.deinit();
+    try pw.addData("HashedPassword", &[_]u8{ 1, 2, 3 });
+    var pw_resp = try call(allocator, &server, true, "", "SetServerPassword", &pw);
+    defer {
+        pw_resp.deinit();
+        allocator.destroy(pw_resp);
+    }
+    try assertErr(pw_resp, err_invalid_parameter);
+
+    // CreateHub: a malformed SecurePassword is rejected without storing it.
+    var hub = try makeRequest(allocator, "CreateHub");
+    defer hub.deinit();
+    try hub.addStr("HubName", "VPN");
+    try hub.addInt("HubType", hub_type_standalone);
+    try hub.addData("SecurePassword", &[_]u8{ 4, 5, 6 });
+    var hub_resp = try call(allocator, &server, true, "", "CreateHub", &hub);
+    defer {
+        hub_resp.deinit();
+        allocator.destroy(hub_resp);
+    }
+    try assertErr(hub_resp, err_invalid_parameter);
+    try testing.expectEqual(@as(usize, 0), server.hubs.items.len);
 }
 
 test "server.admin_dispatch unknown function replies ERR_NOT_SUPPORTED" {
