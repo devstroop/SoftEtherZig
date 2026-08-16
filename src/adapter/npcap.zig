@@ -78,6 +78,15 @@ const PcapApi = struct {
     findalldevs: *const fn (*?*PcapIf, [*]u8) callconv(.c) c_int,
     freealldevs: *const fn (*PcapIf) callconv(.c) void,
 
+    /// Release the loaded DLL. Undoes `load()` on partially-initialized
+    /// open paths so a failed `open()` does not leak the module reference.
+    fn unload(self: *PcapApi) void {
+        if (self.dll) |dll| {
+            _ = kernel32.FreeLibrary(@ptrCast(@alignCast(dll)));
+            self.dll = null;
+        }
+    }
+
     fn load() !PcapApi {
         const dll = kernel32.LoadLibraryA("pcap.dll");
         if (dll == null) {
@@ -147,6 +156,13 @@ pub const NpcapPort = struct {
 
         const api = PcapApi.load() catch return error.NpcapNotInstalled;
         self.api = api;
+        // Every failure after this point must release the DLL reference so
+        // repeated opens of an unavailable/invalid interface do not leak a
+        // pcap.dll module handle (PR #150 review).
+        errdefer {
+            self.api.?.unload();
+            self.api = null;
+        }
 
         // Resolve the Npcap device name for the requested interface.
         var dev_name_buf: [512]u8 = undefined;

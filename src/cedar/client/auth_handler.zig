@@ -218,9 +218,11 @@ pub fn run(client: *VpnClient) !void {
     // the bridge pump (loop.zig) and the monitor pump (monitor.zig) carry
     // no UDP data channel in v1 (proposal §4.6) — their pumps poll a
     // single TLS socket. Monitor inherits the mirror-only drain.
-    // getNetworkMode() reads under the client mutex (connect() released
-    // it while authenticating; softether_set_network_mode may acquire it).
-    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.getNetworkMode() == .client) {
+    // Uses the mode frozen at connect entry (`session_mode`), the same
+    // value session_opts was built from, so a concurrent
+    // softether_set_network_mode can't split auth from pump dispatch
+    // (PR #150 review).
+    if (auth_result.udp_accel_enabled and client.config.udp_acceleration and client.session_mode == .client) {
         startUdpAcceleration(client, auth_result);
     }
 

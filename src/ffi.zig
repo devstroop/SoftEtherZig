@@ -601,7 +601,9 @@ export fn softether_get_bridge_stats(client: ?*const VpnClient, out: ?*CBridgeSt
     // Contract: zeroed when bridge mode is not active or the pump is not
     // running (the pump also resets the cached snapshot at teardown, but
     // the flag guard covers the pre-start / post-stop windows too).
-    const st = if (c.session_mode == .bridge and c.data_loop_running) c.bridge_stats else lib.bridge.loop.BridgeStats{};
+    // snapshotBridgeStats() copies the snapshot under the client mutex so
+    // the read cannot race the pump's 1 Hz store (PR #150 review).
+    const st = if (c.session_mode == .bridge and c.data_loop_running) c.snapshotBridgeStats() else lib.bridge.loop.BridgeStats{};
     s.* = .{
         .fdb_entries = st.fdb_entries,
         .forwarded = st.forwarded,
@@ -627,7 +629,9 @@ export fn softether_get_monitor_stats(client: ?*const VpnClient, out: ?*CMonitor
     // Contract: zeroed when monitor mode is not active or the pump is not
     // running (the pump also resets the cached snapshot at teardown, but
     // the flag guard covers the pre-start / post-stop windows too).
-    const st = if (c.session_mode == .monitor and c.data_loop_running) c.monitor_stats else lib.monitor.MonitorStats{};
+    // snapshotMonitorStats() copies the snapshot under the client mutex so
+    // the read cannot race the pump's 1 Hz store (PR #150 review).
+    const st = if (c.session_mode == .monitor and c.data_loop_running) c.snapshotMonitorStats() else lib.monitor.MonitorStats{};
     s.* = .{
         .frames_captured = st.frames_captured,
         .frames_dropped = st.frames_dropped,
