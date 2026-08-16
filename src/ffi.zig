@@ -46,6 +46,10 @@ fn iosWriteStderr(text: []const u8) void {
 const ExternalLogFn = *const fn (level: c_int, msg: [*:0]const u8) callconv(.c) void;
 var external_log_fn: ?ExternalLogFn = null;
 
+/// Fallback log buffer used when heap allocation fails. Its address is a
+/// sentinel so softether_free_log_text() can skip it (it is not heap-owned).
+var fallback_log_buf: [2048]u8 = .{0} ** 2048;
+
 /// Runtime log level override. 0=err, 1=warn, 2=info, 3=debug.
 /// Values 4-5 from the old 0-5 API are mapped to 3 (debug).
 /// When set to a value lower than the caller's level, the message is skipped
@@ -62,6 +66,18 @@ var external_log_fn_exclusive: bool = true;
 
 export fn softether_set_log_callback(cb: ?ExternalLogFn) void {
     external_log_fn = cb;
+}
+
+/// Free a log message previously passed to the log callback. Required for
+/// hosts that read the message asynchronously (e.g. NativeCallable.listener):
+/// every callback invocation transfers ownership of a heap-allocated message
+/// to the host, which must release it here after copying.
+export fn softether_free_log_text(ptr: [*c]const u8) void {
+    if (ptr == null) return;
+    const text: [*:0]const u8 = @ptrCast(ptr);
+    // Never free the static fallback buffer (only used on alloc failure).
+    if (@intFromPtr(text) == @intFromPtr(&fallback_log_buf)) return;
+    ffi_allocator.free(text[0..std.mem.len(text)]);
 }
 
 /// Set whether the external log callback is exclusive (stops further output)
@@ -95,6 +111,12 @@ fn libsoftetherLogFn(
     //    may want all levels regardless of runtime_log_level. Runs before the
     //    level gate so debug messages still reach the external sink.
     //    Uses the original scope_prefix ++ fmt format to preserve compatibility.
+    //
+    //    IMPORTANT: the message is HEAP-ALLOCATED and must be freed by the host
+    //    via softether_free_log_text(). Hosts using NativeCallable.listener
+    //    (async dispatch to an isolate event loop) MUST NOT read a stack-local
+    //    buffer after the callback returns — that is use-after-return and
+    //    produces garbage. Ownership transfers to the host on every call.
     if (external_log_fn) |cb| {
         var cb_buf: [2048]u8 = .{0} ** 2048;
         const scope_prefix = if (scope == .default) "" else "[" ++ @tagName(scope) ++ "] ";
@@ -102,13 +124,22 @@ fn libsoftetherLogFn(
             cb_buf[cb_buf.len - 1] = 0;
             break :blk @as([:0]const u8, cb_buf[0 .. cb_buf.len - 1 :0]);
         };
+        const owned = ffi_allocator.dupeZ(u8, cb_text) catch blk: {
+            // Allocation failed — fall back to a static buffer (owned by the
+            // library for the process lifetime) so the message is never lost.
+            // Its content may be overwritten by later log calls; the host
+            // should copy synchronously when it observes this fallback.
+            @memcpy(fallback_log_buf[0..cb_text.len], cb_text);
+            fallback_log_buf[cb_text.len] = 0;
+            break :blk @as([:0]u8, fallback_log_buf[0..cb_text.len :0]);
+        };
         const lvl: c_int = switch (level) {
             .err => 0,
             .warn => 1,
             .info => 2,
             .debug => 3,
         };
-        cb(lvl, cb_text.ptr);
+        cb(lvl, owned.ptr);
         // By default the external callback is exclusive (the FFI contract says
         // this sink is set by hosts that can't read stderr). When
         // external_log_fn_exclusive is true the log is consumed here; when
@@ -315,6 +346,7 @@ pub const CEventType = enum(c_int) {
     disconnected = 2,
     stats_updated = 3,
     error_occurred = 4,
+    dhcp_configured = 5,
 };
 
 /// C event callback function pointer
@@ -1198,10 +1230,7 @@ fn ffiDispatchEvent(event: client_mod.ClientEvent, ud: ?*anyopaque) void {
         .disconnected => .disconnected,
         .stats_updated => .stats_updated,
         .error_occurred => .error_occurred,
-        else => {
-            std.log.warn("ffiDispatchEvent: unhandled event type (new variant added?)", .{});
-            return;
-        },
+        .dhcp_configured => .dhcp_configured,
     };
     const state: CState = switch (event) {
         .state_changed => |sc| mapState(sc.new_state),
