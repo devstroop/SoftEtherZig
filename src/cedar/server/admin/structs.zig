@@ -433,6 +433,42 @@ pub const RpcSetPassword = struct {
     }
 };
 
+/// Issue #88 `SetPassword` — user password change (project-defined; no C RPC).
+/// Classic C `RPC_SET_PASSWORD` (Admin.h:218) carried `HubName` + `Name`;
+/// modern C dropped them (server-only `SetServerPassword`). This endpoint
+/// restores the user-scoped variant with the modern SHA1 `HashedPassword`
+/// element, so the wire is `HubName`, `Name`, `HashedPassword`,
+/// `PlainTextPassword`.
+pub const RpcSetUserPassword = struct {
+    hub_name: []const u8 = "",
+    name: []const u8 = "",
+    hashed_password: []const u8 = "",
+    plain_text_password: []const u8 = "",
+
+    pub fn inRpc(self: *RpcSetUserPassword, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        self.hashed_password = try dupData(allocator, p.getData("HashedPassword"));
+        self.plain_text_password = try dupStr(allocator, p.getStr("PlainTextPassword"));
+    }
+
+    pub fn outRpc(self: *const RpcSetUserPassword, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("Name", self.name);
+        try p.addData("HashedPassword", self.hashed_password);
+        try p.addStr("PlainTextPassword", self.plain_text_password);
+    }
+
+    pub fn free(self: *RpcSetUserPassword, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.name);
+        allocator.free(self.hashed_password);
+        allocator.free(self.plain_text_password);
+        self.* = .{};
+    }
+};
+
 /// C `RPC_STR` (Admin.h:206) — single string (e.g. `GetServerCipher`).
 pub const RpcStr = struct {
     string: []const u8 = "",
@@ -1078,7 +1114,6 @@ pub const RpcDeleteUser = struct {
     }
 };
 
-
 // ============================================================================
 // Sessions & connections (C: Admin.h RPC_ENUM_SESSION / RPC_SESSION_STATUS /
 // RPC_DELETE_SESSION / RPC_ENUM_CONNECTION / RPC_DISCONNECT_CONNECTION)
@@ -1615,6 +1650,30 @@ pub const RpcDeleteTable = struct {
 // Group 8 — Log files (C: Admin.c InRpcEnumLogFile)
 // ============================================================================
 
+/// Issue #88 `GetTraffic` — hub traffic snapshot (project-defined; no C RPC).
+/// Mirrors the `TRAFFIC` block C embeds in `RPC_HUB_STATUS` (`GetHubStatus`),
+/// exposed standalone with the hub name for scope.
+pub const RpcGetTraffic = struct {
+    hub_name: []const u8 = "",
+    traffic: Traffic = .{},
+
+    pub fn inRpc(self: *RpcGetTraffic, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.traffic.inRpc(p);
+    }
+
+    pub fn outRpc(self: *const RpcGetTraffic, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try self.traffic.outRpc(p);
+    }
+
+    pub fn free(self: *RpcGetTraffic, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
 /// C `RPC_ENUM_LOG_FILE_ITEM` (Admin.h:887) — one entry of `EnumLogFile`.
 pub const EnumLogFileItem = struct {
     file_path: []const u8 = "",
@@ -1814,6 +1873,8 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
         RpcEnumIpTable => try t.inRpc(allocator, p),
         RpcDeleteTable => try t.inRpc(allocator, p),
         RpcEnumLogFile => try t.inRpc(allocator, p),
+        RpcSetUserPassword => try t.inRpc(allocator, p),
+        RpcGetTraffic => try t.inRpc(allocator, p),
         else => @compileError("no inRpc for " ++ @typeName(T)),
     }
 }
@@ -1840,6 +1901,8 @@ fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
         RpcEnumIpTable => try t.outRpc(p),
         RpcDeleteTable => try t.outRpc(p),
         RpcEnumLogFile => try t.outRpc(p),
+        RpcSetUserPassword => try t.outRpc(p),
+        RpcGetTraffic => try t.outRpc(p),
         else => @compileError("no outRpc for " ++ @typeName(T)),
     }
 }
@@ -2405,4 +2468,42 @@ test "server.admin_structs RpcEnumLogFile round-trip" {
     try testing.expectEqualStrings("srv1", r.items[0].server_name);
     try testing.expectEqual(@as(u32, 2048), r.items[0].file_size);
     try testing.expectEqual(@as(u64, 555), r.items[0].updated_time);
+}
+
+test "server.admin_structs RpcSetUserPassword round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcSetUserPassword{
+        .hub_name = "VPN",
+        .name = "Alice",
+        .hashed_password = &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 },
+        .plain_text_password = "s3" ++ "cret",
+    };
+    var r = RpcSetUserPassword{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcSetUserPassword, &v, &r);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqualStrings("Alice", r.name);
+    try testing.expectEqualSlices(u8, v.hashed_password, r.hashed_password);
+    try testing.expectEqualStrings("s3cret", r.plain_text_password);
+}
+
+test "server.admin_structs RpcGetTraffic round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcGetTraffic{
+        .hub_name = "VPN",
+        .traffic = .{
+            .recv_broadcast_bytes = 100,
+            .send_unicast_count = 42,
+            .recv_unicast_bytes = 7,
+        },
+    };
+    var r = RpcGetTraffic{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcGetTraffic, &v, &r);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqual(@as(u64, 100), r.traffic.recv_broadcast_bytes);
+    try testing.expectEqual(@as(u64, 42), r.traffic.send_unicast_count);
+    try testing.expectEqual(@as(u64, 7), r.traffic.recv_unicast_bytes);
 }
