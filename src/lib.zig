@@ -85,6 +85,7 @@ pub const server = struct {
     pub const auth = @import("cedar/server/auth.zig");
     pub const session = @import("cedar/server/session.zig");
     pub const session_main = @import("cedar/server/session_main.zig");
+    pub const session_registry = @import("cedar/server/session_registry.zig");
     pub const listener = @import("cedar/server/listener.zig");
     pub const hub = @import("cedar/server/hub.zig");
     pub const accept = @import("cedar/server/accept.zig");

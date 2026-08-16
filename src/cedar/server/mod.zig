@@ -10,6 +10,8 @@
 //!   fast RC4 / classic AES, per-connection cipher state)
 //! - `session_main.zig` — SessionMain data loop: ConnectionReceive/Send
 //!   framing orchestration over a TunnelConnection + hub PacketAdapter
+//! - `session_registry.zig` — live session/connection registry + force-stop
+//!   (feeds the admin RPC dispatcher, issue #88)
 //! - `listener.zig` — Listener layer: per-port accept threads, DoS gate,
 //!   listener registry
 //! - `hub.zig` — Virtual Hub L2 switch: StorePacket (MAC/IP tables, unicast
@@ -31,6 +33,7 @@
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
 pub const session_main = @import("session_main.zig");
+pub const session_registry = @import("session_registry.zig");
 pub const listener = @import("listener.zig");
 pub const hub = @import("hub.zig");
 pub const accept = @import("accept.zig");
