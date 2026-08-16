@@ -373,6 +373,8 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcDisconnectConnection, &a, allocator, request, ret, stDisconnectConnection);
     } else if (mem.eql(u8, function_name, "EnumUser")) {
         err = dispatchCall(structs.RpcEnumUser, &a, allocator, request, ret, stEnumUser);
+    } else if (mem.eql(u8, function_name, "GetUser")) {
+        err = dispatchCall(structs.RpcSetUser, &a, allocator, request, ret, stGetUser);
     } else if (mem.eql(u8, function_name, "CreateUser")) {
         err = dispatchCall(structs.RpcSetUser, &a, allocator, request, ret, stCreateUser);
     } else if (mem.eql(u8, function_name, "SetUser")) {
@@ -1061,6 +1063,43 @@ fn stEnumUser(a: *AdminCtx, t: *structs.RpcEnumUser, allocator: Allocator) u32 {
         e.expires = user.expire_time;
     }
     s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StGetUser` (Admin.c:6048). Returns the account settings in a
+/// `RPC_SET_USER`; unlike `SetUser` there is no canonicalization or
+/// wildcard check (C only validates `IsUserName`). Divergence from C: the
+/// stored model keeps only `password_hash` (SHA-0 of the password), so the
+/// returned `NtLmSecureHash` is always empty and `Policy` is always null —
+/// the C server returns both from `AUTHPASSWORD` / `USER.Policy`.
+fn stGetUser(a: *AdminCtx, t: *structs.RpcSetUser, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!isUserName(t.name)) return err_invalid_parameter;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    const user = hub.findUser(t.name) orelse return err_object_not_found;
+
+    const group_name = dupStr(allocator, user.group_name) catch return err_internal_error;
+    const realname = dupStr(allocator, user.realname) catch return err_internal_error;
+    const note = dupStr(allocator, user.note) catch return err_internal_error;
+
+    allocator.free(t.group_name);
+    allocator.free(t.realname);
+    allocator.free(t.note);
+    t.group_name = group_name;
+    t.realname = realname;
+    t.note = note;
+    t.created_time = user.created_time;
+    t.updated_time = user.updated_time;
+    t.expire_time = user.expire_time;
+    t.auth_type = @intFromEnum(user.auth_type);
+    t.hashed_key = if (user.auth_type == .password) user.password_hash else null;
+    t.ntlm_secure_hash = null;
+    t.num_login = user.num_login;
+    t.traffic = user.traffic;
     return err_no_error;
 }
 
@@ -2506,6 +2545,98 @@ test "server.admin_dispatch DeleteUser removes and reports missing" {
         allocator.destroy(bad_resp);
     }
     try assertErr(bad_resp, err_invalid_parameter);
+}
+
+test "server.admin_dispatch GetUser returns account settings" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hash = auth.hashPassword("s3cret", "Alice");
+    var create = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer create.deinit();
+    try create.addStr("function_name", "CreateUser");
+    try create.addData("HashedKey", &hash);
+    try create.addInt("AuthType", 1);
+    try create.addStrEx("GroupName", "Security", 0);
+    try create.addUniStrEx("Realname", "Alice Smith", 0);
+    try create.addUniStrEx("Note", "ops account", 0);
+    var create_resp = try call(allocator, &server, true, "", "CreateUser", &create);
+    defer {
+        create_resp.deinit();
+        allocator.destroy(create_resp);
+    }
+    try assertOk(create_resp);
+
+    var get = try makeSetUserRequest(allocator, "VPN", "Alice");
+    defer get.deinit();
+    try get.addStr("function_name", "GetUser");
+    var get_resp = try call(allocator, &server, true, "", "GetUser", &get);
+    defer {
+        get_resp.deinit();
+        allocator.destroy(get_resp);
+    }
+    try assertOk(get_resp);
+    try testing.expectEqualStrings("VPN", get_resp.getStr("HubName").?);
+    try testing.expectEqualStrings("Alice", get_resp.getStr("Name").?);
+    try testing.expectEqualStrings("Security", get_resp.getStr("GroupName").?);
+    try testing.expectEqualStrings("Alice Smith", get_resp.getUniStr("Realname").?);
+    try testing.expectEqualStrings("ops account", get_resp.getUniStr("Note").?);
+    try testing.expectEqual(@as(u32, 1), get_resp.getInt("AuthType").?);
+    try testing.expectEqualSlices(u8, &hash, get_resp.getData("HashedKey").?[0..20]);
+
+    // Unknown user reports ERR_OBJECT_NOT_FOUND.
+    var miss = try makeSetUserRequest(allocator, "VPN", "Nobody");
+    defer miss.deinit();
+    try miss.addStr("function_name", "GetUser");
+    var miss_resp = try call(allocator, &server, true, "", "GetUser", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_object_not_found);
+}
+
+test "server.admin_dispatch GetUser validates name and hub rights" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Invalid name.
+    var bad = try makeSetUserRequest(allocator, "VPN", "administrator");
+    defer bad.deinit();
+    try bad.addStr("function_name", "GetUser");
+    var bad_resp = try call(allocator, &server, true, "", "GetUser", &bad);
+    defer {
+        bad_resp.deinit();
+        allocator.destroy(bad_resp);
+    }
+    try assertErr(bad_resp, err_invalid_parameter);
+
+    // Missing hub.
+    var nohub = try makeSetUserRequest(allocator, "Elsewhere", "Alice");
+    defer nohub.deinit();
+    try nohub.addStr("function_name", "GetUser");
+    var nohub_resp = try call(allocator, &server, true, "", "GetUser", &nohub);
+    defer {
+        nohub_resp.deinit();
+        allocator.destroy(nohub_resp);
+    }
+    try assertErr(nohub_resp, err_hub_not_found);
+
+    // Hub admin cannot read another hub.
+    try server.addHub("Other", hub_type_standalone);
+    var other = try makeSetUserRequest(allocator, "Other", "Alice");
+    defer other.deinit();
+    try other.addStr("function_name", "GetUser");
+    var other_resp = try call(allocator, &server, false, "VPN", "GetUser", &other);
+    defer {
+        other_resp.deinit();
+        allocator.destroy(other_resp);
+    }
+    try assertErr(other_resp, err_not_enough_right);
 }
 /// Stands in for `SessionMain` in admin tests: `requestStop` flips `halt`, and
 /// the padding makes the store land in the fake's `halt` (same layout trick as
