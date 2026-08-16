@@ -141,6 +141,7 @@ pub const ServerState = struct {
     auth_hub: ?softether.server.auth.Hub = null,
     switch_hub: ?*softether.server.hub.Hub = null,
     server_ctx: ?*softether.server.accept.ServerContext = null,
+    session_registry: ?*softether.server.session_registry.SessionRegistry = null,
     listeners: std.ArrayListUnmanaged(*softether.server.listener.Listener) = .{},
 
     pub fn init(allocator: std.mem.Allocator, cli_args: CliArgs) ServerState {
@@ -161,6 +162,12 @@ pub const ServerState = struct {
     pub fn deinit(self: *ServerState) void {
         for (self.listeners.items) |listener| listener.stop();
         self.listeners.deinit(self.allocator);
+
+        if (self.session_registry) |registry| {
+            registry.deinit();
+            self.allocator.destroy(registry);
+        }
+        self.session_registry = null;
 
         if (self.server_ctx) |ctx| self.allocator.destroy(ctx);
         self.server_ctx = null;
@@ -356,6 +363,10 @@ fn buildServer(state: *ServerState) !void {
 
     state.switch_hub = try softether.server.hub.Hub.init(state.allocator, default_hub_name);
 
+    const registry = try state.allocator.create(softether.server.session_registry.SessionRegistry);
+    registry.* = softether.server.session_registry.SessionRegistry.init(state.allocator);
+    state.session_registry = registry;
+
     const ctx = try state.allocator.create(softether.server.accept.ServerContext);
     ctx.* = .{
         .allocator = state.allocator,
@@ -363,6 +374,7 @@ fn buildServer(state: *ServerState) !void {
         .key_pem = state.key_pem.?,
         .auth_hub = &state.auth_hub.?,
         .switch_hub = state.switch_hub.?,
+        .session_registry = registry,
     };
     state.server_ctx = ctx;
 }

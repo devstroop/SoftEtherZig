@@ -47,6 +47,7 @@ const hub = @import("hub.zig");
 const session_mod = @import("session.zig");
 const ServerSession = session_mod.ServerSession;
 const SessionMain = @import("session_main.zig").SessionMain;
+const session_registry_mod = @import("session_registry.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -106,6 +107,10 @@ pub const ServerContext = struct {
     auth_hub: *auth_mod.Hub,
     /// L2 switch hub (hub.zig): the data-plane forwarding tables.
     switch_hub: *hub.Hub,
+    /// Live session/connection registry (session_registry.zig): populated by
+    /// `runSession`, read/force-stopped by the admin RPC dispatcher (issue
+    /// #88). The vpnserver main owns the underlying value.
+    session_registry: *session_registry_mod.SessionRegistry,
     /// Monotonic counter for session/connection naming.
     session_counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 };
@@ -113,7 +118,6 @@ pub const ServerContext = struct {
 /// The `AcceptHandler` entry point (listener.zig). Runs on the per-connection
 /// thread. On failure the connection is closed and the error is logged.
 pub fn acceptConnection(ctx: *anyopaque, sock: *TcpSocket, peer_ip: u32, peer_port: u16) void {
-    _ = peer_port;
     const self: *ServerContext = @ptrCast(@alignCast(ctx));
 
     // TLS accept with the server certificate (C: `ConnectionAccept` →
@@ -130,7 +134,7 @@ pub fn acceptConnection(ctx: *anyopaque, sock: *TcpSocket, peer_ip: u32, peer_po
     };
     defer tls_sock.close();
 
-    handleConnection(self, &tls_sock) catch |err| {
+    handleConnection(self, &tls_sock, peer_ip, peer_port) catch |err| {
         log.info("connection from {s} rejected: {s}", .{ fmtIp(peer_ip), @errorName(err) });
     };
 }
@@ -148,7 +152,7 @@ fn fmtIp(ip: u32) [15]u8 {
 /// The full accept sequence for an established TLS connection:
 /// signature → hello → auth/welcome, then the data plane. Exposed for the
 /// end-to-end tests; `acceptConnection` wraps it in TLS accept + close.
-pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket) !void {
+pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket, peer_ip: u32, peer_port: u16) !void {
     // 1. Signature upload — WaterMark GIF POSTed to connect.cgi. The server
     //    validates it and sends NO reply (C `ServerDownloadSignature`).
     try receiveSignature(self, tls_sock);
@@ -166,7 +170,7 @@ pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket) !void {
     defer established.deinit(self.allocator);
 
     // 4. Data plane — attach to the hub and run the session loop.
-    try runSession(self, tls_sock, &established);
+    try runSession(self, tls_sock, &established, peer_ip, peer_port);
 }
 
 /// Read and validate the connect.cgi signature POST.
@@ -263,10 +267,13 @@ const EstablishedSession = struct {
     session_name: []u8,
     /// Owned connection name.
     connection_name: []u8,
+    /// Owned authenticated username (registry display; case as sent).
+    username: []u8,
 
     fn deinit(self: *EstablishedSession, allocator: Allocator) void {
         allocator.free(self.session_name);
         allocator.free(self.connection_name);
+        allocator.free(self.username);
     }
 };
 
@@ -327,10 +334,13 @@ fn authenticate(
     defer self.allocator.free(welcome);
     try http.sendHttpResponse(tls_sock, welcome);
 
+    const username_owned = try self.allocator.dupe(u8, username);
+
     return EstablishedSession{
         .session = session,
         .session_name = session_name,
         .connection_name = connection_name,
+        .username = username_owned,
     };
 }
 
@@ -372,7 +382,7 @@ fn sendAuthError(self: *ServerContext, tls_sock: *tls.TlsSocket, code: u32, no_s
 /// L2 hub, frame the TLS socket with a `TunnelConnection`, and drive both with
 /// `SessionMain` until the peer disconnects, the session times out, or stop is
 /// requested. Any `SessionEnd` reason is a normal teardown.
-fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *EstablishedSession) !void {
+fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *EstablishedSession, peer_ip: u32, peer_port: u16) !void {
     const pa = try hub.SessionPa.init(self.switch_hub, self.allocator, established.session_name);
     defer pa.deinit();
     self.switch_hub.attach(pa);
@@ -385,6 +395,30 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
         .timeout_ms = established.session.timeout,
     });
     defer main.deinit();
+
+    // Register with the session registry (issue #88) so the admin dispatcher
+    // can enumerate and force-stop this session. Unregister runs before
+    // `main.deinit` (LIFO) so the record's `main` pointer stays valid until
+    // the registry frees it.
+    const rec = try self.allocator.create(session_registry_mod.SessionRecord);
+    rec.* = .{
+        .session_name = try self.allocator.dupe(u8, established.session_name),
+        .connection_name = try self.allocator.dupe(u8, established.connection_name),
+        .username = try self.allocator.dupe(u8, established.username),
+        .hub_name = self.auth_hub.name,
+        .peer_ip = peer_ip,
+        .peer_port = peer_port,
+        .created_time = std.time.milliTimestamp(),
+        .main = &main,
+    };
+    self.session_registry.register(rec) catch {
+        self.allocator.free(rec.session_name);
+        self.allocator.free(rec.connection_name);
+        self.allocator.free(rec.username);
+        self.allocator.destroy(rec);
+        return error.SessionRegistryFull;
+    };
+    defer _ = self.session_registry.unregister(rec.session_name);
 
     log.info("session {s} established on hub {s}", .{ established.session_name, self.auth_hub.name });
     main.run() catch |err| switch (err) {
@@ -487,11 +521,14 @@ const EndToEnd = struct {
     client: tls.TlsSocket,
     accept_ctx: *AcceptThreadCtx,
     sctx: *ServerContext,
+    registry: *session_registry_mod.SessionRegistry,
     client_closed: bool = false,
 
     fn deinit(self: *EndToEnd) void {
         if (!self.client_closed) self.client.close();
         self.thread.join();
+        self.registry.deinit();
+        self.allocator.destroy(self.registry);
         self.allocator.destroy(self.accept_ctx);
         self.allocator.destroy(self.sctx);
     }
@@ -509,17 +546,22 @@ fn startEndToEnd(
     if (std.os.linux.E.init(rc) != .SUCCESS) return error.SocketPairFailed;
 
     const sctx = try allocator.create(ServerContext);
+    const registry = try allocator.create(session_registry_mod.SessionRegistry);
+    registry.* = session_registry_mod.SessionRegistry.init(allocator);
     sctx.* = .{
         .allocator = allocator,
         .cert_pem = cert_pem,
         .key_pem = key_pem,
         .auth_hub = auth_hub,
         .switch_hub = switch_hub,
+        .session_registry = registry,
     };
     const accept_ctx = try allocator.create(AcceptThreadCtx);
     accept_ctx.* = .{ .ctx = sctx, .fd = fds[0] };
     errdefer allocator.destroy(accept_ctx);
     errdefer allocator.destroy(sctx);
+    errdefer allocator.destroy(registry);
+    errdefer registry.deinit();
     const thread = try std.Thread.spawn(.{}, acceptThread, .{accept_ctx});
 
     test_dial_fd = @intCast(fds[1]);
@@ -540,6 +582,7 @@ fn startEndToEnd(
         .client = client,
         .accept_ctx = accept_ctx,
         .sctx = sctx,
+        .registry = registry,
     };
 }
 
