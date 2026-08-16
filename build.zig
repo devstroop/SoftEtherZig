@@ -394,6 +394,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Use the LLVM backend for the shared library. The default self-hosted
+    // x86_64 backend corrupts caller-saved registers around __tls_get_addr()
+    // calls (threadlocal access) when the library is loaded via dlopen, which
+    // makes std.crypto.random's thread-local CSPRNG crash with a SIGSEGV
+    // (upstream ziglang/zig#30183, fixed in 0.16.0-dev via ziglang/zig#30202).
+    // The Flutter app, Python, and other hosts load this via dlopen, so this
+    // is required for correctness there.
+    shared_lib.use_llvm = true;
+
     // Leave room for install_name_tool to rewrite dylib install name at bundle time
     if (target_os == .macos) {
         shared_lib.headerpad_max_install_names = true;

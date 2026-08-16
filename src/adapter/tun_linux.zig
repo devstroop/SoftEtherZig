@@ -96,8 +96,11 @@ pub const TunLinuxDevice = struct {
             return TunLinuxError.NotLinux;
         }
 
-        // Open /dev/net/tun
-        const fd = posix.open("/dev/net/tun", .{ .ACCMODE = .RDWR }, 0) catch |err| {
+        // Open /dev/net/tun non-blocking — the data loop polls POLLIN and
+        // drains up to 64 packets per iteration; a blocking fd stalls the
+        // whole loop (and TLS keepalives) on the second read when the
+        // kernel queue is momentarily empty.
+        const fd = posix.open("/dev/net/tun", .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch |err| {
             std.log.err("Failed to open /dev/net/tun: {}", .{err});
             if (err == error.AccessDenied) {
                 return TunLinuxError.PermissionDenied;

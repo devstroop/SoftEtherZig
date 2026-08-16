@@ -329,10 +329,24 @@ typedef void (*softether_log_callback_t)(int level, const char* msg);
  * std.log, replacing platform-default logging (Android __android_log, iOS stderr).
  * Pass NULL to unregister and fall back to the default sink.
  *
+ * Ownership: every message delivered to the callback is a heap-allocated
+ * NUL-terminated string owned by libsoftether. The host MUST call
+ * softether_free_log_text(msg) after copying the message, or the memory
+ * leaks. Only a static fallback buffer (never the heap) is used on
+ * allocation failure, and softether_free_log_text skips it — always call
+ * the free for every callback invocation.
+ *
  * Required on iOS NetworkExtension hosts where stderr capture races with
  * extension teardown — register a callback that calls os_log directly.
  */
 void softether_set_log_callback(softether_log_callback_t cb);
+
+/**
+ * Release a log message previously delivered via softether_log_callback_t.
+ * The message pointer is valid only until this call returns; it must not be
+ * retained. Passing the static fallback buffer (or NULL) is a no-op.
+ */
+void softether_free_log_text(const char* msg);
 
 /**
  * Bind libsoftether's outbound TLS sockets to a specific network interface
