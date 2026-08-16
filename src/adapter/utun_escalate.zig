@@ -396,11 +396,9 @@ pub fn escalatedBpfOpen(allocator: std.mem.Allocator, ifname: []const u8) Escala
     // Spawn the setuid helper in --bpf-open mode (no prompt on fast path).
     // stderr is piped (not inherited): Zig's test runner fails any test
     // whose stderr receives output, and the helper writes diagnostics there.
-    var cmd_buf: [1200]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "{s} {s} --bpf-open {s}", .{ INSTALLED_HELPER_PATH, sock_path, ifname }) catch {
-        return EscalationError.PathTooLong;
-    };
-    var child = std.process.Child.init(&[_][]const u8{ "sh", "-c", cmd }, allocator);
+    // Executed via an argument vector (no shell) so a user-supplied `ifname`
+    // can never inject shell syntax (PR #150 review).
+    var child = std.process.Child.init(&[_][]const u8{ INSTALLED_HELPER_PATH, sock_path, "--bpf-open", ifname }, allocator);
     child.stderr_behavior = .Pipe;
     child.spawn() catch {
         return EscalationError.HelperLaunchFailed;

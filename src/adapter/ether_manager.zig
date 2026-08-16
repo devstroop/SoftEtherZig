@@ -215,7 +215,11 @@ pub fn etherManagerPort(port: *EtherManagerPort, ifname: []const u8) NetPort {
             return asPort(impl_).inner.fd;
         }
         fn getName(impl_: *anyopaque) []const u8 {
-            return asPort(impl_).ifname;
+            const p = asPort(impl_);
+            // Report the interface actually bound for I/O after open()
+            // resolves the best-effort NIC (PR #150 review). Before open,
+            // inner.ifname is empty, so fall back to the configured name.
+            return if (p.inner.ifname.len != 0) p.inner.ifname else p.ifname;
         }
         fn getMac(impl_: *anyopaque) ?[6]u8 {
             return asPort(impl_).inner.mac;

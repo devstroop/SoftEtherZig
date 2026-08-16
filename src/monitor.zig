@@ -175,6 +175,11 @@ pub const PcapWriter = struct {
         std.mem.writeInt(u32, hdr[12..16], incl_len, .little);
         self.file.writeAll(&hdr) catch {
             self.write_errors += 1;
+            // Partial header: truncate back to the last good record boundary
+            // and stop appending, exactly like a partial payload, so the
+            // file stays parseable (PR #150 review).
+            self.file.setEndPos(rec_start) catch {};
+            self.faulted = true;
             return;
         };
         self.file.writeAll(frame) catch {
@@ -314,9 +319,9 @@ test "monitor ring: bounded, drop-and-count on overflow" {
 test "monitor ring: wraps past head" {
     var ring = try MonitorRing.init(testing.allocator, 2);
     defer ring.deinit();
-    try ring.push("a");
-    try ring.push("b");
-    try ring.push("c"); // full — dropped (no eviction)
+    _ = ring.push("a");
+    _ = ring.push("b");
+    _ = ring.push("c"); // full — dropped (no eviction)
     try testing.expectEqual(@as(u32, 2), ring.used());
     var it = ring.iterator();
     try testing.expectEqualStrings("a", it.next().?);
@@ -349,9 +354,10 @@ test "pcap writer: global header + Ethernet records, tcpdump-readable shape" {
     try testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, buf[6..8], .little));
     try testing.expectEqual(@as(u32, 1514), std.mem.readInt(u32, buf[16..20], .little)); // snaplen
     try testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, buf[20..24], .little)); // LINKTYPE_ETHERNET
-    // First record header: incl/orig len == 64.
-    try testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, buf[24..28], .little));
-    try testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, buf[28..32], .little));
+    // First record header (at file offset 24): ts_sec@0, ts_usec@4,
+    // incl_len@8, orig_len@12 → incl_len lands at bytes 32..36.
+    try testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, buf[32..36], .little));
+    try testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, buf[36..40], .little));
 }
 
 test "monitor loop: capture counts, budget clamp, overflow" {

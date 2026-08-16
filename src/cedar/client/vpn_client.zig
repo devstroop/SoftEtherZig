@@ -785,6 +785,47 @@ pub const VpnClient = struct {
         return self.network_mode;
     }
 
+    /// Bridge pump stats snapshot, synchronized with the pump thread that
+    /// refreshes it at 1 Hz (PR #150 review — the FFI getter must not race
+    /// the writer and observe a torn multi-field struct).
+    pub fn snapshotBridgeStats(self: *const Self) bridge_mod.BridgeStats {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
+        return self.bridge_stats;
+    }
+
+    /// Monitor pump stats snapshot, synchronized with the monitor pump
+    /// thread (PR #150 review).
+    pub fn snapshotMonitorStats(self: *const Self) monitor_mod.MonitorStats {
+        const mutable = @constCast(self);
+        mutable.mutex.lock();
+        defer mutable.mutex.unlock();
+        return self.monitor_stats;
+    }
+
+    /// Publish a bridge pump stats snapshot (called by the pump thread).
+    pub fn storeBridgeStats(self: *Self, st: bridge_mod.BridgeStats) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.bridge_stats = st;
+    }
+
+    /// Publish a monitor pump stats snapshot (called by the pump thread).
+    pub fn storeMonitorStats(self: *Self, st: monitor_mod.MonitorStats) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.monitor_stats = st;
+    }
+
+    /// Zero both mode-specific stats snapshots under the mutex (teardown).
+    pub fn resetModeStats(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.bridge_stats = .{};
+        self.monitor_stats = .{};
+    }
+
     pub fn isConnecting(self: *const Self) bool {
         const mutable = @constCast(self);
         mutable.mutex.lock();
@@ -3254,8 +3295,7 @@ pub const VpnClient = struct {
         // Zero the mode-specific stats so FFI getters (documented as
         // "zeroed when the pump is not running") never expose a previous
         // session's counters after teardown.
-        self.bridge_stats = .{};
-        self.monitor_stats = .{};
+        self.resetModeStats();
 
         // === SIGNAL DONE (last thing — after all cleanup) ===
         self.data_loop_thread = null;
@@ -3634,7 +3674,7 @@ pub const VpnClient = struct {
                 last_age_sec = now;
                 const aged = bridge_loop.age(@intCast(@divFloor(now, 1000)));
                 if (aged > 0) std.log.debug("bridge: aged out {d} FDB entries", .{aged});
-                self.bridge_stats = bridge_loop.getStats();
+                self.storeBridgeStats(bridge_loop.getStats());
                 session_io.maybeSendKeepalive(
                     if (self.conn_manager) |*cm| cm else null,
                     single_tunnel,
@@ -3686,8 +3726,7 @@ pub const VpnClient = struct {
         // Zero the mode-specific stats so FFI getters (documented as
         // "zeroed when the pump is not running") never expose a previous
         // session's counters after teardown.
-        self.bridge_stats = .{};
-        self.monitor_stats = .{};
+        self.resetModeStats();
 
         // === SIGNAL DONE (last thing — after all cleanup) ===
         self.data_loop_thread = null;
@@ -3841,7 +3880,7 @@ pub const VpnClient = struct {
             if (now - last_upkeep_ms >= 1000) {
                 last_upkeep_ms = now;
                 session_io.maybeSendKeepalive(null, single_tunnel, &timing, now, @max(@as(i64, @intCast(self.config.keepalive_interval_ms)), 1000));
-                self.monitor_stats = monitor_loop.getStats();
+                self.storeMonitorStats(monitor_loop.getStats());
             }
         }
 
