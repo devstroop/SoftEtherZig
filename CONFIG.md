@@ -67,7 +67,7 @@ Every config property must be present in **all six layers** to be maintainable.
 | 47 | ingress_ifs | `--ingress` (multi) | `SOFTETHER_INGRESS` | `"bridge.ingress"` | ✅ | `softether_add_ingress_interface` / `softether_remove_ingress_interface` | `bridge.ingress_ifs` | — |
 | 48 | fdb_max | — (config-only) | — | `"bridge.fdb_max"` | ✅ | — | `bridge.fdb_max` | — |
 | 49 | fdb_aging_s | — (config-only) | — | `"bridge.fdb_aging_s"` | ✅ | — | `bridge.fdb_aging_s` | — |
-| 50 | pcap_file | `--pcap` | `SOFTETHER_PCAP` | `"monitor.pcap_file"` | ✅ | — | `monitor.pcap_file` | — |
+| 50 | pcap_file | `--pcap` | `SOFTETHER_PCAP` | `"monitor.pcap_file"` | ✅ | `softether_set_monitor_pcap` | `monitor.pcap_file` | — |
 
 ## Env Vars Reference
 
@@ -126,3 +126,9 @@ The SoftEther VPN server uses these field names in the auth handshake
 ## Gaps (not equally placed)
 
 All gaps resolved — every property has complete coverage across all six layers.
+
+## Bridge & Monitor Modes
+
+Operating semantics (security boundary, MTU rules, FFI behavior, errata) for
+`mode: bridge` and `mode: monitor` are documented in
+[docs/bridge_monitor_ops.md](docs/bridge_monitor_ops.md) (issue #57).

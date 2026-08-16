@@ -179,6 +179,187 @@ test "SendTunnelHelper falls back to single connection" {
     _ = helper;
 }
 
+test "SendTunnelHelper multi-connection: least-loaded send-capable selection" {
+    // Deterministic no-socket fixture (mirrors test/integration's
+    // ScriptedTransport): ManagedConnections are populated by hand with
+    // scripted TunnelConnections; selectSendConnection only reads
+    // established/direction/pending_bytes, never the TLS socket.
+    const Transport = struct {
+        const Self = @This();
+        fed: *std.ArrayListUnmanaged(u8),
+        fn readFn(_: *anyopaque, _: []u8) anyerror!usize {
+            return 0;
+        }
+        fn writeFn(ctx: *anyopaque, data: []const u8) anyerror!usize {
+            const t: *Self = @ptrCast(@alignCast(ctx));
+            try t.fed.appendSlice(std.testing.allocator, data);
+            return data.len;
+        }
+    };
+
+    var fed_a = std.ArrayListUnmanaged(u8){};
+    var fed_b = std.ArrayListUnmanaged(u8){};
+    defer fed_a.deinit(std.testing.allocator);
+    defer fed_b.deinit(std.testing.allocator);
+    var ta = Transport{ .fed = &fed_a };
+    var tb = Transport{ .fed = &fed_b };
+    var tunnel_a = tunnel_mod.TunnelConnection.init(std.testing.allocator, @ptrCast(&ta), Transport.readFn, Transport.writeFn);
+    defer tunnel_a.deinit();
+    var tunnel_b = tunnel_mod.TunnelConnection.init(std.testing.allocator, @ptrCast(&tb), Transport.readFn, Transport.writeFn);
+    defer tunnel_b.deinit();
+    tunnel_a.use_compress = false;
+    tunnel_b.use_compress = false;
+
+    var cm = conn_mgr_mod.ConnectionManager.init(std.testing.allocator, 3, false, false);
+    // NOTE: cm.deinit() is deliberately NOT called — tls_socket fields are
+    // undefined in this fixture and close() would touch them.
+    cm.connections[0] = .{
+        .tls_socket = undefined,
+        .tunnel = tunnel_a,
+        .direction = .bidirectional,
+        .is_primary = true,
+        .pending_bytes = 50,
+        .last_send_time = 0,
+        .established = true,
+        .saved_direction = .bidirectional,
+    };
+    cm.connections[1] = .{
+        .tls_socket = undefined,
+        .tunnel = tunnel_b,
+        .direction = .server_to_client,
+        .is_primary = false,
+        .pending_bytes = 0,
+        .last_send_time = 0,
+        .established = true,
+        .saved_direction = .server_to_client,
+    };
+    cm.count = 2;
+
+    var helper = SendTunnelHelper{ .cm_ptr = &cm, .single_ptr = undefined };
+    // Only conn 0 (bidirectional) is send-capable — conn 1 is recv-only
+    // (S2C) — so the helper must pick conn 0.
+    const picked = helper.get();
+    try std.testing.expect(picked == &cm.connections[0].?.tunnel);
+    try std.testing.expectEqual(@as(usize, 0), fed_a.items.len);
+}
+
+test "SendTunnelHelper multi-connection: falls back to primary when none send-capable" {
+    const Transport = struct {
+        const Self = @This();
+        fed: *std.ArrayListUnmanaged(u8),
+        fn readFn(_: *anyopaque, _: []u8) anyerror!usize {
+            return 0;
+        }
+        fn writeFn(ctx: *anyopaque, data: []const u8) anyerror!usize {
+            const t: *Self = @ptrCast(@alignCast(ctx));
+            try t.fed.appendSlice(std.testing.allocator, data);
+            return data.len;
+        }
+    };
+
+    var fed_a = std.ArrayListUnmanaged(u8){};
+    var fed_b = std.ArrayListUnmanaged(u8){};
+    defer fed_a.deinit(std.testing.allocator);
+    defer fed_b.deinit(std.testing.allocator);
+    var ta = Transport{ .fed = &fed_a };
+    var tb = Transport{ .fed = &fed_b };
+    var tunnel_a = tunnel_mod.TunnelConnection.init(std.testing.allocator, @ptrCast(&ta), Transport.readFn, Transport.writeFn);
+    defer tunnel_a.deinit();
+    var tunnel_b = tunnel_mod.TunnelConnection.init(std.testing.allocator, @ptrCast(&tb), Transport.readFn, Transport.writeFn);
+    defer tunnel_b.deinit();
+    tunnel_a.use_compress = false;
+    tunnel_b.use_compress = false;
+
+    var cm = conn_mgr_mod.ConnectionManager.init(std.testing.allocator, 3, false, false);
+    cm.connections[0] = .{
+        .tls_socket = undefined,
+        .tunnel = tunnel_a,
+        .direction = .server_to_client,
+        .is_primary = true,
+        .pending_bytes = 0,
+        .last_send_time = 0,
+        .established = true,
+        .saved_direction = .server_to_client,
+    };
+    cm.connections[1] = .{
+        .tls_socket = undefined,
+        .tunnel = tunnel_b,
+        .direction = .server_to_client,
+        .is_primary = false,
+        .pending_bytes = 0,
+        .last_send_time = 0,
+        .established = true,
+        .saved_direction = .server_to_client,
+    };
+    cm.count = 2;
+
+    var helper = SendTunnelHelper{ .cm_ptr = &cm, .single_ptr = undefined };
+    const picked = helper.get();
+    try std.testing.expect(picked == &cm.connections[0].?.tunnel);
+}
+
+test "SendTunnelHelper multi-connection: LAN fanout delivers to least-loaded conn" {
+    // End-to-end: a complete Ethernet frame through the helper's get() →
+    // sendBlocks lands on the selected connection's wire (issue #58 bridge
+    // pump path).
+    const Transport = struct {
+        const Self = @This();
+        fed: *std.ArrayListUnmanaged(u8),
+        fn readFn(_: *anyopaque, _: []u8) anyerror!usize {
+            return 0;
+        }
+        fn writeFn(ctx: *anyopaque, data: []const u8) anyerror!usize {
+            const t: *Self = @ptrCast(@alignCast(ctx));
+            try t.fed.appendSlice(std.testing.allocator, data);
+            return data.len;
+        }
+    };
+
+    var fed_a = std.ArrayListUnmanaged(u8){};
+    var fed_b = std.ArrayListUnmanaged(u8){};
+    defer fed_a.deinit(std.testing.allocator);
+    defer fed_b.deinit(std.testing.allocator);
+    var ta = Transport{ .fed = &fed_a };
+    var tb = Transport{ .fed = &fed_b };
+    var tunnel_a = tunnel_mod.TunnelConnection.init(std.testing.allocator, @ptrCast(&ta), Transport.readFn, Transport.writeFn);
+    defer tunnel_a.deinit();
+    var tunnel_b = tunnel_mod.TunnelConnection.init(std.testing.allocator, @ptrCast(&tb), Transport.readFn, Transport.writeFn);
+    defer tunnel_b.deinit();
+    tunnel_a.use_compress = false;
+    tunnel_b.use_compress = false;
+
+    var cm = conn_mgr_mod.ConnectionManager.init(std.testing.allocator, 3, false, false);
+    cm.connections[0] = .{
+        .tls_socket = undefined,
+        .tunnel = tunnel_a,
+        .direction = .client_to_server,
+        .is_primary = true,
+        .pending_bytes = 100,
+        .last_send_time = 0,
+        .established = true,
+        .saved_direction = .client_to_server,
+    };
+    cm.connections[1] = .{
+        .tls_socket = undefined,
+        .tunnel = tunnel_b,
+        .direction = .client_to_server,
+        .is_primary = false,
+        .pending_bytes = 5,
+        .last_send_time = 0,
+        .established = true,
+        .saved_direction = .client_to_server,
+    };
+    cm.count = 2;
+
+    var helper = SendTunnelHelper{ .cm_ptr = &cm, .single_ptr = undefined };
+    const blocks = [_][]const u8{"hello-bridge"};
+    try helper.get().sendBlocks(&blocks);
+
+    // Frame went to the least-loaded connection (b), not the primary (a).
+    try std.testing.expectEqual(@as(usize, 0), fed_a.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, fed_b.items, "hello-bridge") != null);
+}
+
 test "MAX_INBOUND_DRAIN is session-wide" {
     try std.testing.expectEqual(@as(u32, 256), MAX_INBOUND_DRAIN);
 }
