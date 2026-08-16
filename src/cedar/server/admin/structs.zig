@@ -28,6 +28,8 @@ const pack_mod = @import("../../protocol/pack.zig");
 const Pack = pack_mod.Pack;
 const types_mod = @import("../../../mayaqua/kernel/types.zig");
 const IpAddress = types_mod.IpAddress;
+const auth_mod = @import("../auth.zig");
+const md4_mod = @import("md4");
 
 // ============================================================================
 // Length constants (C: Cedar.h / Mayaqua.h)
@@ -41,6 +43,8 @@ pub const MAX_SERVER_STR_LEN = 255;
 pub const MAX_CLIENT_STR_LEN = 255;
 pub const MAX_SIZE = 512;
 pub const SHA1_SIZE = 20;
+pub const MD5_SIZE = 16;
+pub const auth_type_password: u32 = 1;
 
 // ============================================================================
 // Shared sub-structs
@@ -889,6 +893,10 @@ fn getDataFixed(p: *const Pack, name: []const u8, index: usize, len: usize) ?[20
 /// fallback the client may send for `CreateUser` (C InRpcAuthData:13544).
 /// There is no `use_policy` flag: `UsePolicy` is derived from `policy`
 /// being non-null, exactly like C `OutRpcSetUser` (Admin.c:13695).
+///
+/// The `NtLmSecureHash` wire element is MD5_SIZE (16) bytes — smaller than
+/// the `HashedKey` element (SHA1_SIZE, 20) — matching C `AUTHPASSWORD`
+/// (Account.h:204) where the two hashes have different sizes.
 pub const RpcSetUser = struct {
     hub_name: []const u8 = "",
     name: []const u8 = "",
@@ -900,7 +908,7 @@ pub const RpcSetUser = struct {
     expire_time: u64 = 0,
     auth_type: u32 = 0,
     hashed_key: ?[20]u8 = null,
-    ntlm_secure_hash: ?[20]u8 = null,
+    ntlm_secure_hash: ?[16]u8 = null,
     auth_password: []const u8 = "",
     num_login: u32 = 0,
     traffic: Traffic = .{},
@@ -918,8 +926,18 @@ pub const RpcSetUser = struct {
         self.expire_time = p.getInt64("ExpireTime") orelse 0;
         self.auth_type = p.getInt("AuthType") orelse 0;
         if (getDataFixed(p, "HashedKey", 0, SHA1_SIZE)) |k| self.hashed_key = k;
-        if (getDataFixed(p, "NtLmSecureHash", 0, SHA1_SIZE)) |k| self.ntlm_secure_hash = k;
+        if (getDataFixed(p, "NtLmSecureHash", 0, MD5_SIZE)) |k| {
+            var nt: [16]u8 = undefined;
+            @memcpy(&nt, k[0..16]);
+            self.ntlm_secure_hash = nt;
+        }
         self.auth_password = try dupStr(allocator, p.getStr("Auth_Password"));
+        // C InRpcAuthData (Admin.c:13535): when the client sends the plaintext
+        // `Auth_Password` and no `HashedKey`, derive both hashes.
+        if (self.auth_type == auth_type_password and self.auth_password.len != 0 and self.hashed_key == null) {
+            self.hashed_key = auth_mod.hashPassword(self.auth_password, self.name);
+            self.ntlm_secure_hash = md4_mod.generateNtPasswordHash(self.auth_password);
+        }
         self.num_login = p.getInt("NumLogin") orelse 0;
         self.traffic.inRpc(p);
         if (p.getBool("UsePolicy") orelse false) {
@@ -1836,7 +1854,7 @@ test "server.admin_structs RpcSetUser round-trip" {
         .expire_time = 200,
         .auth_type = 1,
         .hashed_key = @as([20]u8, .{1} ** 20),
-        .ntlm_secure_hash = @as([20]u8, .{2} ** 20),
+        .ntlm_secure_hash = @as([16]u8, .{2} ** 16),
         .num_login = 5,
         .traffic = .{ .send_unicast_bytes = 42 },
     };
@@ -1854,6 +1872,27 @@ test "server.admin_structs RpcSetUser round-trip" {
     try testing.expectEqual(@as(u64, 42), r.traffic.send_unicast_bytes);
     try testing.expect(r.policy != null);
     try testing.expectEqual(@as(u32, 8), r.policy.?.max_connection);
+}
+
+test "server.admin_structs RpcSetUser derives hashes from Auth_Password" {
+    // C InRpcAuthData (Admin.c:13535): a plaintext `Auth_Password` with no
+    // `HashedKey` yields SHA-0(password ‖ UPPER(name)) + MD4(UTF-16LE(pw)).
+    const allocator = testing.allocator;
+    var p = Pack.init(allocator);
+    defer p.deinit();
+    try p.addStr("HubName", "VPN");
+    try p.addStr("Name", "alice");
+    try p.addInt("AuthType", auth_type_password);
+    try p.addStr("Auth_Password", "hunter2");
+
+    var r = RpcSetUser{};
+    defer r.free(allocator);
+    try r.inRpc(allocator, &p);
+
+    try testing.expectEqualStrings("hunter2", r.auth_password);
+    const expected_key = auth_mod.hashPassword("hunter2", "alice");
+    try testing.expectEqualSlices(u8, &expected_key, &r.hashed_key.?);
+    try testing.expectEqualSlices(u8, &md4_mod.generateNtPasswordHash("hunter2"), &r.ntlm_secure_hash.?);
 }
 
 test "server.admin_structs RpcEnumUser round-trip" {
