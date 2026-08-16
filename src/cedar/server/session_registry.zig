@@ -61,6 +61,9 @@ pub const SessionSnapshot = struct {
     peer_ip: u32 = 0,
     peer_port: u16 = 0,
     created_time: i64 = 0,
+    /// True once `requestStop` was called on the live session; the record can
+    /// still be registered while the session thread tears itself down.
+    stop_requested: bool = false,
 
     fn free(self: *SessionSnapshot, allocator: Allocator) void {
         allocator.free(self.session_name);
@@ -128,6 +131,28 @@ pub const SessionRegistry = struct {
         return true;
     }
 
+    /// Same as `requestStop`, but looked up by connection name
+    /// (C `DisconnectConnection`: `Disconnect(c, c->ConnectionList)`).
+    /// Returns false when no connection with that name is live.
+    pub fn requestStopByConnection(self: *SessionRegistry, connection_name: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const rec = self.findByConnectionLocked(connection_name) orelse return false;
+        rec.main.requestStop();
+        return true;
+    }
+
+    /// Same as `requestStop`, but the session must belong to `hub_name`
+    /// (C `DeleteSession`: `GetSessionByName(h, name)` on the target hub).
+    /// Returns false when no such session is live on that hub.
+    pub fn requestStopOnHub(self: *SessionRegistry, hub_name: []const u8, session_name: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const rec = self.findOnHubLocked(hub_name, session_name) orelse return false;
+        rec.main.requestStop();
+        return true;
+    }
+
     /// Snapshot all live sessions into freshly allocated records the caller
     /// owns (free with `freeSnapshot`). Safe to hold after sessions exit.
     pub fn snapshot(self: *SessionRegistry, allocator: Allocator) ![]SessionSnapshot {
@@ -147,6 +172,7 @@ pub const SessionRegistry = struct {
                 .peer_ip = rec.peer_ip,
                 .peer_port = rec.peer_port,
                 .created_time = rec.created_time,
+                .stop_requested = rec.main.isStopRequested(),
             };
             errdefer snap.free(allocator);
             try out.append(allocator, snap);
@@ -162,6 +188,20 @@ pub const SessionRegistry = struct {
     fn findLocked(self: *SessionRegistry, session_name: []const u8) ?*SessionRecord {
         const idx = self.indexLocked(session_name) orelse return null;
         return self.sessions.items[idx];
+    }
+
+    fn findByConnectionLocked(self: *SessionRegistry, connection_name: []const u8) ?*SessionRecord {
+        for (self.sessions.items) |rec| {
+            if (eqlIgnoreCase(rec.connection_name, connection_name)) return rec;
+        }
+        return null;
+    }
+
+    fn findOnHubLocked(self: *SessionRegistry, hub_name: []const u8, session_name: []const u8) ?*SessionRecord {
+        for (self.sessions.items) |rec| {
+            if (eqlIgnoreCase(rec.hub_name, hub_name) and eqlIgnoreCase(rec.session_name, session_name)) return rec;
+        }
+        return null;
     }
 
     fn indexLocked(self: *SessionRegistry, session_name: []const u8) ?usize {
@@ -233,6 +273,11 @@ test "server.session_registry register/unregister" {
     try testing.expect(reg.requestStop("sid-alice-0"));
     try testing.expect(fake.wasStopped());
     try testing.expect(!reg.requestStop("SID-NOPE"));
+
+    // The snapshot reflects the stop request while the record is registered.
+    const snap2 = try reg.snapshot(allocator);
+    defer SessionRegistry.freeSnapshot(allocator, snap2);
+    try testing.expect(snap2[0].stop_requested);
 
     // Duplicate registration rejected.
     const dup = try allocator.create(SessionRecord);
@@ -312,4 +357,64 @@ test "server.session_registry unregister frees and snapshot survives teardown" {
     try testing.expectEqualStrings("SID-CAROL-2", snap[0].session_name);
     try testing.expectEqualStrings("Carol", snap[0].username);
     try testing.expectEqualStrings("DEFAULT", snap[0].hub_name);
+}
+
+test "server.session_registry requestStopByConnection" {
+    const allocator = testing.allocator;
+    var reg = SessionRegistry.init(allocator);
+    defer reg.deinit();
+
+    var fake: FakeMain align(@alignOf(SessionMain)) = .{};
+    const rec = try allocator.create(SessionRecord);
+    rec.* = .{
+        .session_name = try allocator.dupe(u8, "SID-DAVE-3"),
+        .connection_name = try allocator.dupe(u8, "CONN-3"),
+        .username = try allocator.dupe(u8, "Dave"),
+        .hub_name = "DEFAULT",
+        .main = @ptrCast(@alignCast(&fake)),
+    };
+    try reg.register(rec);
+
+    try testing.expect(!fake.wasStopped());
+    try testing.expect(reg.requestStopByConnection("conn-3"));
+    try testing.expect(fake.wasStopped());
+    try testing.expect(!reg.requestStopByConnection("CONN-NOPE"));
+}
+
+test "server.session_registry requestStopOnHub is hub-scoped" {
+    const allocator = testing.allocator;
+    var reg = SessionRegistry.init(allocator);
+    defer reg.deinit();
+
+    var fake_a: FakeMain align(@alignOf(SessionMain)) = .{};
+    const rec_a = try allocator.create(SessionRecord);
+    rec_a.* = .{
+        .session_name = try allocator.dupe(u8, "SID-EVE-4"),
+        .connection_name = try allocator.dupe(u8, "CONN-4"),
+        .username = try allocator.dupe(u8, "Eve"),
+        .hub_name = "VPN",
+        .main = @ptrCast(@alignCast(&fake_a)),
+    };
+    try reg.register(rec_a);
+
+    var fake_b: FakeMain align(@alignOf(SessionMain)) = .{};
+    const rec_b = try allocator.create(SessionRecord);
+    rec_b.* = .{
+        .session_name = try allocator.dupe(u8, "SID-FRANK-5"),
+        .connection_name = try allocator.dupe(u8, "CONN-5"),
+        .username = try allocator.dupe(u8, "Frank"),
+        .hub_name = "TEST",
+        .main = @ptrCast(@alignCast(&fake_b)),
+    };
+    try reg.register(rec_b);
+
+    // The same session name on another hub is not stopped.
+    try testing.expect(!fake_b.wasStopped());
+    try testing.expect(!reg.requestStopOnHub("VPN", "SID-FRANK-5"));
+    try testing.expect(!fake_b.wasStopped());
+
+    // Correct hub + name (case-insensitive) stops the session.
+    try testing.expect(reg.requestStopOnHub("vpn", "sid-eve-4"));
+    try testing.expect(fake_a.wasStopped());
+    try testing.expect(!reg.requestStopOnHub("VPN", "SID-NOPE"));
 }

@@ -205,6 +205,13 @@ pub const SessionMain = struct {
         self.halt.store(true, .seq_cst);
     }
 
+    /// Thread-safe stop-flag query, complement to `requestStop`. Lets the
+    /// admin dispatch report a session that is mid-teardown as disconnecting
+    /// instead of fully connected (C `CONNECTING_DISCONNECTING`).
+    pub fn isStopRequested(self: *const SessionMain) bool {
+        return self.halt.load(.acquire);
+    }
+
     /// Run the session loop until stop requested, transport closed, or an
     /// error. End reasons are the `SessionEnd` error set.
     pub fn run(self: *SessionMain) !void {
@@ -850,4 +857,3 @@ test "server.session_main packet adapter init failure halts the session" {
 
     try testing.expectError(error.PacketAdapterInitFailed, session.run());
 }
-
