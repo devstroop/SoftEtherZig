@@ -735,6 +735,332 @@ pub const RpcHubStatus = struct {
     }
 };
 
+/// C `POLICY` (Cedar.h:1576) — the per-user/per-group policy table, serialized
+/// flat by `PackGetPolicy`/`PackAddPolicy` (Protocol.c:6623, 6687). All
+/// fields match the C wire names exactly.
+pub const Policy = struct {
+    // Ver 2 booleans
+    access: bool = false,
+    dhcp_filter: bool = false,
+    dhcp_no_server: bool = false,
+    dhcp_force: bool = false,
+    no_bridge: bool = false,
+    no_routing: bool = false,
+    privacy_filter: bool = false,
+    no_server: bool = false,
+    check_mac: bool = false,
+    check_ip: bool = false,
+    arp_dhcp_only: bool = false,
+    monitor_port: bool = false,
+    no_broadcast_limiter: bool = false,
+    fix_password: bool = false,
+    no_qos: bool = false,
+    // Ver 3 booleans
+    rs_and_ra_filter: bool = false,
+    ra_filter: bool = false,
+    dhcp_v6_filter: bool = false,
+    dhcp_v6_no_server: bool = false,
+    no_routing_v6: bool = false,
+    check_ip_v6: bool = false,
+    no_server_v6: bool = false,
+    no_save_password: bool = false,
+    filter_ip_v4: bool = false,
+    filter_ip_v6: bool = false,
+    filter_non_ip: bool = false,
+    no_ip_v6_default_router_in_ra: bool = false,
+    no_ip_v6_default_router_in_ra_when_ip_v6: bool = false,
+    // UINTs
+    max_connection: u32 = 0,
+    time_out: u32 = 0,
+    max_mac: u32 = 0,
+    max_ip: u32 = 0,
+    max_upload: u32 = 0,
+    max_download: u32 = 0,
+    multi_logins: u32 = 0,
+    max_ip_v6: u32 = 0,
+    auto_disconnect: u32 = 0,
+    vlan_id: u32 = 0,
+    // Ver 3 flag
+    ver3: bool = false,
+
+    pub fn inRpc(self: *Policy, p: *const Pack) void {
+        self.* = .{};
+        self.access = p.getBool("Access") orelse false;
+        self.dhcp_filter = p.getBool("DHCPFilter") orelse false;
+        self.dhcp_no_server = p.getBool("DHCPNoServer") orelse false;
+        self.dhcp_force = p.getBool("DHCPForce") orelse false;
+        self.no_bridge = p.getBool("NoBridge") orelse false;
+        self.no_routing = p.getBool("NoRouting") orelse false;
+        self.privacy_filter = p.getBool("PrivacyFilter") orelse false;
+        self.no_server = p.getBool("NoServer") orelse false;
+        self.check_mac = p.getBool("CheckMac") orelse false;
+        self.check_ip = p.getBool("CheckIP") orelse false;
+        self.arp_dhcp_only = p.getBool("ArpDhcpOnly") orelse false;
+        self.monitor_port = p.getBool("MonitorPort") orelse false;
+        self.no_broadcast_limiter = p.getBool("NoBroadcastLimiter") orelse false;
+        self.fix_password = p.getBool("FixPassword") orelse false;
+        self.no_qos = p.getBool("NoQoS") orelse false;
+        self.rs_and_ra_filter = p.getBool("RSandRAFilter") orelse false;
+        self.ra_filter = p.getBool("RAFilter") orelse false;
+        self.dhcp_v6_filter = p.getBool("DHCPv6Filter") orelse false;
+        self.dhcp_v6_no_server = p.getBool("DHCPv6NoServer") orelse false;
+        self.no_routing_v6 = p.getBool("NoRoutingV6") orelse false;
+        self.check_ip_v6 = p.getBool("CheckIPv6") orelse false;
+        self.no_server_v6 = p.getBool("NoServerV6") orelse false;
+        self.no_save_password = p.getBool("NoSavePassword") orelse false;
+        self.filter_ip_v4 = p.getBool("FilterIPv4") orelse false;
+        self.filter_ip_v6 = p.getBool("FilterIPv6") orelse false;
+        self.filter_non_ip = p.getBool("FilterNonIP") orelse false;
+        self.no_ip_v6_default_router_in_ra = p.getBool("NoIPv6DefaultRouterInRA") orelse false;
+        self.no_ip_v6_default_router_in_ra_when_ip_v6 = p.getBool("NoIPv6DefaultRouterInRAWhenIPv6") orelse false;
+        self.max_connection = p.getInt("MaxConnection") orelse 0;
+        self.time_out = p.getInt("TimeOut") orelse 0;
+        self.max_mac = p.getInt("MaxMac") orelse 0;
+        self.max_ip = p.getInt("MaxIP") orelse 0;
+        self.max_upload = p.getInt("MaxUpload") orelse 0;
+        self.max_download = p.getInt("MaxDownload") orelse 0;
+        self.multi_logins = p.getInt("MultiLogins") orelse 0;
+        self.max_ip_v6 = p.getInt("MaxIPv6") orelse 0;
+        self.auto_disconnect = p.getInt("AutoDisconnect") orelse 0;
+        self.vlan_id = p.getInt("VLanId") orelse 0;
+        self.ver3 = p.getBool("Ver3") orelse false;
+    }
+
+    pub fn outRpc(self: *const Policy, p: *Pack) !void {
+        try p.addBool("Access", self.access);
+        try p.addBool("DHCPFilter", self.dhcp_filter);
+        try p.addBool("DHCPNoServer", self.dhcp_no_server);
+        try p.addBool("DHCPForce", self.dhcp_force);
+        try p.addBool("NoBridge", self.no_bridge);
+        try p.addBool("NoRouting", self.no_routing);
+        try p.addBool("PrivacyFilter", self.privacy_filter);
+        try p.addBool("NoServer", self.no_server);
+        try p.addBool("CheckMac", self.check_mac);
+        try p.addBool("CheckIP", self.check_ip);
+        try p.addBool("ArpDhcpOnly", self.arp_dhcp_only);
+        try p.addBool("MonitorPort", self.monitor_port);
+        try p.addBool("NoBroadcastLimiter", self.no_broadcast_limiter);
+        try p.addBool("FixPassword", self.fix_password);
+        try p.addBool("NoQoS", self.no_qos);
+        try p.addBool("RSandRAFilter", self.rs_and_ra_filter);
+        try p.addBool("RAFilter", self.ra_filter);
+        try p.addBool("DHCPv6Filter", self.dhcp_v6_filter);
+        try p.addBool("DHCPv6NoServer", self.dhcp_v6_no_server);
+        try p.addBool("NoRoutingV6", self.no_routing_v6);
+        try p.addBool("CheckIPv6", self.check_ip_v6);
+        try p.addBool("NoServerV6", self.no_server_v6);
+        try p.addBool("NoSavePassword", self.no_save_password);
+        try p.addBool("FilterIPv4", self.filter_ip_v4);
+        try p.addBool("FilterIPv6", self.filter_ip_v6);
+        try p.addBool("FilterNonIP", self.filter_non_ip);
+        try p.addBool("NoIPv6DefaultRouterInRA", self.no_ip_v6_default_router_in_ra);
+        try p.addBool("NoIPv6DefaultRouterInRAWhenIPv6", self.no_ip_v6_default_router_in_ra_when_ip_v6);
+        try p.addInt("MaxConnection", self.max_connection);
+        try p.addInt("TimeOut", self.time_out);
+        try p.addInt("MaxMac", self.max_mac);
+        try p.addInt("MaxIP", self.max_ip);
+        try p.addInt("MaxUpload", self.max_upload);
+        try p.addInt("MaxDownload", self.max_download);
+        try p.addInt("MultiLogins", self.multi_logins);
+        try p.addInt("MaxIPv6", self.max_ip_v6);
+        try p.addInt("AutoDisconnect", self.auto_disconnect);
+        try p.addInt("VLanId", self.vlan_id);
+        try p.addBool("Ver3", self.ver3);
+    }
+};
+
+/// Read a fixed-size data element, returning null when absent or shorter
+/// than `len` (C `PackGetData2` semantics for e.g. UniqueId/MacAddress).
+fn getDataFixed(p: *const Pack, name: []const u8, index: usize, len: usize) ?[20]u8 {
+    const d = p.getDataEx(name, index) orelse return null;
+    if (d.len < len) return null;
+    var out: [20]u8 = .{0} ** 20;
+    @memcpy(out[0..len], d[0..len]);
+    return out;
+}
+
+// ============================================================================
+// Group 4 — Users (C: Admin.c InRpcSetUser/EnumUser/DeleteUser)
+// ============================================================================
+
+/// C `RPC_SET_USER` (Admin.h:572) — `CreateUser`/`SetUser`. `hashed_key`/
+/// `ntlm_secure_hash` carry the password auth data (C `AUTHPASSWORD`,
+/// serialized by `OutRpcAuthData`); `auth_password` is the plaintext
+/// fallback the client may send for `CreateUser` (C InRpcAuthData:13544).
+/// There is no `use_policy` flag: `UsePolicy` is derived from `policy`
+/// being non-null, exactly like C `OutRpcSetUser` (Admin.c:13695).
+pub const RpcSetUser = struct {
+    hub_name: []const u8 = "",
+    name: []const u8 = "",
+    group_name: []const u8 = "",
+    realname: []const u8 = "",
+    note: []const u8 = "",
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+    expire_time: u64 = 0,
+    auth_type: u32 = 0,
+    hashed_key: ?[20]u8 = null,
+    ntlm_secure_hash: ?[20]u8 = null,
+    auth_password: []const u8 = "",
+    num_login: u32 = 0,
+    traffic: Traffic = .{},
+    policy: ?*Policy = null,
+
+    pub fn inRpc(self: *RpcSetUser, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        self.group_name = try dupStr(allocator, p.getStr("GroupName"));
+        self.realname = try dupStr(allocator, p.getUniStr("Realname"));
+        self.note = try dupStr(allocator, p.getUniStr("Note"));
+        self.created_time = p.getInt64("CreatedTime") orelse 0;
+        self.updated_time = p.getInt64("UpdatedTime") orelse 0;
+        self.expire_time = p.getInt64("ExpireTime") orelse 0;
+        self.auth_type = p.getInt("AuthType") orelse 0;
+        if (getDataFixed(p, "HashedKey", 0, SHA1_SIZE)) |k| self.hashed_key = k;
+        if (getDataFixed(p, "NtLmSecureHash", 0, SHA1_SIZE)) |k| self.ntlm_secure_hash = k;
+        self.auth_password = try dupStr(allocator, p.getStr("Auth_Password"));
+        self.num_login = p.getInt("NumLogin") orelse 0;
+        self.traffic.inRpc(p);
+        if (p.getBool("UsePolicy") orelse false) {
+            const policy = try allocator.create(Policy);
+            policy.* = .{};
+            policy.inRpc(p);
+            self.policy = policy;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcSetUser, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("Name", self.name);
+        try p.addStr("GroupName", self.group_name);
+        try p.addUniStr("Realname", self.realname);
+        try p.addUniStr("Note", self.note);
+        try p.addInt64("CreatedTime", self.created_time);
+        try p.addInt64("UpdatedTime", self.updated_time);
+        try p.addInt64("ExpireTime", self.expire_time);
+        try p.addInt("AuthType", self.auth_type);
+        if (self.hashed_key) |k| try p.addData("HashedKey", &k);
+        if (self.ntlm_secure_hash) |k| try p.addData("NtLmSecureHash", &k);
+        if (self.auth_password.len != 0) try p.addStr("Auth_Password", self.auth_password);
+        try p.addInt("NumLogin", self.num_login);
+        try self.traffic.outRpc(p);
+        if (self.policy) |policy| {
+            try p.addBool("UsePolicy", true);
+            try policy.outRpc(p);
+        }
+    }
+
+    pub fn free(self: *RpcSetUser, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.name);
+        allocator.free(self.group_name);
+        allocator.free(self.realname);
+        allocator.free(self.note);
+        allocator.free(self.auth_password);
+        if (self.policy) |policy| allocator.destroy(policy);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ENUM_USER_ITEM` (Admin.h:590) — one entry of `EnumUser`.
+pub const EnumUserItem = struct {
+    name: []const u8 = "",
+    group_name: []const u8 = "",
+    realname: []const u8 = "",
+    note: []const u8 = "",
+    auth_type: u32 = 0,
+    last_login_time: u64 = 0,
+    num_login: u32 = 0,
+    deny_access: bool = false,
+    is_traffic_filled: bool = false,
+    traffic: Traffic = .{},
+    is_expires_filled: bool = false,
+    expires: u64 = 0,
+};
+
+/// C `RPC_ENUM_USER` (Admin.h:607) — `EnumUser`.
+pub const RpcEnumUser = struct {
+    hub_name: []const u8 = "",
+    users: []EnumUserItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumUser, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Name");
+        self.users = try allocator.alloc(EnumUserItem, count);
+        for (self.users, 0..) |*e, i| {
+            e.* = .{};
+            e.name = try dupStr(allocator, p.getStrEx("Name", i));
+            e.group_name = try dupStr(allocator, p.getStrEx("GroupName", i));
+            e.realname = try dupStr(allocator, p.getUniStrEx("Realname", i));
+            e.note = try dupStr(allocator, p.getUniStrEx("Note", i));
+            e.auth_type = p.getIntEx("AuthType", i) orelse 0;
+            e.last_login_time = p.getInt64Ex("LastLoginTime", i) orelse 0;
+            e.num_login = p.getIntEx("NumLogin", i) orelse 0;
+            e.deny_access = p.getBoolEx("DenyAccess", i) orelse false;
+            e.is_traffic_filled = p.getBoolEx("IsTrafficFilled", i) orelse false;
+            inRpcTrafficEx(&e.traffic, p, i);
+            e.is_expires_filled = p.getBoolEx("IsExpiresFilled", i) orelse false;
+            e.expires = p.getInt64Ex("Expires", i) orelse 0;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumUser, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.users, 0..) |e, i| {
+            try p.addStrEx("Name", e.name, i);
+            try p.addStrEx("GroupName", e.group_name, i);
+            try p.addUniStrEx("Realname", e.realname, i);
+            try p.addUniStrEx("Note", e.note, i);
+            try p.addIntEx("AuthType", e.auth_type, i);
+            try p.addInt64Ex("LastLoginTime", e.last_login_time, i);
+            try p.addIntEx("NumLogin", e.num_login, i);
+            try p.addBoolEx("DenyAccess", e.deny_access, i);
+            try p.addBoolEx("IsTrafficFilled", e.is_traffic_filled, i);
+            try outRpcTrafficEx(&e.traffic, p, i);
+            try p.addBoolEx("IsExpiresFilled", e.is_expires_filled, i);
+            try p.addInt64Ex("Expires", e.expires, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumUser, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.users) |*e| {
+            allocator.free(e.name);
+            allocator.free(e.group_name);
+            allocator.free(e.realname);
+            allocator.free(e.note);
+        }
+        allocator.free(self.users);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_DELETE_USER` (Admin.h:644) — `DeleteUser`.
+pub const RpcDeleteUser = struct {
+    hub_name: []const u8 = "",
+    name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcDeleteUser, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.name = try dupStr(allocator, p.getStr("Name"));
+    }
+
+    pub fn outRpc(self: *const RpcDeleteUser, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("Name", self.name);
+    }
+
+    pub fn free(self: *RpcDeleteUser, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+
 // ============================================================================
 // Sessions & connections (C: Admin.h RPC_ENUM_SESSION / RPC_SESSION_STATUS /
 // RPC_DELETE_SESSION / RPC_ENUM_CONNECTION / RPC_DISCONNECT_CONNECTION)
@@ -1254,6 +1580,9 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
         RpcCreateHub => try t.inRpc(allocator, p),
         RpcDeleteHub => try t.inRpc(allocator, p),
         RpcHubStatus => try t.inRpc(allocator, p),
+        RpcSetUser => try t.inRpc(allocator, p),
+        RpcEnumUser => try t.inRpc(allocator, p),
+        RpcDeleteUser => try t.inRpc(allocator, p),
         RpcEnumSession => try t.inRpc(allocator, p),
         RpcSessionStatus => try t.inRpc(allocator, p),
         RpcDeleteSession => try t.inRpc(allocator, p),
@@ -1273,6 +1602,9 @@ fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
         RpcCreateHub => try t.outRpc(p),
         RpcDeleteHub => try t.outRpc(p),
         RpcHubStatus => try t.outRpc(p),
+        RpcSetUser => try t.outRpc(p),
+        RpcEnumUser => try t.outRpc(p),
+        RpcDeleteUser => try t.outRpc(p),
         RpcEnumSession => try t.outRpc(p),
         RpcSessionStatus => try t.outRpc(p),
         RpcDeleteSession => try t.outRpc(p),
@@ -1464,6 +1796,97 @@ test "server.admin_structs RpcHubStatus round-trip" {
     try testing.expectEqual(@as(u32, 10), r.num_users);
     try testing.expectEqual(@as(u64, 99), r.traffic.recv_broadcast_bytes);
     try testing.expectEqual(@as(u64, 1234), r.last_login_time);
+}
+
+test "server.admin_structs Policy round-trip" {
+    const allocator = testing.allocator;
+    var v = Policy{
+        .access = true,
+        .no_bridge = true,
+        .max_connection = 16,
+        .multi_logins = 3,
+        .vlan_id = 100,
+        .ver3 = true,
+    };
+    var r = Policy{};
+
+    var p = Pack.init(allocator);
+    defer p.deinit();
+    try v.outRpc(&p);
+    r.inRpc(&p);
+
+    try testing.expect(r.access);
+    try testing.expect(r.no_bridge);
+    try testing.expectEqual(@as(u32, 16), r.max_connection);
+    try testing.expectEqual(@as(u32, 3), r.multi_logins);
+    try testing.expectEqual(@as(u32, 100), r.vlan_id);
+    try testing.expect(r.ver3);
+    try testing.expect(!r.dhcp_filter);
+}
+
+test "server.admin_structs RpcSetUser round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcSetUser{
+        .hub_name = "VPN",
+        .name = "alice",
+        .group_name = "staff",
+        .realname = "Alice",
+        .note = "note",
+        .created_time = 100,
+        .expire_time = 200,
+        .auth_type = 1,
+        .hashed_key = @as([20]u8, .{1} ** 20),
+        .ntlm_secure_hash = @as([20]u8, .{2} ** 20),
+        .num_login = 5,
+        .traffic = .{ .send_unicast_bytes = 42 },
+    };
+    var policy = Policy{ .max_connection = 8 };
+    v.policy = &policy;
+
+    var r = RpcSetUser{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcSetUser, &v, &r);
+
+    try testing.expectEqualStrings("alice", r.name);
+    try testing.expectEqualStrings("Alice", r.realname);
+    try testing.expectEqual(@as(u32, 1), r.auth_type);
+    try testing.expectEqualSlices(u8, &v.hashed_key.?, &r.hashed_key.?);
+    try testing.expectEqual(@as(u64, 42), r.traffic.send_unicast_bytes);
+    try testing.expect(r.policy != null);
+    try testing.expectEqual(@as(u32, 8), r.policy.?.max_connection);
+}
+
+test "server.admin_structs RpcEnumUser round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumUser{ .users = try allocator.alloc(EnumUserItem, 2) };
+    v.users[0] = .{ .name = try allocator.dupe(u8, "alice"), .group_name = try allocator.dupe(u8, "staff"), .auth_type = 1, .deny_access = false, .traffic = .{ .recv_unicast_count = 7 }, .expires = 999, .is_expires_filled = true };
+    v.users[1] = .{ .name = try allocator.dupe(u8, "bob"), .auth_type = 0 };
+    defer v.free(allocator);
+
+    var r = RpcEnumUser{};
+    defer r.free(allocator);
+
+    var p = Pack.init(allocator);
+    defer p.deinit();
+    try v.outRpc(&p);
+    try r.inRpc(allocator, &p);
+
+    try testing.expectEqual(@as(usize, 2), r.users.len);
+    try testing.expectEqualStrings("alice", r.users[0].name);
+    try testing.expectEqualStrings("staff", r.users[0].group_name);
+    try testing.expectEqual(@as(u64, 7), r.users[0].traffic.recv_unicast_count);
+    try testing.expectEqual(@as(u64, 999), r.users[0].expires);
+    try testing.expect(r.users[0].is_expires_filled);
+    try testing.expectEqualStrings("bob", r.users[1].name);
+}
+
+test "server.admin_structs RpcDeleteUser round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcDeleteUser{ .hub_name = "VPN", .name = "alice" };
+    var r = RpcDeleteUser{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcDeleteUser, &v, &r);
+    try testing.expectEqualStrings("alice", r.name);
 }
 
 test "server.admin_structs CapsList round-trip" {
