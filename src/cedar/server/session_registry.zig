@@ -13,6 +13,12 @@
 //! tearing down the `SessionMain` it points at — `runSession` registers right
 //! after `SessionMain.init` and unregisters in a defer that runs before
 //! `main.deinit` (LIFO).
+//!
+//! Concurrency: every operation runs under the internal mutex and never hands
+//! out a raw `*SessionRecord` (a record can be freed by a concurrent
+//! `unregister`/`deinit` the moment the lock drops). Observers use `snapshot`
+//! for owned copies; actions such as `requestStop` look the record up and act
+//! on it while still holding the lock.
 
 const std = @import("std");
 const mem = std.mem;
@@ -105,25 +111,6 @@ pub const SessionRegistry = struct {
         return true;
     }
 
-    /// Find a live session by session name. The returned pointer is valid
-    /// only while the caller holds the registry lock; prefer `snapshot` for
-    /// anything crossing threads.
-    pub fn find(self: *SessionRegistry, session_name: []const u8) ?*SessionRecord {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.findLocked(session_name);
-    }
-
-    /// Find a live session by connection name.
-    pub fn findByConnection(self: *SessionRegistry, connection_name: []const u8) ?*SessionRecord {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.sessions.items) |rec| {
-            if (eqlIgnoreCase(rec.connection_name, connection_name)) return rec;
-        }
-        return null;
-    }
-
     pub fn count(self: *SessionRegistry) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -211,12 +198,12 @@ const FakeMain = struct {
     }
 };
 
-test "server.session_registry register/unregister/find" {
+test "server.session_registry register/unregister" {
     const allocator = testing.allocator;
     var reg = SessionRegistry.init(allocator);
     defer reg.deinit();
 
-    var fake = FakeMain{};
+    var fake: FakeMain align(@alignOf(SessionMain)) = .{};
     const rec = try allocator.create(SessionRecord);
     rec.* = .{
         .session_name = try allocator.dupe(u8, "SID-ALICE-0"),
@@ -232,13 +219,16 @@ test "server.session_registry register/unregister/find" {
 
     try testing.expectEqual(@as(usize, 1), reg.count());
 
-    // Case-insensitive find.
-    const found = reg.find("sid-alice-0").?;
-    try testing.expectEqualStrings("SID-ALICE-0", found.session_name);
-    try testing.expectEqualStrings("CONN-0", found.connection_name);
-    try testing.expectEqual(@as(u32, 0x0A000001), found.peer_ip);
+    // Snapshot observes the registered record.
+    const snap = try reg.snapshot(allocator);
+    defer SessionRegistry.freeSnapshot(allocator, snap);
+    try testing.expectEqual(@as(usize, 1), snap.len);
+    try testing.expectEqualStrings("SID-ALICE-0", snap[0].session_name);
+    try testing.expectEqualStrings("CONN-0", snap[0].connection_name);
+    try testing.expectEqual(@as(u32, 0x0A000001), snap[0].peer_ip);
 
-    // requestStop flips the session's halt flag (via SessionMain.requestStop).
+    // requestStop flips the session's halt flag (via SessionMain.requestStop);
+    // name matching is case-insensitive.
     try testing.expect(!fake.wasStopped());
     try testing.expect(reg.requestStop("sid-alice-0"));
     try testing.expect(fake.wasStopped());
@@ -260,10 +250,6 @@ test "server.session_registry register/unregister/find" {
     allocator.free(dup.username);
     allocator.destroy(dup);
 
-    // findByConnection.
-    try testing.expectEqualStrings("SID-ALICE-0", reg.findByConnection("conn-0").?.session_name);
-    try testing.expect(reg.findByConnection("CONN-9") == null);
-
     // Unregister frees the record.
     try testing.expect(reg.unregister("SID-ALICE-0"));
     try testing.expectEqual(@as(usize, 0), reg.count());
@@ -275,7 +261,7 @@ test "server.session_registry snapshot round-trip" {
     var reg = SessionRegistry.init(allocator);
     defer reg.deinit();
 
-    var fake = FakeMain{};
+    var fake: FakeMain align(@alignOf(SessionMain)) = .{};
     const rec = try allocator.create(SessionRecord);
     rec.* = .{
         .session_name = try allocator.dupe(u8, "SID-BOB-1"),
@@ -304,7 +290,7 @@ test "server.session_registry unregister frees and snapshot survives teardown" {
     var reg = SessionRegistry.init(allocator);
     defer reg.deinit();
 
-    var fake = FakeMain{};
+    var fake: FakeMain align(@alignOf(SessionMain)) = .{};
     const rec = try allocator.create(SessionRecord);
     rec.* = .{
         .session_name = try allocator.dupe(u8, "SID-CAROL-2"),
