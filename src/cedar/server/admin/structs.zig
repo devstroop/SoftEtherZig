@@ -26,6 +26,8 @@ const testing = std.testing;
 
 const pack_mod = @import("../../protocol/pack.zig");
 const Pack = pack_mod.Pack;
+const types_mod = @import("../../../mayaqua/kernel/types.zig");
+const IpAddress = types_mod.IpAddress;
 
 // ============================================================================
 // Length constants (C: Cedar.h / Mayaqua.h)
@@ -1060,6 +1062,459 @@ pub const RpcDeleteUser = struct {
 
 
 // ============================================================================
+// Sessions & connections (C: Admin.h RPC_ENUM_SESSION / RPC_SESSION_STATUS /
+// RPC_DELETE_SESSION / RPC_ENUM_CONNECTION / RPC_DISCONNECT_CONNECTION)
+// ============================================================================
+
+/// C `RPC_ENUM_SESSION_ITEM` (Admin.h:651) — one row of `EnumSession`. The
+/// `client_ip` union is serialized in the C `PackAddIpEx` four-element format
+/// so vpncmd's `PackGetIpEx` round-trips it; `ip` carries the plain IPv4 u32.
+pub const EnumSessionItem = struct {
+    name: []const u8 = "",
+    remote_session: bool = false,
+    remote_hostname: []const u8 = "",
+    username: []const u8 = "",
+    ip: u32 = 0,
+    client_ip: IpAddress = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+    hostname: []const u8 = "",
+    max_num_tcp: u32 = 0,
+    current_num_tcp: u32 = 0,
+    packet_size: u64 = 0,
+    packet_num: u64 = 0,
+    link_mode: bool = false,
+    secure_nat_mode: bool = false,
+    bridge_mode: bool = false,
+    layer3_mode: bool = false,
+    client_bridge_mode: bool = false,
+    client_monitor_mode: bool = false,
+    vlan_id: u32 = 0,
+    unique_id: [16]u8 = [_]u8{0} ** 16,
+    is_dormant_enabled: bool = false,
+    is_dormant: bool = false,
+    last_comm_dormant: u64 = 0,
+    created_time: u64 = 0,
+    last_comm_time: u64 = 0,
+
+    pub fn inRpc(self: *EnumSessionItem, allocator: Allocator, p: *const Pack, index: usize) !void {
+        self.* = .{};
+        self.name = try dupStr(allocator, p.getStrEx("Name", index));
+        self.remote_session = p.getBoolEx("RemoteSession", index) orelse false;
+        self.remote_hostname = try dupStr(allocator, p.getStrEx("RemoteHostname", index));
+        self.username = try dupStr(allocator, p.getStrEx("Username", index));
+        self.ip = p.getIntEx("Ip", index) orelse 0;
+        self.client_ip = getIpAddressEx(p, "ClientIP", index);
+        self.hostname = try dupStr(allocator, p.getStrEx("Hostname", index));
+        self.max_num_tcp = p.getIntEx("MaxNumTcp", index) orelse 0;
+        self.current_num_tcp = p.getIntEx("CurrentNumTcp", index) orelse 0;
+        self.packet_size = p.getInt64Ex("PacketSize", index) orelse 0;
+        self.packet_num = p.getInt64Ex("PacketNum", index) orelse 0;
+        self.link_mode = p.getBoolEx("LinkMode", index) orelse false;
+        self.secure_nat_mode = p.getBoolEx("SecureNATMode", index) orelse false;
+        self.bridge_mode = p.getBoolEx("BridgeMode", index) orelse false;
+        self.layer3_mode = p.getBoolEx("Layer3Mode", index) orelse false;
+        self.client_bridge_mode = p.getBoolEx("Client_BridgeMode", index) orelse false;
+        self.client_monitor_mode = p.getBoolEx("Client_MonitorMode", index) orelse false;
+        self.vlan_id = p.getIntEx("VLanId", index) orelse 0;
+        if (p.getDataEx("UniqueId", index)) |d| {
+            const n = @min(d.len, self.unique_id.len);
+            @memcpy(self.unique_id[0..n], d[0..n]);
+        }
+        self.is_dormant_enabled = p.getBoolEx("IsDormantEnabled", index) orelse false;
+        self.is_dormant = p.getBoolEx("IsDormant", index) orelse false;
+        self.last_comm_dormant = p.getInt64Ex("LastCommDormant", index) orelse 0;
+        self.created_time = p.getInt64Ex("CreatedTime", index) orelse 0;
+        self.last_comm_time = p.getInt64Ex("LastCommTime", index) orelse 0;
+    }
+
+    pub fn outRpc(self: *const EnumSessionItem, p: *Pack, index: usize) !void {
+        try p.addStrEx("Name", self.name, index);
+        try p.addBoolEx("RemoteSession", self.remote_session, index);
+        try p.addStrEx("RemoteHostname", self.remote_hostname, index);
+        try p.addStrEx("Username", self.username, index);
+        try p.addIntEx("Ip", self.ip, index);
+        try addIpAddressEx(p, "ClientIP", self.client_ip, index);
+        try p.addStrEx("Hostname", self.hostname, index);
+        try p.addIntEx("MaxNumTcp", self.max_num_tcp, index);
+        try p.addIntEx("CurrentNumTcp", self.current_num_tcp, index);
+        try p.addInt64Ex("PacketSize", self.packet_size, index);
+        try p.addInt64Ex("PacketNum", self.packet_num, index);
+        try p.addBoolEx("LinkMode", self.link_mode, index);
+        try p.addBoolEx("SecureNATMode", self.secure_nat_mode, index);
+        try p.addBoolEx("BridgeMode", self.bridge_mode, index);
+        try p.addBoolEx("Layer3Mode", self.layer3_mode, index);
+        try p.addBoolEx("Client_BridgeMode", self.client_bridge_mode, index);
+        try p.addBoolEx("Client_MonitorMode", self.client_monitor_mode, index);
+        try p.addIntEx("VLanId", self.vlan_id, index);
+        try p.addDataEx("UniqueId", &self.unique_id, index);
+        try p.addBoolEx("IsDormantEnabled", self.is_dormant_enabled, index);
+        try p.addBoolEx("IsDormant", self.is_dormant, index);
+        try p.addInt64Ex("LastCommDormant", self.last_comm_dormant, index);
+        try p.addInt64Ex("CreatedTime", self.created_time, index);
+        try p.addInt64Ex("LastCommTime", self.last_comm_time, index);
+    }
+
+    pub fn free(self: *EnumSessionItem, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.remote_hostname);
+        allocator.free(self.username);
+        allocator.free(self.hostname);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ENUM_SESSION` (Admin.h:676) — `EnumSession`.
+pub const RpcEnumSession = struct {
+    hub_name: []const u8 = "",
+    sessions: []EnumSessionItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumSession, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Name");
+        self.sessions = try allocator.alloc(EnumSessionItem, count);
+        for (0..count) |i| {
+            self.sessions[i] = .{};
+            try self.sessions[i].inRpc(allocator, p, i);
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumSession, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.sessions, 0..) |*item, i| {
+            try item.outRpc(p, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumSession, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.sessions) |*item| item.free(allocator);
+        allocator.free(self.sessions);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_CLIENT_GET_CONNECTION_STATUS` (Client.h:409) subset, the `Status`
+/// field of `GetSessionStatus`. Only the fields the standalone server can
+/// fill are serialized; field names match C exactly.
+pub const Connecting = struct {
+    session_name: []const u8 = "",
+    connection_name: []const u8 = "",
+    active: bool = false,
+    connected: bool = false,
+    session_status: u32 = 0,
+    half_connection: bool = false,
+    qos: bool = false,
+    max_tcp_connections: u32 = 0,
+    num_tcp_connections: u32 = 0,
+    use_encrypt: bool = false,
+    cipher_name: []const u8 = "",
+    use_compress: bool = false,
+    is_udp_session: bool = false,
+    underlay_protocol: []const u8 = "",
+    is_bridge_mode: bool = false,
+    is_monitor_mode: bool = false,
+    start_time: u64 = 0,
+    total_send_size: u64 = 0,
+    total_recv_size: u64 = 0,
+    vlan_id: u32 = 0,
+    traffic: Traffic = .{},
+
+    pub fn inRpc(self: *Connecting, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.session_name = try dupStr(allocator, p.getStr("SessionName"));
+        self.connection_name = try dupStr(allocator, p.getStr("ConnectionName"));
+        self.active = p.getBool("Active") orelse false;
+        self.connected = p.getBool("Connected") orelse false;
+        self.session_status = p.getInt("SessionStatus") orelse 0;
+        self.half_connection = p.getBool("HalfConnection") orelse false;
+        self.qos = p.getBool("QoS") orelse false;
+        self.max_tcp_connections = p.getInt("MaxTcpConnections") orelse 0;
+        self.num_tcp_connections = p.getInt("NumTcpConnections") orelse 0;
+        self.use_encrypt = p.getBool("UseEncrypt") orelse false;
+        self.cipher_name = try dupStr(allocator, p.getStr("CipherName"));
+        self.use_compress = p.getBool("UseCompress") orelse false;
+        self.is_udp_session = p.getBool("IsRUDPSession") orelse false;
+        self.underlay_protocol = try dupStr(allocator, p.getStr("UnderlayProtocol"));
+        self.is_bridge_mode = p.getBool("IsBridgeMode") orelse false;
+        self.is_monitor_mode = p.getBool("IsMonitorMode") orelse false;
+        self.start_time = p.getInt64("StartTime") orelse 0;
+        self.total_send_size = p.getInt64("TotalSendSize") orelse 0;
+        self.total_recv_size = p.getInt64("TotalRecvSize") orelse 0;
+        self.vlan_id = p.getInt("VLanId") orelse 0;
+        self.traffic.inRpc(p);
+    }
+
+    pub fn outRpc(self: *const Connecting, p: *Pack) !void {
+        try p.addStr("SessionName", self.session_name);
+        try p.addStr("ConnectionName", self.connection_name);
+        try p.addBool("Active", self.active);
+        try p.addBool("Connected", self.connected);
+        try p.addInt("SessionStatus", self.session_status);
+        try p.addBool("HalfConnection", self.half_connection);
+        try p.addBool("QoS", self.qos);
+        try p.addInt("MaxTcpConnections", self.max_tcp_connections);
+        try p.addInt("NumTcpConnections", self.num_tcp_connections);
+        try p.addBool("UseEncrypt", self.use_encrypt);
+        try p.addStr("CipherName", self.cipher_name);
+        try p.addBool("UseCompress", self.use_compress);
+        try p.addBool("IsRUDPSession", self.is_udp_session);
+        try p.addStr("UnderlayProtocol", self.underlay_protocol);
+        try p.addBool("IsBridgeMode", self.is_bridge_mode);
+        try p.addBool("IsMonitorMode", self.is_monitor_mode);
+        try p.addInt64("StartTime", self.start_time);
+        try p.addInt64("TotalSendSize", self.total_send_size);
+        try p.addInt64("TotalRecvSize", self.total_recv_size);
+        try p.addInt("VLanId", self.vlan_id);
+        try self.traffic.outRpc(p);
+    }
+
+    pub fn free(self: *Connecting, allocator: Allocator) void {
+        allocator.free(self.session_name);
+        allocator.free(self.connection_name);
+        allocator.free(self.cipher_name);
+        allocator.free(self.underlay_protocol);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_SESSION_STATUS` (Admin.h:660) — `GetSessionStatus`. `node_info`
+/// (C `NODE_INFO`) is not modeled yet, so those pack fields are omitted.
+pub const RpcSessionStatus = struct {
+    hub_name: []const u8 = "",
+    name: []const u8 = "",
+    username: []const u8 = "",
+    group_name: []const u8 = "",
+    real_username: []const u8 = "",
+    client_ip: u32 = 0,
+    client_ip6: [16]u8 = [_]u8{0} ** 16,
+    client_host_name: []const u8 = "",
+    client_ip_address: IpAddress = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+    status: Connecting = .{},
+
+    pub fn inRpc(self: *RpcSessionStatus, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        self.username = try dupStr(allocator, p.getStr("Username"));
+        self.group_name = try dupStr(allocator, p.getStr("GroupName"));
+        self.real_username = try dupStr(allocator, p.getStr("RealUsername"));
+        self.client_ip = p.getInt("SessionStatus_ClientIp") orelse 0;
+        if (p.getData("SessionStatus_ClientIp6")) |d| {
+            const n = @min(d.len, self.client_ip6.len);
+            @memcpy(self.client_ip6[0..n], d[0..n]);
+        }
+        self.client_host_name = try dupStr(allocator, p.getStr("SessionStatus_ClientHostName"));
+        self.client_ip_address = getIpAddress(p, "Client_Ip_Address");
+        try self.status.inRpc(allocator, p);
+    }
+
+    pub fn outRpc(self: *const RpcSessionStatus, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("Name", self.name);
+        try p.addStr("Username", self.username);
+        try p.addStr("GroupName", self.group_name);
+        try p.addStr("RealUsername", self.real_username);
+        try p.addInt("SessionStatus_ClientIp", self.client_ip);
+        try p.addData("SessionStatus_ClientIp6", &self.client_ip6);
+        try p.addStr("SessionStatus_ClientHostName", self.client_host_name);
+        try addIpAddress(p, "Client_Ip_Address", self.client_ip_address);
+        try self.status.outRpc(p);
+    }
+
+    pub fn free(self: *RpcSessionStatus, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.name);
+        allocator.free(self.username);
+        allocator.free(self.group_name);
+        allocator.free(self.real_username);
+        allocator.free(self.client_host_name);
+        self.status.free(allocator);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_DELETE_SESSION` (Admin.h:680) — `DeleteSession`.
+pub const RpcDeleteSession = struct {
+    hub_name: []const u8 = "",
+    name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcDeleteSession, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.name = try dupStr(allocator, p.getStr("Name"));
+    }
+
+    pub fn outRpc(self: *const RpcDeleteSession, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("Name", self.name);
+    }
+
+    pub fn free(self: *RpcDeleteSession, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ENUM_CONNECTION_ITEM` (Admin.h:379) — one row of `EnumConnection`.
+pub const EnumConnectionItem = struct {
+    name: []const u8 = "",
+    hostname: []const u8 = "",
+    ip: u32 = 0,
+    port: u32 = 0,
+    connected_time: u64 = 0,
+    connection_type: u32 = 0,
+
+    pub fn inRpc(self: *EnumConnectionItem, allocator: Allocator, p: *const Pack, index: usize) !void {
+        self.* = .{};
+        self.name = try dupStr(allocator, p.getStrEx("Name", index));
+        self.hostname = try dupStr(allocator, p.getStrEx("Hostname", index));
+        self.ip = p.getIntEx("Ip", index) orelse 0;
+        self.port = p.getIntEx("Port", index) orelse 0;
+        self.connected_time = p.getInt64Ex("ConnectedTime", index) orelse 0;
+        self.connection_type = p.getIntEx("Type", index) orelse 0;
+    }
+
+    pub fn outRpc(self: *const EnumConnectionItem, p: *Pack, index: usize) !void {
+        try p.addStrEx("Name", self.name, index);
+        try p.addStrEx("Hostname", self.hostname, index);
+        try p.addIntEx("Ip", self.ip, index);
+        try p.addIntEx("Port", self.port, index);
+        try p.addInt64Ex("ConnectedTime", self.connected_time, index);
+        try p.addIntEx("Type", self.connection_type, index);
+    }
+
+    pub fn free(self: *EnumConnectionItem, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.hostname);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ENUM_CONNECTION` (Admin.h:390) — `EnumConnection`. Server-wide (no
+/// `HubName`); the item count is the index count of the "Name" element.
+pub const RpcEnumConnection = struct {
+    connections: []EnumConnectionItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumConnection, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        const count = p.getValueCount("Name");
+        self.connections = try allocator.alloc(EnumConnectionItem, count);
+        for (0..count) |i| {
+            self.connections[i] = .{};
+            try self.connections[i].inRpc(allocator, p, i);
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumConnection, p: *Pack) !void {
+        for (self.connections, 0..) |*item, i| {
+            try item.outRpc(p, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumConnection, allocator: Allocator) void {
+        for (self.connections) |*item| item.free(allocator);
+        allocator.free(self.connections);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_DISCONNECT_CONNECTION` (Admin.h:397) — `DisconnectConnection`.
+pub const RpcDisconnectConnection = struct {
+    name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcDisconnectConnection, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.name = try dupStr(allocator, p.getStr("Name"));
+    }
+
+    pub fn outRpc(self: *const RpcDisconnectConnection, p: *Pack) !void {
+        try p.addStr("Name", self.name);
+    }
+
+    pub fn free(self: *RpcDisconnectConnection, allocator: Allocator) void {
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+// ============================================================================
+// IP helpers (C: PackAddIp32Ex2 / PackAddIpEx2 / PackGetIpEx wire format)
+// ============================================================================
+
+/// C `PackAddIpEx2`: an IP address spans four elements
+/// (`name@ipv6_bool`, `name@ipv6_array`, `name@ipv6_scope_id`, `name`), so
+/// `PackGetIpEx`/`PackGetIp32` read it back on the C side.
+fn addIpAddress(p: *Pack, name: []const u8, ip: IpAddress) !void {
+    var buf: [128]u8 = undefined;
+    const v6_bool = std.fmt.bufPrint(&buf, "{s}@ipv6_bool", .{name}) catch return error.OutOfMemory;
+    try p.addBool(v6_bool, ip == .ipv6);
+    const v6_array = std.fmt.bufPrint(&buf, "{s}@ipv6_array", .{name}) catch return error.OutOfMemory;
+    switch (ip) {
+        .ipv6 => |a| try p.addData(v6_array, &a),
+        .ipv4 => try p.addData(v6_array, &([_]u8{0} ** 16)),
+    }
+    const v6_scope = std.fmt.bufPrint(&buf, "{s}@ipv6_scope_id", .{name}) catch return error.OutOfMemory;
+    try p.addInt(v6_scope, 0);
+    const ip32 = ip.toU32() orelse 0;
+    try p.addInt(name, ip32);
+}
+
+fn getIpAddress(p: *const Pack, name: []const u8) IpAddress {
+    var buf: [128]u8 = undefined;
+    const v6_bool = std.fmt.bufPrint(&buf, "{s}@ipv6_bool", .{name}) catch return IpAddress{ .ipv4 = .{ 0, 0, 0, 0 } };
+    const is_v6 = p.getBool(v6_bool) orelse false;
+    if (!is_v6) {
+        const ip32 = p.getInt(name) orelse 0;
+        return IpAddress.fromU32(ip32);
+    }
+    const v6_array = std.fmt.bufPrint(&buf, "{s}@ipv6_array", .{name}) catch return IpAddress{ .ipv4 = .{ 0, 0, 0, 0 } };
+    if (p.getData(v6_array)) |d| {
+        if (d.len == 16) {
+            var a: [16]u8 = undefined;
+            @memcpy(&a, d);
+            return .{ .ipv6 = a };
+        }
+    }
+    return IpAddress{ .ipv4 = .{ 0, 0, 0, 0 } };
+}
+
+/// Indexed variant of `addIpAddress` (C `PackAddIpEx2` with an index).
+fn addIpAddressEx(p: *Pack, name: []const u8, ip: IpAddress, index: usize) !void {
+    var buf: [128]u8 = undefined;
+    const v6_bool = std.fmt.bufPrint(&buf, "{s}@ipv6_bool", .{name}) catch return error.OutOfMemory;
+    try p.addBoolEx(v6_bool, ip == .ipv6, index);
+    const v6_array = std.fmt.bufPrint(&buf, "{s}@ipv6_array", .{name}) catch return error.OutOfMemory;
+    switch (ip) {
+        .ipv6 => |a| try p.addDataEx(v6_array, &a, index),
+        .ipv4 => try p.addDataEx(v6_array, &([_]u8{0} ** 16), index),
+    }
+    const v6_scope = std.fmt.bufPrint(&buf, "{s}@ipv6_scope_id", .{name}) catch return error.OutOfMemory;
+    try p.addIntEx(v6_scope, 0, index);
+    const ip32 = ip.toU32() orelse 0;
+    try p.addIntEx(name, ip32, index);
+}
+
+fn getIpAddressEx(p: *const Pack, name: []const u8, index: usize) IpAddress {
+    var buf: [128]u8 = undefined;
+    const v6_bool = std.fmt.bufPrint(&buf, "{s}@ipv6_bool", .{name}) catch return IpAddress{ .ipv4 = .{ 0, 0, 0, 0 } };
+    const is_v6 = p.getBoolEx(v6_bool, index) orelse false;
+    if (!is_v6) {
+        const ip32 = p.getIntEx(name, index) orelse 0;
+        return IpAddress.fromU32(ip32);
+    }
+    const v6_array = std.fmt.bufPrint(&buf, "{s}@ipv6_array", .{name}) catch return IpAddress{ .ipv4 = .{ 0, 0, 0, 0 } };
+    if (p.getDataEx(v6_array, index)) |d| {
+        if (d.len == 16) {
+            var a: [16]u8 = undefined;
+            @memcpy(&a, d);
+            return .{ .ipv6 = a };
+        }
+    }
+    return IpAddress{ .ipv4 = .{ 0, 0, 0, 0 } };
+}
+
+// ============================================================================
 // Indexed traffic helpers (C: Client.c InRpcTrafficEx / OutRpcTrafficEx)
 // ============================================================================
 
@@ -1128,6 +1583,11 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
         RpcSetUser => try t.inRpc(allocator, p),
         RpcEnumUser => try t.inRpc(allocator, p),
         RpcDeleteUser => try t.inRpc(allocator, p),
+        RpcEnumSession => try t.inRpc(allocator, p),
+        RpcSessionStatus => try t.inRpc(allocator, p),
+        RpcDeleteSession => try t.inRpc(allocator, p),
+        RpcEnumConnection => try t.inRpc(allocator, p),
+        RpcDisconnectConnection => try t.inRpc(allocator, p),
         else => @compileError("no inRpc for " ++ @typeName(T)),
     }
 }
@@ -1145,6 +1605,11 @@ fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
         RpcSetUser => try t.outRpc(p),
         RpcEnumUser => try t.outRpc(p),
         RpcDeleteUser => try t.outRpc(p),
+        RpcEnumSession => try t.outRpc(p),
+        RpcSessionStatus => try t.outRpc(p),
+        RpcDeleteSession => try t.outRpc(p),
+        RpcEnumConnection => try t.outRpc(p),
+        RpcDisconnectConnection => try t.outRpc(p),
         else => @compileError("no outRpc for " ++ @typeName(T)),
     }
 }
@@ -1449,4 +1914,130 @@ test "server.admin_structs CapsList round-trip" {
     try testing.expectEqual(@as(u32, 1), r.caps[0].value);
     try testing.expectEqualStrings("i_max_conn", r.caps[1].name);
     try testing.expectEqual(@as(u32, 128), r.caps[1].value);
+}
+
+test "server.admin_structs RpcEnumSession round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumSession{ .hub_name = try allocator.dupe(u8, "VPN") };
+    v.sessions = try allocator.alloc(EnumSessionItem, 2);
+    v.sessions[0] = .{
+        .name = try allocator.dupe(u8, "SID-ALICE"),
+        .username = try allocator.dupe(u8, "Alice"),
+        .ip = 0x0A000001,
+        .client_ip = IpAddress.fromU32(0x0A000001),
+        .packet_size = 1000,
+        .created_time = 111,
+    };
+    v.sessions[1] = .{
+        .name = try allocator.dupe(u8, "SID-BOB"),
+        .username = try allocator.dupe(u8, "Bob"),
+        .ip = 0x0A000002,
+        .client_ip = IpAddress.fromU32(0x0A000002),
+        .vlan_id = 4,
+        .last_comm_time = 222,
+    };
+    defer v.free(allocator);
+    var r = RpcEnumSession{};
+    defer r.free(allocator);
+
+    var p = Pack.init(allocator);
+    defer p.deinit();
+    try v.outRpc(&p);
+    try r.inRpc(allocator, &p);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqual(@as(usize, 2), r.sessions.len);
+    try testing.expectEqualStrings("SID-ALICE", r.sessions[0].name);
+    try testing.expectEqualStrings("Alice", r.sessions[0].username);
+    try testing.expectEqual(@as(u32, 0x0A000001), r.sessions[0].ip);
+    try testing.expectEqual(@as(u64, 1000), r.sessions[0].packet_size);
+    try testing.expectEqual(@as(u64, 111), r.sessions[0].created_time);
+    try testing.expectEqual(@as(u32, 0x0A000002), r.sessions[1].ip);
+    try testing.expectEqual(@as(u32, 4), r.sessions[1].vlan_id);
+    try testing.expectEqual(@as(u64, 222), r.sessions[1].last_comm_time);
+}
+
+test "server.admin_structs RpcSessionStatus round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcSessionStatus{
+        .hub_name = "VPN",
+        .name = "SID-ALICE",
+        .username = "Alice",
+        .client_ip = 0x0A000001,
+        .client_ip_address = IpAddress.fromU32(0x0A000001),
+        .status = .{
+            .session_name = "SID-ALICE",
+            .connection_name = "CONN-0",
+            .active = true,
+            .connected = true,
+            .session_status = 4,
+            .start_time = 12345,
+            .total_send_size = 500,
+            .total_recv_size = 600,
+            .traffic = .{ .send_unicast_bytes = 7 },
+        },
+    };
+    var r = RpcSessionStatus{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcSessionStatus, &v, &r);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqualStrings("SID-ALICE", r.name);
+    try testing.expectEqualStrings("Alice", r.username);
+    try testing.expectEqual(@as(u32, 0x0A000001), r.client_ip);
+    try testing.expectEqual(@as(u32, 0x0A000001), r.client_ip_address.toU32().?);
+    try testing.expectEqualStrings("CONN-0", r.status.connection_name);
+    try testing.expect(r.status.connected);
+    try testing.expectEqual(@as(u64, 12345), r.status.start_time);
+    try testing.expectEqual(@as(u64, 600), r.status.total_recv_size);
+    try testing.expectEqual(@as(u64, 7), r.status.traffic.send_unicast_bytes);
+}
+
+test "server.admin_structs RpcDeleteSession round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcDeleteSession{ .hub_name = "VPN", .name = "SID-ALICE" };
+    var r = RpcDeleteSession{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcDeleteSession, &v, &r);
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqualStrings("SID-ALICE", r.name);
+}
+
+test "server.admin_structs RpcEnumConnection round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumConnection{};
+    v.connections = try allocator.alloc(EnumConnectionItem, 1);
+    v.connections[0] = .{
+        .name = try allocator.dupe(u8, "CONN-0"),
+        .hostname = try allocator.dupe(u8, "client.example.com"),
+        .ip = 0xC0A80101,
+        .port = 40000,
+        .connected_time = 999,
+        .connection_type = 0,
+    };
+    defer v.free(allocator);
+    var r = RpcEnumConnection{};
+    defer r.free(allocator);
+
+    var p = Pack.init(allocator);
+    defer p.deinit();
+    try v.outRpc(&p);
+    try r.inRpc(allocator, &p);
+
+    try testing.expectEqual(@as(usize, 1), r.connections.len);
+    try testing.expectEqualStrings("CONN-0", r.connections[0].name);
+    try testing.expectEqualStrings("client.example.com", r.connections[0].hostname);
+    try testing.expectEqual(@as(u32, 0xC0A80101), r.connections[0].ip);
+    try testing.expectEqual(@as(u32, 40000), r.connections[0].port);
+    try testing.expectEqual(@as(u64, 999), r.connections[0].connected_time);
+    try testing.expectEqual(@as(u32, 0), r.connections[0].connection_type);
+}
+
+test "server.admin_structs RpcDisconnectConnection round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcDisconnectConnection{ .name = "CONN-0" };
+    var r = RpcDisconnectConnection{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcDisconnectConnection, &v, &r);
+    try testing.expectEqualStrings("CONN-0", r.name);
 }
