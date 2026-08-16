@@ -152,6 +152,26 @@ pub const ServerUser = struct {
     }
 };
 
+/// C `MAC_TABLE_ENTRY` (Hub.c:57) subset held by the admin model.
+pub const MacTableEntry = struct {
+    key: u32 = 0,
+    session_name: []const u8 = "",
+    mac_address: [6]u8 = [_]u8{0} ** 6,
+    vlan_id: u32 = 0,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+};
+
+/// C `IP_TABLE_ENTRY` (Hub.c:57) subset held by the admin model.
+pub const IpTableEntry = struct {
+    key: u32 = 0,
+    session_name: []const u8 = "",
+    ip: types_mod.IpAddress = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+    dhcp_allocated: bool = false,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+};
+
 /// C `HUB` subset used by EnumHub / CreateHub / SetHub / GetHubStatus.
 pub const ServerHub = struct {
     name: []const u8 = "",
@@ -171,7 +191,14 @@ pub const ServerHub = struct {
     created_time: u64 = 0,
     num_login: u32 = 0,
     traffic: structs.Traffic = .{},
+
     users: std.ArrayListUnmanaged(ServerUser) = .{},
+    /// Learned MAC table (C `HUB->MacHashTable` subset). The admin model is
+    /// self-contained: entries are bootstrapped by tests / callers, the
+    /// data-plane integration is a separate follow-up.
+    mac_table: std.ArrayListUnmanaged(MacTableEntry) = .{},
+    /// Learned IP table (C `HUB->IpTable` subset).
+    ip_table: std.ArrayListUnmanaged(IpTableEntry) = .{},
 
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
@@ -205,6 +232,35 @@ pub const ServerHub = struct {
     fn deinitUsers(self: *ServerHub, allocator: Allocator) void {
         for (self.users.items) |*user| user.free(allocator);
         self.users.deinit(allocator);
+    }
+
+    /// Release the owned table entry names (test/bootstrap helper).
+    pub fn freeTables(self: *ServerHub, allocator: Allocator) void {
+        for (self.mac_table.items) |*e| allocator.free(e.session_name);
+        self.mac_table.deinit(allocator);
+        for (self.ip_table.items) |*e| allocator.free(e.session_name);
+        self.ip_table.deinit(allocator);
+    }
+
+    /// Append a MAC table entry (test/bootstrap helper). Takes ownership of a
+    /// copy of `entry.session_name`.
+    pub fn addMacTableEntry(self: *ServerHub, allocator: Allocator, entry: MacTableEntry) !void {
+        const owned = try allocator.dupe(u8, entry.session_name);
+        errdefer allocator.free(owned);
+        var e = entry;
+        e.session_name = owned;
+        try self.mac_table.append(allocator, e);
+        self.num_mac_tables +%= 1;
+    }
+
+    /// Append an IP table entry (test/bootstrap helper).
+    pub fn addIpTableEntry(self: *ServerHub, allocator: Allocator, entry: IpTableEntry) !void {
+        const owned = try allocator.dupe(u8, entry.session_name);
+        errdefer allocator.free(owned);
+        var e = entry;
+        e.session_name = owned;
+        try self.ip_table.append(allocator, e);
+        self.num_ip_tables +%= 1;
     }
 };
 
@@ -271,6 +327,7 @@ pub const Server = struct {
         self.os_info.free(allocator);
         for (self.hubs.items) |*hub| {
             hub.deinitUsers(allocator);
+            hub.freeTables(allocator);
             allocator.free(hub.name);
         }
         self.hubs.deinit(allocator);
@@ -381,6 +438,10 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcSetUser, &a, allocator, request, ret, stSetUser);
     } else if (mem.eql(u8, function_name, "DeleteUser")) {
         err = dispatchCall(structs.RpcDeleteUser, &a, allocator, request, ret, stDeleteUser);
+    } else if (mem.eql(u8, function_name, "EnumMacTable")) {
+        err = dispatchCall(structs.RpcEnumMacTable, &a, allocator, request, ret, stEnumMacTable);
+    } else if (mem.eql(u8, function_name, "EnumIpTable")) {
+        err = dispatchCall(structs.RpcEnumIpTable, &a, allocator, request, ret, stEnumIpTable);
     } else {
         err = err_not_supported;
     }
@@ -440,6 +501,8 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcEnumUser => try t.inRpc(allocator, p),
         structs.RpcSetUser => try t.inRpc(allocator, p),
         structs.RpcDeleteUser => try t.inRpc(allocator, p),
+        structs.RpcEnumMacTable => try t.inRpc(allocator, p),
+        structs.RpcEnumIpTable => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -465,6 +528,8 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcEnumUser => try t.outRpc(p),
         structs.RpcSetUser => try t.outRpc(p),
         structs.RpcDeleteUser => try t.outRpc(p),
+        structs.RpcEnumMacTable => try t.outRpc(p),
+        structs.RpcEnumIpTable => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -495,6 +560,8 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcEnumUser => t.free(allocator),
         structs.RpcSetUser => t.free(allocator),
         structs.RpcDeleteUser => t.free(allocator),
+        structs.RpcEnumMacTable => t.free(allocator),
+        structs.RpcEnumIpTable => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
@@ -810,6 +877,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     const index = findHubIndex(s, t.hub_name) orelse return err_hub_not_found;
     var removed = s.hubs.swapRemove(index);
     removed.deinitUsers(allocator);
+    removed.freeTables(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
     return err_no_error;
@@ -991,6 +1059,74 @@ fn stDisconnectConnection(a: *AdminCtx, t: *structs.RpcDisconnectConnection, all
     if (t.name.len == 0) return err_invalid_parameter;
     if (!a.server_admin) return err_not_enough_right;
     if (!s.sessions.requestStopByConnection(t.name)) return err_object_not_found;
+    return err_no_error;
+}
+
+/// C `StEnumMacTable` (Admin.c:5152). Hub-scoped: a server admin targets the
+/// requested hub, a hub admin is locked to the hub named in their session.
+/// Standalone only: a farm controller would adjoin remote member entries
+/// (C `SiCallEnumMacTable`), which the model does not implement, so non-
+/// standalone types are rejected rather than returning a misleading local-only
+/// enumeration. Does not touch `config_revision`.
+fn stEnumMacTable(a: *AdminCtx, t: *structs.RpcEnumMacTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type != server_type_standalone) return err_not_supported;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    t.mac_tables = allocator.alloc(structs.EnumMacTableItem, hub.mac_table.items.len) catch return err_internal_error;
+    for (hub.mac_table.items, 0..) |*entry, i| {
+        const e = &t.mac_tables[i];
+        e.* = .{};
+        e.key = entry.key;
+        e.session_name = dupStr(allocator, entry.session_name) catch return err_internal_error;
+        e.mac_address = entry.mac_address;
+        e.vlan_id = entry.vlan_id;
+        e.created_time = entry.created_time;
+        e.updated_time = entry.updated_time;
+        e.remote_item = false;
+        e.remote_hostname = dupStr(allocator, "") catch return err_internal_error;
+    }
+    return err_no_error;
+}
+
+/// C `StEnumIpTable` (Admin.c:4978). Same hub-scoping and standalone-only
+/// behaviour as `StEnumMacTable`.
+fn stEnumIpTable(a: *AdminCtx, t: *structs.RpcEnumIpTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type != server_type_standalone) return err_not_supported;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    t.ip_tables = allocator.alloc(structs.EnumIpTableItem, hub.ip_table.items.len) catch return err_internal_error;
+    for (hub.ip_table.items, 0..) |*entry, i| {
+        const e = &t.ip_tables[i];
+        e.* = .{};
+        e.key = entry.key;
+        e.session_name = dupStr(allocator, entry.session_name) catch return err_internal_error;
+        e.ip = entry.ip.toU32() orelse 0;
+        e.ip_v6 = entry.ip;
+        e.ip_address = entry.ip;
+        e.dhcp_allocated = entry.dhcp_allocated;
+        e.created_time = entry.created_time;
+        e.updated_time = entry.updated_time;
+        e.remote_item = false;
+        e.remote_hostname = dupStr(allocator, "") catch return err_internal_error;
+    }
     return err_no_error;
 }
 
@@ -1970,6 +2106,42 @@ test "server.admin_dispatch DeleteHub frees the hub's users" {
         resp.deinit();
         allocator.destroy(resp);
     }
+    try assertOk(resp);
+    try testing.expectEqual(@as(usize, 0), server.hubs.items.len);
+}
+
+test "server.admin_dispatch DeleteHub releases a populated hub's tables" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.hubs.items[0].addMacTableEntry(allocator, .{
+        .key = 1,
+        .session_name = "SID-ALICE",
+        .mac_address = .{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 },
+        .vlan_id = 3,
+        .created_time = 111,
+        .updated_time = 222,
+    });
+    try server.hubs.items[0].addIpTableEntry(allocator, .{
+        .key = 2,
+        .session_name = "SID-BOB",
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .dhcp_allocated = true,
+        .created_time = 111,
+        .updated_time = 222,
+    });
+
+    var req = try makeRequest(allocator, "DeleteHub");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+
+    var resp = try call(allocator, &server, true, "", "DeleteHub", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
     try assertOk(resp);
     try testing.expectEqual(@as(usize, 0), server.hubs.items.len);
 }
@@ -2988,4 +3160,144 @@ test "server.admin_dispatch DisconnectConnection stops a connection" {
         allocator.destroy(no_admin_resp);
     }
     try assertErr(no_admin_resp, err_not_enough_right);
+}
+
+test "server.admin_dispatch EnumMacTable lists a hub's MAC table" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    const hub = &server.hubs.items[0];
+    try hub.addMacTableEntry(allocator, .{
+        .key = 0x10,
+        .session_name = "SID-ALICE",
+        .mac_address = .{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 },
+        .vlan_id = 3,
+        .created_time = 111,
+        .updated_time = 222,
+    });
+    try hub.addMacTableEntry(allocator, .{
+        .key = 0x11,
+        .session_name = "SID-BOB",
+        .mac_address = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF },
+    });
+
+    var req = try makeRequest(allocator, "EnumMacTable");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+
+    var resp = try call(allocator, &server, true, "", "EnumMacTable", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
+    try assertOk(resp);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+    try testing.expectEqual(@as(usize, 2), resp.getValueCount("SessionName"));
+    try testing.expectEqual(@as(u32, 0x10), resp.getIntEx("Key", 0).?);
+    try testing.expectEqualStrings("SID-ALICE", resp.getStrEx("SessionName", 0).?);
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 }, resp.getDataEx("MacAddress", 0).?);
+    try testing.expectEqual(@as(u32, 3), resp.getIntEx("VlanId", 0).?);
+    try testing.expectEqual(@as(u64, 111), resp.getInt64Ex("CreatedTime", 0).?);
+    try testing.expectEqual(@as(u64, 222), resp.getInt64Ex("UpdatedTime", 0).?);
+    try testing.expectEqualStrings("SID-BOB", resp.getStrEx("SessionName", 1).?);
+    try testing.expectEqual(@as(u32, 0x11), resp.getIntEx("Key", 1).?);
+}
+
+test "server.admin_dispatch EnumIpTable lists a hub's IP table" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    const hub = &server.hubs.items[0];
+    try hub.addIpTableEntry(allocator, .{
+        .key = 0x20,
+        .session_name = "SID-ALICE",
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .dhcp_allocated = true,
+        .created_time = 111,
+        .updated_time = 222,
+    });
+    try hub.addIpTableEntry(allocator, .{
+        .key = 0x21,
+        .session_name = "SID-BOB",
+        .ip = types_mod.IpAddress.fromU32(0x0A000002),
+    });
+
+    var req = try makeRequest(allocator, "EnumIpTable");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+
+    var resp = try call(allocator, &server, true, "", "EnumIpTable", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+
+    try assertOk(resp);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+    try testing.expectEqual(@as(usize, 2), resp.getValueCount("SessionName"));
+    try testing.expectEqual(@as(u32, 0x20), resp.getIntEx("Key", 0).?);
+    try testing.expectEqualStrings("SID-ALICE", resp.getStrEx("SessionName", 0).?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getIntEx("Ip", 0).?);
+    try testing.expectEqual(@as(bool, true), resp.getBoolEx("DhcpAllocated", 0).?);
+    try testing.expectEqual(@as(u64, 111), resp.getInt64Ex("CreatedTime", 0).?);
+    try testing.expectEqualStrings("SID-BOB", resp.getStrEx("SessionName", 1).?);
+    try testing.expectEqual(@as(u32, 0x0A000002), resp.getIntEx("Ip", 1).?);
+}
+
+test "server.admin_dispatch EnumMacTable and EnumIpTable validate hub and rights" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Unknown hub.
+    var miss = try makeRequest(allocator, "EnumMacTable");
+    defer miss.deinit();
+    try miss.addStr("HubName", "MISSING");
+    var miss_resp = try call(allocator, &server, true, "", "EnumMacTable", &miss);
+    defer {
+        miss_resp.deinit();
+        allocator.destroy(miss_resp);
+    }
+    try assertErr(miss_resp, err_hub_not_found);
+
+    // Hub admin locked to their own hub.
+    var locked = try makeRequest(allocator, "EnumIpTable");
+    defer locked.deinit();
+    try locked.addStr("HubName", "OTHER");
+    var locked_resp = try call(allocator, &server, false, "VPN", "EnumIpTable", &locked);
+    defer {
+        locked_resp.deinit();
+        allocator.destroy(locked_resp);
+    }
+    try assertErr(locked_resp, err_not_enough_right);
+
+    // Hub admin may enumerate their own hub.
+    var own = try makeRequest(allocator, "EnumMacTable");
+    defer own.deinit();
+    try own.addStr("HubName", "VPN");
+    var own_resp = try call(allocator, &server, false, "VPN", "EnumMacTable", &own);
+    defer {
+        own_resp.deinit();
+        allocator.destroy(own_resp);
+    }
+    try assertOk(own_resp);
+
+    // Farm controller and farm member are not standalone: remote entries are
+    // not modelled, so the enumeration is rejected rather than misleading.
+    for ([_]u32{ server_type_farm_controller, server_type_farm_member }) |server_type| {
+        server.server_type = server_type;
+        var farm = try makeRequest(allocator, "EnumMacTable");
+        defer farm.deinit();
+        try farm.addStr("HubName", "VPN");
+        var farm_resp = try call(allocator, &server, true, "", "EnumMacTable", &farm);
+        defer {
+            farm_resp.deinit();
+            allocator.destroy(farm_resp);
+        }
+        try assertErr(farm_resp, err_not_supported);
+    }
 }
