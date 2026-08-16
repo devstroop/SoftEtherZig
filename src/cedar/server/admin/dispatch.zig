@@ -1069,6 +1069,7 @@ fn stCreateUser(a: *AdminCtx, t: *structs.RpcSetUser, allocator: Allocator) u32 
     const s = a.server;
     if (!isUserName(t.name)) return err_invalid_parameter;
     if (isWildcardName(t.name)) return err_invalid_parameter;
+    if (!canonicalizeUserName(t, allocator)) return err_internal_error;
     if (s.is_bridge) return err_not_supported;
     if (s.server_type == server_type_farm_member) return err_not_supported;
     if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
@@ -1105,6 +1106,7 @@ fn stSetUser(a: *AdminCtx, t: *structs.RpcSetUser, allocator: Allocator) u32 {
     const s = a.server;
     if (!isUserName(t.name)) return err_invalid_parameter;
     if (isWildcardName(t.name)) return err_invalid_parameter;
+    if (!canonicalizeUserName(t, allocator)) return err_internal_error;
     if (s.is_bridge) return err_not_supported;
     if (s.server_type == server_type_farm_member) return err_not_supported;
     if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
@@ -1369,7 +1371,7 @@ fn isUserName(s: []const u8) bool {
         std.ascii.eqlIgnoreCase(t, "localbridge") or
         std.ascii.eqlIgnoreCase(t, "Local Bridge") or
         std.ascii.eqlIgnoreCase(t, "administrator")) return false;
-    if (std.mem.startsWith(u8, t, "L3SW_")) return false;
+    if (std.ascii.startsWithIgnoreCase(t, "L3SW_")) return false;
     return true;
 }
 
@@ -1378,6 +1380,19 @@ fn isUserName(s: []const u8) bool {
 /// trimmed wildcard too, since `IsUserName` trims in place).
 fn isWildcardName(s: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.mem.trim(u8, s, " \t"), "*");
+}
+
+/// Replace the request name with its trimmed canonical form (C `IsUserName`
+/// validates the trimmed name, so the stored/hashed identity must match).
+/// The raw allocation is freed and the trimmed copy adopted, so padded names
+/// like `" Alice "` can't create a distinct account from `Alice`.
+fn canonicalizeUserName(t: *structs.RpcSetUser, allocator: Allocator) bool {
+    const trimmed = std.mem.trim(u8, t.name, " \t");
+    if (trimmed.len == t.name.len) return true;
+    const owned = allocator.dupe(u8, trimmed) catch return false;
+    allocator.free(t.name);
+    t.name = owned;
+    return true;
 }
 
 fn findListenerIndex(s: *Server, port: u32) ?usize {
@@ -2158,6 +2173,17 @@ test "server.admin_dispatch CreateUser validates name, hub and auth type" {
     }
     try assertErr(padded_star_resp, err_invalid_parameter);
 
+    // The L3SW_ namespace is reserved case-insensitively, matching the
+    // case-insensitive user lookup.
+    var l3sw = try makeSetUserRequest(allocator, "VPN", "l3sw_vlan10");
+    defer l3sw.deinit();
+    var l3sw_resp = try call(allocator, &server, true, "", "CreateUser", &l3sw);
+    defer {
+        l3sw_resp.deinit();
+        allocator.destroy(l3sw_resp);
+    }
+    try assertErr(l3sw_resp, err_invalid_parameter);
+
     // Certificate auth is unavailable in the opensource model.
     var cert = try makeSetUserRequest(allocator, "VPN", "Carol");
     defer cert.deinit();
@@ -2188,6 +2214,45 @@ test "server.admin_dispatch CreateUser validates name, hub and auth type" {
         allocator.destroy(locked_resp);
     }
     try assertErr(locked_resp, err_not_enough_right);
+}
+
+test "server.admin_dispatch CreateUser canonicalizes padded names" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // A padded name is stored trimmed, matching the validated identity.
+    var padded = try makeSetUserRequest(allocator, "VPN", "  Frank  ");
+    defer padded.deinit();
+    var padded_resp = try call(allocator, &server, true, "", "CreateUser", &padded);
+    defer {
+        padded_resp.deinit();
+        allocator.destroy(padded_resp);
+    }
+    try assertOk(padded_resp);
+
+    var req = try makeRequest(allocator, "EnumUser");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    var resp = try call(allocator, &server, true, "", "EnumUser", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqual(@as(usize, 1), resp.getValueCount("Name"));
+    try testing.expectEqualStrings("Frank", resp.getStrEx("Name", 0).?);
+
+    // The trimmed identity is the same account: a second create collides.
+    var dup = try makeSetUserRequest(allocator, "VPN", "Frank");
+    defer dup.deinit();
+    var dup_resp = try call(allocator, &server, true, "", "CreateUser", &dup);
+    defer {
+        dup_resp.deinit();
+        allocator.destroy(dup_resp);
+    }
+    try assertErr(dup_resp, err_user_already_exists);
 }
 
 test "server.admin_dispatch EnumUser lists only the requested hub's users" {
