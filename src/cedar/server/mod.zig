@@ -25,6 +25,8 @@
 //!   frames, dispatch on `function_name`, error/error_code replies (issue #87)
 //! - `admin/structs.zig` — admin RPC `RPC_*` structs + Pack (de)serialization
 //!   in dispatch order: Core, Listeners, Hubs (issue #89)
+//! - `admin/dispatch.zig` — admin RPC dispatch: server state model + the St*
+//!   handlers for the Core/Listeners/Hubs endpoints (issue #88)
 
 pub const auth = @import("auth.zig");
 pub const session = @import("session.zig");
@@ -36,6 +38,7 @@ pub const cfg = @import("config/cfg.zig");
 pub const vpn_server_config = @import("config/vpn_server_config.zig");
 pub const admin_rpc = @import("admin/rpc.zig");
 pub const admin_structs = @import("admin/structs.zig");
+pub const admin_dispatch = @import("admin/dispatch.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
