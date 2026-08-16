@@ -220,6 +220,8 @@ pub const ServerHub = struct {
     mac_table: std.ArrayListUnmanaged(MacTableEntry) = .{},
     /// Learned IP table (C `HUB->IpTable` subset).
     ip_table: std.ArrayListUnmanaged(IpTableEntry) = .{},
+    /// Hub access list (C `HUB->AccessList` subset).
+    access_list: std.ArrayListUnmanaged(structs.Access) = .{},
 
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
@@ -317,6 +319,37 @@ pub const ServerHub = struct {
         try self.ip_table.append(allocator, e);
         self.num_ip_tables +%= 1;
     }
+
+    /// Append an access list entry. Ownership of `a`'s heap fields transfers
+    /// to the hub (caller must not free them after append).
+    pub fn addAccessEntry(self: *ServerHub, allocator: Allocator, a: structs.Access) !void {
+        try self.access_list.append(allocator, a);
+    }
+
+    /// Remove an access list entry by `id`. Returns false when absent.
+    pub fn removeAccessEntry(self: *ServerHub, allocator: Allocator, id: u32) bool {
+        for (self.access_list.items, 0..) |*entry, i| {
+            if (entry.id == id) {
+                var removed = self.access_list.swapRemove(i);
+                freeAccessFields(allocator, &removed);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Release all access list entries.
+    pub fn deinitAccessList(self: *ServerHub, allocator: Allocator) void {
+        for (self.access_list.items) |*e| freeAccessFields(allocator, e);
+        self.access_list.deinit(allocator);
+    }
+
+    /// Replace the entire access list with new entries.
+    pub fn setAccessList(self: *ServerHub, allocator: Allocator, entries: []structs.Access) !void {
+        self.deinitAccessList(allocator);
+        self.access_list.items = entries;
+        self.access_list.capacity = entries.len;
+    }
 };
 
 /// C `SERVER` subset covering the 13 dispatch endpoints. `param` of the RPC
@@ -384,6 +417,7 @@ pub const Server = struct {
             hub.deinitUsers(allocator);
             hub.deinitGroups(allocator);
             hub.freeTables(allocator);
+            hub.deinitAccessList(allocator);
             allocator.free(hub.name);
         }
         self.hubs.deinit(allocator);
@@ -512,6 +546,14 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcEnumMacTable, &a, allocator, request, ret, stEnumMacTable);
     } else if (mem.eql(u8, function_name, "EnumIpTable")) {
         err = dispatchCall(structs.RpcEnumIpTable, &a, allocator, request, ret, stEnumIpTable);
+    } else if (mem.eql(u8, function_name, "EnumAccess")) {
+        err = dispatchCall(structs.RpcEnumAccessList, &a, allocator, request, ret, stEnumAccess);
+    } else if (mem.eql(u8, function_name, "AddAccess")) {
+        err = dispatchCall(structs.RpcAddAccess, &a, allocator, request, ret, stAddAccess);
+    } else if (mem.eql(u8, function_name, "DeleteAccess")) {
+        err = dispatchCall(structs.RpcDeleteAccess, &a, allocator, request, ret, stDeleteAccess);
+    } else if (mem.eql(u8, function_name, "SetAccessList")) {
+        err = dispatchCall(structs.RpcEnumAccessList, &a, allocator, request, ret, stSetAccessList);
     } else if (mem.eql(u8, function_name, "EnumLog")) {
         err = dispatchCall(structs.RpcEnumLogFile, &a, allocator, request, ret, stEnumLog);
     } else if (mem.eql(u8, function_name, "GetTraffic")) {
@@ -578,6 +620,9 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcSetUserPassword => try t.inRpc(allocator, p),
         structs.RpcSetGroup => try t.inRpc(allocator, p),
         structs.RpcEnumGroup => try t.inRpc(allocator, p),
+        structs.RpcEnumAccessList => try t.inRpc(allocator, p),
+        structs.RpcAddAccess => try t.inRpc(allocator, p),
+        structs.RpcDeleteAccess => try t.inRpc(allocator, p),
         structs.RpcEnumLogFile => try t.inRpc(allocator, p),
         structs.RpcGetTraffic => try t.inRpc(allocator, p),
         structs.RpcEnumMacTable => try t.inRpc(allocator, p),
@@ -610,6 +655,9 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcSetUserPassword => try t.outRpc(p),
         structs.RpcSetGroup => try t.outRpc(p),
         structs.RpcEnumGroup => try t.outRpc(p),
+        structs.RpcEnumAccessList => try t.outRpc(p),
+        structs.RpcAddAccess => try t.outRpc(p),
+        structs.RpcDeleteAccess => try t.outRpc(p),
         structs.RpcEnumLogFile => try t.outRpc(p),
         structs.RpcGetTraffic => try t.outRpc(p),
         structs.RpcEnumMacTable => try t.outRpc(p),
@@ -647,6 +695,9 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcSetUserPassword => t.free(allocator),
         structs.RpcSetGroup => t.free(allocator),
         structs.RpcEnumGroup => t.free(allocator),
+        structs.RpcEnumAccessList => t.free(allocator),
+        structs.RpcAddAccess => t.free(allocator),
+        structs.RpcDeleteAccess => t.free(allocator),
         structs.RpcEnumLogFile => t.free(allocator),
         structs.RpcGetTraffic => t.free(allocator),
         structs.RpcEnumMacTable => t.free(allocator),
@@ -1617,6 +1668,129 @@ fn stDeleteGroup(a: *AdminCtx, t: *structs.RpcDeleteUser, allocator: Allocator) 
     if (s.server_type == server_type_farm_member) return err_not_supported;
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
     if (!hub.removeGroup(allocator, t.name)) return err_object_not_found;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Access List (C: Admin.c StAddAccess / StDeleteAccess / StEnumAccess /
+// StSetAccessList — Hub.h ACCESS)
+// ============================================================================
+
+fn freeAccessFields(allocator: Allocator, a: *structs.Access) void {
+    allocator.free(a.note);
+    allocator.free(a.src_username);
+    allocator.free(a.dest_username);
+    allocator.free(a.redirect_url);
+    a.* = .{};
+}
+
+/// C `StAddAccess` (Admin.c:4854). Append one ACCESS entry to the hub.
+fn stAddAccess(a: *AdminCtx, t: *structs.RpcAddAccess, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    var access = t.access;
+    t.access = .{};
+    // Dupe heap-owned strings before the Pack backing them is freed.
+    access.note = dupStr(allocator, access.note) catch return err_internal_error;
+    errdefer allocator.free(access.note);
+    access.src_username = dupStr(allocator, access.src_username) catch return err_internal_error;
+    errdefer allocator.free(access.src_username);
+    access.dest_username = dupStr(allocator, access.dest_username) catch return err_internal_error;
+    errdefer allocator.free(access.dest_username);
+    access.redirect_url = dupStr(allocator, access.redirect_url) catch return err_internal_error;
+    errdefer allocator.free(access.redirect_url);
+    hub.addAccessEntry(allocator, access) catch return err_internal_error;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteAccess` (Admin.c:4907). Remove an ACCESS entry by Id.
+fn stDeleteAccess(a: *AdminCtx, t: *structs.RpcDeleteAccess, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!hub.removeAccessEntry(allocator, t.id)) return err_object_not_found;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StEnumAccess` (Admin.c:4878). Copy all ACCESS entries into a flat
+/// array; C assigns `UniqueId = HashPtrToUINT` — we assign the original `id`.
+fn stEnumAccess(a: *AdminCtx, t: *structs.RpcEnumAccessList, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    const entries = allocator.alloc(structs.Access, hub.access_list.items.len) catch return err_internal_error;
+    for (hub.access_list.items, 0..) |src, i| {
+        entries[i] = .{
+            .id = src.id,
+            .note = dupStr(allocator, src.note) catch return err_internal_error,
+            .active = src.active,
+            .priority = src.priority,
+            .discard = src.discard,
+            .src_ip = src.src_ip,
+            .src_mask = src.src_mask,
+            .dest_ip = src.dest_ip,
+            .dest_mask = src.dest_mask,
+            .protocol = src.protocol,
+            .src_port_start = src.src_port_start,
+            .src_port_end = src.src_port_end,
+            .dest_port_start = src.dest_port_start,
+            .dest_port_end = src.dest_port_end,
+            .src_username = dupStr(allocator, src.src_username) catch return err_internal_error,
+            .dest_username = dupStr(allocator, src.dest_username) catch return err_internal_error,
+            .check_src_mac = src.check_src_mac,
+            .src_mac = src.src_mac,
+            .src_mac_mask = src.src_mac_mask,
+            .check_dst_mac = src.check_dst_mac,
+            .dst_mac = src.dst_mac,
+            .dst_mac_mask = src.dst_mac_mask,
+            .check_tcp_state = src.check_tcp_state,
+            .established = src.established,
+            .delay = src.delay,
+            .jitter = src.jitter,
+            .loss = src.loss,
+            .redirect_url = dupStr(allocator, src.redirect_url) catch return err_internal_error,
+            .is_ipv6 = src.is_ipv6,
+            .src_ip6 = src.src_ip6,
+            .src_mask6 = src.src_mask6,
+            .dest_ip6 = src.dest_ip6,
+            .dest_mask6 = src.dest_mask6,
+            .unique_id = src.id,
+        };
+    }
+    t.accesses = entries;
+    return err_no_error;
+}
+
+/// C `StSetAccessList` (Admin.c:4939). Replace the entire access list.
+fn stSetAccessList(a: *AdminCtx, t: *structs.RpcEnumAccessList, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    // Transfer ownership of the incoming array to the hub.
+    const entries = t.accesses;
+    t.accesses = &.{};
+
+    hub.setAccessList(allocator, entries) catch return err_internal_error;
     s.config_revision +%= 1;
     return err_no_error;
 }
@@ -4288,4 +4462,370 @@ test "server.admin_dispatch EnumGroup is hub-scoped for non-server-admin" {
         allocator.destroy(oresp);
     }
     try assertErr(oresp, err_not_enough_right);
+}
+
+// ============================================================================
+// Access List tests
+// ============================================================================
+
+test "server.admin_dispatch AddAccess / EnumAccess / DeleteAccess round-trip" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Add an access entry
+    {
+        var req = try makeRequest(allocator, "AddAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("Id", 100);
+        try req.addUniStr("Note", "test-rule");
+        try req.addBool("Active", true);
+        try req.addInt("Priority", 10);
+        try req.addBool("Discard", false);
+        try req.addInt("SrcIpAddress", 0x0A000000);
+        try req.addInt("SrcSubnetMask", 0xFF000000);
+        try req.addInt("DestIpAddress", 0xC0A80000);
+        try req.addInt("DestSubnetMask", 0xFFFFFF00);
+        try req.addInt("Protocol", 6);
+        try req.addInt("SrcPortStart", 1024);
+        try req.addInt("SrcPortEnd", 65535);
+        try req.addInt("DestPortStart", 80);
+        try req.addInt("DestPortEnd", 80);
+        var resp = try call(allocator, &server, true, "", "AddAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+    }
+
+    // Enum should show 1 entry
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        var resp = try call(allocator, &server, true, "", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+        try testing.expectEqual(@as(u32, 1), resp.getInt("NumAccess").?);
+        try testing.expectEqual(@as(u32, 100), resp.getIntEx("Id", 0).?);
+        try testing.expectEqual(@as(u32, 0x0A000000), resp.getIntEx("SrcIpAddress", 0).?);
+        try testing.expectEqual(@as(u32, 6), resp.getIntEx("Protocol", 0).?);
+        try testing.expectEqual(@as(u32, 100), resp.getIntEx("UniqueId", 0).?);
+        try testing.expect(resp.getBoolEx("Active", 0) orelse false);
+        try testing.expectEqual(@as(u32, 10), resp.getIntEx("Priority", 0).?);
+    }
+
+    // Delete the entry
+    {
+        var req = try makeRequest(allocator, "DeleteAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("Id", 100);
+        var resp = try call(allocator, &server, true, "", "DeleteAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+    }
+
+    // Enum should now show 0 entries
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        var resp = try call(allocator, &server, true, "", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+        try testing.expectEqual(@as(u32, 0), resp.getInt("NumAccess").?);
+    }
+
+    // Delete non-existent id -> error
+    {
+        var req = try makeRequest(allocator, "DeleteAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("Id", 999);
+        var resp = try call(allocator, &server, true, "", "DeleteAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertErr(resp, err_object_not_found);
+    }
+}
+
+test "server.admin_dispatch SetAccessList replaces entire list" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Add two entries
+    for (&[_]u32{ 1, 2 }) |id| {
+        var req = try makeRequest(allocator, "AddAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("Id", id);
+        try req.addInt("SrcIpAddress", id * 0x01000000);
+        var resp = try call(allocator, &server, true, "", "AddAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+    }
+
+    // SetAccessList with one new entry replaces the two
+    {
+        var req = try makeRequest(allocator, "SetAccessList");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("NumAccess", 1);
+        try req.addInt("Id", 42);
+        try req.addInt("SrcIpAddress", 0xDEAD0000);
+        var resp = try call(allocator, &server, true, "", "SetAccessList", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+    }
+
+    // Enum should show exactly 1 entry with the new id
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        var resp = try call(allocator, &server, true, "", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+        try testing.expectEqual(@as(u32, 1), resp.getInt("NumAccess").?);
+        try testing.expectEqual(@as(u32, 42), resp.getIntEx("Id", 0).?);
+        try testing.expectEqual(@as(u32, 0xDEAD0000), resp.getIntEx("SrcIpAddress", 0).?);
+    }
+}
+
+test "server.admin_dispatch AddAccess hub-not-found" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+
+    var req = try makeRequest(allocator, "AddAccess");
+    defer req.deinit();
+    try req.addStr("HubName", "NOPE");
+    try req.addInt("Id", 1);
+    var resp = try call(allocator, &server, true, "", "AddAccess", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertErr(resp, err_hub_not_found);
+}
+
+test "server.admin_dispatch AccessList hub-scoped for non-server-admin" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("OTHER", hub_type_standalone);
+
+    // Add access to both hubs
+    for (&[_][]const u8{ "VPN", "OTHER" }) |hub_name| {
+        var cr = try makeRequest(allocator, "AddAccess");
+        defer cr.deinit();
+        try cr.addStr("HubName", hub_name);
+        try cr.addInt("Id", 1);
+        var r = try call(allocator, &server, true, "", "AddAccess", &cr);
+        defer {
+            r.deinit();
+            allocator.destroy(r);
+        }
+        try assertOk(r);
+    }
+
+    // Hub admin on VPN: can see VPN's entries
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        var resp = try call(allocator, &server, false, "VPN", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+        try testing.expectEqual(@as(u32, 1), resp.getInt("NumAccess").?);
+    }
+
+    // But not OTHER's
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "OTHER");
+        var resp = try call(allocator, &server, false, "VPN", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertErr(resp, err_not_enough_right);
+    }
+}
+
+test "server.admin_dispatch Access struct round-trip IPv4 + mac + redirect" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Add a complex IPv4 access entry with all field types
+    {
+        var req = try makeRequest(allocator, "AddAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("Id", 200);
+        try req.addUniStr("Note", "complex");
+        try req.addBool("Active", false);
+        try req.addInt("Priority", 99);
+        try req.addBool("Discard", true);
+        try req.addInt("SrcIpAddress", 0x0A0A0A0A);
+        try req.addInt("SrcSubnetMask", 0xFFFFFFFF);
+        try req.addInt("DestIpAddress", 0x14141414);
+        try req.addInt("DestSubnetMask", 0xFFFFFF00);
+        try req.addInt("Protocol", 17);
+        try req.addInt("SrcPortStart", 5000);
+        try req.addInt("SrcPortEnd", 5001);
+        try req.addInt("DestPortStart", 53);
+        try req.addInt("DestPortEnd", 53);
+        try req.addStr("SrcUsername", "alice");
+        try req.addStr("DestUsername", "bob");
+        try req.addBool("CheckSrcMac", true);
+        try req.addData("SrcMacAddress", &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF });
+        try req.addData("SrcMacMask", &[_]u8{ 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00 });
+        try req.addBool("CheckDstMac", false);
+        try req.addData("DstMacAddress", &[_]u8{ 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 });
+        try req.addData("DstMacMask", &[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
+        try req.addBool("CheckTcpState", true);
+        try req.addBool("Established", true);
+        try req.addInt("Delay", 100);
+        try req.addInt("Jitter", 50);
+        try req.addInt("Loss", 10);
+        try req.addStr("RedirectUrl", "http://blocked.example.com");
+        try req.addBool("IsIPv6", false);
+        var resp = try call(allocator, &server, true, "", "AddAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+    }
+
+    // Enum and verify every field
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        var resp = try call(allocator, &server, true, "", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+        try testing.expectEqual(@as(u32, 1), resp.getInt("NumAccess").?);
+        try testing.expectEqual(@as(u32, 200), resp.getIntEx("Id", 0).?);
+        try testing.expectEqual(@as(u32, 99), resp.getIntEx("Priority", 0).?);
+        try testing.expectEqual(@as(u32, 17), resp.getIntEx("Protocol", 0).?);
+        try testing.expectEqual(@as(u32, 100), resp.getIntEx("Delay", 0).?);
+        try testing.expectEqual(@as(u32, 50), resp.getIntEx("Jitter", 0).?);
+        try testing.expectEqual(@as(u32, 10), resp.getIntEx("Loss", 0).?);
+        try testing.expectEqual(@as(u32, 0x0A0A0A0A), resp.getIntEx("SrcIpAddress", 0).?);
+        try testing.expectEqual(@as(u32, 0x14141414), resp.getIntEx("DestIpAddress", 0).?);
+        try testing.expectEqual(@as(u32, 5000), resp.getIntEx("SrcPortStart", 0).?);
+        try testing.expectEqual(@as(u32, 5001), resp.getIntEx("SrcPortEnd", 0).?);
+        try testing.expectEqual(@as(u32, 53), resp.getIntEx("DestPortStart", 0).?);
+        try testing.expect(!(resp.getBoolEx("Active", 0) orelse true));
+        try testing.expect(resp.getBoolEx("Discard", 0) orelse false);
+        try testing.expect(resp.getBoolEx("CheckSrcMac", 0) orelse false);
+        try testing.expect(!(resp.getBoolEx("CheckDstMac", 0) orelse true));
+        try testing.expect(resp.getBoolEx("CheckTcpState", 0) orelse false);
+        try testing.expect(resp.getBoolEx("Established", 0) orelse false);
+        try testing.expect(!(resp.getBoolEx("IsIPv6", 0) orelse true));
+        // MAC address
+        const mac = resp.getData("SrcMacAddress") orelse return error.TestExpectedData;
+        try testing.expectEqual(@as(usize, 6), mac.len);
+        try testing.expectEqual(@as(u8, 0xAA), mac[0]);
+        try testing.expectEqual(@as(u8, 0xBB), mac[1]);
+        try testing.expectEqual(@as(u8, 0xFF), mac[5]);
+        // Redirect URL
+        const url = resp.getStr("RedirectUrl") orelse return error.TestExpectedString;
+        try testing.expectEqualStrings("http://blocked.example.com", url);
+    }
+}
+
+test "server.admin_dispatch Access struct round-trip IPv6 fields" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Add an IPv6 access entry
+    {
+        var req = try makeRequest(allocator, "AddAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        try req.addInt("Id", 300);
+        try req.addBool("IsIPv6", true);
+        const src6 = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+        const dst6 = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 };
+        const mask6 = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        try req.addData("SrcIpAddress6", &src6);
+        try req.addData("SrcSubnetMask6", &mask6);
+        try req.addData("DestIpAddress6", &dst6);
+        try req.addData("DestSubnetMask6", &mask6);
+        var resp = try call(allocator, &server, true, "", "AddAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+    }
+
+    // Enum and verify IPv6 fields
+    {
+        var req = try makeRequest(allocator, "EnumAccess");
+        defer req.deinit();
+        try req.addStr("HubName", "VPN");
+        var resp = try call(allocator, &server, true, "", "EnumAccess", &req);
+        defer {
+            resp.deinit();
+            allocator.destroy(resp);
+        }
+        try assertOk(resp);
+        try testing.expectEqual(@as(u32, 1), resp.getInt("NumAccess").?);
+        try testing.expectEqual(@as(u32, 300), resp.getIntEx("Id", 0).?);
+        try testing.expect(resp.getBoolEx("IsIPv6", 0) orelse false);
+        // IPv6 source address
+        const src6 = resp.getData("SrcIpAddress6") orelse return error.TestExpectedData;
+        try testing.expectEqual(@as(usize, 16), src6.len);
+        try testing.expectEqual(@as(u8, 0x20), src6[0]);
+        try testing.expectEqual(@as(u8, 0x01), src6[1]);
+        try testing.expectEqual(@as(u8, 0x01), src6[15]);
+        // IPv6 dest address
+        const dst6 = resp.getData("DestIpAddress6") orelse return error.TestExpectedData;
+        try testing.expectEqual(@as(u8, 0x02), dst6[15]);
+        // When is_ipv6=true, IPv4 fields get dummy values
+        try testing.expectEqual(@as(u32, 0xFDFFFFDF), resp.getIntEx("SrcIpAddress", 0).?);
+    }
 }
