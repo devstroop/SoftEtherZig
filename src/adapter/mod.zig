@@ -21,6 +21,9 @@ pub const wrapper = @import("wrapper.zig");
 pub const port = @import("port.zig");
 pub const nic_enumerate = @import("nic_enumerate.zig");
 pub const af_packet = @import("af_packet.zig");
+pub const bpf = @import("bpf.zig");
+pub const npcap = @import("npcap.zig");
+pub const ether_manager = @import("ether_manager.zig");
 
 // Wrapper
 pub const AdapterWrapper = wrapper.AdapterWrapper;
@@ -36,6 +39,18 @@ pub const NicInfo = nic_enumerate.NicInfo;
 pub const AfPacketPort = af_packet.AfPacketPort;
 pub const afPacketPort = af_packet.afPacketPort;
 pub const SESSION_FRAME_BUDGET = af_packet.SESSION_FRAME_BUDGET;
+
+// L2 bridge port — macOS BPF (/dev/bpfN, H-7 helper-granted fd)
+pub const BpfPort = bpf.BpfPort;
+pub const bpfPort = bpf.bpfPort;
+
+// L2 bridge port — Windows Npcap (issue #61, dynamic pcap.dll)
+pub const NpcapPort = npcap.NpcapPort;
+pub const npcapPort = npcap.npcapPort;
+
+// L2 bridge port — Android EthernetManager best-effort (issue #59)
+pub const EtherManagerPort = ether_manager.EtherManagerPort;
+pub const etherManagerPort = ether_manager.etherManagerPort;
 
 // Platform-specific adapter types
 pub const UtunDevice = utun.UtunDevice;
@@ -300,7 +315,7 @@ pub const VirtualAdapter = struct {
 
         if (is_android) {
             return error.UnsupportedPlatform; // Android must use openWithFd()
-} else if (builtin.os.tag == .linux) {
+        } else if (builtin.os.tag == .linux) {
             const dev = TunLinuxDevice.open(self.allocator) catch |err| {
                 std.log.err("Failed to open Linux TUN device: {}", .{err});
                 return err;

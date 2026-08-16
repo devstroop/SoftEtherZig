@@ -4,7 +4,8 @@
 // Creates a utun device, configures it with a temporary IP, and sends
 // the fd back to the parent process via Unix domain socket + SCM_RIGHTS.
 //
-// Usage: softether-utun-helper <unix-socket-path>
+// Usage: softether-utun-helper <unix-socket-path> [--cmd-only]
+//        softether-utun-helper <unix-socket-path> --bpf-open <ifname>
 
 const std = @import("std");
 const posix = std.posix;
@@ -32,6 +33,37 @@ const SockaddrCtl = extern struct {
     sc_unit: u32,
     sc_reserved: [5]u32,
 };
+
+// /dev/bpfN ioctls (macOS <net/bpf.h>); request codes exceed i32::MAX, so
+// they are stored as bitcast c_int for std.c.ioctl. Note: macOS has NO
+// BIOCNONBLOCK — the fd is set non-blocking with fcntl at open time.
+const BIOCSBLEN: c_int = @bitCast(@as(u32, 0xc0044266)); // set buffer length
+const BIOCSETIF: c_int = @bitCast(@as(u32, 0x8020426c)); // set interface
+const BIOCPROMISC: c_int = @bitCast(@as(u32, 0x20004269)); // force promiscuous
+const BIOCIMMEDIATE: c_int = @bitCast(@as(u32, 0x80044270)); // return immediately on packet
+const IFNAMSIZ: usize = 16;
+
+// struct ifreq on macOS: ifr_name[16] + 16-byte union (kernel copies 32).
+const BpfIfreq = extern struct {
+    ifr_name: [IFNAMSIZ]u8,
+    ifru_pad: [16]u8,
+};
+
+/// `--bpf-open` allowlist (H-7): only /dev/bpf0..9 may be opened. The
+/// interface name is validated to a conservative charset — no separators,
+/// no shell metacharacters — and is used ONLY as a BIOCSETIF argument, never
+/// interpolated into a shell command. This mode performs no shell execution.
+const MAX_BPF_UNIT: usize = 9;
+
+fn validIfname(name: []const u8) bool {
+    if (name.len == 0 or name.len >= IFNAMSIZ) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_' or c == ':' or c == '-' or c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
 
 // msghdr / cmsghdr for SCM_RIGHTS
 const Cmsghdr = extern struct {
@@ -88,6 +120,115 @@ pub fn main() !void {
         std.debug.print("OK: cmd-only mode, entering privileged command loop\n", .{});
         runCommandLoop(sock_fd);
         return;
+    }
+
+    // --bpf-open <ifname>: open an allowlisted /dev/bpfN, attach it to the
+    // interface, enable promiscuous + immediate + non-blocking, and hand the
+    // fd back to the parent via SCM_RIGHTS. NO shell execution in this mode
+    // (H-7): the ifname is charset-validated and only ever used as a
+    // BIOCSETIF argument; the device path is built from a digit, never the
+    // raw string.
+    const bpf_open = args.len >= 4 and std.mem.eql(u8, args[2], "--bpf-open");
+    if (bpf_open) {
+        const ifname = args[3];
+        if (!validIfname(ifname)) {
+            std.debug.print("ERROR: invalid interface name\n", .{});
+            std.process.exit(20);
+        }
+
+        // Open the first free /dev/bpfN (root, so permission is fine) and
+        // attach it. Two helpers can race for the same unit: open succeeds
+        // for both before either attaches, so BIOCSETIF may return EBUSY —
+        // close and retry the next unit (matches /dev/bpf0..N presence).
+        var bpf_fd: posix.fd_t = -1;
+        for (0..MAX_BPF_UNIT + 1) |unit| {
+            var dev_buf: [16]u8 = undefined;
+            const dev_path = std.fmt.bufPrintZ(&dev_buf, "/dev/bpf{d}", .{unit}) catch continue;
+            const fd = posix.openZ(dev_path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0) catch continue;
+            var ok = true;
+
+            // Configure capture: buffer size before attach, then attach.
+            var buf_len: c_uint = 65536;
+            if (std.c.ioctl(fd, BIOCSBLEN, @intFromPtr(&buf_len)) < 0) ok = false;
+            var req = BpfIfreq{ .ifr_name = [_]u8{0} ** IFNAMSIZ, .ifru_pad = [_]u8{0} ** 16 };
+            if (ok) {
+                if (ifname.len >= req.ifr_name.len) ok = false;
+                if (ok) @memcpy(req.ifr_name[0..ifname.len], ifname);
+            }
+            if (ok and std.c.ioctl(fd, BIOCSETIF, @intFromPtr(&req)) < 0) ok = false;
+            if (ok) {
+                bpf_fd = fd;
+                break;
+            }
+            std.debug.print("NOTE: /dev/bpf{d} unusable (errno={d}), trying next unit\n", .{ unit, std.c._errno().* });
+            posix.close(fd);
+        }
+        if (bpf_fd < 0) {
+            std.debug.print("ERROR: no usable /dev/bpfN device\n", .{});
+            std.process.exit(21);
+        }
+        errdefer posix.close(bpf_fd);
+
+        if (std.c.ioctl(bpf_fd, BIOCPROMISC, @as(c_uint, 0)) < 0) {
+            std.debug.print("ERROR: ioctl(BIOCPROMISC) failed (errno={d})\n", .{std.c._errno().*});
+            std.process.exit(25);
+        }
+        const on: c_uint = 1;
+        if (std.c.ioctl(bpf_fd, BIOCIMMEDIATE, @intFromPtr(&on)) < 0) {
+            std.debug.print("ERROR: ioctl(BIOCIMMEDIATE) failed (errno={d})\n", .{std.c._errno().*});
+            std.process.exit(26);
+        }
+        const flags = posix.fcntl(bpf_fd, posix.F.GETFL, 0) catch 0;
+        _ = posix.fcntl(bpf_fd, posix.F.SETFL, flags | 0x0004) catch {};
+
+        // Connect to the parent socket and hand the fd over (SCM_RIGHTS).
+        const sock_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
+            std.debug.print("ERROR: socket(AF_UNIX) failed\n", .{});
+            std.process.exit(28);
+        };
+        defer posix.close(sock_fd);
+
+        var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+        @memset(&addr.path, 0);
+        if (socket_path.len >= addr.path.len) {
+            std.debug.print("ERROR: socket path too long\n", .{});
+            std.process.exit(29);
+        }
+        @memcpy(addr.path[0..socket_path.len], socket_path);
+
+        posix.connect(sock_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch {
+            std.debug.print("ERROR: connect to parent socket failed\n", .{});
+            std.process.exit(30);
+        };
+
+        const CMSG_SPACE = @sizeOf(Cmsghdr) + @sizeOf(c_int);
+        var cmsg_buf: [CMSG_SPACE + 16]u8 align(@alignOf(Cmsghdr)) = [_]u8{0} ** (CMSG_SPACE + 16);
+        const cmsg: *Cmsghdr = @ptrCast(&cmsg_buf);
+        cmsg.cmsg_len = @intCast(@sizeOf(Cmsghdr) + @sizeOf(c_int));
+        cmsg.cmsg_level = SOL_SOCKET;
+        cmsg.cmsg_type = SCM_RIGHTS;
+        const fd_ptr: *c_int = @ptrCast(@alignCast(&cmsg_buf[@sizeOf(Cmsghdr)]));
+        fd_ptr.* = bpf_fd;
+
+        var iov = [1]std.posix.iovec_const{
+            .{ .base = @constCast(ifname.ptr), .len = ifname.len },
+        };
+        const msg = std.c.msghdr_const{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = &cmsg_buf,
+            .controllen = @intCast(CMSG_SPACE),
+            .flags = 0,
+        };
+        if (std.c.sendmsg(sock_fd, &msg, 0) < 0) {
+            std.debug.print("ERROR: sendmsg failed\n", .{});
+            std.process.exit(31);
+        }
+
+        std.debug.print("OK: bpf-open mode, sent /dev/bpfN (fd={d}) for {s}\n", .{ bpf_fd, ifname });
+        return; // bpf fd lives in the parent; helper exits.
     }
 
     // Step 1: Create utun device

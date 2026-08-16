@@ -90,20 +90,29 @@ Public disclosure: 90 days from initial report, or upon release of a fix, whiche
 
 ### Overview
 
-This project follows **GitHub Flow**. The `main` branch is always considered
-deployable. All work is performed on short-lived branches created from `main`
-and merged back through pull requests.
+This project uses a three-tier branch flow. **`master` is release-only and
+never receives feature work directly** — everything (bridge, server, client,
+CI) lands on `develop` and reaches `master` only through the release
+process.
 
 ```
-main → feat/something → PR (squash) → main
+master ← develop ← feat/bridge ← feat/bridge-*
 ```
 
 ### Branch Rules
 
-- All branches must be created from the latest `main`
-- One logical change per branch
-- Rebase on the latest `main` before merge
-- Delete branches after merge
+- **`master`** — production releases only. Untouched during development.
+  Merging feature work here (e.g. the #136 regression) pulls whole epics
+  into the release line; PRs against `master` are closed without merge.
+- **`develop`** — the integration branch. **All PRs merge here** (base =
+  `develop`). GitHub's default PR base and the `remote-sync` workflow both
+  target `develop`.
+- **`feat/bridge`** — epic integration branch for the L2 bridge / monitor /
+  server work; intermediate PRs may merge here before `develop`.
+- **`feat/*`, `feat/bridge-*`** — short-lived per-issue branches created
+  from `develop` (or `feat/bridge`), merged back through PRs.
+- One logical change per branch; rebase on the latest `develop` before
+  merge; delete branches after merge.
 
 ### Branch Naming
 
@@ -139,12 +148,12 @@ test(crypto): add AES-256-CBC test vectors
 ### Standard Workflow
 
 ```sh
-# Sync main
-git checkout main
+# Sync develop
+git checkout develop
 git pull
 
 # Create branch
-git checkout -b feat/my-feature
+git checkout -b feat/my-feature develop
 
 # Develop
 zig build
@@ -153,15 +162,15 @@ zig build test
 # Commit incrementally
 git commit -m "feat(module): description"
 
-# Push and open PR
+# Push and open PR (base is develop — never master)
 git push -u origin feat/my-feature
-gh pr create
+gh pr create --base develop
 
 # Merge via squash
 gh pr merge --squash
 
 # Cleanup
-git checkout main
+git checkout develop
 git pull
 git branch -d feat/my-feature
 ```

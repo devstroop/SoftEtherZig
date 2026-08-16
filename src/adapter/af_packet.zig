@@ -1,10 +1,12 @@
 //! AF_PACKET L2 ingress port (L2 Network Bridge proposal §4.1, H-3/H-5/H-8).
 //!
-//! Linux-only NetPort implementation over AF_PACKET (SOCK_RAW, ETH_P_ALL)
+//! Linux-kernel NetPort implementation over AF_PACKET (SOCK_RAW, ETH_P_ALL)
 //! bound to a named interface, used by the bridge pump (issue #56) as the
-//! physical-side ingress. Mirrors `port.l3Port()`: the caller owns the
-//! `AfPacketPort` instance and the returned `NetPort` points at it; the pump
-//! drives open/close/read/write uniformly through the vtable.
+//! physical-side ingress. Runs on Linux and Android (same kernel; Android
+//! wires this up behind `ether_manager.zig`, issue #59). Mirrors
+//! `port.l3Port()`: the caller owns the `AfPacketPort` instance and the
+//! returned `NetPort` points at it; the pump drives open/close/read/write
+//! uniformly through the vtable.
 //!
 //! Design decisions (proposal §4.6, §6):
 //! - **CAP_NET_RAW detection (H-8):** `socket(AF_PACKET)` fails with EPERM
@@ -81,13 +83,15 @@ const IfreqMtu = extern struct {
 
 const IfreqHwaddr = extern struct {
     ifr_name: [IFNAMSIZ]u8,
-    ifr_hwaddr: posix.sockaddr,
+    // Raw 16-byte sockaddr region; `sa_data` naming differs per platform
+    // (Linux: `data`, BSDs: `sa_data`) so copy bytes 2..8 manually.
+    ifr_hwaddr: [16]u8,
     padding: [8]u8,
 };
 
 /// Errors specific to AF_PACKET port lifecycle.
 pub const AfPacketError = error{
-    /// Ports can only be opened on Linux.
+    /// Ports can only be opened on a Linux kernel (Linux/Android).
     NotLinux,
     /// Interface name invalid or not found.
     InterfaceNotFound,
@@ -97,6 +101,8 @@ pub const AfPacketError = error{
     BindFailed,
     /// setsockopt(PACKET_ADD/DROP_MEMBERSHIP) failed.
     PromiscFailed,
+    /// Port has been closed / fd is invalid.
+    DeviceClosed,
     /// Caller lacks CAP_NET_RAW (H-8); open() returned EPERM on socket(2).
     NoCapability,
     /// Frames larger than the session budget (1514) are not forwarded (H-3).
@@ -141,9 +147,18 @@ pub const AfPacketPort = struct {
 
         // H-8: without CAP_NET_RAW, socket(2) fails with EPERM — detect at
         // open and fail cleanly.
-        const sock = posix.socket(AF_PACKET, posix.SOCK.RAW | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, ethProtoAll()) catch |err| switch (err) {
-            error.PermissionDenied => return error.NoCapability,
-            else => return error.OpenFailed,
+        const sock = posix.socket(AF_PACKET, posix.SOCK.RAW | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, ethProtoAll()) catch |err| switch (builtin.os.tag) {
+            // EPERM maps to AccessDenied on the Linux kernel (incl. Android
+            // abi), PermissionDenied elsewhere. Only mention the name that
+            // exists per target.
+            .linux => switch (err) {
+                error.AccessDenied => return error.NoCapability,
+                else => return error.OpenFailed,
+            },
+            else => switch (err) {
+                error.PermissionDenied => return error.NoCapability,
+                else => return error.OpenFailed,
+            },
         };
         self.fd = sock;
         errdefer self.close();
@@ -187,7 +202,7 @@ pub const AfPacketPort = struct {
         @memcpy(req.ifr_name[0..self.ifname.len], self.ifname);
         if (std.c.ioctl(self.fd, SIOCGIFHWADDR, @intFromPtr(&req)) < 0) return error.InterfaceNotFound;
         var mac: [6]u8 = undefined;
-        @memcpy(&mac, &req.ifr_hwaddr.sa_data);
+        @memcpy(&mac, req.ifr_hwaddr[2..8]);
         return mac;
     }
 
@@ -268,7 +283,8 @@ pub const AfPacketPort = struct {
             .mr_address = [_]u8{0} ** 8,
         };
         const opt = if (on) PACKET_ADD_MEMBERSHIP else PACKET_DROP_MEMBERSHIP;
-        posix.setsockopt(self.fd, SOL_PACKET, opt, std.mem.asBytes(&req)) catch {
+        const optname: u32 = @intCast(opt);
+        posix.setsockopt(self.fd, SOL_PACKET, optname, std.mem.asBytes(&req)) catch {
             self.promisc = false;
             return error.PromiscFailed;
         };
@@ -355,8 +371,8 @@ const IfAddrs = extern struct {
 /// getifaddrs(3) — same shape as `nic_enumerate`.
 fn hostAddressesPresent(ifname: []const u8) bool {
     if (comptime builtin.os.tag != .linux) return false;
-    const getifaddrs = @extern(*const fn (?*?*IfAddrs) c_int, .{ .name = "getifaddrs" });
-    const freeifaddrs = @extern(*const fn (?*IfAddrs) void, .{ .name = "freeifaddrs" });
+    const getifaddrs = @extern(*const fn (?*?*IfAddrs) callconv(.c) c_int, .{ .name = "getifaddrs" });
+    const freeifaddrs = @extern(*const fn (?*IfAddrs) callconv(.c) void, .{ .name = "freeifaddrs" });
 
     var head: ?*IfAddrs = null;
     if (getifaddrs(&head) != 0) return false;

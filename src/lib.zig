@@ -77,7 +77,11 @@ pub const core = @import("mayaqua/kernel/mod.zig");
 pub const bridge = struct {
     pub const fdb = @import("bridge/fdb.zig");
     pub const engine = @import("bridge/engine.zig");
+    pub const loop = @import("bridge/loop.zig");
 };
+
+// Monitor role (proposal §5.4) — ring + PCAP capture of session L2 frames
+pub const monitor = @import("monitor.zig");
 
 // Server core (M1 epic) — session keys, data-channel encryption, session loop,
 // TCP listener (issue #77)
@@ -144,6 +148,7 @@ test "library exports" {
     _ = ReconnectConfig;
     _ = core;
     _ = bridge;
+    _ = monitor;
     _ = server;
     _ = server_tls;
     _ = server_cert;
