@@ -1439,6 +1439,210 @@ pub const RpcDisconnectConnection = struct {
 };
 
 // ============================================================================
+// Group 7 — Tables (C: Admin.c InRpcEnumMacTable / InRpcEnumIpTable /
+//                    InRpcDeleteTable)
+// ============================================================================
+
+/// C `RPC_ENUM_MAC_TABLE_ITEM` (Admin.h:687) — one entry of `EnumMacTable`.
+pub const EnumMacTableItem = struct {
+    key: u32 = 0,
+    session_name: []const u8 = "",
+    mac_address: [6]u8 = .{0} ** 6,
+    vlan_id: u32 = 0,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+    remote_item: bool = false,
+    remote_hostname: []const u8 = "",
+};
+
+/// C `RPC_ENUM_MAC_TABLE` (Admin.h:701) — `EnumMacTable`.
+pub const RpcEnumMacTable = struct {
+    hub_name: []const u8 = "",
+    mac_tables: []EnumMacTableItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumMacTable, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("SessionName");
+        self.mac_tables = try allocator.alloc(EnumMacTableItem, count);
+        for (self.mac_tables, 0..) |*e, i| {
+            e.* = .{};
+            e.key = p.getIntEx("Key", i) orelse 0;
+            e.session_name = try dupStr(allocator, p.getStrEx("SessionName", i));
+            if (getDataFixed(p, "MacAddress", i, 6)) |d| @memcpy(&e.mac_address, d[0..6]);
+            e.vlan_id = p.getIntEx("VlanId", i) orelse 0;
+            e.created_time = p.getInt64Ex("CreatedTime", i) orelse 0;
+            e.updated_time = p.getInt64Ex("UpdatedTime", i) orelse 0;
+            e.remote_item = p.getBoolEx("RemoteItem", i) orelse false;
+            e.remote_hostname = try dupStr(allocator, p.getStrEx("RemoteHostname", i));
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumMacTable, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.mac_tables, 0..) |e, i| {
+            try p.addIntEx("Key", e.key, i);
+            try p.addStrEx("SessionName", e.session_name, i);
+            try p.addDataEx("MacAddress", &e.mac_address, i);
+            try p.addIntEx("VlanId", e.vlan_id, i);
+            try p.addInt64Ex("CreatedTime", e.created_time, i);
+            try p.addInt64Ex("UpdatedTime", e.updated_time, i);
+            try p.addBoolEx("RemoteItem", e.remote_item, i);
+            try p.addStrEx("RemoteHostname", e.remote_hostname, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumMacTable, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.mac_tables) |*e| {
+            allocator.free(e.session_name);
+            allocator.free(e.remote_hostname);
+        }
+        allocator.free(self.mac_tables);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ENUM_IP_TABLE_ITEM` (Admin.h:709) — one entry of `EnumIpTable`.
+pub const EnumIpTableItem = struct {
+    key: u32 = 0,
+    session_name: []const u8 = "",
+    ip: u32 = 0,
+    ip_v6: IpAddress = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+    ip_address: IpAddress = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+    dhcp_allocated: bool = false,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+    remote_item: bool = false,
+    remote_hostname: []const u8 = "",
+};
+
+/// C `RPC_ENUM_IP_TABLE` (Admin.h:724) — `EnumIpTable`.
+pub const RpcEnumIpTable = struct {
+    hub_name: []const u8 = "",
+    ip_tables: []EnumIpTableItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumIpTable, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("SessionName");
+        self.ip_tables = try allocator.alloc(EnumIpTableItem, count);
+        for (self.ip_tables, 0..) |*e, i| {
+            e.* = .{};
+            e.key = p.getIntEx("Key", i) orelse 0;
+            e.session_name = try dupStr(allocator, p.getStrEx("SessionName", i));
+            e.ip = getIpAddressEx(p, "Ip", i).toU32() orelse 0;
+            e.ip_v6 = getIpAddressEx(p, "IpV6", i);
+            // C quirk: InRpcEnumIpTable reads "IpAddress" with the non-indexed
+            // PackGetIp (Admin.c:14296), so every item gets element index 0.
+            e.ip_address = getIpAddress(p, "IpAddress");
+            e.dhcp_allocated = p.getBoolEx("DhcpAllocated", i) orelse false;
+            e.created_time = p.getInt64Ex("CreatedTime", i) orelse 0;
+            e.updated_time = p.getInt64Ex("UpdatedTime", i) orelse 0;
+            e.remote_item = p.getBoolEx("RemoteItem", i) orelse false;
+            e.remote_hostname = try dupStr(allocator, p.getStrEx("RemoteHostname", i));
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumIpTable, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.ip_tables, 0..) |e, i| {
+            try p.addIntEx("Key", e.key, i);
+            try p.addStrEx("SessionName", e.session_name, i);
+            try addIpAddressEx(p, "Ip", IpAddress.fromU32(e.ip), i);
+            try addIpAddressEx(p, "IpV6", e.ip_v6, i);
+            try addIpAddressEx(p, "IpAddress", e.ip_address, i);
+            try p.addBoolEx("DhcpAllocated", e.dhcp_allocated, i);
+            try p.addInt64Ex("CreatedTime", e.created_time, i);
+            try p.addInt64Ex("UpdatedTime", e.updated_time, i);
+            try p.addBoolEx("RemoteItem", e.remote_item, i);
+            try p.addStrEx("RemoteHostname", e.remote_hostname, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumIpTable, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.ip_tables) |*e| {
+            allocator.free(e.session_name);
+            allocator.free(e.remote_hostname);
+        }
+        allocator.free(self.ip_tables);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_DELETE_TABLE` (Admin.h:732) — `DeleteMacTable`/`DeleteIpTable`.
+pub const RpcDeleteTable = struct {
+    hub_name: []const u8 = "",
+    key: u32 = 0,
+
+    pub fn inRpc(self: *RpcDeleteTable, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.key = p.getInt("Key") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcDeleteTable, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("Key", self.key);
+    }
+
+    pub fn free(self: *RpcDeleteTable, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+// ============================================================================
+// Group 8 — Log files (C: Admin.c InRpcEnumLogFile)
+// ============================================================================
+
+/// C `RPC_ENUM_LOG_FILE_ITEM` (Admin.h:887) — one entry of `EnumLogFile`.
+pub const EnumLogFileItem = struct {
+    file_path: []const u8 = "",
+    server_name: []const u8 = "",
+    file_size: u32 = 0,
+    updated_time: u64 = 0,
+};
+
+/// C `RPC_ENUM_LOG_FILE` (Admin.h:894) — `EnumLogFile`.
+pub const RpcEnumLogFile = struct {
+    items: []EnumLogFileItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumLogFile, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        const count = p.getInt("NumItem") orelse 0;
+        self.items = try allocator.alloc(EnumLogFileItem, count);
+        for (self.items, 0..) |*e, i| {
+            e.* = .{};
+            e.file_path = try dupStr(allocator, p.getStrEx("FilePath", i));
+            e.server_name = try dupStr(allocator, p.getStrEx("ServerName", i));
+            e.file_size = p.getIntEx("FileSize", i) orelse 0;
+            e.updated_time = p.getInt64Ex("UpdatedTime", i) orelse 0;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumLogFile, p: *Pack) !void {
+        try p.addInt("NumItem", @intCast(self.items.len));
+        for (self.items, 0..) |e, i| {
+            try p.addStrEx("FilePath", e.file_path, i);
+            try p.addStrEx("ServerName", e.server_name, i);
+            try p.addIntEx("FileSize", e.file_size, i);
+            try p.addInt64Ex("UpdatedTime", e.updated_time, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumLogFile, allocator: Allocator) void {
+        for (self.items) |*e| {
+            allocator.free(e.file_path);
+            allocator.free(e.server_name);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+// ============================================================================
 // IP helpers (C: PackAddIp32Ex2 / PackAddIpEx2 / PackGetIpEx wire format)
 // ============================================================================
 
@@ -1588,6 +1792,10 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
         RpcDeleteSession => try t.inRpc(allocator, p),
         RpcEnumConnection => try t.inRpc(allocator, p),
         RpcDisconnectConnection => try t.inRpc(allocator, p),
+        RpcEnumMacTable => try t.inRpc(allocator, p),
+        RpcEnumIpTable => try t.inRpc(allocator, p),
+        RpcDeleteTable => try t.inRpc(allocator, p),
+        RpcEnumLogFile => try t.inRpc(allocator, p),
         else => @compileError("no inRpc for " ++ @typeName(T)),
     }
 }
@@ -1610,6 +1818,10 @@ fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
         RpcDeleteSession => try t.outRpc(p),
         RpcEnumConnection => try t.outRpc(p),
         RpcDisconnectConnection => try t.outRpc(p),
+        RpcEnumMacTable => try t.outRpc(p),
+        RpcEnumIpTable => try t.outRpc(p),
+        RpcDeleteTable => try t.outRpc(p),
+        RpcEnumLogFile => try t.outRpc(p),
         else => @compileError("no outRpc for " ++ @typeName(T)),
     }
 }
@@ -2040,4 +2252,118 @@ test "server.admin_structs RpcDisconnectConnection round-trip" {
     defer r.free(allocator);
     try roundTripStr(allocator, RpcDisconnectConnection, &v, &r);
     try testing.expectEqualStrings("CONN-0", r.name);
+}
+
+test "server.admin_structs RpcEnumMacTable round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumMacTable{ .hub_name = try allocator.dupe(u8, "VPN") };
+    v.mac_tables = try allocator.alloc(EnumMacTableItem, 1);
+    v.mac_tables[0] = .{
+        .key = 7,
+        .session_name = try allocator.dupe(u8, "SID-ALICE"),
+        .mac_address = .{ 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E },
+        .vlan_id = 11,
+        .created_time = 333,
+        .updated_time = 444,
+        .remote_item = true,
+        .remote_hostname = try allocator.dupe(u8, "host.example"),
+    };
+    defer v.free(allocator);
+    var r = RpcEnumMacTable{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcEnumMacTable, &v, &r);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqual(@as(usize, 1), r.mac_tables.len);
+    try testing.expectEqual(@as(u32, 7), r.mac_tables[0].key);
+    try testing.expectEqualStrings("SID-ALICE", r.mac_tables[0].session_name);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E }, &r.mac_tables[0].mac_address);
+    try testing.expectEqual(@as(u32, 11), r.mac_tables[0].vlan_id);
+    try testing.expectEqual(@as(u64, 333), r.mac_tables[0].created_time);
+    try testing.expectEqual(@as(u64, 444), r.mac_tables[0].updated_time);
+    try testing.expect(r.mac_tables[0].remote_item);
+    try testing.expectEqualStrings("host.example", r.mac_tables[0].remote_hostname);
+}
+
+test "server.admin_structs RpcEnumIpTable round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumIpTable{ .hub_name = try allocator.dupe(u8, "VPN") };
+    v.ip_tables = try allocator.alloc(EnumIpTableItem, 2);
+    v.ip_tables[0] = .{
+        .key = 1,
+        .session_name = try allocator.dupe(u8, "SID-ALICE"),
+        .ip = 0x0A000001,
+        .ip_v6 = IpAddress.fromU32(0x0A000001),
+        .ip_address = IpAddress.fromU32(0x0A000001),
+        .dhcp_allocated = true,
+        .created_time = 111,
+        .updated_time = 222,
+        .remote_item = true,
+        .remote_hostname = try allocator.dupe(u8, "host1.example"),
+    };
+    v.ip_tables[1] = .{
+        .key = 2,
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .ip = 0x0A000002,
+        .ip_v6 = .{ .ipv6 = .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 } },
+        .ip_address = IpAddress.fromU32(0x0A000002),
+        .dhcp_allocated = false,
+        .created_time = 333,
+        .updated_time = 444,
+        .remote_item = false,
+        .remote_hostname = try allocator.dupe(u8, "host2.example"),
+    };
+    defer v.free(allocator);
+    var r = RpcEnumIpTable{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcEnumIpTable, &v, &r);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqual(@as(usize, 2), r.ip_tables.len);
+    try testing.expectEqual(@as(u32, 1), r.ip_tables[0].key);
+    try testing.expectEqualStrings("SID-ALICE", r.ip_tables[0].session_name);
+    try testing.expectEqual(@as(u32, 0x0A000001), r.ip_tables[0].ip);
+    try testing.expectEqual(@as(u32, 0x0A000001), r.ip_tables[0].ip_v6.toU32().?);
+    try testing.expect(r.ip_tables[0].dhcp_allocated);
+    try testing.expectEqual(@as(u64, 111), r.ip_tables[0].created_time);
+    try testing.expectEqual(@as(u32, 2), r.ip_tables[1].key);
+    try testing.expectEqualStrings("SID-BOB", r.ip_tables[1].session_name);
+    try testing.expectEqual(@as(u32, 0x0A000002), r.ip_tables[1].ip);
+    // C quirk: InRpcEnumIpTable reads "IpAddress" non-indexed, so item 1
+    // receives item 0's value (Admin.c:14296).
+    try testing.expectEqual(@as(u32, 0x0A000001), r.ip_tables[1].ip_address.toU32().?);
+    try testing.expectEqual(@as(u64, 333), r.ip_tables[1].created_time);
+    try testing.expectEqualStrings("host2.example", r.ip_tables[1].remote_hostname);
+}
+
+test "server.admin_structs RpcDeleteTable round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcDeleteTable{ .hub_name = "VPN", .key = 42 };
+    var r = RpcDeleteTable{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcDeleteTable, &v, &r);
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqual(@as(u32, 42), r.key);
+}
+
+test "server.admin_structs RpcEnumLogFile round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumLogFile{};
+    v.items = try allocator.alloc(EnumLogFileItem, 1);
+    v.items[0] = .{
+        .file_path = try allocator.dupe(u8, "/var/log/vpnserver/security_log"),
+        .server_name = try allocator.dupe(u8, "srv1"),
+        .file_size = 2048,
+        .updated_time = 555,
+    };
+    defer v.free(allocator);
+    var r = RpcEnumLogFile{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcEnumLogFile, &v, &r);
+
+    try testing.expectEqual(@as(usize, 1), r.items.len);
+    try testing.expectEqualStrings("/var/log/vpnserver/security_log", r.items[0].file_path);
+    try testing.expectEqualStrings("srv1", r.items[0].server_name);
+    try testing.expectEqual(@as(u32, 2048), r.items[0].file_size);
+    try testing.expectEqual(@as(u64, 555), r.items[0].updated_time);
 }
