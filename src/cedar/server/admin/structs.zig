@@ -1115,6 +1115,114 @@ pub const RpcDeleteUser = struct {
 };
 
 // ============================================================================
+// Group 4b — Groups (C: Admin.h RPC_SET_GROUP / RPC_ENUM_GROUP /
+// RPC_ENUM_GROUP_ITEM)
+// ============================================================================
+
+/// C `RPC_SET_GROUP` (Admin.h:616) — `CreateGroup`/`SetGroup`. The wire
+/// carries `HubName`, `Name`, `Realname` (wchar), `Note` (wchar), `Traffic`,
+/// and an optional `Policy` block. Unlike `RpcSetUser` there is no auth data.
+pub const RpcSetGroup = struct {
+    hub_name: []const u8 = "",
+    name: []const u8 = "",
+    realname: []const u8 = "",
+    note: []const u8 = "",
+    traffic: Traffic = .{},
+    policy: ?*Policy = null,
+
+    pub fn inRpc(self: *RpcSetGroup, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        self.realname = try dupStr(allocator, p.getUniStr("Realname"));
+        self.note = try dupStr(allocator, p.getUniStr("Note"));
+        self.traffic.inRpc(p);
+        if (p.getBool("UsePolicy") orelse false) {
+            const policy = try allocator.create(Policy);
+            policy.* = .{};
+            policy.inRpc(p);
+            self.policy = policy;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcSetGroup, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("Name", self.name);
+        try p.addUniStr("Realname", self.realname);
+        try p.addUniStr("Note", self.note);
+        try self.traffic.outRpc(p);
+        if (self.policy) |pol| {
+            try p.addBool("UsePolicy", true);
+            try pol.outRpc(p);
+        }
+    }
+
+    pub fn free(self: *RpcSetGroup, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.name);
+        allocator.free(self.realname);
+        allocator.free(self.note);
+        if (self.policy) |pol| {
+            allocator.destroy(pol);
+        }
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ENUM_GROUP_ITEM` (Admin.h:634) — one entry of `EnumGroup`.
+pub const EnumGroupItem = struct {
+    name: []const u8 = "",
+    realname: []const u8 = "",
+    note: []const u8 = "",
+    num_users: u32 = 0,
+    deny_access: bool = false,
+};
+
+/// C `RPC_ENUM_GROUP` (Admin.h:640) — `EnumGroup`.
+pub const RpcEnumGroup = struct {
+    hub_name: []const u8 = "",
+    groups: []EnumGroupItem = &.{},
+
+    pub fn inRpc(self: *RpcEnumGroup, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Name");
+        self.groups = try allocator.alloc(EnumGroupItem, count);
+        for (self.groups, 0..) |*e, i| {
+            e.* = .{};
+            e.name = try dupStr(allocator, p.getStrEx("Name", i));
+            e.realname = try dupStr(allocator, p.getUniStrEx("Realname", i));
+            e.note = try dupStr(allocator, p.getUniStrEx("Note", i));
+            e.num_users = p.getIntEx("NumUsers", i) orelse 0;
+            e.deny_access = p.getBoolEx("DenyAccess", i) orelse false;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumGroup, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("NumGroup", @intCast(self.groups.len));
+        for (self.groups, 0..) |e, i| {
+            try p.addStrEx("Name", e.name, i);
+            try p.addUniStrEx("Realname", e.realname, i);
+            try p.addUniStrEx("Note", e.note, i);
+            try p.addIntEx("NumUsers", e.num_users, i);
+            try p.addBoolEx("DenyAccess", e.deny_access, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumGroup, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.groups) |*e| {
+            allocator.free(e.name);
+            allocator.free(e.realname);
+            allocator.free(e.note);
+        }
+        allocator.free(self.groups);
+        self.* = .{};
+    }
+};
+
+// ============================================================================
 // Sessions & connections (C: Admin.h RPC_ENUM_SESSION / RPC_SESSION_STATUS /
 // RPC_DELETE_SESSION / RPC_ENUM_CONNECTION / RPC_DISCONNECT_CONNECTION)
 // ============================================================================
@@ -1875,6 +1983,8 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
         RpcEnumLogFile => try t.inRpc(allocator, p),
         RpcSetUserPassword => try t.inRpc(allocator, p),
         RpcGetTraffic => try t.inRpc(allocator, p),
+        RpcSetGroup => try t.inRpc(allocator, p),
+        RpcEnumGroup => try t.inRpc(allocator, p),
         else => @compileError("no inRpc for " ++ @typeName(T)),
     }
 }
@@ -1903,6 +2013,8 @@ fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
         RpcEnumLogFile => try t.outRpc(p),
         RpcSetUserPassword => try t.outRpc(p),
         RpcGetTraffic => try t.outRpc(p),
+        RpcSetGroup => try t.outRpc(p),
+        RpcEnumGroup => try t.outRpc(p),
         else => @compileError("no outRpc for " ++ @typeName(T)),
     }
 }
@@ -2506,4 +2618,59 @@ test "server.admin_structs RpcGetTraffic round-trip" {
     try testing.expectEqual(@as(u64, 100), r.traffic.recv_broadcast_bytes);
     try testing.expectEqual(@as(u64, 42), r.traffic.send_unicast_count);
     try testing.expectEqual(@as(u64, 7), r.traffic.recv_unicast_bytes);
+}
+
+test "server.admin_structs RpcSetGroup round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcSetGroup{
+        .hub_name = "VPN",
+        .name = "Managers",
+        .realname = "Management Group",
+        .note = "Administrators",
+        .traffic = .{
+            .recv_broadcast_bytes = 10,
+            .send_unicast_count = 5,
+        },
+    };
+    var r = RpcSetGroup{};
+    defer r.free(allocator);
+    try roundTripStr(allocator, RpcSetGroup, &v, &r);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqualStrings("Managers", r.name);
+    try testing.expectEqualStrings("Management Group", r.realname);
+    try testing.expectEqualStrings("Administrators", r.note);
+    try testing.expectEqual(@as(u64, 10), r.traffic.recv_broadcast_bytes);
+    try testing.expectEqual(@as(u64, 5), r.traffic.send_unicast_count);
+    try testing.expect(r.policy == null);
+}
+
+test "server.admin_structs RpcEnumGroup round-trip" {
+    const allocator = testing.allocator;
+    var v = RpcEnumGroup{
+        .hub_name = try allocator.dupe(u8, "VPN"),
+        .groups = try allocator.alloc(EnumGroupItem, 2),
+    };
+    v.groups[0] = .{ .name = try allocator.dupe(u8, "Admins"), .realname = try allocator.dupe(u8, "Admin Group"), .note = try allocator.dupe(u8, "Admins only"), .num_users = 3, .deny_access = false };
+    v.groups[1] = .{ .name = try allocator.dupe(u8, "Guests"), .realname = try allocator.dupe(u8, "Guest Group"), .note = try allocator.dupe(u8, "Guests"), .num_users = 10, .deny_access = true };
+    defer v.free(allocator);
+
+    var r = RpcEnumGroup{};
+    defer r.free(allocator);
+
+    var p = Pack.init(allocator);
+    defer p.deinit();
+    try v.outRpc(&p);
+    try r.inRpc(allocator, &p);
+
+    try testing.expectEqualStrings("VPN", r.hub_name);
+    try testing.expectEqual(@as(usize, 2), r.groups.len);
+    try testing.expectEqualStrings("Admins", r.groups[0].name);
+    try testing.expectEqualStrings("Admin Group", r.groups[0].realname);
+    try testing.expectEqualStrings("Admins only", r.groups[0].note);
+    try testing.expectEqual(@as(u32, 3), r.groups[0].num_users);
+    try testing.expect(!r.groups[0].deny_access);
+    try testing.expectEqualStrings("Guests", r.groups[1].name);
+    try testing.expectEqual(@as(u32, 10), r.groups[1].num_users);
+    try testing.expect(r.groups[1].deny_access);
 }
