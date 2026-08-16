@@ -152,6 +152,41 @@ pub const ServerUser = struct {
     }
 };
 
+/// C `MAC_TABLE_ENTRY` (Hub.h:280) subset backing `EnumMacTable` /
+/// `DeleteMacTable`. `session_name` is owned (duped at insert). C keys the
+/// hash by the entry pointer (`POINTER_TO_KEY`); the model uses a monotonic
+/// counter instead, which is stable per hub and distinct from the data
+/// plane's own table records.
+pub const MacTableEntry = struct {
+    key: u32 = 0,
+    session_name: []const u8 = "",
+    mac_address: [6]u8 = .{0} ** 6,
+    vlan_id: u32 = 0,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+
+    fn free(self: *MacTableEntry, allocator: Allocator) void {
+        allocator.free(self.session_name);
+        self.* = .{};
+    }
+};
+
+/// C `IP_TABLE_ENTRY` (Hub.h:292) subset backing `EnumIpTable` /
+/// `DeleteIpTable`. Same key scheme as `MacTableEntry`.
+pub const IpTableEntry = struct {
+    key: u32 = 0,
+    session_name: []const u8 = "",
+    ip: types_mod.IpAddress = .{ .ipv4 = .{ 0, 0, 0, 0 } },
+    dhcp_allocated: bool = false,
+    created_time: u64 = 0,
+    updated_time: u64 = 0,
+
+    fn free(self: *IpTableEntry, allocator: Allocator) void {
+        allocator.free(self.session_name);
+        self.* = .{};
+    }
+};
+
 /// C `HUB` subset used by EnumHub / CreateHub / SetHub / GetHubStatus.
 pub const ServerHub = struct {
     name: []const u8 = "",
@@ -172,6 +207,15 @@ pub const ServerHub = struct {
     num_login: u32 = 0,
     traffic: structs.Traffic = .{},
     users: std.ArrayListUnmanaged(ServerUser) = .{},
+    mac_tables: std.ArrayListUnmanaged(MacTableEntry) = .{},
+    ip_tables: std.ArrayListUnmanaged(IpTableEntry) = .{},
+    /// Next `MacTableEntry` / `IpTableEntry` key (monotonic per hub).
+    next_table_key: u32 = 1,
+    /// C hub admin options consulted by the table endpoints
+    /// (`GetHubAdminOption`, Admin.c): `no_delete_mactable` /
+    /// `no_delete_iptable` deny hub admins table deletion.
+    no_delete_mactable: bool = false,
+    no_delete_iptable: bool = false,
 
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
@@ -205,6 +249,82 @@ pub const ServerHub = struct {
     fn deinitUsers(self: *ServerHub, allocator: Allocator) void {
         for (self.users.items) |*user| user.free(allocator);
         self.users.deinit(allocator);
+    }
+
+    /// Look up a MAC table entry by key (C `IsInHashListKey` +
+    /// `HashListKeyToPointer` on `MacHashTable`).
+    fn findMacTableEntry(self: *ServerHub, key: u32) ?*MacTableEntry {
+        for (self.mac_tables.items) |*e| {
+            if (e.key == key) return e;
+        }
+        return null;
+    }
+
+    /// Look up an IP table entry by key (C `IsInListKey` +
+    /// `ListKeyToPointer` on `IpTable`).
+    fn findIpTableEntry(self: *ServerHub, key: u32) ?*IpTableEntry {
+        for (self.ip_tables.items) |*e| {
+            if (e.key == key) return e;
+        }
+        return null;
+    }
+
+    /// Insert a MAC table entry, assigning the next monotonic key and
+    /// keeping `num_mac_tables` in sync. `session_name` ownership transfers
+    /// to the hub.
+    fn addMacTableEntry(self: *ServerHub, allocator: Allocator, entry: MacTableEntry) !u32 {
+        var e = entry;
+        e.key = self.next_table_key;
+        self.next_table_key +%= 1;
+        try self.mac_tables.append(allocator, e);
+        self.num_mac_tables +%= 1;
+        return e.key;
+    }
+
+    /// Insert an IP table entry, assigning the next monotonic key and
+    /// keeping `num_ip_tables` in sync.
+    fn addIpTableEntry(self: *ServerHub, allocator: Allocator, entry: IpTableEntry) !u32 {
+        var e = entry;
+        e.key = self.next_table_key;
+        self.next_table_key +%= 1;
+        try self.ip_tables.append(allocator, e);
+        self.num_ip_tables +%= 1;
+        return e.key;
+    }
+
+    /// Remove a MAC table entry by key, releasing it. Returns false when
+    /// absent (C `ERR_OBJECT_NOT_FOUND`).
+    fn removeMacTableEntry(self: *ServerHub, allocator: Allocator, key: u32) bool {
+        for (self.mac_tables.items, 0..) |*e, i| {
+            if (e.key == key) {
+                var removed = self.mac_tables.swapRemove(i);
+                removed.free(allocator);
+                self.num_mac_tables -%= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Remove an IP table entry by key, releasing it. Returns false when
+    /// absent (C `ERR_OBJECT_NOT_FOUND`).
+    fn removeIpTableEntry(self: *ServerHub, allocator: Allocator, key: u32) bool {
+        for (self.ip_tables.items, 0..) |*e, i| {
+            if (e.key == key) {
+                var removed = self.ip_tables.swapRemove(i);
+                removed.free(allocator);
+                self.num_ip_tables -%= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn deinitTables(self: *ServerHub, allocator: Allocator) void {
+        for (self.mac_tables.items) |*e| e.free(allocator);
+        self.mac_tables.deinit(allocator);
+        for (self.ip_tables.items) |*e| e.free(allocator);
+        self.ip_tables.deinit(allocator);
     }
 };
 
@@ -271,6 +391,7 @@ pub const Server = struct {
         self.os_info.free(allocator);
         for (self.hubs.items) |*hub| {
             hub.deinitUsers(allocator);
+            hub.deinitTables(allocator);
             allocator.free(hub.name);
         }
         self.hubs.deinit(allocator);
@@ -379,6 +500,14 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcSetUser, &a, allocator, request, ret, stSetUser);
     } else if (mem.eql(u8, function_name, "DeleteUser")) {
         err = dispatchCall(structs.RpcDeleteUser, &a, allocator, request, ret, stDeleteUser);
+    } else if (mem.eql(u8, function_name, "EnumMacTable")) {
+        err = dispatchCall(structs.RpcEnumMacTable, &a, allocator, request, ret, stEnumMacTable);
+    } else if (mem.eql(u8, function_name, "EnumIpTable")) {
+        err = dispatchCall(structs.RpcEnumIpTable, &a, allocator, request, ret, stEnumIpTable);
+    } else if (mem.eql(u8, function_name, "DeleteMacTable")) {
+        err = dispatchCall(structs.RpcDeleteTable, &a, allocator, request, ret, stDeleteMacTable);
+    } else if (mem.eql(u8, function_name, "DeleteIpTable")) {
+        err = dispatchCall(structs.RpcDeleteTable, &a, allocator, request, ret, stDeleteIpTable);
     } else {
         err = err_not_supported;
     }
@@ -438,6 +567,9 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcEnumUser => try t.inRpc(allocator, p),
         structs.RpcSetUser => try t.inRpc(allocator, p),
         structs.RpcDeleteUser => try t.inRpc(allocator, p),
+        structs.RpcEnumMacTable => try t.inRpc(allocator, p),
+        structs.RpcEnumIpTable => try t.inRpc(allocator, p),
+        structs.RpcDeleteTable => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -463,6 +595,9 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcEnumUser => try t.outRpc(p),
         structs.RpcSetUser => try t.outRpc(p),
         structs.RpcDeleteUser => try t.outRpc(p),
+        structs.RpcEnumMacTable => try t.outRpc(p),
+        structs.RpcEnumIpTable => try t.outRpc(p),
+        structs.RpcDeleteTable => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -493,6 +628,9 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcEnumUser => t.free(allocator),
         structs.RpcSetUser => t.free(allocator),
         structs.RpcDeleteUser => t.free(allocator),
+        structs.RpcEnumMacTable => t.free(allocator),
+        structs.RpcEnumIpTable => t.free(allocator),
+        structs.RpcDeleteTable => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
@@ -808,6 +946,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     const index = findHubIndex(s, t.hub_name) orelse return err_hub_not_found;
     var removed = s.hubs.swapRemove(index);
     removed.deinitUsers(allocator);
+    removed.deinitTables(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
     return err_no_error;
@@ -1151,6 +1290,97 @@ fn stDeleteUser(a: *AdminCtx, t: *structs.RpcDeleteUser, allocator: Allocator) u
     if (s.server_type == server_type_farm_member) return err_not_supported;
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
     if (!hub.removeUser(allocator, t.name)) return err_object_not_found;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Tables (C `StEnumMacTable` Admin.c:5152, `StEnumIpTable` Admin.c:4978,
+//         `StDeleteMacTable` Admin.c:5028, `StDeleteIpTable` Admin.c:4854)
+// ============================================================================
+
+/// C `StEnumMacTable` (Admin.c:5152) via `SiEnumMacTable` (Admin.c:5224).
+/// CHECK_RIGHT only — the MAC table is enumerable by hub admins of their own
+/// hub. Divergence from C: the model holds a single MAC table list, so the
+/// farm-controller fan-out (`SiCallEnumMacTable`) is not needed.
+fn stEnumMacTable(a: *AdminCtx, t: *structs.RpcEnumMacTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    t.mac_tables = allocator.alloc(structs.EnumMacTableItem, hub.mac_tables.items.len) catch return err_internal_error;
+    for (hub.mac_tables.items, 0..) |*m, i| {
+        const e = &t.mac_tables[i];
+        e.* = .{};
+        e.key = m.key;
+        e.session_name = dupStr(allocator, m.session_name) catch return err_internal_error;
+        e.mac_address = m.mac_address;
+        e.vlan_id = m.vlan_id;
+        e.created_time = m.created_time;
+        e.updated_time = m.updated_time;
+        e.remote_item = false;
+    }
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StEnumIpTable` (Admin.c:4978) via `SiEnumIpTable` (Admin.c:4930).
+/// CHECK_RIGHT only; the IP table is enumerable by hub admins of their own
+/// hub. Divergence from C: single local list, no farm-controller fan-out.
+fn stEnumIpTable(a: *AdminCtx, t: *structs.RpcEnumIpTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = hub_name;
+
+    t.ip_tables = allocator.alloc(structs.EnumIpTableItem, hub.ip_tables.items.len) catch return err_internal_error;
+    for (hub.ip_tables.items, 0..) |*entry, i| {
+        const e = &t.ip_tables[i];
+        e.* = .{};
+        e.key = entry.key;
+        e.session_name = dupStr(allocator, entry.session_name) catch return err_internal_error;
+        e.ip = entry.ip.toU32() orelse 0;
+        e.ip_v6 = entry.ip;
+        e.ip_address = entry.ip;
+        e.dhcp_allocated = entry.dhcp_allocated;
+        e.created_time = entry.created_time;
+        e.updated_time = entry.updated_time;
+        e.remote_item = false;
+    }
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteMacTable` (Admin.c:5028). Hub admins are blocked when the
+/// `no_delete_mactable` hub option is set (C `GetHubAdminOption`);
+/// server admins always pass (C returns early on `a->ServerAdmin`).
+fn stDeleteMacTable(a: *AdminCtx, t: *structs.RpcDeleteTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!a.server_admin and hub.no_delete_mactable) return err_not_enough_right;
+    if (!hub.removeMacTableEntry(allocator, t.key)) return err_object_not_found;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteIpTable` (Admin.c:4854). Hub admins are blocked when the
+/// `no_delete_iptable` hub option is set (C `GetHubAdminOption`).
+fn stDeleteIpTable(a: *AdminCtx, t: *structs.RpcDeleteTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!a.server_admin and hub.no_delete_iptable) return err_not_enough_right;
+    if (!hub.removeIpTableEntry(allocator, t.key)) return err_object_not_found;
     s.config_revision +%= 1;
     return err_no_error;
 }
@@ -2507,6 +2737,237 @@ test "server.admin_dispatch DeleteUser removes and reports missing" {
     }
     try assertErr(bad_resp, err_invalid_parameter);
 }
+test "server.admin_dispatch EnumMacTable lists entries for the requested hub" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+    try server.addHub("TEST", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    const mac = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+    _ = try hub.addMacTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .mac_address = mac,
+        .vlan_id = 7,
+        .created_time = 100,
+        .updated_time = 200,
+    });
+    _ = try hub.addMacTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-ALICE"),
+        .mac_address = .{ 1, 2, 3, 4, 5, 6 },
+        .created_time = 300,
+        .updated_time = 400,
+    });
+    _ = try findHub(&server, "TEST").?.addMacTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-CAROL"),
+        .created_time = 500,
+        .updated_time = 600,
+    });
+
+    var req = try makeRequest(allocator, "EnumMacTable");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    var resp = try call(allocator, &server, true, "", "EnumMacTable", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+    try testing.expectEqual(@as(usize, 2), resp.getValueCount("SessionName"));
+    try testing.expectEqualStrings("SID-BOB", resp.getStrEx("SessionName", 0).?);
+    try testing.expectEqualSlices(u8, &mac, resp.getDataEx("MacAddress", 0).?[0..6]);
+    try testing.expectEqual(@as(u32, 7), resp.getIntEx("VlanId", 0).?);
+    try testing.expectEqual(@as(u64, 100), resp.getInt64Ex("CreatedTime", 0).?);
+    try testing.expectEqualStrings("SID-ALICE", resp.getStrEx("SessionName", 1).?);
+
+    // Unknown hub.
+    var nohub = try makeRequest(allocator, "EnumMacTable");
+    defer nohub.deinit();
+    try nohub.addStr("HubName", "NOPE");
+    var nohub_resp = try call(allocator, &server, true, "", "EnumMacTable", &nohub);
+    defer {
+        nohub_resp.deinit();
+        allocator.destroy(nohub_resp);
+    }
+    try assertErr(nohub_resp, err_hub_not_found);
+
+    // Hub admin of another hub is denied.
+    var other = try makeRequest(allocator, "EnumMacTable");
+    defer other.deinit();
+    try other.addStr("HubName", "TEST");
+    var other_resp = try call(allocator, &server, false, "VPN", "EnumMacTable", &other);
+    defer {
+        other_resp.deinit();
+        allocator.destroy(other_resp);
+    }
+    try assertErr(other_resp, err_not_enough_right);
+}
+
+test "server.admin_dispatch EnumIpTable lists entries for the requested hub" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    _ = try hub.addIpTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .dhcp_allocated = true,
+        .created_time = 100,
+        .updated_time = 200,
+    });
+
+    var req = try makeRequest(allocator, "EnumIpTable");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    var resp = try call(allocator, &server, true, "", "EnumIpTable", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expectEqual(@as(usize, 1), resp.getValueCount("SessionName"));
+    try testing.expectEqualStrings("SID-BOB", resp.getStrEx("SessionName", 0).?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getIntEx("Ip", 0).?);
+    try testing.expectEqual(@as(u32, 0x0A000001), resp.getIntEx("IpAddress", 0).?);
+    try testing.expect(resp.getBoolEx("DhcpAllocated", 0).?);
+    try testing.expectEqual(@as(u64, 100), resp.getInt64Ex("CreatedTime", 0).?);
+}
+
+test "server.admin_dispatch DeleteMacTable and DeleteIpTable remove by key" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    const mac_key = try hub.addMacTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .created_time = 100,
+        .updated_time = 100,
+    });
+    const ip_key = try hub.addIpTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .created_time = 100,
+        .updated_time = 100,
+    });
+    try testing.expectEqual(@as(u32, 2), hub.num_mac_tables + hub.num_ip_tables);
+
+    // Remove the MAC entry.
+    var mac_del = try makeRequest(allocator, "DeleteMacTable");
+    defer mac_del.deinit();
+    try mac_del.addStr("HubName", "VPN");
+    try mac_del.addInt("Key", mac_key);
+    var mac_resp = try call(allocator, &server, true, "", "DeleteMacTable", &mac_del);
+    defer {
+        mac_resp.deinit();
+        allocator.destroy(mac_resp);
+    }
+    try assertOk(mac_resp);
+    try testing.expect(hub.findMacTableEntry(mac_key) == null);
+    try testing.expectEqual(@as(u32, 0), hub.num_mac_tables);
+
+    // Missing entry reports ERR_OBJECT_NOT_FOUND.
+    var again = try makeRequest(allocator, "DeleteMacTable");
+    defer again.deinit();
+    try again.addStr("HubName", "VPN");
+    try again.addInt("Key", mac_key);
+    var again_resp = try call(allocator, &server, true, "", "DeleteMacTable", &again);
+    defer {
+        again_resp.deinit();
+        allocator.destroy(again_resp);
+    }
+    try assertErr(again_resp, err_object_not_found);
+
+    // Remove the IP entry.
+    var ip_del = try makeRequest(allocator, "DeleteIpTable");
+    defer ip_del.deinit();
+    try ip_del.addStr("HubName", "VPN");
+    try ip_del.addInt("Key", ip_key);
+    var ip_resp = try call(allocator, &server, true, "", "DeleteIpTable", &ip_del);
+    defer {
+        ip_resp.deinit();
+        allocator.destroy(ip_resp);
+    }
+    try assertOk(ip_resp);
+    try testing.expect(hub.findIpTableEntry(ip_key) == null);
+    try testing.expectEqual(@as(u32, 0), hub.num_ip_tables);
+
+    // Unknown hub.
+    var nohub = try makeRequest(allocator, "DeleteMacTable");
+    defer nohub.deinit();
+    try nohub.addStr("HubName", "NOPE");
+    try nohub.addInt("Key", mac_key);
+    var nohub_resp = try call(allocator, &server, true, "", "DeleteMacTable", &nohub);
+    defer {
+        nohub_resp.deinit();
+        allocator.destroy(nohub_resp);
+    }
+    try assertErr(nohub_resp, err_hub_not_found);
+}
+
+test "server.admin_dispatch table deletes honor hub options for hub admins" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    hub.no_delete_mactable = true;
+    hub.no_delete_iptable = true;
+    const mac_key = try hub.addMacTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .created_time = 100,
+        .updated_time = 100,
+    });
+    const ip_key = try hub.addIpTableEntry(allocator, .{
+        .session_name = try allocator.dupe(u8, "SID-BOB"),
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .created_time = 100,
+        .updated_time = 100,
+    });
+
+    // Hub admin is blocked by the option.
+    var mac_del = try makeRequest(allocator, "DeleteMacTable");
+    defer mac_del.deinit();
+    try mac_del.addStr("HubName", "VPN");
+    try mac_del.addInt("Key", mac_key);
+    var mac_resp = try call(allocator, &server, false, "VPN", "DeleteMacTable", &mac_del);
+    defer {
+        mac_resp.deinit();
+        allocator.destroy(mac_resp);
+    }
+    try assertErr(mac_resp, err_not_enough_right);
+
+    var ip_del = try makeRequest(allocator, "DeleteIpTable");
+    defer ip_del.deinit();
+    try ip_del.addStr("HubName", "VPN");
+    try ip_del.addInt("Key", ip_key);
+    var ip_resp = try call(allocator, &server, false, "VPN", "DeleteIpTable", &ip_del);
+    defer {
+        ip_resp.deinit();
+        allocator.destroy(ip_resp);
+    }
+    try assertErr(ip_resp, err_not_enough_right);
+
+    // Server admin bypasses the option (C returns early on `a->ServerAdmin`).
+    var adm = try makeRequest(allocator, "DeleteMacTable");
+    defer adm.deinit();
+    try adm.addStr("HubName", "VPN");
+    try adm.addInt("Key", mac_key);
+    var adm_resp = try call(allocator, &server, true, "", "DeleteMacTable", &adm);
+    defer {
+        adm_resp.deinit();
+        allocator.destroy(adm_resp);
+    }
+    try assertOk(adm_resp);
+    try testing.expect(hub.findMacTableEntry(mac_key) == null);
+}
+
 /// Stands in for `SessionMain` in admin tests: `requestStop` flips `halt`, and
 /// the padding makes the store land in the fake's `halt` (same layout trick as
 /// the session_registry tests).
