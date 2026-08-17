@@ -208,13 +208,13 @@ pub const RpcAdminOption = struct {
     pub fn inRpc(self: *RpcAdminOption, allocator: Allocator, p: *const Pack) !void {
         self.free(allocator);
         self.* = .{};
-        self.hub_name = p.getStr("HubName") orelse "";
+        if (p.getStr("HubName")) |hn| self.hub_name = try allocator.dupe(u8, hn);
         const count = p.getValueCount("Name");
         if (count == 0) return;
         self.items = try allocator.alloc(AdminOption, count);
         for (0..count) |i| {
             self.items[i] = .{
-                .name = p.getStrEx("Name", i) orelse "",
+                .name = try allocator.dupe(u8, p.getStrEx("Name", i) orelse ""),
                 .value = p.getIntEx("Value", i) orelse 0,
             };
         }
@@ -230,6 +230,7 @@ pub const RpcAdminOption = struct {
     }
 
     pub fn free(self: *RpcAdminOption, allocator: Allocator) void {
+        allocator.free(self.hub_name);
         for (self.items) |*item| item.free(allocator);
         allocator.free(self.items);
         self.* = .{};
