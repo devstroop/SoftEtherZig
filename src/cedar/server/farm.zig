@@ -94,8 +94,11 @@ pub const FarmMember = struct {
     server_cert: ?[]u8 = null,
     /// List of HUBs hosted by this member.
     hub_list: std.ArrayListUnmanaged(FarmHub) = .{},
-    /// Task queue for RPC dispatch.
+    /// Task queue for RPC dispatch (protected by `queue_lock`).
     task_queue: std.ArrayListUnmanaged(FarmTask) = .{},
+    /// Lock protecting `task_queue` between the service loop (consumer)
+    /// and `postTask` callers (producer).
+    queue_lock: std.Thread.Mutex = .{},
     /// Load balancing score (higher = less loaded).
     point: u32 = 0,
     /// Performance weight (C `FARM_MEMBER.Weight`).
