@@ -496,6 +496,71 @@ pub const Traffic = struct {
 };
 
 // ============================================================================
+// Traffic accounting helpers (C: Session.c:914, Hub.c:6816)
+// ============================================================================
+
+/// Accumulate traffic counters into a destination Traffic struct.
+/// Simple field-by-field addition (C: `AddTraffic`, Cedar.c:1847).
+pub fn addTraffic(dst: *Traffic, diff: *const Traffic) void {
+    dst.send.broadcast_count += diff.send.broadcast_count;
+    dst.send.broadcast_bytes += diff.send.broadcast_bytes;
+    dst.send.unicast_count += diff.send.unicast_count;
+    dst.send.unicast_bytes += diff.send.unicast_bytes;
+    dst.recv.broadcast_count += diff.recv.broadcast_count;
+    dst.recv.broadcast_bytes += diff.recv.broadcast_bytes;
+    dst.recv.unicast_count += diff.recv.unicast_count;
+    dst.recv.unicast_bytes += diff.recv.unicast_bytes;
+}
+
+/// Accumulate per-session traffic into the hub-level and cedar-level totals.
+/// Called once per main-loop iteration. Send/Recv are swapped from the
+/// server's perspective (C: `AddTrafficForSession`, Session.c:914).
+///
+/// `session_traffic` is the per-session delta for this iteration.
+/// `hub_traffic` is the hub's running total (accumulated into).
+/// `cedar_traffic` is the cedar's running total (accumulated into, may be null).
+pub fn addTrafficForSession(
+    session_traffic: *const Traffic,
+    hub_traffic: *Traffic,
+    cedar_traffic: ?*Traffic,
+) void {
+    // Server's perspective: send ↔ recv are swapped.
+    var swapped = Traffic{
+        .send = session_traffic.recv,
+        .recv = session_traffic.send,
+    };
+    addTraffic(hub_traffic, &swapped);
+    if (cedar_traffic) |cedar| addTraffic(cedar, &swapped);
+}
+
+/// Compute the traffic delta for a session (current - old), apply it to a
+/// user's traffic counters, and snapshot old = current.
+/// Called every `INCREMENT_TRAFFIC_INTERVAL` (10 seconds).
+/// (C: `IncrementUserTraffic`, Session.c:848).
+pub fn incrementUserTraffic(
+    session_traffic: *Traffic,
+    old_traffic: *Traffic,
+    user_traffic: ?*Traffic,
+    group_traffic: ?*Traffic,
+) Traffic {
+    const delta = session_traffic.delta(old_traffic);
+    if (user_traffic) |u| addTraffic(u, &delta);
+    if (group_traffic) |g| addTraffic(g, &delta);
+    return delta;
+}
+
+/// Compute the traffic delta for a hub (current - old), apply it to the
+/// hub's total counters, and snapshot old = current.
+/// Called every `INCREMENT_TRAFFIC_INTERVAL` (10 seconds).
+/// (C: `IncrementHubTraffic`, Hub.c:6816).
+pub fn incrementHubTraffic(
+    hub_traffic: *Traffic,
+    old_traffic: *Traffic,
+) Traffic {
+    return hub_traffic.delta(old_traffic);
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -901,4 +966,86 @@ test "Traffic.totalBytes" {
         .recv = .{ .unicast_bytes = 2000, .broadcast_bytes = 100 },
     };
     try testing.expectEqual(@as(u64, 3600), t.totalBytes());
+}
+
+test "addTraffic accumulates correctly" {
+    var dst = Traffic{};
+    const diff = Traffic{
+        .send = .{ .unicast_count = 10, .unicast_bytes = 5000 },
+        .recv = .{ .broadcast_count = 3, .broadcast_bytes = 1500 },
+    };
+    addTraffic(&dst, &diff);
+    addTraffic(&dst, &diff);
+    try testing.expectEqual(@as(u64, 20), dst.send.unicast_count);
+    try testing.expectEqual(@as(u64, 10000), dst.send.unicast_bytes);
+    try testing.expectEqual(@as(u64, 6), dst.recv.broadcast_count);
+    try testing.expectEqual(@as(u64, 3000), dst.recv.broadcast_bytes);
+}
+
+test "addTrafficForSession swaps send/recv" {
+    var hub_traffic = Traffic{};
+    const session_traffic = Traffic{
+        .send = .{ .unicast_count = 5, .unicast_bytes = 2500 },
+        .recv = .{ .unicast_count = 10, .unicast_bytes = 5000 },
+    };
+    addTrafficForSession(&session_traffic, &hub_traffic, null);
+    // Hub sees: send = session.recv, recv = session.send
+    try testing.expectEqual(@as(u64, 10), hub_traffic.send.unicast_count);
+    try testing.expectEqual(@as(u64, 5000), hub_traffic.send.unicast_bytes);
+    try testing.expectEqual(@as(u64, 5), hub_traffic.recv.unicast_count);
+    try testing.expectEqual(@as(u64, 2500), hub_traffic.recv.unicast_bytes);
+}
+
+test "addTrafficForSession accumulates into cedar" {
+    var hub_traffic = Traffic{};
+    var cedar_traffic = Traffic{};
+    const session_traffic = Traffic{
+        .send = .{ .unicast_count = 1, .unicast_bytes = 100 },
+        .recv = .{ .unicast_count = 2, .unicast_bytes = 200 },
+    };
+    addTrafficForSession(&session_traffic, &hub_traffic, &cedar_traffic);
+    // Both hub and cedar should have the same (swapped) totals.
+    try testing.expectEqual(cedar_traffic.send.unicast_count, hub_traffic.send.unicast_count);
+    try testing.expectEqual(cedar_traffic.recv.unicast_count, hub_traffic.recv.unicast_count);
+}
+
+test "incrementUserTraffic computes delta and accumulates" {
+    var session_traffic = Traffic{
+        .send = .{ .unicast_count = 100, .unicast_bytes = 50000 },
+        .recv = .{ .unicast_count = 80, .unicast_bytes = 40000 },
+    };
+    var old_traffic = session_traffic;
+    var user_traffic = Traffic{};
+
+    // Advance counters.
+    session_traffic.send.unicast_count = 110;
+    session_traffic.send.unicast_bytes = 55000;
+    session_traffic.recv.unicast_count = 85;
+    session_traffic.recv.unicast_bytes = 42500;
+
+    const delta = incrementUserTraffic(&session_traffic, &old_traffic, &user_traffic, null);
+    try testing.expectEqual(@as(u64, 10), delta.send.unicast_count);
+    try testing.expectEqual(@as(u64, 5000), delta.send.unicast_bytes);
+    try testing.expectEqual(@as(u64, 5), delta.recv.unicast_count);
+    try testing.expectEqual(@as(u64, 2500), delta.recv.unicast_bytes);
+    // User traffic should have accumulated the delta.
+    try testing.expectEqual(@as(u64, 10), user_traffic.send.unicast_count);
+}
+
+test "incrementHubTraffic computes delta" {
+    var hub_traffic = Traffic{
+        .send = .{ .unicast_count = 500 },
+        .recv = .{ .unicast_bytes = 25000 },
+    };
+    var old_traffic = hub_traffic;
+
+    hub_traffic.send.unicast_count = 520;
+    hub_traffic.recv.unicast_bytes = 30000;
+
+    const delta = incrementHubTraffic(&hub_traffic, &old_traffic);
+    try testing.expectEqual(@as(u64, 20), delta.send.unicast_count);
+    try testing.expectEqual(@as(u64, 5000), delta.recv.unicast_bytes);
+    // old should now reflect current.
+    try testing.expectEqual(@as(u64, 520), old_traffic.send.unicast_count);
+    try testing.expectEqual(@as(u64, 30000), old_traffic.recv.unicast_bytes);
 }

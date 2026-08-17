@@ -44,6 +44,9 @@ const acl_mod = @import("acl.zig");
 const AccessList = acl_mod.AccessList;
 const AccessRule = acl_mod.AccessRule;
 const HubFilters = acl_mod.HubFilters;
+const logging_mod = @import("logging.zig");
+const Log = logging_mod.LOG;
+const HubLogConfig = logging_mod.HubLogConfig;
 
 // ============================================================================
 // Constants (C: Cedar.h / Hub.c)
@@ -278,6 +281,10 @@ pub const Hub = struct {
     access_list: AccessList = undefined,
     /// Hub-level protocol filters (PPPoE, OSPF, IPv4/IPv6/NonIP/BPDU).
     filters: HubFilters = .{},
+    /// Hub log configuration.
+    log_config: HubLogConfig = .{},
+    /// Hub security logger (C: `HUB.SecurityLogger`).
+    security_logger: ?*Log = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*Hub {
         const self = try allocator.create(Hub);
@@ -296,6 +303,8 @@ pub const Hub = struct {
     pub fn deinit(self: *Hub) void {
         // Stop SecureNAT first — it holds a SessionPa that references this hub.
         self.disableSecureNAT();
+        // Stop the security logger.
+        if (self.security_logger) |l| l.deinit();
         const allocator = self.allocator;
         self.access_list.deinit();
         self.mutex.lock();
@@ -440,6 +449,50 @@ pub const Hub = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.filters = filters;
+    }
+
+    // ---- Security logger ---------------------------------------------------
+
+    /// Start the hub security logger (C: `HUB.SecurityLogger`).
+    /// Creates the log directory and spawns the writer thread.
+    pub fn startSecurityLogger(self: *Hub) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.security_logger != null) return; // already running
+
+        var buf: [256]u8 = undefined;
+        const dir = std.fmt.bufPrint(&buf, "{s}/{s}", .{
+            logging_mod.HUB_SECURITY_LOG_DIR_NAME,
+            self.name,
+        }) catch return error.NameTooLong;
+
+        const l = try Log.init(self.allocator, dir, logging_mod.HUB_SECURITY_LOG_PREFIX, self.log_config.security_log_switch_type);
+        self.security_logger = l;
+    }
+
+    /// Stop the hub security logger.
+    pub fn stopSecurityLogger(self: *Hub) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.security_logger) |l| {
+            l.deinit();
+            self.security_logger = null;
+        }
+    }
+
+    /// Log a security event to the hub's security logger.
+    pub fn securityLog(self: *Hub, comptime fmt: []const u8, args: anytype) void {
+        self.mutex.lock();
+        const logger = self.security_logger;
+        self.mutex.unlock();
+        if (logger) |l| l.printf(fmt, args);
+    }
+
+    /// Update the hub log configuration.
+    pub fn setLogConfig(self: *Hub, config: HubLogConfig) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.log_config = config;
     }
 
     // ---- Switching ---------------------------------------------------------
