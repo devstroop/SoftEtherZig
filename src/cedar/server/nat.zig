@@ -66,6 +66,20 @@ pub const NatStatus = enum(u8) {
 };
 
 // ============================================================================
+// Error sets for packet forwarding / receive stubs
+// ============================================================================
+
+pub const ForwardError = error{
+    /// Stub — not yet implemented in this PR.
+    NotYetImplemented,
+};
+
+pub const ReceiveError = error{
+    /// Stub — not yet implemented in this PR.
+    NotYetImplemented,
+};
+
+// ============================================================================
 // Flow key — identifies a unique NAT flow
 // ============================================================================
 
@@ -129,6 +143,11 @@ pub const NatEntry = struct {
     /// Public (outbound) address — the socket we allocated.
     public_ip: u32,
     public_port: u16,
+
+    /// Public-facing flow key for receive-direction lookup.
+    /// Maps (public_ip:public_port -> dest_ip:dest_port) so inbound replies
+    /// find the correct NAT session.
+    recv_key: FlowKey,
 
     created_time: i64,
     last_comm_time: i64,
@@ -239,7 +258,7 @@ pub const NatTable = struct {
         return null;
     }
 
-    pub fn remove(self: *NatTable, allocator: Allocator, key: FlowKey) bool {
+    pub fn remove(self: *NatTable, key: FlowKey) bool {
         const idx = bucketIndex(key);
         const bucket = &self.buckets[idx];
         for (0..bucket.items.len) |i| {
@@ -253,8 +272,17 @@ pub const NatTable = struct {
         return false;
     }
 
+    /// Find an entry by receive key (C: `NnGetNatEntryForRecv`).
+    pub fn findRecv(self: *const NatTable, recv_key: FlowKey) ?*const NatEntry {
+        const idx = bucketIndex(recv_key);
+        for (self.buckets[idx].items) |*entry| {
+            if (entry.recv_key.eql(recv_key)) return entry;
+        }
+        return null;
+    }
+
     /// Remove all expired entries. Returns the number removed.
-    pub fn sweepExpired(self: *NatTable, allocator: Allocator, now: i64) u32 {
+    pub fn sweepExpired(self: *NatTable, now: i64) u32 {
         var removed: u32 = 0;
         for (&self.buckets) |*bucket| {
             var i: usize = 0;
@@ -273,15 +301,30 @@ pub const NatTable = struct {
     }
 
     /// Delete the oldest entry for a given source IP + protocol
-    /// (C: `NnGetOldestNatEntryOfIp`).
-    pub fn deleteOldestForIp(self: *NatTable, allocator: Allocator, src_ip: u32, protocol: u8) bool {
+    /// (C: `NnGetOldestNatEntryOfIp`). Falls back to the global oldest
+    /// entry when no matching entry exists.
+    pub fn deleteOldestForIp(self: *NatTable, src_ip: u32, protocol: u8) bool {
         var oldest_idx: ?usize = null;
         var oldest_time: i64 = std.math.maxInt(i64);
         var oldest_bucket: ?usize = null;
 
+        // First pass: find matching entry by src_ip + protocol.
         for (&self.buckets, 0..) |*bucket, bi| {
             for (bucket.items, 0..) |entry, ei| {
                 if (entry.src_ip == src_ip and entry.protocol == protocol) {
+                    if (entry.created_time < oldest_time) {
+                        oldest_time = entry.created_time;
+                        oldest_idx = ei;
+                        oldest_bucket = bi;
+                    }
+                }
+            }
+        }
+
+        // Second pass: if no match, fall back to global oldest.
+        if (oldest_bucket == null) {
+            for (&self.buckets, 0..) |*bucket, bi| {
+                for (bucket.items, 0..) |entry, ei| {
                     if (entry.created_time < oldest_time) {
                         oldest_time = entry.created_time;
                         oldest_idx = ei;
@@ -358,7 +401,7 @@ pub const NatEngine = struct {
         defer self.mutex.unlock();
 
         if (self.table.count >= self.max_entries) {
-            _ = self.table.deleteOldestForIp(self.allocator, src_ip, PROTO_ICMP);
+            _ = self.table.deleteOldestForIp(src_ip, PROTO_ICMP);
         }
 
         const id = self.next_id;
@@ -374,6 +417,13 @@ pub const NatEngine = struct {
             .dest_port = dest_port,
             .public_ip = self.public_ip,
             .public_port = src_port,
+            .recv_key = .{
+                .src_ip = self.public_ip,
+                .src_port = src_port,
+                .dest_ip = dest_ip,
+                .dest_port = dest_port,
+                .protocol = PROTO_ICMP,
+            },
             .created_time = now,
             .last_comm_time = now,
             .total_sent = 0,
@@ -411,7 +461,7 @@ pub const NatEngine = struct {
         defer self.mutex.unlock();
 
         if (self.table.count >= self.max_entries) {
-            _ = self.table.deleteOldestForIp(self.allocator, src_ip, PROTO_UDP);
+            _ = self.table.deleteOldestForIp(src_ip, PROTO_UDP);
         }
 
         // Allocate an outbound UDP socket.
@@ -426,7 +476,7 @@ pub const NatEngine = struct {
         try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in));
 
         // Get the assigned port.
-        var addr_len: socklen_t = @sizeOf(std.posix.sockaddr.in);
+        var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
         try std.posix.getsockname(fd, @ptrCast(&addr), &addr_len);
         const public_port = std.mem.bigToNative(u16, addr.port);
 
@@ -443,6 +493,13 @@ pub const NatEngine = struct {
             .dest_port = dest_port,
             .public_ip = self.public_ip,
             .public_port = public_port,
+            .recv_key = .{
+                .src_ip = dest_ip,
+                .src_port = dest_port,
+                .dest_ip = self.public_ip,
+                .dest_port = public_port,
+                .protocol = PROTO_UDP,
+            },
             .created_time = now,
             .last_comm_time = now,
             .total_sent = 0,
@@ -481,7 +538,7 @@ pub const NatEngine = struct {
         defer self.mutex.unlock();
 
         if (self.table.count >= self.max_entries) {
-            _ = self.table.deleteOldestForIp(self.allocator, src_ip, PROTO_TCP);
+            _ = self.table.deleteOldestForIp(src_ip, PROTO_TCP);
         }
 
         // Allocate an outbound TCP socket.
@@ -496,7 +553,7 @@ pub const NatEngine = struct {
         try std.posix.bind(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.in));
 
         // Get the assigned port.
-        var addr_len: socklen_t = @sizeOf(std.posix.sockaddr.in);
+        var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
         try std.posix.getsockname(fd, @ptrCast(&addr), &addr_len);
         const public_port = std.mem.bigToNative(u16, addr.port);
 
@@ -525,6 +582,13 @@ pub const NatEngine = struct {
             .dest_port = dest_port,
             .public_ip = self.public_ip,
             .public_port = public_port,
+            .recv_key = .{
+                .src_ip = dest_ip,
+                .src_port = dest_port,
+                .dest_ip = self.public_ip,
+                .dest_port = public_port,
+                .protocol = PROTO_TCP,
+            },
             .created_time = now,
             .last_comm_time = now,
             .total_sent = 0,
@@ -561,7 +625,8 @@ pub const NatEngine = struct {
     }
 
     /// Look up an entry for the receive direction (C: `NnGetNatEntryForRecv`).
-    /// Receive uses the reverse key: dest_ip:dest_port -> src_ip:src_port.
+    /// A reply from `src_ip:src_port` to `dest_ip:dest_port` matches an entry
+    /// whose `recv_key` has (src_ip=dest_ip, dest_ip=src_ip).
     pub fn lookupRecv(self: *NatEngine, src_ip: u32, src_port: u16, dest_ip: u32, dest_port: u16, protocol: u8) ?NatEntry {
         const key = FlowKey{
             .src_ip = dest_ip,
@@ -572,7 +637,7 @@ pub const NatEngine = struct {
         };
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.table.find(key)) |entry| {
+        if (self.table.findRecv(key)) |entry| {
             return entry.*;
         }
         return null;
@@ -582,7 +647,7 @@ pub const NatEngine = struct {
     pub fn deleteEntry(self: *NatEngine, key: FlowKey) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.table.remove(self.allocator, key)) {
+        if (self.table.remove(key)) {
             self.total_destroyed +%= 1;
             return true;
         }
@@ -593,7 +658,7 @@ pub const NatEngine = struct {
     pub fn sweep(self: *NatEngine, now: i64) u32 {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const removed = self.table.sweepExpired(self.allocator, now);
+        const removed = self.table.sweepExpired(now);
         self.total_destroyed +%= removed;
         return removed;
     }
@@ -620,6 +685,26 @@ pub const NatEngine = struct {
         }
         return all.toOwnedSlice(self.allocator) catch return &.{};
     }
+
+    /// Forward an outbound IP packet from the virtual host.
+    /// Looks up the flow, rewrites the source address to the public NAT
+    /// address, and writes to the outbound socket.
+    /// TODO(C: Virtual.c NnSendNatPacket) — currently a stub for PR #163.
+    pub fn forwardPacket(self: *NatEngine, packet: []const u8) ForwardError!void {
+        _ = self;
+        _ = packet;
+        return error.NotYetImplemented;
+    }
+
+    /// Process a reply packet received on the public NAT socket.
+    /// Looks up the flow by recv_key, rewrites the destination address back
+    /// to the virtual host, and enqueues for delivery to the hub.
+    /// TODO(C: Virtual.c NnRecvNatPacket) — currently a stub for PR #163.
+    pub fn receivePacket(self: *NatEngine, packet: []const u8) ReceiveError!void {
+        _ = self;
+        _ = packet;
+        return error.NotYetImplemented;
+    }
 };
 
 // ============================================================================
@@ -643,6 +728,47 @@ fn fmtIp(ip: u32) [15]u8 {
 // Tests
 // ============================================================================
 
+/// Helper to create a NatEntry with all required fields (tests only).
+fn makeTestEntry(
+    id: u32,
+    protocol: u8,
+    src_ip: u32,
+    src_port: u16,
+    dest_ip: u32,
+    dest_port: u16,
+    public_ip: u32,
+    public_port: u16,
+    created_time: i64,
+) NatEntry {
+    return .{
+        .id = id,
+        .status = if (protocol == PROTO_TCP) .connecting else .active,
+        .protocol = protocol,
+        .src_ip = src_ip,
+        .src_port = src_port,
+        .dest_ip = dest_ip,
+        .dest_port = dest_port,
+        .public_ip = public_ip,
+        .public_port = public_port,
+        .recv_key = .{
+            .src_ip = dest_ip,
+            .src_port = dest_port,
+            .dest_ip = public_ip,
+            .dest_port = public_port,
+            .protocol = protocol,
+        },
+        .created_time = created_time,
+        .last_comm_time = created_time,
+        .total_sent = 0,
+        .total_recv = 0,
+        .last_seq = 0,
+        .last_ack = 0,
+        .hash_code_for_send = 0,
+        .hash_code_for_recv = 0,
+        .outbound_fd = std.math.maxInt(std.posix.socket_t),
+    };
+}
+
 test "nat.FlowKey hash and equality" {
     const a = FlowKey{ .src_ip = 0x0A000001, .src_port = 12345, .dest_ip = 0xC0A80101, .dest_port = 80, .protocol = PROTO_TCP };
     const b = FlowKey{ .src_ip = 0x0A000001, .src_port = 12345, .dest_ip = 0xC0A80101, .dest_port = 80, .protocol = PROTO_TCP };
@@ -659,26 +785,10 @@ test "nat.NatTable insert and find" {
     defer table.deinit(allocator);
 
     const key = FlowKey{ .src_ip = 0x0A000001, .src_port = 1000, .dest_ip = 0xC0A80101, .dest_port = 80, .protocol = PROTO_TCP };
-    const entry = NatEntry{
-        .id = 1,
-        .status = .established,
-        .protocol = PROTO_TCP,
-        .src_ip = 0x0A000001,
-        .src_port = 1000,
-        .dest_ip = 0xC0A80101,
-        .dest_port = 80,
-        .public_ip = 0x01020304,
-        .public_port = 5000,
-        .created_time = 1000,
-        .last_comm_time = 2000,
-        .total_sent = 100,
-        .total_recv = 200,
-        .last_seq = 0,
-        .last_ack = 0,
-        .hash_code_for_send = 0,
-        .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
-    };
+    var entry = makeTestEntry(1, PROTO_TCP, 0x0A000001, 1000, 0xC0A80101, 80, 0x01020304, 5000, 1000);
+    entry.total_sent = 100;
+    entry.total_recv = 200;
+    entry.last_comm_time = 2000;
 
     try table.insert(allocator, entry);
     try testing.expectEqual(@as(u32, 1), table.count);
@@ -689,37 +799,39 @@ test "nat.NatTable insert and find" {
     try testing.expectEqual(@as(u64, 200), found.?.total_recv);
 }
 
+test "nat.NatTable findRecv matches recv_key" {
+    const allocator = testing.allocator;
+    var table = NatTable.init();
+    defer table.deinit(allocator);
+
+    const entry = makeTestEntry(1, PROTO_UDP, 0x0A000001, 1000, 0xC0A80101, 53, 0x01020304, 5000, 1000);
+    try table.insert(allocator, entry);
+
+    // Receive lookup: reply from server (0xC0A80101:53) to public (0x01020304:5000).
+    const recv_key = FlowKey{
+        .src_ip = 0xC0A80101,
+        .src_port = 53,
+        .dest_ip = 0x01020304,
+        .dest_port = 5000,
+        .protocol = PROTO_UDP,
+    };
+    const found = table.findRecv(recv_key);
+    try testing.expect(found != null);
+    try testing.expectEqual(@as(u32, 1), found.?.id);
+}
+
 test "nat.NatTable remove" {
     const allocator = testing.allocator;
     var table = NatTable.init();
     defer table.deinit(allocator);
 
     const key = FlowKey{ .src_ip = 0x0A000001, .src_port = 1000, .dest_ip = 0xC0A80101, .dest_port = 80, .protocol = PROTO_TCP };
-    try table.insert(allocator, .{
-        .id = 1,
-        .status = .established,
-        .protocol = PROTO_TCP,
-        .src_ip = 0x0A000001,
-        .src_port = 1000,
-        .dest_ip = 0xC0A80101,
-        .dest_port = 80,
-        .public_ip = 0x01020304,
-        .public_port = 5000,
-        .created_time = 1000,
-        .last_comm_time = 2000,
-        .total_sent = 0,
-        .total_recv = 0,
-        .last_seq = 0,
-        .last_ack = 0,
-        .hash_code_for_send = 0,
-        .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
-    });
+    try table.insert(allocator, makeTestEntry(1, PROTO_TCP, 0x0A000001, 1000, 0xC0A80101, 80, 0x01020304, 5000, 1000));
 
-    try testing.expect(table.remove(allocator, key));
+    try testing.expect(table.remove(key));
     try testing.expectEqual(@as(u32, 0), table.count);
     try testing.expect(table.find(key) == null);
-    try testing.expect(!table.remove(allocator, key));
+    try testing.expect(!table.remove(key));
 }
 
 test "nat.NatTable sweepExpired removes stale entries" {
@@ -727,50 +839,12 @@ test "nat.NatTable sweepExpired removes stale entries" {
     var table = NatTable.init();
     defer table.deinit(allocator);
 
-    try table.insert(allocator, .{
-        .id = 1,
-        .status = .active,
-        .protocol = PROTO_UDP,
-        .src_ip = 0x0A000001,
-        .src_port = 1000,
-        .dest_ip = 0xC0A80101,
-        .dest_port = 53,
-        .public_ip = 0x01020304,
-        .public_port = 5000,
-        .created_time = 1000,
-        .last_comm_time = 1000,
-        .total_sent = 0,
-        .total_recv = 0,
-        .last_seq = 0,
-        .last_ack = 0,
-        .hash_code_for_send = 0,
-        .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
-    });
-    try table.insert(allocator, .{
-        .id = 2,
-        .status = .active,
-        .protocol = PROTO_UDP,
-        .src_ip = 0x0A000002,
-        .src_port = 2000,
-        .dest_ip = 0xC0A80101,
-        .dest_port = 53,
-        .public_ip = 0x01020304,
-        .public_port = 5001,
-        .created_time = 50000,
-        .last_comm_time = 50000,
-        .total_sent = 0,
-        .total_recv = 0,
-        .last_seq = 0,
-        .last_ack = 0,
-        .hash_code_for_send = 0,
-        .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
-    });
+    try table.insert(allocator, makeTestEntry(1, PROTO_UDP, 0x0A000001, 1000, 0xC0A80101, 53, 0x01020304, 5000, 1000));
+    try table.insert(allocator, makeTestEntry(2, PROTO_UDP, 0x0A000002, 2000, 0xC0A80101, 53, 0x01020304, 5001, 50000));
     try testing.expectEqual(@as(u32, 2), table.count);
 
     // Sweep at time=50000: entry 1 (last_comm=1000) is expired, entry 2 is not.
-    const removed = table.sweepExpired(allocator, 50000);
+    const removed = table.sweepExpired(50000);
     try testing.expectEqual(@as(u32, 1), removed);
     try testing.expectEqual(@as(u32, 1), table.count);
 }
@@ -780,34 +854,29 @@ test "nat.NatTable deleteOldestForIp" {
     var table = NatTable.init();
     defer table.deinit(allocator);
 
-    // Two entries from the same src_ip.
-    for (1..3) |i| {
-        try table.insert(allocator, .{
-            .id = @intCast(i),
-            .status = .active,
-            .protocol = PROTO_UDP,
-            .src_ip = 0x0A000001,
-            .src_port = @intCast(1000 + i),
-            .dest_ip = 0xC0A80101,
-            .dest_port = 53,
-            .public_ip = 0x01020304,
-            .public_port = @intCast(5000 + i),
-            .created_time = @intCast(i * 1000),
-            .last_comm_time = @intCast(i * 1000),
-            .total_sent = 0,
-            .total_recv = 0,
-            .last_seq = 0,
-            .last_ack = 0,
-            .hash_code_for_send = 0,
-            .hash_code_for_recv = 0,
-            .outbound_fd = std.math.maxInt(std.posix.socket_t),
-        });
-    }
+    try table.insert(allocator, makeTestEntry(1, PROTO_UDP, 0x0A000001, 1000, 0xC0A80101, 53, 0x01020304, 5000, 1000));
+    try table.insert(allocator, makeTestEntry(2, PROTO_UDP, 0x0A000001, 2000, 0xC0A80101, 53, 0x01020304, 5001, 2000));
     try testing.expectEqual(@as(u32, 2), table.count);
 
     // Should delete oldest (id=1, created_time=1000).
-    try testing.expect(table.deleteOldestForIp(allocator, 0x0A000001, PROTO_UDP));
+    try testing.expect(table.deleteOldestForIp(0x0A000001, PROTO_UDP));
     try testing.expectEqual(@as(u32, 1), table.count);
+}
+
+test "nat.NatTable deleteOldestForIp falls back to global oldest" {
+    const allocator = testing.allocator;
+    var table = NatTable.init();
+    defer table.deinit(allocator);
+
+    try table.insert(allocator, makeTestEntry(1, PROTO_UDP, 0x0A000001, 1000, 0xC0A80101, 53, 0x01020304, 5000, 2000));
+    try table.insert(allocator, makeTestEntry(2, PROTO_TCP, 0x0A000002, 2000, 0xC0A80101, 80, 0x01020304, 5001, 1000));
+
+    // No matching src_ip=0xFF for PROTO_UDP, should fall back to global oldest (id=2, time=1000).
+    try testing.expect(table.deleteOldestForIp(0xFF, PROTO_UDP));
+    try testing.expectEqual(@as(u32, 1), table.count);
+    // Entry 1 should remain.
+    const key1 = FlowKey{ .src_ip = 0x0A000001, .src_port = 1000, .dest_ip = 0xC0A80101, .dest_port = 53, .protocol = PROTO_UDP };
+    try testing.expect(table.find(key1) != null);
 }
 
 test "nat.NatEngine creates ICMP entry" {
@@ -839,7 +908,6 @@ test "nat.NatEngine creates UDP entry with bound socket" {
     try testing.expect(entry.public_port > 0);
     try testing.expectEqual(@as(u32, 1), engine.table.count);
 
-    // Cleanup: close socket.
     engine.deleteEntry(entry.flowKey());
 }
 
@@ -857,14 +925,14 @@ test "nat.NatEngine creates TCP entry with non-blocking socket" {
     engine.deleteEntry(entry.flowKey());
 }
 
-test "nat.NatEngine lookupRecv uses reverse key" {
+test "nat.NatEngine lookupRecv uses recv_key" {
     const allocator = testing.allocator;
     var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
     defer engine.deinit();
 
     const entry = try engine.newUdpEntry(0x0A000001, 1000, 0xC0A80101, 53, 1000);
 
-    // Receive from server -> client uses reverse key.
+    // Reply from server (0xC0A80101:53) to public (0x01020304:entry.public_port).
     const found = engine.lookupRecv(0xC0A80101, 53, engine.public_ip, entry.public_port, PROTO_UDP);
     try testing.expect(found != null);
     try testing.expectEqual(@as(u32, entry.id), found.?.id);
@@ -882,7 +950,6 @@ test "nat.NatEngine sweep removes expired entries" {
 
     try testing.expectEqual(@as(u32, 2), engine.table.count);
 
-    // Sweep at 50000: entry 1 (last_comm=1000) is expired, entry 2 is not.
     const removed = engine.sweep(50000);
     try testing.expectEqual(@as(u32, 1), removed);
     try testing.expectEqual(@as(u32, 1), engine.table.count);
@@ -908,29 +975,13 @@ test "nat.NatEngine respects max_entries by evicting oldest" {
 }
 
 test "nat.NatEntry.isExpired respects protocol timeouts" {
-    const tcp = NatEntry{
-        .id = 1,
-        .status = .established,
-        .protocol = PROTO_TCP,
-        .src_ip = 0,
-        .src_port = 0,
-        .dest_ip = 0,
-        .dest_port = 0,
-        .public_ip = 0,
-        .public_port = 0,
-        .created_time = 0,
-        .last_comm_time = 100_000,
-        .total_sent = 0,
-        .total_recv = 0,
-        .last_seq = 0,
-        .last_ack = 0,
-        .hash_code_for_send = 0,
-        .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
-    };
+    const tcp = makeTestEntry(1, PROTO_TCP, 0, 0, 0, 0, 0, 0, 0);
+    // Override last_comm_time to test timeout.
+    var tcp_mut = tcp;
+    tcp_mut.last_comm_time = 100_000;
 
-    // TCP timeout is 300s = 300000ms. At t=350000, last_comm=100000, delta=250000 < 300000 -> not expired.
-    try testing.expect(!tcp.isExpired(350_000));
+    // TCP timeout is 300s = 300000ms. At t=350000, delta=250000 < 300000 -> not expired.
+    try testing.expect(!tcp_mut.isExpired(350_000));
     // At t=450000, delta=350000 > 300000 -> expired.
-    try testing.expect(tcp.isExpired(450_000));
+    try testing.expect(tcp_mut.isExpired(450_000));
 }
