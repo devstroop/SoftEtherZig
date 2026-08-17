@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const mem = std.mem;
+const posix = std.posix;
 const Allocator = mem.Allocator;
 const log = std.log.scoped(.cedar_server);
 
@@ -42,6 +43,10 @@ const MAX_RECV_BLOCKS = tunnel_mod.MAX_RECV_BLOCKS;
 /// When no bytes have flowed in either direction for this long, the session
 /// is torn down. 0 disables the timeout.
 pub const DEFAULT_TIMEOUT_MS: u32 = 300000;
+
+/// Data-plane poll timeout in ms for the UDP fd (same as accept.zig's
+/// `session_poll_ms`).
+const UDP_POLL_MS: u32 = 250;
 
 /// Max frames pulled from the packet adapter per loop iteration
 /// (C: `MAX_SEND_SOCKET_QUEUE_NUM` = 128, Cedar.h:248).
@@ -128,6 +133,20 @@ pub const SessionConfig = struct {
     /// `ConnectionReceive`. null → a short sleep to avoid a busy spin.
     wait_fn: ?*const fn (ctx: *anyopaque) void = null,
     wait_ctx: ?*anyopaque = null,
+
+    /// UDP acceleration (optional). When set, the session loop polls the UDP
+    /// socket alongside TLS and prefers UDP for outbound data.
+    udp_ctx: ?*anyopaque = null,
+    /// Receive one data block from the UDP path. Returns null when no data.
+    udp_poll_fn: ?*const fn (ctx: *anyopaque) ?[]const u8 = null,
+    /// Send a data block via UDP. Returns true on success.
+    udp_send_fn: ?*const fn (ctx: *anyopaque, data: []const u8, compressed: bool) bool = null,
+    /// Check if the UDP path is active and ready for sending.
+    udp_ready_fn: ?*const fn (ctx: *anyopaque) bool = null,
+    /// Drive UDP timers (keepalive, dead detection).
+    udp_tick_fn: ?*const fn (ctx: *anyopaque) void = null,
+    /// Get the UDP socket fd for poll(). Returns null if unavailable.
+    udp_fd_fn: ?*const fn (ctx: *anyopaque) ?posix.socket_t = null,
 };
 
 /// The session main loop. Owns no sockets and no hub state — it coordinates a
@@ -227,6 +246,11 @@ pub const SessionMain = struct {
         while (!self.halt.load(.seq_cst)) {
             var progress = false;
 
+            // 0. Drive UDP acceleration timers (keepalive, dead detection).
+            if (self.config.udp_tick_fn) |tick_fn| {
+                if (self.config.udp_ctx) |ctx| tick_fn(ctx);
+            }
+
             // 1+2. Receive from the wire, hand each block to the hub. Drain as
             // many complete messages as are buffered (C's ConnectionReceive
             // consumes everything the socket has), but keep the loop bounded
@@ -267,6 +291,23 @@ pub const SessionMain = struct {
             // sessions (Session.c:440-449) — the hub flush hook.
             if (!self.pa.flush(self.pa.ctx)) return error.PacketAdapterFlushFailed;
 
+            // 2b. Poll UDP acceleration. Drain all pending blocks into the hub
+            // (same path as TLS-received blocks — C: ConnectionReceive drains
+            // UdpAccel->RecvBlockQueue into ReceivedBlocks).
+            if (self.config.udp_poll_fn) |poll_fn| {
+                if (self.config.udp_ctx) |ctx| {
+                    var udp_batches: usize = 0;
+                    while (udp_batches < MAX_RECV_BLOCKS) {
+                        const block = poll_fn(ctx) orelse break;
+                        self.stats.rx_blocks += 1;
+                        self.stats.rx_bytes += block.len;
+                        if (!self.pa.put(self.pa.ctx, block)) return error.PacketAdapterPutFailed;
+                        udp_batches += 1;
+                        progress = true;
+                    }
+                }
+            }
+
             if (self.halt.load(.seq_cst)) break;
 
             // 3. Keep-alive on idle wire — C sends it at the top of
@@ -295,6 +336,17 @@ pub const SessionMain = struct {
             if (!progress) {
                 if (self.config.wait_fn) |w| {
                     w(self.config.wait_ctx orelse self.pa.ctx);
+                } else if (self.config.udp_fd_fn) |udp_fd_fn| {
+                    // Combined wait: poll both TLS (via wait_ctx) and UDP.
+                    if (self.config.udp_ctx) |ctx| {
+                        if (udp_fd_fn(ctx)) |udp_fd| {
+                            var pfd = [_]posix.pollfd{
+                                .{ .fd = udp_fd, .events = posix.POLL.IN, .revents = 0 },
+                            };
+                            _ = posix.poll(&pfd, UDP_POLL_MS) catch 0;
+                        }
+                    }
+                    std.Thread.sleep(std.time.ns_per_ms);
                 } else {
                     std.Thread.sleep(std.time.ns_per_ms);
                 }
@@ -307,10 +359,50 @@ pub const SessionMain = struct {
     /// Pull up to `max_send_batch` frames from the packet adapter, frame them
     /// with the tunnel (compression included), and write them to the wire.
     /// Returns true if at least one frame was sent.
+    ///
+    /// When UDP acceleration is active and ready (C: `UdpAccelIsSendReady`),
+    /// frames are sent via UDP individually instead of batched over TLS.
     fn drainAndSend(self: *SessionMain) !bool {
         var count: usize = 0;
         var sent_bytes: usize = 0;
 
+        // Check if UDP acceleration is available and ready.
+        const use_udp = if (self.config.udp_ready_fn) |ready_fn|
+            if (self.config.udp_ctx) |ctx| ready_fn(ctx) else false
+        else
+            false;
+
+        if (use_udp) {
+            // UDP path: send each frame individually via UDP.
+            while (count < self.send_batch.len) {
+                const frame = self.pa.get(self.pa.ctx) orelse break;
+                if (self.send_queue_bytes + frame.len > self.config.max_buffering_size) {
+                    self.allocator.free(frame);
+                    log.warn("dropping frame: send queue over buffering budget (UDP)", .{});
+                    continue;
+                }
+                const sent = if (self.config.udp_send_fn) |send_fn|
+                    if (self.config.udp_ctx) |ctx| send_fn(ctx, frame, false) else false
+                else
+                    false;
+                self.allocator.free(frame);
+                if (sent) {
+                    count += 1;
+                    sent_bytes += frame.len;
+                }
+                self.send_queue_bytes += frame.len;
+            }
+            if (count > 0) {
+                self.send_queue_bytes = 0;
+                self.stats.tx_blocks += count;
+                self.stats.tx_bytes += sent_bytes;
+                self.touchComm();
+                return true;
+            }
+            return false;
+        }
+
+        // TLS path: batch frames and send via tunnel.
         while (count < self.send_batch.len) {
             const frame = self.pa.get(self.pa.ctx) orelse break;
             // C drops frames once the pending send queue is over budget
