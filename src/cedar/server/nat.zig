@@ -359,6 +359,19 @@ pub const NatTable = struct {
 };
 
 // ============================================================================
+// Inbound port mapping (DNAT) — M4 extension
+// ============================================================================
+
+/// A static inbound port mapping: external clients connecting to
+/// `public_ip:public_port` are forwarded to `internal_ip:internal_port`.
+pub const PortMapping = struct {
+    public_port: u16,
+    protocol: u8,
+    internal_ip: u32,
+    internal_port: u16,
+};
+
+// ============================================================================
 // NAT engine — top-level coordinator
 // ============================================================================
 
@@ -391,6 +404,9 @@ pub const NatEngine = struct {
     udp_timeout_ms: ?i64 = null,
     icmp_timeout_ms: ?i64 = null,
 
+    /// Inbound port mappings (DNAT). Maps external clients to internal hosts.
+    port_mappings: std.ArrayListUnmanaged(PortMapping) = .{},
+
     pub fn init(allocator: Allocator, virtual_ip: u32, public_ip: u32) NatEngine {
         return .{
             .allocator = allocator,
@@ -404,6 +420,7 @@ pub const NatEngine = struct {
 
     pub fn deinit(self: *NatEngine) void {
         self.table.deinit(self.allocator);
+        self.port_mappings.deinit(self.allocator);
     }
 
     /// Configure per-engine timeouts (ms). `null` means use the default constant.
@@ -905,6 +922,196 @@ pub const NatEngine = struct {
 
         return translated;
     }
+
+    // ---- Inbound port-mapping (DNAT) ---------------------------------------
+
+    /// Add an inbound port mapping. External clients connecting to
+    /// `public_ip:public_port` will be forwarded to `internal_ip:internal_port`.
+    pub fn addPortMapping(
+        self: *NatEngine,
+        public_port: u16,
+        protocol: u8,
+        internal_ip: u32,
+        internal_port: u16,
+    ) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Check for duplicate.
+        for (self.port_mappings.items) |m| {
+            if (m.public_port == public_port and m.protocol == protocol) {
+                return error.DuplicatePort;
+            }
+        }
+
+        try self.port_mappings.append(self.allocator, .{
+            .public_port = public_port,
+            .protocol = protocol,
+            .internal_ip = internal_ip,
+            .internal_port = internal_port,
+        });
+
+        log.info("NAT: added inbound mapping {s}:{d} -> {any}:{d} (proto {d})", .{
+            fmtIp(self.public_ip),
+            public_port,
+            fmtIp(internal_ip),
+            internal_port,
+            protocol,
+        });
+    }
+
+    /// Remove an inbound port mapping by public port and protocol.
+    pub fn removePortMapping(self: *NatEngine, public_port: u16, protocol: u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.port_mappings.items, 0..) |m, i| {
+            if (m.public_port == public_port and m.protocol == protocol) {
+                _ = self.port_mappings.swapRemove(i);
+                log.info("NAT: removed inbound mapping {s}:{d} (proto {d})", .{
+                    fmtIp(self.public_ip),
+                    public_port,
+                    protocol,
+                });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// List all inbound port mappings.
+    pub fn listPortMappings(self: *NatEngine) []const PortMapping {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.port_mappings.items;
+    }
+
+    /// Process an inbound packet that matches a port mapping (DNAT).
+    /// Rewrites the destination IP/port to the internal client and creates
+    /// a reverse NAT flow entry so response packets are translated back.
+    ///
+    /// Returns the translated packet, or error.NoMapping if no mapping matches.
+    pub fn processInboundPacket(self: *NatEngine, packet: []const u8) error{ NoMapping, NotYetImplemented }![]u8 {
+        if (packet.len < 34) return error.NotYetImplemented;
+
+        const ethertype = mem.readInt(u16, packet[12..14], .big);
+        if (ethertype != 0x0800) return error.NotYetImplemented;
+
+        const ip = packet[14..];
+        const version_ihl = ip[0];
+        const version = (version_ihl >> 4) & 0x0F;
+        if (version != 4) return error.NotYetImplemented;
+        const ihl = (version_ihl & 0x0F) * 4;
+        if (ip.len < ihl) return error.NotYetImplemented;
+
+        const protocol = ip[9];
+        const src_ip = mem.readInt(u32, ip[12..16], .big);
+        const dest_ip = mem.readInt(u32, ip[16..20], .big);
+        const now = std.time.milliTimestamp();
+
+        // Only process packets destined for our public IP.
+        if (dest_ip != self.public_ip) return error.NoMapping;
+
+        var dest_port: u16 = 0;
+        if (protocol == PROTO_TCP or protocol == PROTO_UDP) {
+            if (ip.len < ihl + 4) return error.NotYetImplemented;
+            const l4 = ip[ihl..];
+            dest_port = mem.readInt(u16, l4[2..4], .big);
+        } else if (protocol == PROTO_ICMP) {
+            if (ip.len < ihl + 8) return error.NotYetImplemented;
+            const icmp = ip[ihl..];
+            dest_port = mem.readInt(u16, icmp[4..6], .big); // ICMP id
+        } else {
+            return error.NoMapping;
+        }
+
+        // Look up port mapping.
+        self.mutex.lock();
+        var mapping: ?PortMapping = null;
+        for (self.port_mappings.items) |m| {
+            if (m.public_port == dest_port and m.protocol == protocol) {
+                mapping = m;
+                break;
+            }
+        }
+        self.mutex.unlock();
+
+        const m = mapping orelse return error.NoMapping;
+
+        // Create a reverse NAT flow entry so responses are translated back.
+        // The flow key for the reverse direction:
+        //   src = external client, dest = internal client
+        // The recv_key for the reverse direction:
+        //   src = internal client, dest = external client (via public IP)
+        const internal_port = if (m.internal_port != 0) m.internal_port else dest_port;
+
+        const entry = NatEntry{
+            .id = blk: {
+                self.mutex.lock();
+                const id = self.next_id;
+                self.next_id +%= 1;
+                self.mutex.unlock();
+                break :blk id;
+            },
+            .status = .established,
+            .protocol = protocol,
+            .src_ip = m.internal_ip,
+            .src_port = internal_port,
+            .dest_ip = src_ip,
+            .dest_port = dest_port,
+            .public_ip = self.public_ip,
+            .public_port = dest_port,
+            .recv_key = .{
+                .src_ip = src_ip,
+                .src_port = dest_port,
+                .dest_ip = self.public_ip,
+                .dest_port = dest_port,
+                .protocol = protocol,
+            },
+            .created_time = now,
+            .last_comm_time = now,
+            .total_sent = 0,
+            .total_recv = 0,
+            .last_seq = 0,
+            .last_ack = 0,
+            .hash_code_for_send = 0,
+            .hash_code_for_recv = 0,
+            .outbound_fd = INVALID_SOCKET,
+        };
+
+        self.mutex.lock();
+        try self.table.insert(self.allocator, entry);
+        self.total_created +%= 1;
+        self.mutex.unlock();
+
+        // Clone and rewrite the packet.
+        var translated = self.allocator.dupe(u8, packet) catch return error.NotYetImplemented;
+        errdefer self.allocator.free(translated);
+
+        // Rewrite IP destination to the internal client.
+        mem.writeInt(u32, @constCast(translated[14 + 16 ..][0..4]), m.internal_ip, .big);
+
+        // Rewrite L4 destination port to the internal port.
+        if (protocol == PROTO_TCP or protocol == PROTO_UDP) {
+            if (translated.len >= 14 + ihl + 4) {
+                mem.writeInt(u16, @constCast(translated[14 + ihl + 2 ..][0..2]), internal_port, .big);
+            }
+        } else if (protocol == PROTO_ICMP) {
+            if (translated.len >= 14 + ihl + 8) {
+                mem.writeInt(u16, @constCast(translated[14 + ihl + 4 ..][0..2]), internal_port, .big);
+            }
+        }
+
+        log.debug("NAT inbound: {any}:{d} -> {any}:{d} (mapped from {s}:{d})", .{
+            fmtIp(src_ip),
+            dest_port,
+            fmtIp(m.internal_ip),
+            internal_port,
+            fmtIp(self.public_ip),
+            dest_port,
+        });
+
+        return translated;
+    }
 };
 
 // ============================================================================
@@ -1184,4 +1391,203 @@ test "nat.NatEntry.isExpired respects protocol timeouts" {
     try testing.expect(!tcp_mut.isExpired(350_000));
     // At t=450000, delta=350000 > 300000 -> expired.
     try testing.expect(tcp_mut.isExpired(450_000));
+}
+
+// ============================================================================
+// Inbound port-mapping tests
+// ============================================================================
+
+test "nat.NatEngine addPortMapping and listPortMappings" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    try engine.addPortMapping(8080, PROTO_TCP, 0x0A000002, 80);
+    try engine.addPortMapping(53, PROTO_UDP, 0x0A000003, 53);
+
+    const mappings = engine.listPortMappings();
+    try testing.expectEqual(@as(usize, 2), mappings.len);
+    try testing.expectEqual(@as(u16, 8080), mappings[0].public_port);
+    try testing.expectEqual(@as(u32, 0x0A000002), mappings[0].internal_ip);
+    try testing.expectEqual(@as(u16, 80), mappings[0].internal_port);
+    try testing.expectEqual(@as(u16, 53), mappings[1].public_port);
+}
+
+test "nat.NatEngine addPortMapping rejects duplicate" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    try engine.addPortMapping(8080, PROTO_TCP, 0x0A000002, 80);
+    try testing.expectError(error.DuplicatePort, engine.addPortMapping(8080, PROTO_TCP, 0x0A000002, 8080));
+
+    // Different protocol on same port is OK.
+    try engine.addPortMapping(8080, PROTO_UDP, 0x0A000002, 8081);
+    try testing.expectEqual(@as(usize, 2), engine.listPortMappings().len);
+}
+
+test "nat.NatEngine removePortMapping" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    try engine.addPortMapping(8080, PROTO_TCP, 0x0A000002, 80);
+    try testing.expect(engine.removePortMapping(8080, PROTO_TCP));
+    try testing.expectEqual(@as(usize, 0), engine.listPortMappings().len);
+    try testing.expect(!engine.removePortMapping(8080, PROTO_TCP));
+}
+
+test "nat.NatEngine processInboundPacket rewrites destination" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    // Map public 8080 -> internal 192.168.1.2:80.
+    try engine.addPortMapping(8080, PROTO_TCP, 0xC0A80102, 80);
+
+    // Build a minimal inbound TCP SYN packet:
+    // Ethernet(14) + IP(20) + TCP(20) = 54 bytes.
+    var packet: [54]u8 = .{0};
+
+    // Ethernet header: ethertype = 0x0800 at offset 12-13.
+    packet[12] = 0x08;
+    packet[13] = 0x00;
+
+    // IP header: version=4, IHL=5 (20 bytes), protocol=6 (TCP).
+    packet[14] = 0x45;
+    packet[23] = 6;
+
+    // Src IP (external client): 203.0.113.1 = 0xCB007101
+    packet[15] = 0xCB;
+    packet[16] = 0x00;
+    packet[17] = 0x71;
+    packet[18] = 0x01;
+
+    // Dst IP (our public IP): 1.2.3.4 = 0x01020304
+    packet[19] = 0x01;
+    packet[20] = 0x02;
+    packet[21] = 0x03;
+    packet[22] = 0x04;
+
+    // TCP src port = 54321
+    packet[34] = 0xD4;
+    packet[35] = 0x31;
+
+    // TCP dst port = 8080 = 0x1F90
+    packet[36] = 0x1F;
+    packet[37] = 0x90;
+
+    // TCP flags: SYN (0x02)
+    packet[47] = 0x02;
+
+    const translated = try engine.processInboundPacket(&packet);
+    defer allocator.free(translated);
+
+    // Verify destination IP was rewritten to internal client.
+    try testing.expectEqual(@as(u8, 0xC0), translated[19]);
+    try testing.expectEqual(@as(u8, 0xA8), translated[20]);
+    try testing.expectEqual(@as(u8, 0x01), translated[21]);
+    try testing.expectEqual(@as(u8, 0x02), translated[22]);
+
+    // Verify TCP destination port was rewritten to 80 = 0x0050.
+    try testing.expectEqual(@as(u8, 0x00), translated[36]);
+    try testing.expectEqual(@as(u8, 0x50), translated[37]);
+
+    // Verify a reverse flow entry was created.
+    try testing.expectEqual(@as(u32, 1), engine.table.count);
+}
+
+test "nat.NatEngine processInboundPacket rejects wrong public IP" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    try engine.addPortMapping(8080, PROTO_TCP, 0xC0A80102, 80);
+
+    var packet: [54]u8 = .{0};
+    packet[12] = 0x08;
+    packet[13] = 0x00;
+    packet[14] = 0x45;
+    packet[23] = 6;
+
+    // Dest IP = 10.0.0.1 (NOT our public IP).
+    packet[19] = 0x0A;
+    packet[20] = 0x00;
+    packet[21] = 0x00;
+    packet[22] = 0x01;
+
+    try testing.expectError(error.NoMapping, engine.processInboundPacket(&packet));
+}
+
+test "nat.NatEngine processInboundPacket rejects unmatched port" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    try engine.addPortMapping(8080, PROTO_TCP, 0xC0A80102, 80);
+
+    var packet: [54]u8 = .{0};
+    packet[12] = 0x08;
+    packet[13] = 0x00;
+    packet[14] = 0x45;
+    packet[23] = 6;
+
+    // Dest IP = our public IP.
+    packet[19] = 0x01;
+    packet[20] = 0x02;
+    packet[21] = 0x03;
+    packet[22] = 0x04;
+
+    // TCP dst port = 9999 (no mapping).
+    packet[36] = 0x27;
+    packet[37] = 0x0F;
+
+    try testing.expectError(error.NoMapping, engine.processInboundPacket(&packet));
+}
+
+test "nat.NatEngine processInboundPacket preserves source" {
+    const allocator = testing.allocator;
+    var engine = NatEngine.init(allocator, 0x0A000001, 0x01020304);
+    defer engine.deinit();
+
+    try engine.addPortMapping(443, PROTO_TCP, 0xC0A80164, 443);
+
+    var packet: [54]u8 = .{0};
+    packet[12] = 0x08;
+    packet[13] = 0x00;
+    packet[14] = 0x45;
+    packet[23] = 6;
+
+    // Src IP: 198.51.100.1 = 0xC6336401
+    packet[15] = 0xC6;
+    packet[16] = 0x33;
+    packet[17] = 0x64;
+    packet[18] = 0x01;
+
+    // Dst IP: our public.
+    packet[19] = 0x01;
+    packet[20] = 0x02;
+    packet[21] = 0x03;
+    packet[22] = 0x04;
+
+    // TCP src port = 12345 = 0x3039
+    packet[34] = 0x30;
+    packet[35] = 0x39;
+
+    // TCP dst port = 443 = 0x01BB
+    packet[36] = 0x01;
+    packet[37] = 0xBB;
+
+    const translated = try engine.processInboundPacket(&packet);
+    defer allocator.free(translated);
+
+    // Source IP must be preserved (external client's address).
+    try testing.expectEqual(@as(u8, 0xC6), translated[15]);
+    try testing.expectEqual(@as(u8, 0x33), translated[16]);
+    try testing.expectEqual(@as(u8, 0x64), translated[17]);
+    try testing.expectEqual(@as(u8, 0x01), translated[18]);
+
+    // Source port must be preserved.
+    try testing.expectEqual(@as(u8, 0x30), translated[34]);
+    try testing.expectEqual(@as(u8, 0x39), translated[35]);
 }
