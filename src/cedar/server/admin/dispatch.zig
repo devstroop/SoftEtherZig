@@ -68,6 +68,7 @@ pub const err_too_many_hubs: u32 = 58;
 pub const err_too_many_user: u32 = 63;
 pub const err_user_already_exists: u32 = 66;
 pub const err_not_supported_auth_on_opensource: u32 = 143;
+pub const err_too_many_items: u32 = 50;
 
 // ============================================================================
 // Server type / hub type constants (C: Server.h:397, Cedar.h:411)
@@ -102,6 +103,7 @@ pub const nat_max_sessions: u32 = 4096;
 pub const max_num_l3_switch: u32 = 4096;
 pub const max_num_l3_if: u32 = 4096;
 pub const max_num_l3_table: u32 = 4096;
+pub const max_hub_admin_options: u32 = 4096;
 
 const sha1_size = structs.SHA1_SIZE;
 
@@ -114,6 +116,51 @@ pub const default_product_name = "SoftEther VPN Server";
 pub const default_version_string = "4.44";
 pub const default_family_name = "SoftEther VPN";
 pub const default_host_name = "localhost";
+
+/// C `admin_options[]` (Hub.c:113) — default hub admin option table.
+pub const default_admin_options: []const structs.AdminOption = &.{
+    .{ .name = "allow_hub_admin_change_option", .value = 0 },
+    .{ .name = "max_users", .value = 0 },
+    .{ .name = "max_multilogins_per_user", .value = 0 },
+    .{ .name = "max_groups", .value = 0 },
+    .{ .name = "max_accesslists", .value = 0 },
+    .{ .name = "max_sessions_client_bridge_apply", .value = 0 },
+    .{ .name = "max_sessions", .value = 0 },
+    .{ .name = "max_sessions_client", .value = 0 },
+    .{ .name = "max_sessions_bridge", .value = 0 },
+    .{ .name = "max_bitrates_download", .value = 0 },
+    .{ .name = "max_bitrates_upload", .value = 0 },
+    .{ .name = "deny_empty_password", .value = 0 },
+    .{ .name = "deny_bridge", .value = 0 },
+    .{ .name = "deny_routing", .value = 0 },
+    .{ .name = "deny_qos", .value = 0 },
+    .{ .name = "deny_change_user_password", .value = 0 },
+    .{ .name = "no_change_users", .value = 0 },
+    .{ .name = "no_change_groups", .value = 0 },
+    .{ .name = "no_securenat", .value = 0 },
+    .{ .name = "no_securenat_enablenat", .value = 0 },
+    .{ .name = "no_securenat_enabledhcp", .value = 0 },
+    .{ .name = "no_cascade", .value = 0 },
+    .{ .name = "no_online", .value = 0 },
+    .{ .name = "no_offline", .value = 0 },
+    .{ .name = "no_change_log_config", .value = 0 },
+    .{ .name = "no_disconnect_session", .value = 0 },
+    .{ .name = "no_delete_iptable", .value = 0 },
+    .{ .name = "no_delete_mactable", .value = 0 },
+    .{ .name = "no_enum_session", .value = 0 },
+    .{ .name = "no_query_session", .value = 0 },
+    .{ .name = "no_change_admin_password", .value = 0 },
+    .{ .name = "no_change_log_switch_type", .value = 0 },
+    .{ .name = "no_change_access_list", .value = 0 },
+    .{ .name = "no_change_access_control_list", .value = 0 },
+    .{ .name = "no_change_cert_list", .value = 0 },
+    .{ .name = "no_change_crl_list", .value = 0 },
+    .{ .name = "no_read_log_file", .value = 0 },
+    .{ .name = "deny_hub_admin_change_ext_option", .value = 0 },
+    .{ .name = "no_delay_jitter_packet_loss", .value = 0 },
+    .{ .name = "no_change_msg", .value = 0 },
+    .{ .name = "no_access_list_include_file", .value = 0 },
+};
 
 /// C `SERVER_LISTENER` (Server.h:471) subset.
 pub const ServerListener = struct {
@@ -232,6 +279,8 @@ pub const ServerHub = struct {
     ip_table: std.ArrayListUnmanaged(IpTableEntry) = .{},
     /// Hub access list (C `HUB->AccessList` subset).
     access_list: std.ArrayListUnmanaged(structs.Access) = .{},
+    /// Hub admin options (C `HUB->AdminOptionList`).
+    admin_options: std.ArrayListUnmanaged(structs.AdminOption) = .{},
     /// Next `MacTableEntry` / `IpTableEntry` key (monotonic per hub).
     next_table_key: u32 = 1,
     /// C hub admin options: `no_delete_mactable` / `no_delete_iptable` deny
@@ -439,11 +488,67 @@ pub const ServerHub = struct {
         self.access_list.deinit(allocator);
     }
 
+    /// Release all hub admin options.
+    pub fn deinitAdminOptions(self: *ServerHub, allocator: Allocator) void {
+        for (self.admin_options.items) |*e| e.free(allocator);
+        self.admin_options.deinit(allocator);
+    }
+
     /// Replace the entire access list with new entries.
     pub fn setAccessList(self: *ServerHub, allocator: Allocator, entries: []structs.Access) !void {
         self.deinitAccessList(allocator);
         self.access_list.items = entries;
         self.access_list.capacity = entries.len;
+    }
+
+    /// Find an admin option by name (C `GetHubAdminOption` on `AdminOptionList`).
+    pub fn findAdminOption(self: *const ServerHub, name: []const u8) ?*const structs.AdminOption {
+        for (self.admin_options.items) |*e| {
+            if (std.mem.eql(u8, e.name, name)) return e;
+        }
+        return null;
+    }
+
+    /// Get an admin option value, returning `default_val` if not found.
+    pub fn getAdminOptionValue(self: *const ServerHub, name: []const u8, default_val: u32) u32 {
+        if (self.findAdminOption(name)) |opt| return opt.value;
+        return default_val;
+    }
+
+    /// Set or update an admin option (C `StSetHubAdminOptions` logic).
+    pub fn setAdminOption(self: *ServerHub, allocator: Allocator, name: []const u8, value: u32) !void {
+        for (self.admin_options.items) |*e| {
+            if (std.mem.eql(u8, e.name, name)) {
+                e.value = value;
+                return;
+            }
+        }
+        try self.admin_options.append(allocator, .{
+            .name = try allocator.dupe(u8, name),
+            .value = value,
+        });
+    }
+
+    /// Replace all admin options (C `StSetHubAdminOptions` — DeleteAllHubAdminOption + insert).
+    pub fn setAllAdminOptions(self: *ServerHub, allocator: Allocator, items: []const structs.AdminOption) !void {
+        self.deinitAdminOptions(allocator);
+        for (items) |item| {
+            try self.admin_options.append(allocator, .{
+                .name = try allocator.dupe(u8, item.name),
+                .value = item.value,
+            });
+        }
+    }
+
+    /// Populate default admin options if the list is empty (C `AddHubAdminOptionsDefaults`).
+    pub fn ensureDefaultAdminOptions(self: *ServerHub, allocator: Allocator) !void {
+        if (self.admin_options.items.len > 0) return;
+        for (default_admin_options) |def| {
+            try self.admin_options.append(allocator, .{
+                .name = try allocator.dupe(u8, def.name),
+                .value = def.value,
+            });
+        }
     }
 };
 
@@ -513,6 +618,7 @@ pub const Server = struct {
             hub.deinitGroups(allocator);
             hub.freeTables(allocator);
             hub.deinitAccessList(allocator);
+            hub.deinitAdminOptions(allocator);
             allocator.free(hub.name);
         }
         self.hubs.deinit(allocator);
@@ -653,6 +759,12 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcDeleteAccess, &a, allocator, request, ret, stDeleteAccess);
     } else if (mem.eql(u8, function_name, "SetAccessList")) {
         err = dispatchCall(structs.RpcEnumAccessList, &a, allocator, request, ret, stSetAccessList);
+    } else if (mem.eql(u8, function_name, "GetHubAdminOptions")) {
+        err = dispatchCall(structs.RpcAdminOption, &a, allocator, request, ret, stGetHubAdminOptions);
+    } else if (mem.eql(u8, function_name, "GetDefaultHubAdminOptions")) {
+        err = dispatchCall(structs.RpcAdminOption, &a, allocator, request, ret, stGetDefaultHubAdminOptions);
+    } else if (mem.eql(u8, function_name, "SetHubAdminOptions")) {
+        err = dispatchCall(structs.RpcAdminOption, &a, allocator, request, ret, stSetHubAdminOptions);
     } else if (mem.eql(u8, function_name, "EnumLog")) {
         err = dispatchCall(structs.RpcEnumLogFile, &a, allocator, request, ret, stEnumLog);
     } else if (mem.eql(u8, function_name, "GetTraffic")) {
@@ -727,6 +839,7 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcEnumMacTable => try t.inRpc(allocator, p),
         structs.RpcEnumIpTable => try t.inRpc(allocator, p),
         structs.RpcDeleteTable => try t.inRpc(allocator, p),
+        structs.RpcAdminOption => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -763,6 +876,7 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcEnumMacTable => try t.outRpc(p),
         structs.RpcEnumIpTable => try t.outRpc(p),
         structs.RpcDeleteTable => try t.outRpc(p),
+        structs.RpcAdminOption => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -804,6 +918,7 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcEnumMacTable => t.free(allocator),
         structs.RpcEnumIpTable => t.free(allocator),
         structs.RpcDeleteTable => t.free(allocator),
+        structs.RpcAdminOption => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
@@ -1122,6 +1237,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     removed.deinitGroups(allocator);
     removed.freeTables(allocator);
     removed.deinitAccessList(allocator);
+    removed.deinitAdminOptions(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
     return err_no_error;
@@ -1916,6 +2032,71 @@ fn stSetAccessList(a: *AdminCtx, t: *structs.RpcEnumAccessList, allocator: Alloc
     t.accesses = &.{};
 
     hub.setAccessList(allocator, entries) catch return err_internal_error;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StGetHubAdminOptions` (Admin.c:4381). Returns all hub admin options.
+fn stGetHubAdminOptions(a: *AdminCtx, t: *structs.RpcAdminOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    hub.ensureDefaultAdminOptions(allocator) catch return err_internal_error;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = allocator.dupe(u8, hub.name) catch return err_internal_error;
+    t.items = allocator.alloc(structs.AdminOption, hub.admin_options.items.len) catch return err_internal_error;
+    for (hub.admin_options.items, 0..) |opt, i| {
+        t.items[i] = .{
+            .name = allocator.dupe(u8, opt.name) catch return err_internal_error,
+            .value = opt.value,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StGetDefaultHubAdminOptions` (Admin.c:4435). Returns the static default table.
+fn stGetDefaultHubAdminOptions(a: *AdminCtx, t: *structs.RpcAdminOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+
+    t.free(allocator);
+    t.* = .{};
+    t.items = allocator.alloc(structs.AdminOption, default_admin_options.len) catch return err_internal_error;
+    for (default_admin_options, 0..) |opt, i| {
+        t.items[i] = .{
+            .name = allocator.dupe(u8, opt.name) catch return err_internal_error,
+            .value = opt.value,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StSetHubAdminOptions` (Admin.c:4301). Replace all hub admin options.
+fn stSetHubAdminOptions(a: *AdminCtx, t: *structs.RpcAdminOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (s.is_bridge) return err_not_supported;
+    if (s.server_type == server_type_farm_member) return err_not_supported;
+    if (!a.server_admin) return err_not_enough_right;
+    if (t.items.len > max_hub_admin_options) return err_too_many_items;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    // Hub admins need allow_hub_admin_change_option (C checks this).
+    if (!a.server_admin) {
+        if (hub.getAdminOptionValue("allow_hub_admin_change_option", 0) == 0)
+            return err_not_enough_right;
+    }
+
+    hub.setAllAdminOptions(allocator, t.items) catch return err_internal_error;
+    hub.ensureDefaultAdminOptions(allocator) catch return err_internal_error;
+
+    // Take ownership of incoming items so free is safe.
+    t.items = &.{};
+
     s.config_revision +%= 1;
     return err_no_error;
 }
@@ -5092,4 +5273,105 @@ test "server.admin_dispatch table deletes honor no_delete hub options" {
     }
     try assertOk(adm_resp);
     try testing.expect(hub.findMacTableEntry(mac_key) == null);
+}
+
+test "server.admin_dispatch GetDefaultHubAdminOptions returns the static table" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+
+    var req = try makeRequest(allocator, "GetDefaultHubAdminOptions");
+    defer req.deinit();
+    var resp = try call(allocator, &server, true, "", "GetDefaultHubAdminOptions", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    const count = resp.getValueCount("Name");
+    try testing.expectEqual(default_admin_options.len, count);
+    const first_name = resp.getStrEx("Name", 0).?;
+    try testing.expectEqualStrings("allow_hub_admin_change_option", first_name);
+}
+
+test "server.admin_dispatch GetHubAdminOptions returns defaults for a new hub" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    var req = try makeRequest(allocator, "GetHubAdminOptions");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    var resp = try call(allocator, &server, true, "VPN", "GetHubAdminOptions", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    const count = resp.getValueCount("Name");
+    try testing.expectEqual(default_admin_options.len, count);
+    try testing.expectEqualStrings("VPN", resp.getStr("HubName").?);
+}
+
+test "server.admin_dispatch SetHubAdminOptions replaces hub options" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Set two options.
+    var req = try makeRequest(allocator, "SetHubAdminOptions");
+    defer req.deinit();
+    try req.addStr("HubName", "VPN");
+    try req.addStrEx("Name", "max_users", 0);
+    try req.addIntEx("Value", 100, 0);
+    try req.addStrEx("Name", "deny_empty_password", 1);
+    try req.addIntEx("Value", 1, 1);
+    var resp = try call(allocator, &server, true, "VPN", "SetHubAdminOptions", &req);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+
+    // Read back and verify.
+    var req2 = try makeRequest(allocator, "GetHubAdminOptions");
+    defer req2.deinit();
+    try req2.addStr("HubName", "VPN");
+    var resp2 = try call(allocator, &server, true, "VPN", "GetHubAdminOptions", &req2);
+    defer {
+        resp2.deinit();
+        allocator.destroy(resp2);
+    }
+    try assertOk(resp2);
+    // The set replaced all options, so count = 2.
+    try testing.expectEqual(@as(usize, 2), resp2.getValueCount("Name"));
+
+    const hub = findHub(&server, "VPN").?;
+    try testing.expectEqual(@as(u32, 100), hub.getAdminOptionValue("max_users", 0));
+    try testing.expectEqual(@as(u32, 1), hub.getAdminOptionValue("deny_empty_password", 0));
+}
+
+test "server.admin_dispatch SetHubAdminOptions validates hub and rights" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    // Missing hub.
+    var req1 = try makeRequest(allocator, "SetHubAdminOptions");
+    defer req1.deinit();
+    try req1.addStr("HubName", "NOPE");
+    var resp1 = try call(allocator, &server, true, "", "SetHubAdminOptions", &req1);
+    defer { resp1.deinit(); allocator.destroy(resp1); }
+    try assertErr(resp1, err_hub_not_found);
+
+    // Non-server-admin without the change option.
+    var req2 = try makeRequest(allocator, "SetHubAdminOptions");
+    defer req2.deinit();
+    try req2.addStr("HubName", "VPN");
+    var resp2 = try call(allocator, &server, false, "VPN", "SetHubAdminOptions", &req2);
+    defer { resp2.deinit(); allocator.destroy(resp2); }
+    try assertErr(resp2, err_not_enough_right);
 }
