@@ -79,6 +79,7 @@ pub const ListenerRegistry = listener.ListenerRegistry;
 pub const Protocol = listener.Protocol;
 pub const Status = listener.Status;
 pub const DosTable = listener.DosTable;
+pub const DoSConfig = listener.DoSConfig;
 pub const AcceptHandler = listener.AcceptHandler;
 pub const ServerContext = accept.ServerContext;
 pub const acceptConnection = accept.acceptConnection;
