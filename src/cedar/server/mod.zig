@@ -44,6 +44,9 @@ pub const admin_structs = @import("admin/structs.zig");
 pub const admin_dispatch = @import("admin/dispatch.zig");
 pub const dhcp_server = @import("dhcp_server.zig");
 
+pub const dhcp_server = @import("dhcp_server.zig");
+pub const virtual_host = @import("virtual_host.zig");
+
 // Re-export commonly used types
 pub const Hub = auth.Hub;
 pub const User = auth.User;
