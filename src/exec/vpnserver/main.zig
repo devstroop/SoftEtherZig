@@ -142,6 +142,7 @@ pub const ServerState = struct {
     switch_hub: ?*softether.server.hub.Hub = null,
     server_ctx: ?*softether.server.accept.ServerContext = null,
     session_registry: ?*softether.server.session_registry.SessionRegistry = null,
+    admin_server: ?*softether.server.admin_dispatch.Server = null,
     listeners: std.ArrayListUnmanaged(*softether.server.listener.Listener) = .{},
 
     pub fn init(allocator: std.mem.Allocator, cli_args: CliArgs) ServerState {
@@ -171,6 +172,12 @@ pub const ServerState = struct {
 
         if (self.server_ctx) |ctx| self.allocator.destroy(ctx);
         self.server_ctx = null;
+
+        if (self.admin_server) |server| {
+            server.deinit();
+            self.allocator.destroy(server);
+        }
+        self.admin_server = null;
 
         if (self.switch_hub) |hub| hub.deinit(); // Hub.deinit frees itself
         self.switch_hub = null;
@@ -367,6 +374,11 @@ fn buildServer(state: *ServerState) !void {
     registry.* = softether.server.session_registry.SessionRegistry.init(state.allocator);
     state.session_registry = registry;
 
+    // Create admin RPC dispatch server for vpncmd connections (issue #99)
+    const admin = try state.allocator.create(softether.server.admin_dispatch.Server);
+    admin.* = try softether.server.admin_dispatch.Server.init(state.allocator);
+    state.admin_server = admin;
+
     const ctx = try state.allocator.create(softether.server.accept.ServerContext);
     ctx.* = .{
         .allocator = state.allocator,
@@ -375,6 +387,7 @@ fn buildServer(state: *ServerState) !void {
         .auth_hub = &state.auth_hub.?,
         .switch_hub = state.switch_hub.?,
         .session_registry = registry,
+        .admin_server = admin,
     };
     state.server_ctx = ctx;
 }

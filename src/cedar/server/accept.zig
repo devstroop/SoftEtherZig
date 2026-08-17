@@ -45,6 +45,9 @@ const watermark = @import("../protocol/watermark.zig");
 const auth_mod = @import("auth.zig");
 const hub = @import("hub.zig");
 const session_mod = @import("session.zig");
+const rpc_mod = @import("admin/rpc.zig");
+const dispatch_mod = @import("admin/dispatch.zig");
+const wpc_mod = @import("wpc.zig");
 const ServerSession = session_mod.ServerSession;
 const SessionMain = @import("session_main.zig").SessionMain;
 const session_registry_mod = @import("session_registry.zig");
@@ -85,6 +88,8 @@ const session_poll_ms: u32 = 250;
 /// Wire error codes (C: Cedar.h `ERR_*`).
 const error_hub_not_found: u32 = 8;
 const error_auth_failed: u32 = 9;
+const err_protocol_error: u32 = 12;
+const err_access_denied: u32 = 15;
 
 // ============================================================================
 // ServerContext
@@ -113,6 +118,9 @@ pub const ServerContext = struct {
     session_registry: *session_registry_mod.SessionRegistry,
     /// Monotonic counter for session/connection naming.
     session_counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    /// Admin RPC dispatch server (issue #99): when non-null, enables the
+    /// admin method in `handleConnection` for vpncmd-style RPC connections.
+    admin_server: ?*dispatch_mod.Server = null,
 };
 
 /// The `AcceptHandler` entry point (listener.zig). Runs on the per-connection
@@ -150,8 +158,9 @@ fn fmtIp(ip: u32) [15]u8 {
 }
 
 /// The full accept sequence for an established TLS connection:
-/// signature → hello → auth/welcome, then the data plane. Exposed for the
-/// end-to-end tests; `acceptConnection` wraps it in TLS accept + close.
+/// signature → hello → method dispatch (admin or login) → session/RPC.
+/// Exposed for the end-to-end tests; `acceptConnection` wraps it in TLS
+/// accept + close.
 pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket, peer_ip: u32, peer_port: u16) !void {
     // 1. Signature upload — WaterMark GIF POSTed to connect.cgi. The server
     //    validates it and sends NO reply (C `ServerDownloadSignature`).
@@ -164,13 +173,27 @@ pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket, peer_ip:
     defer self.allocator.free(hello_bytes);
     try http.sendHttpResponse(tls_sock, hello_bytes);
 
-    // 3. Auth — read the login pack, verify, and reply with the Welcome (or an
-    //    error) pack.
-    var established = (try authenticate(self, tls_sock, &hello_random)) orelse return;
-    defer established.deinit(self.allocator);
+    // 3. Read the method Pack and dispatch based on "method" field.
+    //    C: `ServerAccept` (Protocol.c:2137) reads the Pack via HttpServerRecv,
+    //    then checks `GetMethodFromPack(p, method)` for "admin", "login", etc.
+    var buf: [http.max_pack_body_len]u8 = undefined;
+    const request = try http.readHttpRequest(tls_sock, &buf);
+    var method_pack = try Pack.fromBytes(self.allocator, request.body);
+    defer method_pack.deinit();
 
-    // 4. Data plane — attach to the hub and run the session loop.
-    try runSession(self, tls_sock, &established, peer_ip, peer_port);
+    const method = method_pack.getStr("method") orelse return error.ProtocolError;
+
+    if (mem.eql(u8, method, "admin") and self.admin_server != null) {
+        // 3a. Admin RPC path — C: `AdminAccept` (Admin.c:14638).
+        try handleAdmin(self, tls_sock, &method_pack, &hello_random);
+    } else if (mem.eql(u8, method, "login")) {
+        // 3b. VPN session path — C: `ServerAccept` login branch.
+        var established = (try authenticateVpn(self, tls_sock, &method_pack, &hello_random)) orelse return;
+        defer established.deinit(self.allocator);
+        try runSession(self, tls_sock, &established, peer_ip, peer_port);
+    } else {
+        return error.ProtocolError;
+    }
 }
 
 /// Read and validate the connect.cgi signature POST.
@@ -279,16 +302,12 @@ const EstablishedSession = struct {
 
 /// Read the login pack, verify it against the SAM hub, and reply with the
 /// Welcome (or an error) pack. Returns null when the client was rejected.
-fn authenticate(
+fn authenticateVpn(
     self: *ServerContext,
     tls_sock: *tls.TlsSocket,
+    pack: *const Pack,
     hello_random: *const [Protocol.sha1_size]u8,
 ) !?EstablishedSession {
-    var buf: [http.max_pack_body_len]u8 = undefined;
-    const request = try http.readHttpRequest(tls_sock, &buf);
-    var pack = try Pack.fromBytes(self.allocator, request.body);
-    defer pack.deinit();
-
     // Hub selection (M1: single hub). C: `GetHubnameAndUsernameFromPack` +
     // `GetHub`; missing/unknown hub → ERR_HUB_NOT_FOUND.
     const hubname = pack.getStr("hubname") orelse {
@@ -301,7 +320,7 @@ fn authenticate(
     }
 
     // Verify the credentials (auth.zig dispatches anonymous → password).
-    const auth_result = auth_mod.authenticate(self.auth_hub, hello_random, &pack);
+    const auth_result = auth_mod.authenticate(self.auth_hub, hello_random, pack);
     if (!auth_result.ok) {
         try sendAuthError(self, tls_sock, error_auth_failed, false);
         return null;
@@ -376,6 +395,86 @@ fn sendAuthError(self: *ServerContext, tls_sock: *tls.TlsSocket, code: u32, no_s
     const body = try pack.toBytes(self.allocator);
     defer self.allocator.free(body);
     try http.sendHttpResponse(tls_sock, body);
+}
+
+// ============================================================================
+// Admin RPC Accept (issue #99)
+// ============================================================================
+
+/// Send an admin error response pack and log the failure.
+fn sendAdminError(self: *ServerContext, tls_sock: *tls.TlsSocket, err_code: u32) !void {
+    var pack = Pack.init(self.allocator);
+    defer pack.deinit();
+    try pack.addInt("error", err_code);
+    const body = try pack.toBytes(self.allocator);
+    defer self.allocator.free(body);
+    try http.sendHttpResponse(tls_sock, body);
+}
+
+/// Handle an admin RPC connection (C: `AdminAccept`, Admin.c:14638).
+///
+/// 1. Extract `secure_password` (20-byte SHA-1) from the method Pack
+/// 2. Verify against the server's hashed password + hello nonce
+/// 3. Send success Pack
+/// 4. Start the RPC frame loop (`Rpc.runServer`)
+fn handleAdmin(
+    self: *ServerContext,
+    tls_sock: *tls.TlsSocket,
+    method_pack: *const Pack,
+    hello_random: *const [Protocol.sha1_size]u8,
+) !void {
+    const server = self.admin_server.?;
+
+    // Extract secure_password (must be exactly 20 bytes)
+    const secure_pw_data = method_pack.getData("secure_password") orelse {
+        try sendAdminError(self, tls_sock, err_protocol_error);
+        return;
+    };
+    if (secure_pw_data.len != Protocol.sha1_size) {
+        try sendAdminError(self, tls_sock, err_protocol_error);
+        return;
+    }
+    var secure_password: [Protocol.sha1_size]u8 = undefined;
+    @memcpy(&secure_password, secure_pw_data);
+
+    // Extract optional hub name (empty = server admin, non-empty = hub admin)
+    const hubname = method_pack.getStr("hubname") orelse "";
+
+    // Verify password (C: `AdminCheckPassword`, Admin.c:14783)
+    const expected = auth_mod.securePassword(&server.hashed_password, hello_random);
+    if (!mem.eql(u8, &expected, &secure_password)) {
+        try sendAdminError(self, tls_sock, err_access_denied);
+        return;
+    }
+
+    // Send success Pack (C: Admin.c:14740-14746)
+    var resp = Pack.init(self.allocator);
+    defer resp.deinit();
+    const resp_body = try resp.toBytes(self.allocator);
+    defer self.allocator.free(resp_body);
+    try http.sendHttpResponse(tls_sock, resp_body);
+
+    // Start the RPC frame loop (C: `AdminAccept` → `RpcServer`)
+    acceptAdmin(self, tls_sock, server, hubname);
+}
+
+/// Run the admin RPC server loop on an authenticated TLS connection.
+///
+/// Mirrors C `AdminAccept` (Admin.c:14761): `StartRpcServer` + `RpcServer`.
+/// The socket stays blocking with no idle timeout — the session lives until
+/// the client disconnects.
+fn acceptAdmin(
+    self: *ServerContext,
+    tls_sock: *tls.TlsSocket,
+    server: *dispatch_mod.Server,
+    hubname: []const u8,
+) void {
+    var rpc = rpc_mod.startRpcServer(self.allocator, tls_sock, dispatch_mod.adminDispatch, @ptrCast(server));
+    rpc.server_mode = true;
+    rpc.server_admin_mode = hubname.len == 0;
+    rpc.hub_name = hubname;
+    rpc.is_vpn_server = true;
+    rpc.runServer();
 }
 
 /// Run the session data plane: attach a packet adapter for this session to the
