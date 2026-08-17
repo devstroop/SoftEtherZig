@@ -42,6 +42,7 @@ pub const vpn_server_config = @import("config/vpn_server_config.zig");
 pub const admin_rpc = @import("admin/rpc.zig");
 pub const admin_structs = @import("admin/structs.zig");
 pub const admin_dispatch = @import("admin/dispatch.zig");
+pub const dhcp_server = @import("dhcp_server.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
