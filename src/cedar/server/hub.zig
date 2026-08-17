@@ -40,6 +40,10 @@ const Allocator = mem.Allocator;
 
 const session_main = @import("session_main.zig");
 const PacketAdapter = session_main.PacketAdapter;
+const acl_mod = @import("acl.zig");
+const AccessList = acl_mod.AccessList;
+const AccessRule = acl_mod.AccessRule;
+const HubFilters = acl_mod.HubFilters;
 
 // ============================================================================
 // Constants (C: Cedar.h / Hub.c)
@@ -270,6 +274,10 @@ pub const Hub = struct {
     /// SecureNAT live instance — opaque pointer to `securenat.SecureNAT`.
     /// Avoids circular import; callers cast via the securenat module.
     secure_nat: ?*anyopaque = null,
+    /// Hub-level access list (ingress/egress packet filtering).
+    access_list: AccessList = undefined,
+    /// Hub-level protocol filters (PPPoE, OSPF, IPv4/IPv6/NonIP/BPDU).
+    filters: HubFilters = .{},
 
     pub fn init(allocator: Allocator, name: []const u8) !*Hub {
         const self = try allocator.create(Hub);
@@ -280,6 +288,7 @@ pub const Hub = struct {
             .mac_table = std.AutoHashMapUnmanaged([6]u8, MacEntry).empty,
             .ip_table = std.AutoHashMapUnmanaged(u32, IpEntry).empty,
             .sessions = .empty,
+            .access_list = AccessList.init(allocator),
         };
         return self;
     }
@@ -288,6 +297,7 @@ pub const Hub = struct {
         // Stop SecureNAT first — it holds a SessionPa that references this hub.
         self.disableSecureNAT();
         const allocator = self.allocator;
+        self.access_list.deinit();
         self.mutex.lock();
         self.mac_table.deinit(allocator);
         self.ip_table.deinit(allocator);
@@ -402,6 +412,36 @@ pub const Hub = struct {
         return self.secure_nat != null;
     }
 
+    // ---- Access list management -------------------------------------------
+
+    /// Add an access rule to this hub's access list. Returns the assigned rule ID.
+    pub fn addAccessRule(self: *Hub, rule: AccessRule) !u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.access_list.add(rule);
+    }
+
+    /// Remove an access rule by ID. Returns true if found and removed.
+    pub fn removeAccessRule(self: *Hub, id: u32) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.access_list.remove(id);
+    }
+
+    /// Get the number of access rules.
+    pub fn accessRuleCount(self: *Hub) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.access_list.rules.items.len;
+    }
+
+    /// Update hub-level protocol filters.
+    pub fn setFilters(self: *Hub, filters: HubFilters) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.filters = filters;
+    }
+
     // ---- Switching ---------------------------------------------------------
 
     /// The hub switch entry point — C `StorePacket` (Hub.c:4068).
@@ -425,6 +465,22 @@ pub const Hub = struct {
             return;
         };
         if (isInvalidSource(parsed.src, parsed.dst)) {
+            self.stats.dropped_frames += 1;
+            return;
+        }
+
+        // Hub-level ingress filters + ACL evaluation (C: Phase A+B of
+        // ApplyAccessListToStoredPacket, Hub.c:2872).
+        const ctx = acl_mod.parsePacketContext(frame) orelse {
+            self.stats.dropped_frames += 1;
+            return;
+        };
+        if (acl_mod.matchesHubFilters(&ctx, &self.filters)) {
+            self.stats.dropped_frames += 1;
+            return;
+        }
+        const acl_result = acl_mod.evaluateAccessList(self.access_list.rules.items, &ctx);
+        if (!acl_result.pass) {
             self.stats.dropped_frames += 1;
             return;
         }
@@ -1019,4 +1075,209 @@ test "server.hub detach purges table entries" {
     try testing.expect(!hub.mac_table.contains(mac_a));
     try testing.expectEqual(@as(usize, 1), hub.sessionCount());
     try testing.expect(!a.attached);
+}
+
+// ============================================================================
+// ACL integration tests
+// ============================================================================
+
+test "server.hub ACL discard rule blocks matching traffic" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    // Add a rule: discard all TCP (protocol 6) traffic.
+    _ = try hub.addAccessRule(.{
+        .discard = true,
+        .protocol = 6,
+    });
+
+    // TCP frame — should be discarded by ACL.
+    var tcp_payload: [20]u8 = .{0} ** 20;
+    tcp_payload[0] = 0x45; // IPv4 IHL
+    tcp_payload[9] = 6; // protocol = TCP
+    mem.writeInt(u32, tcp_payload[12..16], 0xc0a80101, .big); // src IP
+    mem.writeInt(u32, tcp_payload[16..20], 0xc0a80102, .big); // dst IP
+    const f = try buildFrame(mac_b, mac_a, 0x0800, &tcp_payload);
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expectEqual(@as(usize, 0), b.outbound.items.len);
+    try testing.expect(hub.stats.dropped_frames > 0);
+
+    // UDP frame — should pass (no matching rule).
+    var udp_payload: [20]u8 = .{0} ** 20;
+    udp_payload[0] = 0x45;
+    udp_payload[9] = 17; // protocol = UDP
+    mem.writeInt(u32, udp_payload[12..16], 0xc0a80101, .big);
+    mem.writeInt(u32, udp_payload[16..20], 0xc0a80102, .big);
+    const f2 = try buildFrame(mac_b, mac_a, 0x0800, &udp_payload);
+    defer allocator.free(f2);
+    hub.storePacket(a, f2);
+    try testing.expectEqual(@as(usize, 1), b.outbound.items.len);
+}
+
+test "server.hub ACL pass rule allows matching traffic" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    // Rule: pass all traffic from 192.168.1.0/24 (src IP match).
+    _ = try hub.addAccessRule(.{
+        .discard = false,
+        .src_ip = (192 << 24) | (168 << 16) | (1 << 8) | 0,
+        .src_mask = 0xFFFFFF00,
+    });
+
+    // Frame from 192.168.1.1 — matches the pass rule.
+    var payload: [20]u8 = .{0} ** 20;
+    payload[0] = 0x45;
+    mem.writeInt(u32, payload[12..16], 0xc0a80101, .big);
+    mem.writeInt(u32, payload[16..20], 0xc0a80102, .big);
+    const f = try buildFrame(mac_b, mac_a, 0x0800, &payload);
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expectEqual(@as(usize, 1), b.outbound.items.len);
+}
+
+test "server.hub hub filters discard PPPoE" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+
+    hub.setFilters(.{ .filter_pppoe = true });
+
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    // PPPoE frame (EtherType 0x8863) — should be dropped.
+    const f = try buildFrame(mac_b, mac_a, 0x8863, &.{});
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expectEqual(@as(usize, 0), b.outbound.items.len);
+
+    // Normal IPv4 frame — should pass.
+    const f2 = try buildFrame(mac_b, mac_a, 0x0800, &.{});
+    defer allocator.free(f2);
+    hub.storePacket(a, f2);
+    try testing.expectEqual(@as(usize, 1), b.outbound.items.len);
+}
+
+test "server.hub hub filters discard OSPF" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+
+    hub.setFilters(.{ .filter_ospf = true });
+
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    // OSPF frame (IPv4 protocol 89) — should be dropped.
+    var payload: [20]u8 = .{0} ** 20;
+    payload[0] = 0x45;
+    payload[9] = 89; // OSPF
+    mem.writeInt(u32, payload[12..16], 0xc0a80101, .big);
+    mem.writeInt(u32, payload[16..20], 0xc0a80102, .big);
+    const f = try buildFrame(mac_b, mac_a, 0x0800, &payload);
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expectEqual(@as(usize, 0), b.outbound.items.len);
+
+    // TCP frame — should pass.
+    payload[9] = 6;
+    const f2 = try buildFrame(mac_b, mac_a, 0x0800, &payload);
+    defer allocator.free(f2);
+    hub.storePacket(a, f2);
+    try testing.expectEqual(@as(usize, 1), b.outbound.items.len);
+}
+
+test "server.hub hub filters discard IPv4" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+
+    hub.setFilters(.{ .filter_ipv4 = true });
+
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    // IPv4 frame — dropped.
+    const f = try buildFrame(mac_b, mac_a, 0x0800, &.{});
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expectEqual(@as(usize, 0), b.outbound.items.len);
+
+    // ARP frame — also dropped (filter_ipv4 includes ARP).
+    const f2 = try buildFrame(mac_b, mac_a, 0x0806, &.{});
+    defer allocator.free(f2);
+    hub.storePacket(a, f2);
+    try testing.expectEqual(@as(usize, 0), b.outbound.items.len);
+
+    // IPv6 frame — should pass.
+    const f3 = try buildFrame(mac_b, mac_a, 0x86DD, &.{});
+    defer allocator.free(f3);
+    hub.storePacket(a, f3);
+    try testing.expectEqual(@as(usize, 1), b.outbound.items.len);
+}
+
+test "server.hub ACL remove drops existing rule" {
+    const allocator = testing.allocator;
+    const hub = try makeHub();
+    defer hub.deinit();
+    const a = try makePa(hub, "A");
+    defer a.deinit();
+    const b = try makePa(hub, "B");
+    defer b.deinit();
+
+    const mac_a = macBytes("020000000001");
+    const mac_b = macBytes("020000000002");
+
+    // Add a discard rule.
+    const rule_id = try hub.addAccessRule(.{ .discard = true, .protocol = 6 });
+    try testing.expectEqual(@as(usize, 1), hub.accessRuleCount());
+
+    // TCP frame — dropped.
+    var payload: [20]u8 = .{0} ** 20;
+    payload[0] = 0x45;
+    payload[9] = 6;
+    const f = try buildFrame(mac_b, mac_a, 0x0800, &payload);
+    defer allocator.free(f);
+    hub.storePacket(a, f);
+    try testing.expectEqual(@as(usize, 0), b.outbound.items.len);
+
+    // Remove the rule.
+    try testing.expect(hub.removeAccessRule(rule_id));
+    try testing.expectEqual(@as(usize, 0), hub.accessRuleCount());
+
+    // TCP frame — now passes.
+    const f2 = try buildFrame(mac_b, mac_a, 0x0800, &payload);
+    defer allocator.free(f2);
+    hub.storePacket(a, f2);
+    try testing.expectEqual(@as(usize, 1), b.outbound.items.len);
 }
