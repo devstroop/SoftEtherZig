@@ -48,6 +48,7 @@ pub const admin_dispatch = @import("admin/dispatch.zig");
 pub const dhcp_server = @import("dhcp_server.zig");
 pub const virtual_host = @import("virtual_host.zig");
 pub const securenat = @import("securenat.zig");
+pub const wpc = @import("wpc.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
