@@ -176,7 +176,12 @@ pub const SecureNAT = struct {
         const dhcp = DhcpServer.init(allocator, dhcp_config);
 
         // Create the NAT engine.
-        const nat_eng = NatEngine.init(allocator, config.host_ip, config.host_ip);
+        var nat_eng = NatEngine.init(allocator, config.host_ip, config.host_ip);
+        nat_eng.setTimeouts(
+            @as(i64, @intCast(config.nat_tcp_timeout_s)) * 1000,
+            @as(i64, @intCast(config.nat_udp_timeout_s)) * 1000,
+            null, // ICMP: use default 30s
+        );
 
         // Create the hub SessionPa (virtual hidden session).
         const pa = try SessionPa.init(h, allocator, SNAT_USER_NAME);
@@ -194,6 +199,9 @@ pub const SecureNAT = struct {
         // Attach to the hub.
         h.attach(pa);
 
+        // Start the polling thread.
+        self.thread = try std.Thread.spawn(.{}, pollingLoop, .{self});
+
         log.info("SecureNAT created on hub '{s}' (ip={})", .{
             h.name,
             fmtIp(config.host_ip),
@@ -208,10 +216,8 @@ pub const SecureNAT = struct {
         self.hub.detach(self.session_pa);
         self.session_pa.deinit();
         self.nat_engine.deinit();
-        // DhcpServer and VirtualHost have no heap-allocated state beyond
-        // their embedded containers; no explicit deinit needed.
-        _ = self.dhcp_server;
-        _ = self.virtual_host;
+        self.dhcp_server.deinit();
+        self.virtual_host.deinit();
         const allocator = self.allocator;
         allocator.destroy(self);
     }

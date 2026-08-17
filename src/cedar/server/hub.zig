@@ -40,7 +40,6 @@ const Allocator = mem.Allocator;
 
 const session_main = @import("session_main.zig");
 const PacketAdapter = session_main.PacketAdapter;
-const securenat_mod = @import("securenat.zig");
 
 // ============================================================================
 // Constants (C: Cedar.h / Hub.c)
@@ -268,9 +267,9 @@ pub const Hub = struct {
     /// (C: hub option `BroadcastStormDetectionThreshold`; 0 = unlimited).
     storm_threshold: u32 = DEFAULT_BROADCAST_STORM_THRESHOLD,
     stats: HubStats = .{},
-    /// SecureNAT live instance (C: `HUB->SecureNAT`). Owned — set via
-    /// `enableSecureNAT`/`disableSecureNAT`.
-    secure_nat: ?*securenat_mod.SecureNAT = null,
+    /// SecureNAT live instance — opaque pointer to `securenat.SecureNAT`.
+    /// Avoids circular import; callers cast via the securenat module.
+    secure_nat: ?*anyopaque = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*Hub {
         const self = try allocator.create(Hub);
@@ -351,26 +350,55 @@ pub const Hub = struct {
     // ---- SecureNAT lifecycle -----------------------------------------------
 
     /// Enable SecureNAT on this hub (C: `EnableSecureNATEx(h, true)`).
-    /// Creates a `SecureNAT` instance, attaches it to the hub, and starts
-    /// the polling thread. Idempotent if already enabled.
-    pub fn enableSecureNAT(self: *Hub, config: securenat_mod.SecureNATConfig) !void {
-        if (self.secure_nat != null) return; // already running
+    /// Idempotent if already enabled.
+    /// Thread-safe: double-check pattern prevents duplicate instances.
+    pub fn enableSecureNAT(self: *Hub, config: anytype) !void {
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.secure_nat != null) return; // already running
+        }
+        // Import is deferred to break the circular dependency.
+        const securenat_mod = @import("securenat.zig");
+        // init() may lock hub.mutex internally (via attach), so it must
+        // be called with the hub mutex UNLOCKED.
         const s = try securenat_mod.SecureNAT.init(self.allocator, self, config);
-        try s.start();
-        self.secure_nat = s;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.secure_nat != null) {
+                // Another thread raced and enabled SecureNAT first — clean up.
+                s.deinit();
+                return;
+            }
+            self.secure_nat = @ptrCast(s);
+        }
     }
 
     /// Disable SecureNAT on this hub (C: `EnableSecureNATEx(h, false)`).
     /// Stops the polling thread and frees the `SecureNAT` instance.
+    /// Thread-safe: the hub mutex is held for the pointer clear, but the
+    /// SecureNAT.deinit may internally lock the hub mutex (via detach).
     pub fn disableSecureNAT(self: *Hub) void {
-        if (self.secure_nat) |s| {
-            s.deinit();
+        // Extract the pointer under the lock, then deinit outside to avoid
+        // holding the hub mutex while SecureNAT.deinit tries to lock it.
+        const ptr = blk: {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const p = self.secure_nat orelse return;
             self.secure_nat = null;
-        }
+            break :blk p;
+        };
+        const securenat_mod = @import("securenat.zig");
+        const s: *securenat_mod.SecureNAT = @alignCast(@ptrCast(ptr));
+        s.deinit();
     }
 
     /// Query whether SecureNAT is currently running on this hub.
-    pub fn isSecureNATEnabled(self: *const Hub) bool {
+    /// Thread-safe: reads under the hub mutex.
+    pub fn isSecureNATEnabled(self: *Hub) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.secure_nat != null;
     }
 
