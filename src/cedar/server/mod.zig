@@ -50,6 +50,7 @@ pub const virtual_host = @import("virtual_host.zig");
 pub const securenat = @import("securenat.zig");
 pub const wpc = @import("wpc.zig");
 pub const udp_accel_server = @import("udp_accel_server.zig");
+pub const farm = @import("farm.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
@@ -80,6 +81,9 @@ pub const DosTable = listener.DosTable;
 pub const AcceptHandler = listener.AcceptHandler;
 pub const ServerContext = accept.ServerContext;
 pub const acceptConnection = accept.acceptConnection;
+pub const FarmState = farm.FarmState;
+pub const FarmMember = farm.FarmMember;
+pub const FarmController = farm.FarmController;
 
 // Tests
 test {
