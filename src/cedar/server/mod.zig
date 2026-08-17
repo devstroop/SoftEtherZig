@@ -37,6 +37,7 @@ pub const session_registry = @import("session_registry.zig");
 pub const listener = @import("listener.zig");
 pub const hub = @import("hub.zig");
 pub const accept = @import("accept.zig");
+pub const nat = @import("nat.zig");
 pub const cfg = @import("config/cfg.zig");
 pub const vpn_server_config = @import("config/vpn_server_config.zig");
 pub const admin_rpc = @import("admin/rpc.zig");
