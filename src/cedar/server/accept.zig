@@ -48,6 +48,8 @@ const session_mod = @import("session.zig");
 const rpc_mod = @import("admin/rpc.zig");
 const dispatch_mod = @import("admin/dispatch.zig");
 const wpc_mod = @import("wpc.zig");
+const udp_accel_mod = @import("udp_accel_server.zig");
+const UdpAccelServer = udp_accel_mod.UdpAccelServer;
 const ServerSession = session_mod.ServerSession;
 const SessionMain = @import("session_main.zig").SessionMain;
 const session_registry_mod = @import("session_registry.zig");
@@ -292,11 +294,14 @@ const EstablishedSession = struct {
     connection_name: []u8,
     /// Owned authenticated username (registry display; case as sent).
     username: []u8,
+    /// Optional server-side UDP acceleration engine (S20/rudp).
+    udp_server: ?UdpAccelServer = null,
 
     fn deinit(self: *EstablishedSession, allocator: Allocator) void {
         allocator.free(self.session_name);
         allocator.free(self.connection_name);
         allocator.free(self.username);
+        if (self.udp_server) |*us| us.deinit();
     }
 };
 
@@ -349,7 +354,49 @@ fn authenticateVpn(
     const connection_name = try std.fmt.allocPrint(self.allocator, "CONN-{d}", .{counter});
     errdefer self.allocator.free(connection_name);
 
-    const welcome = try buildWelcomePack(self.allocator, &session, session_name, connection_name);
+    // UDP acceleration negotiation (S20/rudp).  Parse the client's request
+    // and create a server-side engine if supported (C: Protocol.c:3786-3887).
+    var udp_server: ?UdpAccelServer = null;
+    const want_udp = (pack.getBool("use_udp_acceleration") orelse false);
+    if (want_udp) {
+        const client_version: u32 = @intCast(pack.getInt("udp_acceleration_version") orelse 1);
+        const client_max_version: u32 = @intCast(pack.getInt("udp_acceleration_max_version") orelse 1);
+        const client_ip_u32: u32 = @intCast(pack.getInt("udp_acceleration_client_ip") orelse 0);
+        const client_port_u16: u16 = @intCast(pack.getInt("udp_acceleration_client_port") orelse 0);
+
+        // Negotiate the version: highest both support.
+        var negotiated_version: u8 = udp_accel_mod.VERSION_ZIG;
+        if (client_version >= udp_accel_mod.VERSION_V2 and client_max_version >= udp_accel_mod.VERSION_V2) {
+            negotiated_version = udp_accel_mod.VERSION_V2;
+        } else if (client_version >= udp_accel_mod.VERSION_V1 and client_max_version >= udp_accel_mod.VERSION_V1) {
+            negotiated_version = udp_accel_mod.VERSION_V1;
+        }
+
+        // Extract client keys (format-specific).
+        const client_key_v1 = pack.getData("udp_acceleration_client_key") orelse &.{};
+        const client_key_v2 = pack.getData("udp_acceleration_client_key_v2") orelse &.{};
+        const client_key_zig_send = pack.getData("bulk_on_rudp_send_key") orelse &.{};
+        const client_key_zig_recv = pack.getData("bulk_on_rudp_recv_key") orelse &.{};
+        _ = client_key_zig_recv;
+
+        var server: ?UdpAccelServer = null;
+        if (UdpAccelServer.init(self.allocator)) |s| {
+            var srv = s;
+            srv.initServer(
+                client_ip_u32,
+                client_port_u16,
+                negotiated_version,
+                client_key_v1,
+                client_key_v2,
+                client_key_zig_send,
+            );
+            server = srv;
+        } else |err| {
+            log.warn("UDP accel server bind failed: {}", .{err});
+        }
+    }
+
+    const welcome = try buildWelcomePack(self.allocator, &session, session_name, connection_name, &udp_server);
     defer self.allocator.free(welcome);
     try http.sendHttpResponse(tls_sock, welcome);
 
@@ -360,6 +407,7 @@ fn authenticateVpn(
         .session_name = session_name,
         .connection_name = connection_name,
         .username = username_owned,
+        .udp_server = udp_server,
     };
 }
 
@@ -369,15 +417,45 @@ fn buildWelcomePack(
     session: *const ServerSession,
     session_name: []const u8,
     connection_name: []const u8,
+    udp_server: *const ?UdpAccelServer,
 ) ![]u8 {
     var pack = Pack.init(allocator);
     defer pack.deinit();
 
     try session.addWelcomeFields(&pack, session_name, connection_name);
 
-    // Remaining fields C always emits (no UDP acceleration, no Azure session,
-    // no special policies in M1).
-    try pack.addBool("use_udp_acceleration", false);
+    // UDP acceleration fields.  When a server engine was created, emit the
+    // negotiated keys and port; otherwise disable UDP accel (C: PackWelcome
+    // when s->UdpAccel is NULL).
+    if (udp_server.*) |*us| {
+        try pack.addBool("use_udp_acceleration", true);
+        try pack.addBool("udp_acceleration_use_encryption", !us.plain_text_mode);
+        try pack.addInt("udp_acceleration_version", us.version);
+
+        switch (us.version) {
+            udp_accel_mod.VERSION_V1 => {
+                try pack.addInt("udp_acceleration_server_port", us.my_port);
+                try pack.addData("udp_acceleration_server_key", &us.my_key_v1);
+                try pack.addInt("udp_acceleration_server_cookie", us.my_cookie_v1);
+                try pack.addInt("udp_acceleration_client_cookie", us.your_cookie_v1);
+            },
+            udp_accel_mod.VERSION_V2 => {
+                try pack.addInt("udp_acceleration_server_port", us.my_port);
+                try pack.addData("udp_acceleration_server_key_v2", &us.my_key_v2);
+                try pack.addInt("udp_acceleration_server_cookie", us.my_cookie_v1);
+                try pack.addInt("udp_acceleration_client_cookie", us.your_cookie_v1);
+            },
+            else => { // VERSION_ZIG
+                try pack.addInt("udp_acceleration_client_port", us.my_port);
+                try pack.addData("bulk_on_rudp_send_key", &us.send_key_zig);
+                try pack.addData("bulk_on_rudp_recv_key", &us.recv_key_zig);
+                try pack.addInt("rudp_bulk_version", 1);
+            },
+        }
+    } else {
+        try pack.addBool("use_udp_acceleration", false);
+    }
+
     try pack.addInt("is_azure_session", 0);
     try pack.addInt("policy:NoRouting", 0);
     try pack.addBool("no_send_signature", false);
@@ -490,9 +568,48 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
     var tunnel = TunnelConnection.init(self.allocator, &conn, TlsConn.read, TlsConn.write);
     defer tunnel.deinit();
 
-    var main = try SessionMain.init(self.allocator, &tunnel, pa.pa(), .{
+    // Build session config with optional UDP acceleration callbacks.
+    const SessionConfig = @import("session_main.zig").SessionConfig;
+    var session_config = SessionConfig{
         .timeout_ms = established.session.timeout,
-    });
+    };
+
+    // Store the UDP server in a mutable static for the callbacks.
+    // Only one session runs per connection thread, so this is safe.
+    const UdpCallbacks = struct {
+        var active_server: ?*UdpAccelServer = null;
+
+        fn udpPoll(_: *anyopaque) ?[]const u8 {
+            if (active_server) |s| return s.poll();
+            return null;
+        }
+        fn udpSend(_: *anyopaque, data: []const u8, compressed: bool) bool {
+            if (active_server) |s| return s.sendBlock(data, compressed);
+            return false;
+        }
+        fn udpReady(_: *anyopaque) bool {
+            if (active_server) |s| return s.isSendReady();
+            return false;
+        }
+        fn udpTick(_: *anyopaque) void {
+            if (active_server) |s| s.tick();
+        }
+        fn udpFd(_: *anyopaque) ?posix.socket_t {
+            if (active_server) |s| return s.getFd();
+            return null;
+        }
+    };
+    if (established.udp_server) |*us| {
+        UdpCallbacks.active_server = us;
+        session_config.udp_ctx = @ptrCast(us);
+        session_config.udp_poll_fn = UdpCallbacks.udpPoll;
+        session_config.udp_send_fn = UdpCallbacks.udpSend;
+        session_config.udp_ready_fn = UdpCallbacks.udpReady;
+        session_config.udp_tick_fn = UdpCallbacks.udpTick;
+        session_config.udp_fd_fn = UdpCallbacks.udpFd;
+    }
+
+    var main = try SessionMain.init(self.allocator, &tunnel, pa.pa(), session_config);
     defer main.deinit();
 
     // Register with the session registry (issue #88) so the admin dispatcher
