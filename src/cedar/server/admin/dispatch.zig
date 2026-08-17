@@ -180,6 +180,11 @@ pub const MacTableEntry = struct {
     vlan_id: u32 = 0,
     created_time: u64 = 0,
     updated_time: u64 = 0,
+
+    fn free(self: *MacTableEntry, allocator: Allocator) void {
+        allocator.free(self.session_name);
+        self.* = .{};
+    }
 };
 
 /// C `IP_TABLE_ENTRY` (Hub.c:57) subset held by the admin model.
@@ -190,6 +195,11 @@ pub const IpTableEntry = struct {
     dhcp_allocated: bool = false,
     created_time: u64 = 0,
     updated_time: u64 = 0,
+
+    fn free(self: *IpTableEntry, allocator: Allocator) void {
+        allocator.free(self.session_name);
+        self.* = .{};
+    }
 };
 
 /// C `HUB` subset used by EnumHub / CreateHub / SetHub / GetHubStatus.
@@ -222,6 +232,12 @@ pub const ServerHub = struct {
     ip_table: std.ArrayListUnmanaged(IpTableEntry) = .{},
     /// Hub access list (C `HUB->AccessList` subset).
     access_list: std.ArrayListUnmanaged(structs.Access) = .{},
+    /// Next `MacTableEntry` / `IpTableEntry` key (monotonic per hub).
+    next_table_key: u32 = 1,
+    /// C hub admin options: `no_delete_mactable` / `no_delete_iptable` deny
+    /// hub admins table deletion (C `GetHubAdminOption`, Admin.c).
+    no_delete_mactable: bool = false,
+    no_delete_iptable: bool = false,
 
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
@@ -297,6 +313,85 @@ pub const ServerHub = struct {
         self.mac_table.deinit(allocator);
         for (self.ip_table.items) |*e| allocator.free(e.session_name);
         self.ip_table.deinit(allocator);
+    }
+
+    /// Release all table entries (C `FreeHub` cleanup).
+    pub fn deinitTables(self: *ServerHub, allocator: Allocator) void {
+        self.freeTables(allocator);
+    }
+
+    /// Look up a MAC table entry by key (C `IsInHashListKey` +
+    /// `HashListKeyToPointer` on `MacHashTable`).
+    fn findMacTableEntry(self: *ServerHub, key: u32) ?*MacTableEntry {
+        for (self.mac_table.items) |*e| {
+            if (e.key == key) return e;
+        }
+        return null;
+    }
+
+    /// Look up an IP table entry by key (C `IsInListKey` +
+    /// `ListKeyToPointer` on `IpTable`).
+    fn findIpTableEntry(self: *ServerHub, key: u32) ?*IpTableEntry {
+        for (self.ip_table.items) |*e| {
+            if (e.key == key) return e;
+        }
+        return null;
+    }
+
+    /// Insert a MAC table entry, assigning the next monotonic key and
+    /// keeping `num_mac_tables` in sync.
+    fn insertMacTableEntry(self: *ServerHub, allocator: Allocator, entry: MacTableEntry) !u32 {
+        const owned = try allocator.dupe(u8, entry.session_name);
+        errdefer allocator.free(owned);
+        var e = entry;
+        e.key = self.next_table_key;
+        self.next_table_key +%= 1;
+        e.session_name = owned;
+        try self.mac_table.append(allocator, e);
+        self.num_mac_tables +%= 1;
+        return e.key;
+    }
+
+    /// Insert an IP table entry, assigning the next monotonic key and
+    /// keeping `num_ip_tables` in sync.
+    fn insertIpTableEntry(self: *ServerHub, allocator: Allocator, entry: IpTableEntry) !u32 {
+        const owned = try allocator.dupe(u8, entry.session_name);
+        errdefer allocator.free(owned);
+        var e = entry;
+        e.key = self.next_table_key;
+        self.next_table_key +%= 1;
+        e.session_name = owned;
+        try self.ip_table.append(allocator, e);
+        self.num_ip_tables +%= 1;
+        return e.key;
+    }
+
+    /// Remove a MAC table entry by key, releasing it. Returns false when
+    /// absent (C `ERR_OBJECT_NOT_FOUND`).
+    fn removeMacTableEntry(self: *ServerHub, allocator: Allocator, key: u32) bool {
+        for (self.mac_table.items, 0..) |*e, i| {
+            if (e.key == key) {
+                var removed = self.mac_table.swapRemove(i);
+                removed.free(allocator);
+                self.num_mac_tables -%= 1;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Remove an IP table entry by key, releasing it. Returns false when
+    /// absent (C `ERR_OBJECT_NOT_FOUND`).
+    fn removeIpTableEntry(self: *ServerHub, allocator: Allocator, key: u32) bool {
+        for (self.ip_table.items, 0..) |*e, i| {
+            if (e.key == key) {
+                var removed = self.ip_table.swapRemove(i);
+                removed.free(allocator);
+                self.num_ip_tables -%= 1;
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Append a MAC table entry (test/bootstrap helper). Takes ownership of a
@@ -546,6 +641,10 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcEnumMacTable, &a, allocator, request, ret, stEnumMacTable);
     } else if (mem.eql(u8, function_name, "EnumIpTable")) {
         err = dispatchCall(structs.RpcEnumIpTable, &a, allocator, request, ret, stEnumIpTable);
+    } else if (mem.eql(u8, function_name, "DeleteMacTable")) {
+        err = dispatchCall(structs.RpcDeleteTable, &a, allocator, request, ret, stDeleteMacTable);
+    } else if (mem.eql(u8, function_name, "DeleteIpTable")) {
+        err = dispatchCall(structs.RpcDeleteTable, &a, allocator, request, ret, stDeleteIpTable);
     } else if (mem.eql(u8, function_name, "EnumAccess")) {
         err = dispatchCall(structs.RpcEnumAccessList, &a, allocator, request, ret, stEnumAccess);
     } else if (mem.eql(u8, function_name, "AddAccess")) {
@@ -627,6 +726,7 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcGetTraffic => try t.inRpc(allocator, p),
         structs.RpcEnumMacTable => try t.inRpc(allocator, p),
         structs.RpcEnumIpTable => try t.inRpc(allocator, p),
+        structs.RpcDeleteTable => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -662,6 +762,7 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcGetTraffic => try t.outRpc(p),
         structs.RpcEnumMacTable => try t.outRpc(p),
         structs.RpcEnumIpTable => try t.outRpc(p),
+        structs.RpcDeleteTable => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -702,6 +803,7 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcGetTraffic => t.free(allocator),
         structs.RpcEnumMacTable => t.free(allocator),
         structs.RpcEnumIpTable => t.free(allocator),
+        structs.RpcDeleteTable => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
@@ -1282,6 +1384,36 @@ fn stEnumIpTable(a: *AdminCtx, t: *structs.RpcEnumIpTable, allocator: Allocator)
         e.remote_item = false;
         e.remote_hostname = dupStr(allocator, "") catch return err_internal_error;
     }
+    return err_no_error;
+}
+
+// ============================================================================
+// Table deletion (C `StDeleteMacTable` Admin.c:5028,
+//                 `StDeleteIpTable` Admin.c:4854)
+// ============================================================================
+
+/// C `StDeleteMacTable` (Admin.c:5028). Hub admins are blocked when the
+/// `no_delete_mactable` hub option is set (C `GetHubAdminOption`);
+/// server admins always pass (C returns early on `a->ServerAdmin`).
+fn stDeleteMacTable(a: *AdminCtx, t: *structs.RpcDeleteTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!a.server_admin and hub.no_delete_mactable) return err_not_enough_right;
+    if (!hub.removeMacTableEntry(allocator, t.key)) return err_object_not_found;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteIpTable` (Admin.c:4854). Hub admins are blocked when the
+/// `no_delete_iptable` hub option is set (C `GetHubAdminOption`).
+fn stDeleteIpTable(a: *AdminCtx, t: *structs.RpcDeleteTable, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    if (!a.server_admin and hub.no_delete_iptable) return err_not_enough_right;
+    if (!hub.removeIpTableEntry(allocator, t.key)) return err_object_not_found;
+    s.config_revision +%= 1;
     return err_no_error;
 }
 
@@ -4821,4 +4953,143 @@ test "server.admin_dispatch Access struct round-trip IPv6 fields" {
         // When is_ipv6=true, IPv4 fields get dummy values
         try testing.expectEqual(@as(u32, 0xFDFFFFDF), resp.getIntEx("SrcIpAddress", 0).?);
     }
+}
+
+test "server.admin_dispatch DeleteMacTable removes by key" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    const mac_key = try hub.insertMacTableEntry(allocator, .{
+        .session_name = "SID-BOB",
+        .mac_address = .{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF },
+        .created_time = 100,
+        .updated_time = 200,
+    });
+
+    var del = try makeRequest(allocator, "DeleteMacTable");
+    defer del.deinit();
+    try del.addStr("HubName", "VPN");
+    try del.addInt("Key", mac_key);
+    var resp = try call(allocator, &server, true, "", "DeleteMacTable", &del);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expect(hub.findMacTableEntry(mac_key) == null);
+    try testing.expectEqual(@as(u32, 0), hub.num_mac_tables);
+
+    // Missing entry reports ERR_OBJECT_NOT_FOUND.
+    var again = try makeRequest(allocator, "DeleteMacTable");
+    defer again.deinit();
+    try again.addStr("HubName", "VPN");
+    try again.addInt("Key", mac_key);
+    var again_resp = try call(allocator, &server, true, "", "DeleteMacTable", &again);
+    defer {
+        again_resp.deinit();
+        allocator.destroy(again_resp);
+    }
+    try assertErr(again_resp, err_object_not_found);
+
+    // Unknown hub.
+    var nohub = try makeRequest(allocator, "DeleteMacTable");
+    defer nohub.deinit();
+    try nohub.addStr("HubName", "NOPE");
+    try nohub.addInt("Key", mac_key);
+    var nohub_resp = try call(allocator, &server, true, "", "DeleteMacTable", &nohub);
+    defer {
+        nohub_resp.deinit();
+        allocator.destroy(nohub_resp);
+    }
+    try assertErr(nohub_resp, err_hub_not_found);
+}
+
+test "server.admin_dispatch DeleteIpTable removes by key" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    const ip_key = try hub.insertIpTableEntry(allocator, .{
+        .session_name = "SID-BOB",
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .dhcp_allocated = true,
+        .created_time = 100,
+        .updated_time = 200,
+    });
+
+    var del = try makeRequest(allocator, "DeleteIpTable");
+    defer del.deinit();
+    try del.addStr("HubName", "VPN");
+    try del.addInt("Key", ip_key);
+    var resp = try call(allocator, &server, true, "", "DeleteIpTable", &del);
+    defer {
+        resp.deinit();
+        allocator.destroy(resp);
+    }
+    try assertOk(resp);
+    try testing.expect(hub.findIpTableEntry(ip_key) == null);
+    try testing.expectEqual(@as(u32, 0), hub.num_ip_tables);
+}
+
+test "server.admin_dispatch table deletes honor no_delete hub options" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+    try server.addHub("VPN", hub_type_standalone);
+
+    const hub = findHub(&server, "VPN").?;
+    hub.no_delete_mactable = true;
+    hub.no_delete_iptable = true;
+    const mac_key = try hub.insertMacTableEntry(allocator, .{
+        .session_name = "SID-BOB",
+        .created_time = 100,
+        .updated_time = 100,
+    });
+    const ip_key = try hub.insertIpTableEntry(allocator, .{
+        .session_name = "SID-BOB",
+        .ip = types_mod.IpAddress.fromU32(0x0A000001),
+        .created_time = 100,
+        .updated_time = 100,
+    });
+
+    // Hub admin is blocked by the option.
+    var mac_del = try makeRequest(allocator, "DeleteMacTable");
+    defer mac_del.deinit();
+    try mac_del.addStr("HubName", "VPN");
+    try mac_del.addInt("Key", mac_key);
+    var mac_resp = try call(allocator, &server, false, "VPN", "DeleteMacTable", &mac_del);
+    defer {
+        mac_resp.deinit();
+        allocator.destroy(mac_resp);
+    }
+    try assertErr(mac_resp, err_not_enough_right);
+
+    var ip_del = try makeRequest(allocator, "DeleteIpTable");
+    defer ip_del.deinit();
+    try ip_del.addStr("HubName", "VPN");
+    try ip_del.addInt("Key", ip_key);
+    var ip_resp = try call(allocator, &server, false, "VPN", "DeleteIpTable", &ip_del);
+    defer {
+        ip_resp.deinit();
+        allocator.destroy(ip_resp);
+    }
+    try assertErr(ip_resp, err_not_enough_right);
+
+    // Server admin bypasses the option.
+    var adm = try makeRequest(allocator, "DeleteMacTable");
+    defer adm.deinit();
+    try adm.addStr("HubName", "VPN");
+    try adm.addInt("Key", mac_key);
+    var adm_resp = try call(allocator, &server, true, "", "DeleteMacTable", &adm);
+    defer {
+        adm_resp.deinit();
+        allocator.destroy(adm_resp);
+    }
+    try assertOk(adm_resp);
+    try testing.expect(hub.findMacTableEntry(mac_key) == null);
 }
