@@ -1430,6 +1430,11 @@ pub const RpcAddAccess = struct {
         self.* = .{};
         self.hub_name = try dupStr(allocator, p.getStr("HubName"));
         self.access.inRpcEx(p, 0);
+        // Dupe heap-owned strings so free() is safe even on early-return paths.
+        self.access.note = try dupStr(allocator, self.access.note);
+        self.access.src_username = try dupStr(allocator, self.access.src_username);
+        self.access.dest_username = try dupStr(allocator, self.access.dest_username);
+        self.access.redirect_url = try dupStr(allocator, self.access.redirect_url);
     }
 
     pub fn outRpc(self: *const RpcAddAccess, p: *Pack) !void {

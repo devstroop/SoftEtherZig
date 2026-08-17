@@ -1019,6 +1019,7 @@ fn stDeleteHub(a: *AdminCtx, t: *structs.RpcDeleteHub, allocator: Allocator) u32
     removed.deinitUsers(allocator);
     removed.deinitGroups(allocator);
     removed.freeTables(allocator);
+    removed.deinitAccessList(allocator);
     allocator.free(removed.name);
     s.config_revision +%= 1;
     return err_no_error;
@@ -1693,17 +1694,9 @@ fn stAddAccess(a: *AdminCtx, t: *structs.RpcAddAccess, allocator: Allocator) u32
     if (s.server_type == server_type_farm_member) return err_not_supported;
     const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
 
-    var access = t.access;
+    // Transfer ownership of the (already-duped) Access to the hub.
+    const access = t.access;
     t.access = .{};
-    // Dupe heap-owned strings before the Pack backing them is freed.
-    access.note = dupStr(allocator, access.note) catch return err_internal_error;
-    errdefer allocator.free(access.note);
-    access.src_username = dupStr(allocator, access.src_username) catch return err_internal_error;
-    errdefer allocator.free(access.src_username);
-    access.dest_username = dupStr(allocator, access.dest_username) catch return err_internal_error;
-    errdefer allocator.free(access.dest_username);
-    access.redirect_url = dupStr(allocator, access.redirect_url) catch return err_internal_error;
-    errdefer allocator.free(access.redirect_url);
     hub.addAccessEntry(allocator, access) catch return err_internal_error;
     s.config_revision +%= 1;
     return err_no_error;
