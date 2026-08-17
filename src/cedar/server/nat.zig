@@ -42,6 +42,13 @@ pub const NAT_TCP_CONNECT_TIMEOUT_MS: i64 = 10_000;
 /// Maximum pending outbound connections (C: `NAT_MAX_CONNECT_QUEUE` = 256).
 pub const NAT_MAX_CONNECT_QUEUE: u32 = 256;
 
+/// Sentinel value for an invalid/unconnected socket.
+/// On POSIX (fd_t = i32): -1. On Windows (SOCKET = HANDLE): null handle (0).
+pub const INVALID_SOCKET: std.posix.socket_t = if (@import("builtin").os.tag == .windows)
+    @ptrFromInt(0)
+else
+    @bitCast(@as(i32, -1));
+
 // ============================================================================
 // Protocol constants
 // ============================================================================
@@ -199,9 +206,9 @@ pub const NatEntry = struct {
     }
 
     pub fn closeSocket(self: *NatEntry) void {
-        if (self.outbound_fd != std.math.maxInt(std.posix.socket_t)) {
+        if (self.outbound_fd != INVALID_SOCKET) {
             std.posix.close(self.outbound_fd);
-            self.outbound_fd = std.math.maxInt(std.posix.socket_t);
+            self.outbound_fd = INVALID_SOCKET;
         }
     }
 };
@@ -455,7 +462,7 @@ pub const NatEngine = struct {
             .last_ack = 0,
             .hash_code_for_send = 0,
             .hash_code_for_recv = 0,
-            .outbound_fd = std.math.maxInt(std.posix.socket_t),
+            .outbound_fd = INVALID_SOCKET,
         };
 
         try self.table.insert(self.allocator, entry);
@@ -953,7 +960,7 @@ fn makeTestEntry(
         .last_ack = 0,
         .hash_code_for_send = 0,
         .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
+        .outbound_fd = INVALID_SOCKET,
     };
 }
 
@@ -1092,7 +1099,7 @@ test "nat.NatEngine creates UDP entry with bound socket" {
 
     const entry = try engine.newUdpEntry(0x0A000001, 1000, 0xC0A80101, 53, 1000);
     try testing.expectEqual(@as(u8, PROTO_UDP), entry.protocol);
-    try testing.expect(entry.outbound_fd != std.math.maxInt(std.posix.socket_t));
+    try testing.expect(entry.outbound_fd != INVALID_SOCKET);
     try testing.expect(entry.public_port > 0);
     try testing.expectEqual(@as(u32, 1), engine.table.count);
 
@@ -1107,7 +1114,7 @@ test "nat.NatEngine creates TCP entry with non-blocking socket" {
     const entry = try engine.newTcpEntry(0x0A000001, 1000, 0xC0A80101, 80, 1000);
     try testing.expectEqual(@as(u8, PROTO_TCP), entry.protocol);
     try testing.expectEqual(NatStatus.connecting, entry.status);
-    try testing.expect(entry.outbound_fd != std.math.maxInt(std.posix.socket_t));
+    try testing.expect(entry.outbound_fd != INVALID_SOCKET);
     try testing.expect(entry.public_port > 0);
 
     engine.deleteEntry(entry.flowKey());
