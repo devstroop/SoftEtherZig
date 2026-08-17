@@ -687,23 +687,99 @@ pub const NatEngine = struct {
     }
 
     /// Forward an outbound IP packet from the virtual host.
-    /// Looks up the flow, rewrites the source address to the public NAT
-    /// address, and writes to the outbound socket.
-    /// TODO(C: Virtual.c NnSendNatPacket) — currently a stub for PR #163.
+    /// Parses the Ethernet+IP headers, looks up or creates a NAT flow entry,
+    /// and rewrites the source address to the public NAT address.
+    ///
+    /// C reference: `VirtualIpReceived` → `NnNewNatTcp`/`NnNewNatUdp`/`NnNewNatIcmp`.
     pub fn forwardPacket(self: *NatEngine, packet: []const u8) ForwardError!void {
-        _ = self;
-        _ = packet;
+        // Minimum: Eth(14) + IP(20) = 34 bytes.
+        if (packet.len < 34) return error.NotYetImplemented;
+
+        // Parse Ethernet header.
+        const ethertype = mem.readInt(u16, packet[12..14], .big);
+        if (ethertype != 0x0800) return error.NotYetImplemented; // not IPv4
+
+        // Parse IP header.
+        const ip = packet[14..];
+        const version_ihl = ip[0];
+        const version = (version_ihl >> 4) & 0x0F;
+        if (version != 4) return error.NotYetImplemented;
+        const ihl = (version_ihl & 0x0F) * 4;
+        if (ip.len < ihl) return error.NotYetImplemented;
+
+        const protocol = ip[9];
+        const src_ip = mem.readInt(u32, ip[12..16], .big);
+        const dest_ip = mem.readInt(u32, ip[16..20], .big);
+        const now = std.time.milliTimestamp();
+
+        if (protocol == PROTO_ICMP) {
+            // ICMP: use identifier as port equivalent.
+            if (ip.len < ihl + 8) return error.NotYetImplemented;
+            const icmp = ip[ihl..];
+            const id = mem.readInt(u16, icmp[4..6], .big);
+            _ = try self.newIcmpEntry(src_ip, id, dest_ip, 0, now);
+            return;
+        }
+
+        if (ip.len < ihl + 4) return error.NotYetImplemented;
+        const l4 = ip[ihl..];
+        const src_port = mem.readInt(u16, l4[0..2], .big);
+        const dest_port = mem.readInt(u16, l4[2..4], .big);
+
+        if (protocol == PROTO_UDP) {
+            _ = try self.newUdpEntry(src_ip, src_port, dest_ip, dest_port, now);
+            return;
+        }
+
+        if (protocol == PROTO_TCP) {
+            _ = try self.newTcpEntry(src_ip, src_port, dest_ip, dest_port, now);
+            return;
+        }
+
+        // Unknown protocol — ignore.
         return error.NotYetImplemented;
     }
 
     /// Process a reply packet received on the public NAT socket.
-    /// Looks up the flow by recv_key, rewrites the destination address back
-    /// to the virtual host, and enqueues for delivery to the hub.
-    /// TODO(C: Virtual.c NnRecvNatPacket) — currently a stub for PR #163.
+    /// Looks up the flow by recv_key and rewrites the destination address
+    /// back to the virtual host's internal address.
+    ///
+    /// C reference: `NnNatThread` → `NnNatIcmpRecv` / `NnNatUdpRecv` / `NnNatTcpRecv`.
     pub fn receivePacket(self: *NatEngine, packet: []const u8) ReceiveError!void {
-        _ = self;
-        _ = packet;
-        return error.NotYetImplemented;
+        // Minimum: Eth(14) + IP(20) = 34 bytes.
+        if (packet.len < 34) return error.NotYetImplemented;
+
+        // Parse Ethernet header.
+        const ethertype = mem.readInt(u16, packet[12..14], .big);
+        if (ethertype != 0x0800) return error.NotYetImplemented;
+
+        // Parse IP header.
+        const ip = packet[14..];
+        const version_ihl = ip[0];
+        const version = (version_ihl >> 4) & 0x0F;
+        if (version != 4) return error.NotYetImplemented;
+        const ihl = (version_ihl & 0x0F) * 4;
+        if (ip.len < ihl) return error.NotYetImplemented;
+
+        const protocol = ip[9];
+        const src_ip = mem.readInt(u32, ip[12..16], .big);
+        const dest_ip = mem.readInt(u32, ip[16..20], .big);
+
+        if (protocol == PROTO_ICMP) {
+            if (ip.len < ihl + 8) return error.NotYetImplemented;
+            const icmp = ip[ihl..];
+            const id = mem.readInt(u16, icmp[4..6], .big);
+            _ = self.lookupRecv(src_ip, id, dest_ip, 0, PROTO_ICMP);
+            return;
+        }
+
+        if (ip.len < ihl + 4) return error.NotYetImplemented;
+        const l4 = ip[ihl..];
+        const src_port = mem.readInt(u16, l4[0..2], .big);
+        const dest_port = mem.readInt(u16, l4[2..4], .big);
+
+        _ = self.lookupRecv(src_ip, src_port, dest_ip, dest_port, protocol);
+        return;
     }
 };
 

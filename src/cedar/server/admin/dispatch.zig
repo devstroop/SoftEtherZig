@@ -287,6 +287,8 @@ pub const ServerHub = struct {
     /// hub admins table deletion (C `GetHubAdminOption`, Admin.c).
     no_delete_mactable: bool = false,
     no_delete_iptable: bool = false,
+    /// SecureNAT enabled on this hub (C: `h->SecureNAT != NULL`).
+    secure_nat_enabled: bool = false,
 
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
@@ -1264,7 +1266,7 @@ fn stGetHubStatus(a: *AdminCtx, t: *structs.RpcHubStatus, allocator: Allocator) 
     t.num_groups = hub.num_groups;
     t.num_mac_tables = hub.num_mac_tables;
     t.num_ip_tables = hub.num_ip_tables;
-    t.secure_nat_enabled = false;
+    t.secure_nat_enabled = hub.secure_nat_enabled;
     t.traffic = hub.traffic;
     t.last_comm_time = hub.last_comm_time;
     t.last_login_time = hub.last_login_time;

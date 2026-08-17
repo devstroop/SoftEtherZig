@@ -40,6 +40,7 @@ const Allocator = mem.Allocator;
 
 const session_main = @import("session_main.zig");
 const PacketAdapter = session_main.PacketAdapter;
+const securenat_mod = @import("securenat.zig");
 
 // ============================================================================
 // Constants (C: Cedar.h / Hub.c)
@@ -267,6 +268,9 @@ pub const Hub = struct {
     /// (C: hub option `BroadcastStormDetectionThreshold`; 0 = unlimited).
     storm_threshold: u32 = DEFAULT_BROADCAST_STORM_THRESHOLD,
     stats: HubStats = .{},
+    /// SecureNAT live instance (C: `HUB->SecureNAT`). Owned — set via
+    /// `enableSecureNAT`/`disableSecureNAT`.
+    secure_nat: ?*securenat_mod.SecureNAT = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*Hub {
         const self = try allocator.create(Hub);
@@ -282,6 +286,8 @@ pub const Hub = struct {
     }
 
     pub fn deinit(self: *Hub) void {
+        // Stop SecureNAT first — it holds a SessionPa that references this hub.
+        self.disableSecureNAT();
         const allocator = self.allocator;
         self.mutex.lock();
         self.mac_table.deinit(allocator);
@@ -340,6 +346,32 @@ pub const Hub = struct {
         while (ipit.next()) |kv| {
             if (kv.value_ptr.session == pa) _ = self.ip_table.remove(kv.key_ptr.*);
         }
+    }
+
+    // ---- SecureNAT lifecycle -----------------------------------------------
+
+    /// Enable SecureNAT on this hub (C: `EnableSecureNATEx(h, true)`).
+    /// Creates a `SecureNAT` instance, attaches it to the hub, and starts
+    /// the polling thread. Idempotent if already enabled.
+    pub fn enableSecureNAT(self: *Hub, config: securenat_mod.SecureNATConfig) !void {
+        if (self.secure_nat != null) return; // already running
+        const s = try securenat_mod.SecureNAT.init(self.allocator, self, config);
+        try s.start();
+        self.secure_nat = s;
+    }
+
+    /// Disable SecureNAT on this hub (C: `EnableSecureNATEx(h, false)`).
+    /// Stops the polling thread and frees the `SecureNAT` instance.
+    pub fn disableSecureNAT(self: *Hub) void {
+        if (self.secure_nat) |s| {
+            s.deinit();
+            self.secure_nat = null;
+        }
+    }
+
+    /// Query whether SecureNAT is currently running on this hub.
+    pub fn isSecureNATEnabled(self: *const Hub) bool {
+        return self.secure_nat != null;
     }
 
     // ---- Switching ---------------------------------------------------------
