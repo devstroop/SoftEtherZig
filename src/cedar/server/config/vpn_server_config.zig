@@ -186,6 +186,19 @@ pub const UserConfig = struct {
     }
 };
 
+/// A hub group as persisted (C `SiWriteGroupCfg`/`SiLoadGroupCfg` subset).
+pub const GroupConfig = struct {
+    name: []u8, // owned
+    realname: []u8 = "", // owned
+    note: []u8 = "", // owned
+
+    fn deinit(self: *GroupConfig, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.realname);
+        allocator.free(self.note);
+    }
+};
+
 /// A virtual hub as persisted (C `SiWriteHubCfg`/`SiLoadHubCfg` subset).
 pub const HubConfig = struct {
     name: []u8, // owned
@@ -199,10 +212,13 @@ pub const HubConfig = struct {
     created_time: u64 = 0,
     option: HubOption = .{},
     users: std.ArrayListUnmanaged(UserConfig) = .{},
+    groups: std.ArrayListUnmanaged(GroupConfig) = .{},
 
     fn deinit(self: *HubConfig, allocator: Allocator) void {
         for (self.users.items) |*u| u.deinit(allocator);
         self.users.deinit(allocator);
+        for (self.groups.items) |*g| g.deinit(allocator);
+        self.groups.deinit(allocator);
         allocator.free(self.name);
     }
 
@@ -249,6 +265,18 @@ pub const HubConfig = struct {
                         // and password (1); unknown values load as anonymous.
                         .auth_type = if (t > 1) 0 else @intCast(t),
                         .auth_password = password,
+                    });
+                }
+            }
+            // SecurityAccountDatabase → GroupList → <groupname> folders.
+            if (db.getFolder("GroupList")) |group_list| {
+                for (group_list.folders.items) |gf| {
+                    const realname = gf.getStr("RealName", "");
+                    const note = gf.getStr("Note", "");
+                    try hub.groups.append(allocator, .{
+                        .name = try allocator.dupe(u8, gf.name),
+                        .realname = try allocator.dupe(u8, realname),
+                        .note = try allocator.dupe(u8, note),
                     });
                 }
             }
@@ -376,6 +404,12 @@ pub const ServerConfig = struct {
                 const uf = try ul.addFolder(u.name);
                 try uf.setUint("AuthType", u.auth_type);
                 if (u.auth_password) |h| try uf.setBytes("AuthPassword", &h);
+            }
+            const gl = try db.addFolder("GroupList");
+            for (hub.groups.items) |*g| {
+                const gf = try gl.addFolder(g.name);
+                if (g.realname.len > 0) try gf.setStr("RealName", g.realname);
+                if (g.note.len > 0) try gf.setStr("Note", g.note);
             }
         }
     }
@@ -832,4 +866,37 @@ test "server.vpn_server_config autosave writes on markModified and stops" {
     try testing.expectEqualStrings("changed.example", reloaded.server.keep_connect_host);
 
     saver.stop();
+}
+
+test "server.vpn_server_config save/load round-trips groups" {
+    const allocator = testing.allocator;
+    var config = try ServerConfig.initDefault(allocator);
+    defer config.deinit();
+
+    const hub = &config.hubs.items[0];
+    try hub.groups.append(allocator, .{
+        .name = try allocator.dupe(u8, "engineers"),
+        .realname = try allocator.dupe(u8, "Engineering Team"),
+        .note = try allocator.dupe(u8, "Core developers"),
+    });
+    try hub.groups.append(allocator, .{
+        .name = try allocator.dupe(u8, "admins"),
+        .realname = try allocator.dupe(u8, ""),
+        .note = try allocator.dupe(u8, ""),
+    });
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try config.save(tmp.dir, default_config_file_name);
+
+    var reloaded = try ServerConfig.load(allocator, tmp.dir, default_config_file_name);
+    defer reloaded.deinit();
+
+    const rhub = &reloaded.hubs.items[0];
+    try testing.expectEqual(@as(usize, 2), rhub.groups.items.len);
+    try testing.expectEqualStrings("engineers", rhub.groups.items[0].name);
+    try testing.expectEqualStrings("Engineering Team", rhub.groups.items[0].realname);
+    try testing.expectEqualStrings("Core developers", rhub.groups.items[0].note);
+    try testing.expectEqualStrings("admins", rhub.groups.items[1].name);
+    try testing.expectEqualStrings("", rhub.groups.items[1].realname);
 }

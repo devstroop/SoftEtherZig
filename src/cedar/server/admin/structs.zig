@@ -182,6 +182,61 @@ pub const HubOption = struct {
     }
 };
 
+/// C `ADMIN_OPTION` (Account.h:103) — one hub admin option name/value pair.
+pub const AdminOption = struct {
+    name: []const u8 = "",
+    value: u32 = 0,
+
+    pub fn free(self: *AdminOption, allocator: Allocator) void {
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ADMIN_OPTION` (Admin.h:794) — hub admin option list for
+/// GetHubAdminOptions / SetHubAdminOptions / GetDefaultHubAdminOptions.
+///
+/// Pack wire format (C `InRpcAdminOption`/`OutRpcAdminOption`):
+///   - `HubName`: string
+///   - `NumItem`: int
+///   - `Name[i]`: string array
+///   - `Value[i]`: int array
+pub const RpcAdminOption = struct {
+    hub_name: []const u8 = "",
+    items: []AdminOption = &.{},
+
+    pub fn inRpc(self: *RpcAdminOption, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        if (p.getStr("HubName")) |hn| self.hub_name = try allocator.dupe(u8, hn);
+        const count = p.getValueCount("Name");
+        if (count == 0) return;
+        self.items = try allocator.alloc(AdminOption, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .name = try allocator.dupe(u8, p.getStrEx("Name", i) orelse ""),
+                .value = p.getIntEx("Value", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcAdminOption, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("NumItem", @intCast(self.items.len));
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("Name", item.name, i);
+            try p.addIntEx("Value", item.value, i);
+        }
+    }
+
+    pub fn free(self: *RpcAdminOption, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.items) |*item| item.free(allocator);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
 /// C `CAPS` (Server.h:404) — one capability (name + int value).
 pub const Caps = struct {
     name: []const u8 = "",
