@@ -172,11 +172,17 @@ pub const DhcpServer = struct {
         // 4. Dispatch on message type.
         switch (pkt.options.msg_type) {
             .discover => {
+                // DISCOVER: client has no IP yet, always broadcast.
                 const ip = self.allocateIp(pkt.mac, pkt.options.requested_ip);
                 if (ip == 0) return null;
-                return self.buildResponse(.offer, ip, &pkt);
+                return self.buildResponse(.offer, ip, &pkt, true);
             },
             .request => {
+                // RFC 2131 §4.4.2: if the client includes a server identifier
+                // option and it doesn't match this server, ignore the packet.
+                if (pkt.options.server_id != 0 and pkt.options.server_id != self.config.host_ip) {
+                    return null;
+                }
                 const ip = self.allocateIp(pkt.mac, pkt.options.requested_ip);
                 if (ip == 0) {
                     return self.buildNak(&pkt);
@@ -187,12 +193,15 @@ pub const DhcpServer = struct {
                     return self.buildNak(&pkt);
                 }
                 self.createLease(pkt.mac, ip, pkt.hostname[0..pkt.hostname_len], now);
-                return self.buildResponse(.ack, ip, &pkt);
+                // Unicast if client has a usable ciaddr, else broadcast.
+                const use_unicast = pkt.ciaddr != 0;
+                return self.buildResponse(.ack, ip, &pkt, !use_unicast);
             },
             .inform => {
                 // INFORM — client already has an IP, just wants config params.
                 if (pkt.ciaddr == 0) return null;
-                return self.buildResponse(.ack, pkt.ciaddr, &pkt);
+                // Unicast to the client's known IP.
+                return self.buildResponse(.ack, pkt.ciaddr, &pkt, false);
             },
             else => return null,
         }
@@ -336,6 +345,7 @@ pub const DhcpServer = struct {
         msg_type: DhcpMessageType,
         assigned_ip: u32,
         pkt: *const IncomingPacket,
+        broadcast: bool,
     ) DhcpResponse {
         var opt_buf: [256]u8 = undefined;
         var opt_len: usize = 0;
@@ -387,6 +397,7 @@ pub const DhcpServer = struct {
             pkt.client_hw_addr_size,
             opt_buf[0..opt_len],
             pkt.src_ip,
+            broadcast,
         );
         return resp;
     }
@@ -417,6 +428,7 @@ pub const DhcpServer = struct {
             pkt.client_hw_addr_size,
             opt_buf[0..opt_len],
             pkt.src_ip,
+            true, // NACK is always broadcast
         );
         return resp;
     }
@@ -483,8 +495,10 @@ fn parseIncoming(frame: []const u8) ?IncomingPacket {
 
     // Hardware type and address size.
     const hw_type = frame[dhcp_start + 1];
-    const hw_addr_size = frame[dhcp_start + 2];
+    var hw_addr_size = frame[dhcp_start + 2];
     if (hw_addr_size > 16) return null;
+    // Ethernet only (RFC 2131: hlen=6 for Ethernet). Cap to 6 for safe MAC copy.
+    if (hw_addr_size > 6) hw_addr_size = 6;
 
     // Transaction ID.
     const xid = (@as(u32, frame[dhcp_start + 4]) << 24) |
@@ -510,27 +524,37 @@ fn parseIncoming(frame: []const u8) ?IncomingPacket {
         frame[magic_pos + 3];
     if (magic != DHCP_MAGIC) return null;
 
-    // Parse options.
+    // Compute the DHCP payload end from the UDP length field (RFC 768).
+    // UDP length includes the 8-byte UDP header.
+    const udp_len = (@as(u16, frame[udp_start + 4]) << 8) | frame[udp_start + 5];
+    const dhcp_payload_end = if (udp_len >= 8) dhcp_start + @as(usize, udp_len - 8) else frame.len;
+
+    // Parse options — bounded by the declared UDP payload, not the raw frame.
     var options = ClientOptions{};
     var hostname_buf: [256:0]u8 = .{0} ** 256;
     var hostname_len: u8 = 0;
 
     var opt_pos = magic_pos + 4;
-    while (opt_pos < frame.len) {
+    while (opt_pos < dhcp_payload_end) {
         const opt_type = frame[opt_pos];
         if (opt_type == @intFromEnum(DhcpOption.end_option)) break;
         if (opt_type == @intFromEnum(DhcpOption.pad)) {
             opt_pos += 1;
             continue;
         }
-        if (opt_pos + 1 >= frame.len) break;
+        if (opt_pos + 1 >= dhcp_payload_end) break;
         const opt_len = frame[opt_pos + 1];
-        if (opt_pos + 2 + @as(usize, opt_len) > frame.len) break;
+        if (opt_pos + 2 + @as(usize, opt_len) > dhcp_payload_end) break;
 
         const opt_data = frame[opt_pos + 2 ..][0..opt_len];
 
         if (opt_type == @intFromEnum(DhcpOption.message_type) and opt_len >= 1) {
-            options.msg_type = @enumFromInt(opt_data[0]);
+            // Validate the message type before @enumFromInt to avoid safety traps.
+            if (opt_data[0] >= @intFromEnum(DhcpMessageType.discover) and
+                opt_data[0] <= @intFromEnum(DhcpMessageType.inform))
+            {
+                options.msg_type = @enumFromInt(opt_data[0]);
+            }
         } else if (opt_type == @intFromEnum(DhcpOption.requested_ip) and opt_len >= 4) {
             options.requested_ip = ip32(opt_data[0..4]);
         } else if (opt_type == @intFromEnum(DhcpOption.hostname)) {
@@ -574,13 +598,18 @@ fn buildDhcpFrame(
     hw_addr_size: u8,
     options: []const u8,
     dest_ip: u32,
+    broadcast: bool,
 ) usize {
-    _ = dest_ip;
     var pos: usize = 0;
 
     // === Ethernet Header ===
-    // Destination: broadcast.
-    @memset(buf[pos..][0..6], 0xFF);
+    if (broadcast) {
+        // Destination: broadcast.
+        @memset(buf[pos..][0..6], 0xFF);
+    } else {
+        // Destination: unicast to client MAC.
+        @memcpy(buf[pos..][0..6], &client_mac);
+    }
     pos += 6;
     // Source: server MAC derived from server IP.
     buf[pos] = 0x00;
@@ -619,8 +648,12 @@ fn buildDhcpFrame(
     // Source IP: server.
     writeIpBytes(buf, pos, server_ip);
     pos += 4;
-    // Destination IP: broadcast.
-    @memset(buf[pos..][0..4], 0xFF);
+    // Destination IP: use dest_ip if unicast, broadcast otherwise.
+    if (broadcast or dest_ip == 0 or dest_ip == 0xFFFFFFFF) {
+        @memset(buf[pos..][0..4], 0xFF);
+    } else {
+        writeIpBytes(buf, pos, dest_ip);
+    }
     pos += 4;
 
     // === UDP Header (8 bytes) ===
@@ -671,10 +704,11 @@ fn buildDhcpFrame(
     buf[pos + 2] = 0;
     buf[pos + 3] = 0;
     pos += 4;
-    // chaddr (client MAC + padding to 16 bytes).
-    const hw_copy = @min(@as(usize, hw_addr_size), @as(usize, 16));
+    // chaddr (client MAC + padding to 16 bytes). Cap at 6 (Ethernet).
+    const hw_copy: usize = @min(@as(usize, hw_addr_size), @as(usize, 6));
     @memcpy(buf[pos..][0..hw_copy], client_mac[0..hw_copy]);
-    @memset(buf[pos + hw_copy ..][0..(16 - hw_copy)], 0);
+    const zero_pad: usize = 16 - hw_copy;
+    @memset(buf[pos + hw_copy ..][0..zero_pad], 0);
     pos += 16;
     // sname (64 bytes) + file (128 bytes) = zeros.
     @memset(buf[pos..][0..192], 0);
