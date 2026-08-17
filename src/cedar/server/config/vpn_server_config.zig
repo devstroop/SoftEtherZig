@@ -87,6 +87,14 @@ pub const default_weight: u32 = 100;
 pub const server_type_standalone: u32 = 0;
 /// Hub type: stand-alone (C `HUB_TYPE_STANDALONE`).
 pub const hub_type_standalone: u32 = 0;
+/// C `SERVER_TYPE_FARM_CONTROLLER`.
+pub const server_type_farm_controller: u32 = 1;
+/// C `SERVER_TYPE_FARM_MEMBER`.
+pub const server_type_farm_member: u32 = 2;
+/// C `MAX_HOST_NAME_LEN` (Cedar.h:59).
+pub const max_host_name_len: usize = 255;
+/// C `MAX_PUBLIC_PORT_NUM` (Server.h:287).
+pub const max_public_port_num: usize = 128;
 /// Default cipher list (C `SERVER_DEFAULT_CIPHER_NAME`).
 pub const default_cipher_name = "AES128-SHA";
 
@@ -129,6 +137,19 @@ pub const ServerConfiguration = struct {
     enable_vpn_azure: bool = true,
     server_type: u32 = server_type_standalone,
     weight: u32 = default_weight,
+    // ── Farm member config (persisted when ServerType == FARM_MEMBER) ──
+    /// C `Server.ControllerName`.
+    controller_name: []u8, // owned
+    /// C `Server.ControllerPort`.
+    controller_port: u32 = 0,
+    /// C `Server.MemberPassword` — raw 20-byte SHA-1 hash.
+    member_password: [20]u8 = .{0} ** 20,
+    /// C `Server.PublicIp` (host byte order).
+    public_ip: u32 = 0,
+    /// CSV of public port numbers.
+    public_ports_str: []u8, // owned
+    /// C `Server.ControllerOnly` — controller-only mode.
+    controller_only: bool = false,
     cipher_name: []u8, // owned
     accept_only_tls: bool = true,
     /// Server admin password hash — SHA-0 of the empty string by default
@@ -140,6 +161,8 @@ pub const ServerConfiguration = struct {
             .keep_connect_host = try allocator.dupe(u8, keep_connect_default_host),
             .cipher_name = undefined,
             .hashed_password = auth.hashPassword("", ""),
+            .controller_name = try allocator.dupe(u8, ""),
+            .public_ports_str = try allocator.dupe(u8, ""),
         };
         errdefer allocator.free(s.keep_connect_host);
         s.cipher_name = try allocator.dupe(u8, default_cipher_name);
@@ -149,6 +172,8 @@ pub const ServerConfiguration = struct {
     fn deinit(self: *ServerConfiguration, allocator: Allocator) void {
         allocator.free(self.keep_connect_host);
         allocator.free(self.cipher_name);
+        allocator.free(self.controller_name);
+        allocator.free(self.public_ports_str);
     }
 };
 
@@ -518,6 +543,26 @@ fn loadServerCfg(allocator: Allocator, s: *ServerConfiguration, f: *const cfg.Fo
     s.server_type = f.getUint("ServerType", server_type_standalone);
     const weight = f.getUint("Weight", 0);
     s.weight = if (weight == 0) default_weight else weight;
+
+    // Farm member fields (C SiLoadServerCfg, line 6495).
+    const cname = f.getStr("ControllerName", "");
+    if (!mem.eql(u8, cname, s.controller_name)) {
+        const duped = try allocator.dupe(u8, cname);
+        allocator.free(s.controller_name);
+        s.controller_name = duped;
+    }
+    s.controller_port = f.getUint("ControllerPort", 0);
+    if (f.getBytes("MemberPassword")) |b| {
+        if (b.len == 20) @memcpy(&s.member_password, b);
+    }
+    s.public_ip = f.getUint("PublicIp", 0);
+    const pports = f.getStr("PublicPorts", "");
+    if (!mem.eql(u8, pports, s.public_ports_str)) {
+        const duped = try allocator.dupe(u8, pports);
+        allocator.free(s.public_ports_str);
+        s.public_ports_str = duped;
+    }
+    s.controller_only = f.getBool("ControllerOnly", false);
     s.accept_only_tls = f.getBool("AcceptOnlyTls", true);
 
     const cipher = f.getStr("CipherName", default_cipher_name);
@@ -552,6 +597,17 @@ fn writeServerCfg(f: *cfg.Folder, s: *const ServerConfiguration) !void {
     // Weight is only persisted for non-standalone servers (C).
     if (s.server_type != server_type_standalone) {
         try f.setUint("Weight", s.weight);
+    }
+    // Farm member fields (C SiWriteServerCfg, line 6495).
+    if (s.server_type == server_type_farm_member) {
+        try f.setStr("ControllerName", s.controller_name);
+        try f.setUint("ControllerPort", s.controller_port);
+        try f.setBytes("MemberPassword", &s.member_password);
+        try f.setUint("PublicIp", s.public_ip);
+        try f.setStr("PublicPorts", s.public_ports_str);
+    }
+    if (s.server_type == server_type_farm_controller) {
+        try f.setBool("ControllerOnly", s.controller_only);
     }
     try f.setStr("CipherName", s.cipher_name);
     try f.setBool("AcceptOnlyTls", s.accept_only_tls);
