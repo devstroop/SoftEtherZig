@@ -43,11 +43,16 @@ pub const NAT_TCP_CONNECT_TIMEOUT_MS: i64 = 10_000;
 pub const NAT_MAX_CONNECT_QUEUE: u32 = 256;
 
 /// Sentinel value for an invalid/unconnected socket.
-/// On POSIX (fd_t = i32): -1. On Windows (SOCKET = HANDLE): null handle (0).
-pub const INVALID_SOCKET: std.posix.socket_t = if (@import("builtin").os.tag == .windows)
-    @ptrFromInt(0)
-else
-    @bitCast(@as(i32, -1));
+/// Matches the POSIX convention (fd_t -1) and Windows (SOCKET ~0).
+pub const INVALID_SOCKET: std.posix.socket_t = blk: {
+    const T = std.posix.socket_t;
+    if (T == i32 or T == i16 or T == i64) {
+        break :blk @bitCast(@as(T, -1));
+    } else {
+        // Windows SOCKET — all bits set (~0) is the invalid sentinel.
+        break :blk @ptrFromInt(~@as(usize, 0));
+    }
+};
 
 // ============================================================================
 // Protocol constants
