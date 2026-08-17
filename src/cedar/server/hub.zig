@@ -47,6 +47,7 @@ const HubFilters = acl_mod.HubFilters;
 const logging_mod = @import("logging.zig");
 const Log = logging_mod.LOG;
 const HubLogConfig = logging_mod.HubLogConfig;
+const ra_mod = @import("ra.zig");
 
 // ============================================================================
 // Constants (C: Cedar.h / Hub.c)
@@ -153,6 +154,19 @@ const StormState = struct {
     check_start_tick: i64 = 0,
     discard_value: u32 = 0,
 };
+
+/// IPv6 table entry: a learned source IPv6 and the session/MAC it belongs to.
+pub const Ip6Entry = struct {
+    session: *SessionPa,
+    mac: [6]u8,
+    updated: i64,
+    created: i64,
+};
+
+/// Maximum IPv6 address table entries.
+pub const MAX_IP6_TABLES: usize = 65536;
+/// IPv6 table entry lifetime in ms.
+pub const IP6_TABLE_EXPIRE_TIME: i64 = 60_000;
 
 // ============================================================================
 // Session packet adapter
@@ -285,6 +299,14 @@ pub const Hub = struct {
     log_config: HubLogConfig = .{},
     /// Hub security logger (C: `HUB.SecurityLogger`).
     security_logger: ?*Log = null,
+    /// Hub MAC address (6 bytes, used for RA source link-layer and EUI-64).
+    hub_mac: [6]u8 = .{ 0x02, 0xAC, 0x11, 0x22, 0x33, 0x44 },
+    /// Hub link-local IPv6 address (16 bytes, fe80::EUI-64 from hub_mac).
+    hub_ipv6: [16]u8 = .{0} ** 16,
+    /// IPv6 address table: learned source IPv6 → entry (C: Hub.IPv6Table).
+    ip6_table: std.AutoHashMapUnmanaged([16]u8, Ip6Entry) = .{},
+    /// Counter for ICMPv6 messages (NS/NA) — used as nonce.
+    hub_ipv6_id: u32 = 0,
 
     pub fn init(allocator: Allocator, name: []const u8) !*Hub {
         const self = try allocator.create(Hub);
@@ -294,8 +316,10 @@ pub const Hub = struct {
             .name = try allocator.dupe(u8, name),
             .mac_table = std.AutoHashMapUnmanaged([6]u8, MacEntry).empty,
             .ip_table = std.AutoHashMapUnmanaged(u32, IpEntry).empty,
+            .ip6_table = std.AutoHashMapUnmanaged([16]u8, Ip6Entry).empty,
             .sessions = .empty,
             .access_list = AccessList.init(allocator),
+            .hub_ipv6 = ra_mod.eui64LinkLocal(.{ 0x02, 0xAC, 0x11, 0x22, 0x33, 0x44 }),
         };
         return self;
     }
@@ -310,6 +334,7 @@ pub const Hub = struct {
         self.mutex.lock();
         self.mac_table.deinit(allocator);
         self.ip_table.deinit(allocator);
+        self.ip6_table.deinit(allocator);
         for (self.sessions.items) |pa| pa.attached = false;
         self.sessions.deinit(allocator);
         self.mutex.unlock();
@@ -363,6 +388,10 @@ pub const Hub = struct {
         var ipit = self.ip_table.iterator();
         while (ipit.next()) |kv| {
             if (kv.value_ptr.session == pa) _ = self.ip_table.remove(kv.key_ptr.*);
+        }
+        var ip6it = self.ip6_table.iterator();
+        while (ip6it.next()) |kv| {
+            if (kv.value_ptr.session == pa) _ = self.ip6_table.remove(kv.key_ptr.*);
         }
     }
 
@@ -543,8 +572,9 @@ pub const Hub = struct {
         // 1. Learn the source MAC (C: MacHashTable insert/refresh/migrate).
         self.learnMac(src, parsed.src, now);
 
-        // 2. Learn the source IPv4 for IP/ARP frames.
+        // 2. Learn the source IPv4/IPv6 for IP/ARP frames.
         self.learnIp4(src, parsed, frame, now);
+        self.learnIp6(src, parsed, frame, now);
 
         // 3. Resolve the destination.
         var broadcast_mode = parsed.broadcast;
@@ -711,6 +741,70 @@ pub const Hub = struct {
         while (it.next()) |kv| {
             if (kv.value_ptr.updated + IP_TABLE_EXPIRE_TIME <= now) {
                 _ = self.ip_table.remove(kv.key_ptr.*);
+                expired += 1;
+            }
+        }
+        return expired;
+    }
+
+    // ---- IPv6 learning -----------------------------------------------------
+
+    /// Learn the source IPv6 address from IPv6 frames (C Hub.c:4492-4600).
+    /// Skips multicast, loopback, and zero source addresses.
+    fn learnIp6(self: *Hub, src: *SessionPa, parsed: ParsedFrame, frame: []const u8, now: i64) void {
+        if (parsed.ethertype != 0x86DD) return;
+        if (frame.len < 14 + 40 + 8) return;
+
+        const ip6 = frame[14..];
+        // Source address is at IPv6 header offset 8..24.
+        var src_addr: [16]u8 = undefined;
+        @memcpy(&src_addr, ip6[8..24]);
+
+        // Skip loopback (::1), unspecified (::), and multicast (ff00::/8).
+        if (src_addr[0] == 0xff) return;
+        var all_zero = true;
+        for (src_addr) |b| {
+            if (b != 0) {
+                all_zero = false;
+                break;
+            }
+        }
+        if (all_zero) return;
+        if (src_addr[0] == 0xfe and src_addr[1] == 0x80) {
+            // Link-local is valid — learn it.
+        } else if (src_addr[0] == 0xfc or src_addr[0] == 0xfd) {
+            // ULA is valid.
+        } else if ((src_addr[0] & 0xfe) == 0x20) {
+            // Global unicast (2000::/3).
+        } else {
+            return; // skip other types
+        }
+
+        if (self.ip6_table.count() >= MAX_IP6_TABLES) return;
+
+        const src_mac: [6]u8 = .{ frame[6], frame[7], frame[8], frame[9], frame[10], frame[11] };
+        const gop = self.ip6_table.getOrPut(self.allocator, src_addr) catch return;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{
+                .session = src,
+                .mac = src_mac,
+                .updated = now,
+                .created = now,
+            };
+        } else {
+            gop.value_ptr.session = src;
+            gop.value_ptr.mac = src_mac;
+            gop.value_ptr.updated = now;
+        }
+    }
+
+    /// Remove IPv6 table entries not touched in `IP6_TABLE_EXPIRE_TIME` ms.
+    pub fn flushExpiredIp6(self: *Hub, now: i64) usize {
+        var expired: usize = 0;
+        var it = self.ip6_table.iterator();
+        while (it.next()) |kv| {
+            if (kv.value_ptr.updated + IP6_TABLE_EXPIRE_TIME <= now) {
+                _ = self.ip6_table.remove(kv.key_ptr.*);
                 expired += 1;
             }
         }
