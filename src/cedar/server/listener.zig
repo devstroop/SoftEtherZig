@@ -71,6 +71,90 @@ pub const AcceptHandler = *const fn (ctx: *anyopaque, sock: *TcpSocket, peer_ip:
 // DoS attack table (C `CheckDosAttack` / `DOS`, Listener.c:405-517)
 // ============================================================================
 
+/// Default max concurrent connections per IP (C `DEFAULT_MAX_CONNECTIONS_PER_IP`).
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: u32 = 256;
+/// Minimum floor for per-IP connection limit (C `MIN_MAX_CONNECTIONS_PER_IP`).
+pub const MIN_MAX_CONNECTIONS_PER_IP: u32 = 10;
+/// Default max unestablished connections (C `DEFAULT_MAX_UNESTABLISHED_CONNECTIONS`).
+pub const DEFAULT_MAX_UNESTABLISHED_CONNECTIONS: u32 = 1000;
+
+/// Shared DoS/connection-limit configuration. Passed by pointer to all
+/// listeners so the global `DisableDosProction` flag and the connection
+/// counters are shared across all listening ports.
+pub const DoSConfig = struct {
+    /// Global DoS protection disable flag (C `disable_dos` static in
+    /// Listener.c, toggled by `DisableDosProction` from Server config).
+    global_disable_dos: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Max concurrent connections per IP (C `GetMaxConnectionsPerIp()`).
+    max_connections_per_ip: std.atomic.Value(u32) = std.atomic.Value(u32).init(DEFAULT_MAX_CONNECTIONS_PER_IP),
+    /// Max unestablished (pre-auth) connections globally
+    /// (C `GetMaxUnestablishedConnections()`).
+    max_unestablished_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(DEFAULT_MAX_UNESTABLISHED_CONNECTIONS),
+    /// Current number of unestablished connections across all listeners
+    /// (C `cedar->CurrentUnestablishedConnections`).
+    unestablished_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    /// Per-IP concurrent connection counts (Check 3).
+    /// Keyed by IPv4 host-byte-order u32, value is current connection count.
+    ip_counts: std.AutoHashMapUnmanaged(u32, u32) = .{},
+    ip_counts_mutex: std.Thread.Mutex = .{},
+
+    pub fn init() DoSConfig {
+        return .{};
+    }
+
+    pub fn deinit(self: *DoSConfig) void {
+        self.ip_counts.deinit(std.heap.page_allocator);
+    }
+
+    /// Increment per-IP connection count. Called on accept.
+    pub fn incIpCount(self: *DoSConfig, ip: u32) void {
+        self.ip_counts_mutex.lock();
+        defer self.ip_counts_mutex.unlock();
+        const entry = self.ip_counts.getOrPut(std.heap.page_allocator, ip) catch return;
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+    }
+
+    /// Decrement per-IP connection count. Called on disconnect.
+    pub fn decIpCount(self: *DoSConfig, ip: u32) void {
+        self.ip_counts_mutex.lock();
+        defer self.ip_counts_mutex.unlock();
+        if (self.ip_counts.getEntry(ip)) |e| {
+            if (e.value_ptr.* > 1) {
+                e.value_ptr.* -= 1;
+            } else {
+                _ = self.ip_counts.remove(ip);
+            }
+        }
+    }
+
+    /// Check 3: per-IP concurrent connection limit.
+    pub fn checkIpLimit(self: *DoSConfig, ip: u32) bool {
+        const max = self.max_connections_per_ip.load(.acquire);
+        self.ip_counts_mutex.lock();
+        defer self.ip_counts_mutex.unlock();
+        const count = self.ip_counts.get(ip) orelse 0;
+        return count < max;
+    }
+
+    /// Increment unestablished connection count.
+    pub fn incUnestablished(self: *DoSConfig) void {
+        _ = self.unestablished_count.fetchAdd(1, .acq_rel);
+    }
+
+    /// Decrement unestablished connection count.
+    pub fn decUnestablished(self: *DoSConfig) void {
+        _ = self.unestablished_count.fetchSub(1, .acq_rel);
+    }
+
+    /// Check 4: global unestablished connection limit.
+    pub fn checkUnestablishedLimit(self: *DoSConfig) bool {
+        const max = self.max_unestablished_connections.load(.acquire);
+        const current = self.unestablished_count.load(.acquire);
+        return current <= max;
+    }
+};
+
 /// Per-IP connection record (C `struct DOS`).
 pub const DosEntry = struct {
     first_connected_tick: i64,
@@ -179,6 +263,9 @@ pub const ListenerOptions = struct {
     local_only: bool = false,
     /// Skip the DoS gate (C `r->DisableDos`).
     disable_dos: bool = false,
+    /// Shared DoS/connection-limit config. When non-null, the listener
+    /// participates in global DoS protection (Checks 2-4).
+    dos_config: ?*DoSConfig = null,
     backlog: u31 = 128,
 };
 
@@ -189,10 +276,16 @@ const ConnJob = struct {
     sock: TcpSocket,
     peer_ip: u32,
     peer_port: u16,
+    dos_config: ?*DoSConfig,
 };
 
 fn connThreadFn(job: *ConnJob) void {
     job.handler(job.ctx, &job.sock, job.peer_ip, job.peer_port);
+    // Decrement connection counters.
+    if (job.dos_config) |dc| {
+        dc.decUnestablished();
+        dc.decIpCount(job.peer_ip);
+    }
     const allocator = job.allocator;
     allocator.destroy(job);
 }
@@ -298,7 +391,7 @@ pub const Listener = struct {
                 const peer_ip = peerIpv4(conn.peer);
                 const peer_port = conn.peer.getPort();
 
-                // DoS gate (C CheckDosAttack).
+                // DoS gate (C CheckDosAttack — Check 1).
                 if (!self.options.disable_dos) {
                     if (!self.dos.check(peer_ip, std.time.milliTimestamp())) {
                         log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (DoS)", .{
@@ -313,6 +406,42 @@ pub const Listener = struct {
                     }
                 }
 
+                // Checks 2-4: global disable, per-IP limit, unestablished limit.
+                if (self.options.dos_config) |dc| {
+                    // Check 2: global DisableDosProction flag (C `disable_dos` static).
+                    if (dc.global_disable_dos.load(.acquire)) {
+                        // Global DoS protection disabled — skip remaining checks.
+                    } else {
+                        // Check 3: per-IP concurrent connection limit.
+                        if (!dc.checkIpLimit(peer_ip)) {
+                            log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (per-IP limit)", .{
+                                self.port,
+                                (peer_ip >> 24) & 0xff,
+                                (peer_ip >> 16) & 0xff,
+                                (peer_ip >> 8) & 0xff,
+                                peer_ip & 0xff,
+                            });
+                            conn.socket.close();
+                            continue;
+                        }
+                        // Check 4: global unestablished connection limit.
+                        if (!dc.checkUnestablishedLimit()) {
+                            log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (unestablished limit)", .{
+                                self.port,
+                                (peer_ip >> 24) & 0xff,
+                                (peer_ip >> 16) & 0xff,
+                                (peer_ip >> 8) & 0xff,
+                                peer_ip & 0xff,
+                            });
+                            conn.socket.close();
+                            continue;
+                        }
+                    }
+                    // Track unestablished connection.
+                    dc.incUnestablished();
+                    dc.incIpCount(peer_ip);
+                }
+
                 // Thread-per-connection (C TCPAccepted -> NewThread).
                 const job = self.allocator.create(ConnJob) catch {
                     conn.socket.close();
@@ -325,6 +454,7 @@ pub const Listener = struct {
                     .sock = conn.socket,
                     .peer_ip = peer_ip,
                     .peer_port = peer_port,
+                    .dos_config = self.options.dos_config,
                 };
                 const t = std.Thread.spawn(.{}, connThreadFn, .{job}) catch {
                     self.allocator.destroy(job);
