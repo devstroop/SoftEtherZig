@@ -171,6 +171,32 @@ pub const HubOption = struct {
     flooding_send_queue_buffer_quota: u32 = 32 * 1024 * 1024,
     /// C `ACCESS_LIST_INCLUDE_FILE_CACHE_LIFETIME` = 30 s.
     access_list_include_file_cache_lifetime: u32 = 30,
+
+    // -- SecureNAT / VH_OPTION (C: hub.SecureNATOption) --
+    /// Enable SecureNAT on this hub (C: `HUB_OPTION.UseSecureNAT`).
+    use_secure_nat: bool = false,
+    /// Virtual host gateway IP (host byte order).
+    vh_host_ip: u32 = 0xC0A8_1E01, // 192.168.30.1
+    /// Virtual host subnet mask.
+    vh_host_mask: u32 = 0xFFFF_FF00, // 255.255.255.0
+    /// Enable outbound NAT.
+    vh_use_nat: bool = true,
+    /// NAT TCP timeout (seconds).
+    vh_nat_tcp_timeout_s: u32 = 1800,
+    /// NAT UDP timeout (seconds).
+    vh_nat_udp_timeout_s: u32 = 60,
+    /// Enable virtual DHCP server.
+    vh_use_dhcp: bool = true,
+    /// DHCP range start (host byte order).
+    vh_dhcp_start: u32 = 0xC0A8_1E0A, // 192.168.30.10
+    /// DHCP range end.
+    vh_dhcp_end: u32 = 0xC0A8_1EC8, // 192.168.30.200
+    /// DHCP lease time (seconds).
+    vh_dhcp_lease_s: u32 = 7200,
+    /// DNS server 1 (handed to DHCP clients).
+    vh_dns1: u32 = 0xC0A8_1E01, // 192.168.30.1
+    /// DNS server 2.
+    vh_dns2: u32 = 0x0808_0808, // 8.8.8.8
 };
 
 /// A user account as persisted (C `SiWriteUserCfg`/`SiLoadUserCfg`). The
@@ -545,6 +571,20 @@ fn loadHubOption(o: *HubOption, f: *const cfg.Folder) !void {
     o.remove_def_gw_on_dhcp_for_localhost = f.getBool("RemoveDefGwOnDhcpForLocalhost", true);
     o.flooding_send_queue_buffer_quota = f.getUint("FloodingSendQueueBufferQuota", 32 * 1024 * 1024);
     o.access_list_include_file_cache_lifetime = f.getUint("AccessListIncludeFileCacheLifetime", 30);
+
+    // SecureNAT / VH_OPTION (C: VirtualHost / VirtualRouter / VirtualDhcpServer subfolders).
+    o.use_secure_nat = f.getBool("UseSecureNAT", false);
+    o.vh_host_ip = f.getUint("VirtualHostIP", 0xC0A8_1E01);
+    o.vh_host_mask = f.getUint("VirtualHostMask", 0xFFFF_FF00);
+    o.vh_use_nat = f.getBool("UseVirtualNAT", true);
+    o.vh_nat_tcp_timeout_s = f.getUint("NatTcpTimeout", 1800);
+    o.vh_nat_udp_timeout_s = f.getUint("NatUdpTimeout", 60);
+    o.vh_use_dhcp = f.getBool("UseVirtualDhcp", true);
+    o.vh_dhcp_start = f.getUint("DhcpLeaseIPStart", 0xC0A8_1E0A);
+    o.vh_dhcp_end = f.getUint("DhcpLeaseIPEnd", 0xC0A8_1EC8);
+    o.vh_dhcp_lease_s = f.getUint("DhcpExpireTimeSpan", 7200);
+    o.vh_dns1 = f.getUint("DhcpDnsServerAddress", 0xC0A8_1E01);
+    o.vh_dns2 = f.getUint("DhcpDnsServerAddress2", 0x0808_0808);
 }
 
 fn writeHubOption(f: *cfg.Folder, o: *const HubOption) !void {
@@ -560,6 +600,20 @@ fn writeHubOption(f: *cfg.Folder, o: *const HubOption) !void {
     try f.setBool("RemoveDefGwOnDhcpForLocalhost", o.remove_def_gw_on_dhcp_for_localhost);
     try f.setUint("FloodingSendQueueBufferQuota", o.flooding_send_queue_buffer_quota);
     try f.setUint("AccessListIncludeFileCacheLifetime", o.access_list_include_file_cache_lifetime);
+
+    // SecureNAT / VH_OPTION.
+    try f.setBool("UseSecureNAT", o.use_secure_nat);
+    try f.setUint("VirtualHostIP", o.vh_host_ip);
+    try f.setUint("VirtualHostMask", o.vh_host_mask);
+    try f.setBool("UseVirtualNAT", o.vh_use_nat);
+    try f.setUint("NatTcpTimeout", o.vh_nat_tcp_timeout_s);
+    try f.setUint("NatUdpTimeout", o.vh_nat_udp_timeout_s);
+    try f.setBool("UseVirtualDhcp", o.vh_use_dhcp);
+    try f.setUint("DhcpLeaseIPStart", o.vh_dhcp_start);
+    try f.setUint("DhcpLeaseIPEnd", o.vh_dhcp_end);
+    try f.setUint("DhcpExpireTimeSpan", o.vh_dhcp_lease_s);
+    try f.setUint("DhcpDnsServerAddress", o.vh_dns1);
+    try f.setUint("DhcpDnsServerAddress2", o.vh_dns2);
 }
 
 // ============================================================================

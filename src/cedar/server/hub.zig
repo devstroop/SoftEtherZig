@@ -267,6 +267,9 @@ pub const Hub = struct {
     /// (C: hub option `BroadcastStormDetectionThreshold`; 0 = unlimited).
     storm_threshold: u32 = DEFAULT_BROADCAST_STORM_THRESHOLD,
     stats: HubStats = .{},
+    /// SecureNAT live instance — opaque pointer to `securenat.SecureNAT`.
+    /// Avoids circular import; callers cast via the securenat module.
+    secure_nat: ?*anyopaque = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*Hub {
         const self = try allocator.create(Hub);
@@ -282,6 +285,8 @@ pub const Hub = struct {
     }
 
     pub fn deinit(self: *Hub) void {
+        // Stop SecureNAT first — it holds a SessionPa that references this hub.
+        self.disableSecureNAT();
         const allocator = self.allocator;
         self.mutex.lock();
         self.mac_table.deinit(allocator);
@@ -340,6 +345,61 @@ pub const Hub = struct {
         while (ipit.next()) |kv| {
             if (kv.value_ptr.session == pa) _ = self.ip_table.remove(kv.key_ptr.*);
         }
+    }
+
+    // ---- SecureNAT lifecycle -----------------------------------------------
+
+    /// Enable SecureNAT on this hub (C: `EnableSecureNATEx(h, true)`).
+    /// Idempotent if already enabled.
+    /// Thread-safe: double-check pattern prevents duplicate instances.
+    pub fn enableSecureNAT(self: *Hub, config: anytype) !void {
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.secure_nat != null) return; // already running
+        }
+        // Import is deferred to break the circular dependency.
+        const securenat_mod = @import("securenat.zig");
+        // init() may lock hub.mutex internally (via attach), so it must
+        // be called with the hub mutex UNLOCKED.
+        const s = try securenat_mod.SecureNAT.init(self.allocator, self, config);
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.secure_nat != null) {
+                // Another thread raced and enabled SecureNAT first — clean up.
+                s.deinit();
+                return;
+            }
+            self.secure_nat = @ptrCast(s);
+        }
+    }
+
+    /// Disable SecureNAT on this hub (C: `EnableSecureNATEx(h, false)`).
+    /// Stops the polling thread and frees the `SecureNAT` instance.
+    /// Thread-safe: the hub mutex is held for the pointer clear, but the
+    /// SecureNAT.deinit may internally lock the hub mutex (via detach).
+    pub fn disableSecureNAT(self: *Hub) void {
+        // Extract the pointer under the lock, then deinit outside to avoid
+        // holding the hub mutex while SecureNAT.deinit tries to lock it.
+        const ptr = blk: {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            const p = self.secure_nat orelse return;
+            self.secure_nat = null;
+            break :blk p;
+        };
+        const securenat_mod = @import("securenat.zig");
+        const s: *securenat_mod.SecureNAT = @alignCast(@ptrCast(ptr));
+        s.deinit();
+    }
+
+    /// Query whether SecureNAT is currently running on this hub.
+    /// Thread-safe: reads under the hub mutex.
+    pub fn isSecureNATEnabled(self: *Hub) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.secure_nat != null;
     }
 
     // ---- Switching ---------------------------------------------------------

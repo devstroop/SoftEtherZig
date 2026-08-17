@@ -42,6 +42,18 @@ pub const NAT_TCP_CONNECT_TIMEOUT_MS: i64 = 10_000;
 /// Maximum pending outbound connections (C: `NAT_MAX_CONNECT_QUEUE` = 256).
 pub const NAT_MAX_CONNECT_QUEUE: u32 = 256;
 
+/// Sentinel value for an invalid/unconnected socket.
+/// Matches the POSIX convention (fd_t -1) and Windows (SOCKET ~0).
+pub const INVALID_SOCKET: std.posix.socket_t = blk: {
+    const T = std.posix.socket_t;
+    if (T == i32 or T == i16 or T == i64) {
+        break :blk @bitCast(@as(T, -1));
+    } else {
+        // Windows SOCKET — all bits set (~0) is the invalid sentinel.
+        break :blk @ptrFromInt(~@as(usize, 0));
+    }
+};
+
 // ============================================================================
 // Protocol constants
 // ============================================================================
@@ -199,9 +211,9 @@ pub const NatEntry = struct {
     }
 
     pub fn closeSocket(self: *NatEntry) void {
-        if (self.outbound_fd != std.math.maxInt(std.posix.socket_t)) {
+        if (self.outbound_fd != INVALID_SOCKET) {
             std.posix.close(self.outbound_fd);
-            self.outbound_fd = std.math.maxInt(std.posix.socket_t);
+            self.outbound_fd = INVALID_SOCKET;
         }
     }
 };
@@ -373,6 +385,12 @@ pub const NatEngine = struct {
     /// Maximum concurrent entries.
     max_entries: u32,
 
+    /// Per-engine configurable timeouts (ms). These override the default
+    /// constants when set via `setTimeouts`.
+    tcp_timeout_ms: ?i64 = null,
+    udp_timeout_ms: ?i64 = null,
+    icmp_timeout_ms: ?i64 = null,
+
     pub fn init(allocator: Allocator, virtual_ip: u32, public_ip: u32) NatEngine {
         return .{
             .allocator = allocator,
@@ -386,6 +404,23 @@ pub const NatEngine = struct {
 
     pub fn deinit(self: *NatEngine) void {
         self.table.deinit(self.allocator);
+    }
+
+    /// Configure per-engine timeouts (ms). `null` means use the default constant.
+    pub fn setTimeouts(self: *NatEngine, tcp_ms: ?i64, udp_ms: ?i64, icmp_ms: ?i64) void {
+        self.tcp_timeout_ms = tcp_ms;
+        self.udp_timeout_ms = udp_ms;
+        self.icmp_timeout_ms = icmp_ms;
+    }
+
+    /// Resolve the effective timeout for a given protocol.
+    pub fn timeoutMs(self: *const NatEngine, protocol: u8) i64 {
+        return switch (protocol) {
+            PROTO_TCP => self.tcp_timeout_ms orelse NAT_TCP_TIMEOUT_MS,
+            PROTO_UDP => self.udp_timeout_ms orelse NAT_UDP_TIMEOUT_MS,
+            PROTO_ICMP => self.icmp_timeout_ms orelse NAT_ICMP_TIMEOUT_MS,
+            else => self.udp_timeout_ms orelse NAT_UDP_TIMEOUT_MS,
+        };
     }
 
     /// Create a new ICMP echo NAT entry (C: `NnNewNatIcmp`).
@@ -432,7 +467,7 @@ pub const NatEngine = struct {
             .last_ack = 0,
             .hash_code_for_send = 0,
             .hash_code_for_recv = 0,
-            .outbound_fd = std.math.maxInt(std.posix.socket_t),
+            .outbound_fd = INVALID_SOCKET,
         };
 
         try self.table.insert(self.allocator, entry);
@@ -655,11 +690,27 @@ pub const NatEngine = struct {
     }
 
     /// Sweep expired entries (C: `NnSweepNatTable`).
+    /// Uses the engine-level timeout settings rather than per-entry constants.
     pub fn sweep(self: *NatEngine, now: i64) u32 {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const removed = self.table.sweepExpired(now);
-        self.total_destroyed +%= removed;
+        var removed: u32 = 0;
+        for (&self.table.buckets) |*bucket| {
+            var i: usize = 0;
+            while (i < bucket.items.len) {
+                const entry = &bucket.items[i];
+                const timeout = self.timeoutMs(entry.protocol);
+                if ((now - entry.last_comm_time) > timeout) {
+                    var gone = bucket.swapRemove(i);
+                    gone.closeSocket();
+                    self.table.count -|= 1;
+                    self.total_destroyed +%= 1;
+                    removed +%= 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
         return removed;
     }
 
@@ -687,23 +738,172 @@ pub const NatEngine = struct {
     }
 
     /// Forward an outbound IP packet from the virtual host.
-    /// Looks up the flow, rewrites the source address to the public NAT
-    /// address, and writes to the outbound socket.
-    /// TODO(C: Virtual.c NnSendNatPacket) — currently a stub for PR #163.
+    /// Parses the Ethernet+IP headers, looks up or creates a NAT flow entry,
+    /// and rewrites the source address to the public NAT address.
+    ///
+    /// C reference: `VirtualIpReceived` → `NnNewNatTcp`/`NnNewNatUdp`/`NnNewNatIcmp`.
     pub fn forwardPacket(self: *NatEngine, packet: []const u8) ForwardError!void {
-        _ = self;
-        _ = packet;
+        // Minimum: Eth(14) + IP(20) = 34 bytes.
+        if (packet.len < 34) return error.NotYetImplemented;
+
+        // Parse Ethernet header.
+        const ethertype = mem.readInt(u16, packet[12..14], .big);
+        if (ethertype != 0x0800) return error.NotYetImplemented; // not IPv4
+
+        // Parse IP header.
+        const ip = packet[14..];
+        const version_ihl = ip[0];
+        const version = (version_ihl >> 4) & 0x0F;
+        if (version != 4) return error.NotYetImplemented;
+        const ihl = (version_ihl & 0x0F) * 4;
+        if (ip.len < ihl) return error.NotYetImplemented;
+
+        const protocol = ip[9];
+        const src_ip = mem.readInt(u32, ip[12..16], .big);
+        const dest_ip = mem.readInt(u32, ip[16..20], .big);
+        const now = std.time.milliTimestamp();
+
+        if (protocol == PROTO_ICMP) {
+            if (ip.len < ihl + 8) return error.NotYetImplemented;
+            const icmp = ip[ihl..];
+            const id = mem.readInt(u16, icmp[4..6], .big);
+            const key = FlowKey{
+                .src_ip = src_ip,
+                .src_port = id,
+                .dest_ip = dest_ip,
+                .dest_port = 0,
+                .protocol = PROTO_ICMP,
+            };
+            self.mutex.lock();
+            if (self.table.findMut(key)) |entry| {
+                entry.last_comm_time = now;
+                entry.total_sent +%= 1;
+                self.mutex.unlock();
+                return;
+            }
+            self.mutex.unlock();
+            _ = try self.newIcmpEntry(src_ip, id, dest_ip, 0, now);
+            return;
+        }
+
+        if (ip.len < ihl + 4) return error.NotYetImplemented;
+        const l4 = ip[ihl..];
+        const src_port = mem.readInt(u16, l4[0..2], .big);
+        const dest_port = mem.readInt(u16, l4[2..4], .big);
+
+        const key = FlowKey{
+            .src_ip = src_ip,
+            .src_port = src_port,
+            .dest_ip = dest_ip,
+            .dest_port = dest_port,
+            .protocol = protocol,
+        };
+
+        // Look up existing flow first (C: `NnGetNatEntryForSend`).
+        self.mutex.lock();
+        if (self.table.findMut(key)) |entry| {
+            entry.last_comm_time = now;
+            entry.total_sent +%= 1;
+            self.mutex.unlock();
+            return;
+        }
+        self.mutex.unlock();
+
+        if (protocol == PROTO_UDP) {
+            _ = try self.newUdpEntry(src_ip, src_port, dest_ip, dest_port, now);
+            return;
+        }
+
+        if (protocol == PROTO_TCP) {
+            _ = try self.newTcpEntry(src_ip, src_port, dest_ip, dest_port, now);
+            return;
+        }
+
+        // Unknown protocol — ignore.
         return error.NotYetImplemented;
     }
 
     /// Process a reply packet received on the public NAT socket.
-    /// Looks up the flow by recv_key, rewrites the destination address back
-    /// to the virtual host, and enqueues for delivery to the hub.
-    /// TODO(C: Virtual.c NnRecvNatPacket) — currently a stub for PR #163.
-    pub fn receivePacket(self: *NatEngine, packet: []const u8) ReceiveError!void {
-        _ = self;
-        _ = packet;
-        return error.NotYetImplemented;
+    /// Looks up the flow by recv_key, rewrites the destination address
+    /// back to the virtual host's internal address, and updates counters.
+    ///
+    /// C reference: `NnNatThread` → `NnNatIcmpRecv` / `NnNatUdpRecv` / `NnNatTcpRecv`.
+    pub fn receivePacket(self: *NatEngine, packet: []const u8) ReceiveError![]u8 {
+        // Minimum: Eth(14) + IP(20) = 34 bytes.
+        if (packet.len < 34) return error.NotYetImplemented;
+
+        // Parse Ethernet header.
+        const ethertype = mem.readInt(u16, packet[12..14], .big);
+        if (ethertype != 0x0800) return error.NotYetImplemented;
+
+        // Parse IP header.
+        const ip = packet[14..];
+        const version_ihl = ip[0];
+        const version = (version_ihl >> 4) & 0x0F;
+        if (version != 4) return error.NotYetImplemented;
+        const ihl = (version_ihl & 0x0F) * 4;
+        if (ip.len < ihl) return error.NotYetImplemented;
+
+        const protocol = ip[9];
+        const src_ip = mem.readInt(u32, ip[12..16], .big);
+        const dest_ip = mem.readInt(u32, ip[16..20], .big);
+        const now = std.time.milliTimestamp();
+
+        var maybe_entry: ?NatEntry = null;
+
+        if (protocol == PROTO_ICMP) {
+            if (ip.len < ihl + 8) return error.NotYetImplemented;
+            const icmp = ip[ihl..];
+            const id = mem.readInt(u16, icmp[4..6], .big);
+            maybe_entry = self.lookupRecv(src_ip, id, dest_ip, 0, PROTO_ICMP);
+        } else {
+            if (ip.len < ihl + 4) return error.NotYetImplemented;
+            const l4 = ip[ihl..];
+            const src_port = mem.readInt(u16, l4[0..2], .big);
+            const dest_port = mem.readInt(u16, l4[2..4], .big);
+            maybe_entry = self.lookupRecv(src_ip, src_port, dest_ip, dest_port, protocol);
+        }
+
+        const entry = maybe_entry orelse return error.NotYetImplemented;
+
+        // Clone the packet and rewrite: source → public, dest → internal client.
+        // The translated frame is returned to the caller for hub injection.
+        var translated = self.allocator.dupe(u8, packet) catch return error.NotYetImplemented;
+        errdefer self.allocator.free(translated);
+
+        // Rewrite IP destination to the internal client address.
+        mem.writeInt(u32, @constCast(translated[14 + 16 .. 14 + 20]), entry.src_ip, .big);
+
+        // Rewrite IP source to the public NAT address.
+        mem.writeInt(u32, @constCast(translated[14 + 12 .. 14 + 16]), entry.public_ip, .big);
+
+        // Update flow counters and timestamp.
+        self.mutex.lock();
+        const key = FlowKey{
+            .src_ip = src_ip,
+            .src_port = entry.recv_key.src_port,
+            .dest_ip = dest_ip,
+            .dest_port = entry.recv_key.dest_port,
+            .protocol = protocol,
+        };
+        if (self.table.findMut(key)) |e| {
+            e.last_comm_time = now;
+            e.total_recv +%= 1;
+            if (protocol == PROTO_TCP) {
+                e.status = .established;
+            }
+        }
+        self.mutex.unlock();
+
+        log.debug("NAT recv: {any}:{d} -> internal {any}:{d} ({d} bytes)", .{
+            fmtIp(src_ip),
+            entry.recv_key.src_port,
+            fmtIp(entry.src_ip),
+            entry.src_port,
+            translated.len,
+        });
+
+        return translated;
     }
 };
 
@@ -765,7 +965,7 @@ fn makeTestEntry(
         .last_ack = 0,
         .hash_code_for_send = 0,
         .hash_code_for_recv = 0,
-        .outbound_fd = std.math.maxInt(std.posix.socket_t),
+        .outbound_fd = INVALID_SOCKET,
     };
 }
 
@@ -904,7 +1104,7 @@ test "nat.NatEngine creates UDP entry with bound socket" {
 
     const entry = try engine.newUdpEntry(0x0A000001, 1000, 0xC0A80101, 53, 1000);
     try testing.expectEqual(@as(u8, PROTO_UDP), entry.protocol);
-    try testing.expect(entry.outbound_fd != std.math.maxInt(std.posix.socket_t));
+    try testing.expect(entry.outbound_fd != INVALID_SOCKET);
     try testing.expect(entry.public_port > 0);
     try testing.expectEqual(@as(u32, 1), engine.table.count);
 
@@ -919,7 +1119,7 @@ test "nat.NatEngine creates TCP entry with non-blocking socket" {
     const entry = try engine.newTcpEntry(0x0A000001, 1000, 0xC0A80101, 80, 1000);
     try testing.expectEqual(@as(u8, PROTO_TCP), entry.protocol);
     try testing.expectEqual(NatStatus.connecting, entry.status);
-    try testing.expect(entry.outbound_fd != std.math.maxInt(std.posix.socket_t));
+    try testing.expect(entry.outbound_fd != INVALID_SOCKET);
     try testing.expect(entry.public_port > 0);
 
     engine.deleteEntry(entry.flowKey());
