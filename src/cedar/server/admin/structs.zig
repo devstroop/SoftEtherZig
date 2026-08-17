@@ -1223,6 +1223,258 @@ pub const RpcEnumGroup = struct {
 };
 
 // ============================================================================
+// Access List (C: Admin.h RPC_ENUM_ACCESS_LIST / RPC_ADD_ACCESS /
+// RPC_DELETE_ACCESS / Hub.h ACCESS)
+// ============================================================================
+
+/// C `ACCESS` (Hub.h) — one entry of the hub access list. All value types,
+/// no heap allocations inside. IPv6 addresses stored as `[16]u8`.
+pub const Access = struct {
+    id: u32 = 0,
+    note: []const u8 = "",
+    active: bool = true,
+    priority: u32 = 0,
+    discard: bool = false,
+    src_ip: u32 = 0,
+    src_mask: u32 = 0,
+    dest_ip: u32 = 0,
+    dest_mask: u32 = 0,
+    protocol: u32 = 0,
+    src_port_start: u32 = 0,
+    src_port_end: u32 = 0,
+    dest_port_start: u32 = 0,
+    dest_port_end: u32 = 0,
+    src_username: []const u8 = "",
+    dest_username: []const u8 = "",
+    check_src_mac: bool = false,
+    src_mac: [6]u8 = [_]u8{0} ** 6,
+    src_mac_mask: [6]u8 = [_]u8{0} ** 6,
+    check_dst_mac: bool = false,
+    dst_mac: [6]u8 = [_]u8{0} ** 6,
+    dst_mac_mask: [6]u8 = [_]u8{0} ** 6,
+    check_tcp_state: bool = false,
+    established: bool = false,
+    delay: u32 = 0,
+    jitter: u32 = 0,
+    loss: u32 = 0,
+    redirect_url: []const u8 = "",
+    is_ipv6: bool = false,
+    src_ip6: [16]u8 = [_]u8{0} ** 16,
+    src_mask6: [16]u8 = [_]u8{0} ** 16,
+    dest_ip6: [16]u8 = [_]u8{0} ** 16,
+    dest_mask6: [16]u8 = [_]u8{0} ** 16,
+    unique_id: u32 = 0,
+
+    pub fn inRpcEx(self: *Access, p: *const Pack, index: usize) void {
+        self.* = .{};
+        self.id = p.getIntEx("Id", index) orelse 0;
+        self.note = p.getUniStrEx("Note", index) orelse "";
+        self.active = p.getBoolEx("Active", index) orelse true;
+        self.priority = p.getIntEx("Priority", index) orelse 0;
+        self.discard = p.getBoolEx("Discard", index) orelse false;
+        self.src_ip = p.getIntEx("SrcIpAddress", index) orelse 0;
+        self.src_mask = p.getIntEx("SrcSubnetMask", index) orelse 0;
+        self.dest_ip = p.getIntEx("DestIpAddress", index) orelse 0;
+        self.dest_mask = p.getIntEx("DestSubnetMask", index) orelse 0;
+        self.protocol = p.getIntEx("Protocol", index) orelse 0;
+        self.src_port_start = p.getIntEx("SrcPortStart", index) orelse 0;
+        self.src_port_end = p.getIntEx("SrcPortEnd", index) orelse 0;
+        self.dest_port_start = p.getIntEx("DestPortStart", index) orelse 0;
+        self.dest_port_end = p.getIntEx("DestPortEnd", index) orelse 0;
+        self.src_username = p.getStrEx("SrcUsername", index) orelse "";
+        self.dest_username = p.getStrEx("DestUsername", index) orelse "";
+        self.check_src_mac = p.getBoolEx("CheckSrcMac", index) orelse false;
+        if (p.getDataEx("SrcMacAddress", index)) |d| {
+            const n = @min(d.len, 6);
+            @memcpy(self.src_mac[0..n], d[0..n]);
+        }
+        if (p.getDataEx("SrcMacMask", index)) |d| {
+            const n = @min(d.len, 6);
+            @memcpy(self.src_mac_mask[0..n], d[0..n]);
+        }
+        self.check_dst_mac = p.getBoolEx("CheckDstMac", index) orelse false;
+        if (p.getDataEx("DstMacAddress", index)) |d| {
+            const n = @min(d.len, 6);
+            @memcpy(self.dst_mac[0..n], d[0..n]);
+        }
+        if (p.getDataEx("DstMacMask", index)) |d| {
+            const n = @min(d.len, 6);
+            @memcpy(self.dst_mac_mask[0..n], d[0..n]);
+        }
+        self.check_tcp_state = p.getBoolEx("CheckTcpState", index) orelse false;
+        self.established = p.getBoolEx("Established", index) orelse false;
+        self.delay = p.getIntEx("Delay", index) orelse 0;
+        self.jitter = p.getIntEx("Jitter", index) orelse 0;
+        self.loss = p.getIntEx("Loss", index) orelse 0;
+        self.is_ipv6 = p.getBoolEx("IsIPv6", index) orelse false;
+        self.unique_id = p.getIntEx("UniqueId", index) orelse 0;
+        self.redirect_url = p.getStrEx("RedirectUrl", index) orelse "";
+        if (p.getDataEx("SrcIpAddress6", index)) |d| {
+            const n = @min(d.len, 16);
+            @memcpy(self.src_ip6[0..n], d[0..n]);
+        }
+        if (p.getDataEx("SrcSubnetMask6", index)) |d| {
+            const n = @min(d.len, 16);
+            @memcpy(self.src_mask6[0..n], d[0..n]);
+        }
+        if (p.getDataEx("DestIpAddress6", index)) |d| {
+            const n = @min(d.len, 16);
+            @memcpy(self.dest_ip6[0..n], d[0..n]);
+        }
+        if (p.getDataEx("DestSubnetMask6", index)) |d| {
+            const n = @min(d.len, 16);
+            @memcpy(self.dest_mask6[0..n], d[0..n]);
+        }
+    }
+
+    pub fn outRpcEx(self: *const Access, p: *Pack, index: usize) !void {
+        try p.addIntEx("Id", self.id, index);
+        try p.addUniStrEx("Note", self.note, index);
+        try p.addBoolEx("Active", self.active, index);
+        try p.addIntEx("Priority", self.priority, index);
+        try p.addBoolEx("Discard", self.discard, index);
+        if (self.is_ipv6) {
+            try p.addIntEx("SrcIpAddress", 0xFDFFFFDF, index);
+            try p.addIntEx("SrcSubnetMask", 0xFFFFFFFF, index);
+            try p.addIntEx("DestIpAddress", 0xFDFFFFDF, index);
+            try p.addIntEx("DestSubnetMask", 0xFFFFFFFF, index);
+        } else {
+            try p.addIntEx("SrcIpAddress", self.src_ip, index);
+            try p.addIntEx("SrcSubnetMask", self.src_mask, index);
+            try p.addIntEx("DestIpAddress", self.dest_ip, index);
+            try p.addIntEx("DestSubnetMask", self.dest_mask, index);
+        }
+        try p.addIntEx("Protocol", self.protocol, index);
+        try p.addIntEx("SrcPortStart", self.src_port_start, index);
+        try p.addIntEx("SrcPortEnd", self.src_port_end, index);
+        try p.addIntEx("DestPortStart", self.dest_port_start, index);
+        try p.addIntEx("DestPortEnd", self.dest_port_end, index);
+        try p.addStrEx("SrcUsername", self.src_username, index);
+        try p.addStrEx("DestUsername", self.dest_username, index);
+        try p.addBoolEx("CheckSrcMac", self.check_src_mac, index);
+        try p.addDataEx("SrcMacAddress", &self.src_mac, index);
+        try p.addDataEx("SrcMacMask", &self.src_mac_mask, index);
+        try p.addBoolEx("CheckDstMac", self.check_dst_mac, index);
+        try p.addDataEx("DstMacAddress", &self.dst_mac, index);
+        try p.addDataEx("DstMacMask", &self.dst_mac_mask, index);
+        try p.addBoolEx("CheckTcpState", self.check_tcp_state, index);
+        try p.addBoolEx("Established", self.established, index);
+        try p.addIntEx("Delay", self.delay, index);
+        try p.addIntEx("Jitter", self.jitter, index);
+        try p.addIntEx("Loss", self.loss, index);
+        try p.addBoolEx("IsIPv6", self.is_ipv6, index);
+        try p.addIntEx("UniqueId", self.unique_id, index);
+        try p.addStrEx("RedirectUrl", self.redirect_url, index);
+        if (self.is_ipv6) {
+            try p.addDataEx("SrcIpAddress6", &self.src_ip6, index);
+            try p.addDataEx("SrcSubnetMask6", &self.src_mask6, index);
+            try p.addDataEx("DestIpAddress6", &self.dest_ip6, index);
+            try p.addDataEx("DestSubnetMask6", &self.dest_mask6, index);
+        } else {
+            const zero = [_]u8{0} ** 16;
+            try p.addDataEx("SrcIpAddress6", &zero, index);
+            try p.addDataEx("SrcSubnetMask6", &zero, index);
+            try p.addDataEx("DestIpAddress6", &zero, index);
+            try p.addDataEx("DestSubnetMask6", &zero, index);
+        }
+    }
+};
+
+/// C `RPC_ENUM_ACCESS_LIST` (Admin.h) — hub-scoped access list enumeration.
+pub const RpcEnumAccessList = struct {
+    hub_name: []const u8 = "",
+    accesses: []Access = &.{},
+
+    pub fn inRpc(self: *RpcEnumAccessList, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getInt("NumAccess") orelse 0;
+        self.accesses = try allocator.alloc(Access, count);
+        for (self.accesses, 0..) |*a, i| {
+            a.inRpcEx(p, i);
+            // Dupe heap-owned strings so they outlive the Pack buffer.
+            a.note = try dupStr(allocator, a.note);
+            a.src_username = try dupStr(allocator, a.src_username);
+            a.dest_username = try dupStr(allocator, a.dest_username);
+            a.redirect_url = try dupStr(allocator, a.redirect_url);
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumAccessList, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("NumAccess", @intCast(self.accesses.len));
+        for (self.accesses, 0..) |*a, i| {
+            try a.outRpcEx(p, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumAccessList, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.accesses) |*a| {
+            allocator.free(a.note);
+            allocator.free(a.src_username);
+            allocator.free(a.dest_username);
+            allocator.free(a.redirect_url);
+        }
+        allocator.free(self.accesses);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_ADD_ACCESS` (Admin.h) — single access list entry to add.
+pub const RpcAddAccess = struct {
+    hub_name: []const u8 = "",
+    access: Access = .{},
+
+    pub fn inRpc(self: *RpcAddAccess, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.access.inRpcEx(p, 0);
+        // Dupe heap-owned strings so free() is safe even on early-return paths.
+        self.access.note = try dupStr(allocator, self.access.note);
+        self.access.src_username = try dupStr(allocator, self.access.src_username);
+        self.access.dest_username = try dupStr(allocator, self.access.dest_username);
+        self.access.redirect_url = try dupStr(allocator, self.access.redirect_url);
+    }
+
+    pub fn outRpc(self: *const RpcAddAccess, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try self.access.outRpcEx(p, 0);
+    }
+
+    pub fn free(self: *RpcAddAccess, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.access.note);
+        allocator.free(self.access.src_username);
+        allocator.free(self.access.dest_username);
+        allocator.free(self.access.redirect_url);
+        self.* = .{};
+    }
+};
+
+/// C `RPC_DELETE_ACCESS` (Admin.h) — delete an access list entry by ID.
+pub const RpcDeleteAccess = struct {
+    hub_name: []const u8 = "",
+    id: u32 = 0,
+
+    pub fn inRpc(self: *RpcDeleteAccess, allocator: Allocator, p: *const Pack) !void {
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.id = p.getInt("Id") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcDeleteAccess, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("Id", self.id);
+    }
+
+    pub fn free(self: *RpcDeleteAccess, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+// ============================================================================
 // Sessions & connections (C: Admin.h RPC_ENUM_SESSION / RPC_SESSION_STATUS /
 // RPC_DELETE_SESSION / RPC_ENUM_CONNECTION / RPC_DISCONNECT_CONNECTION)
 // ============================================================================
