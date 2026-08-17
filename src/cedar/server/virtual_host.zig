@@ -46,6 +46,22 @@ pub const BEACON_SEND_INTERVAL_MS: i64 = 5_000;
 /// ARP wire header size: 28 bytes (C: `ARPV4_HEADER`).
 pub const ARP_HEADER_SIZE: usize = 28;
 
+/// Zero MAC (all zeros — indicates no MAC configured).
+const ZERO_MAC = [6]u8{ 0, 0, 0, 0, 0, 0 };
+
+/// Synthesize a virtual host MAC from its IP address.
+/// Matches C `GenMacAddress`: `52:55:AA:IP[2]:IP[1]:IP[0]`.
+pub fn synthesizeMac(ip: u32) [6]u8 {
+    return .{
+        0x52,
+        0x55,
+        0xAA,
+        @truncate((ip >> 16) & 0xFF),
+        @truncate((ip >> 8) & 0xFF),
+        @truncate(ip & 0xFF),
+    };
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -92,9 +108,14 @@ pub const VirtualHost = struct {
     last_beacon: i64 = -BEACON_SEND_INTERVAL_MS,
 
     pub fn init(allocator: Allocator, config: VirtualHostConfig) VirtualHost {
+        // Auto-synthesize MAC from IP if not explicitly provided (C: GenMacAddress).
+        var resolved_config = config;
+        if (config.enabled and config.host_ip != 0 and mem.eql(u8, &config.host_mac, &ZERO_MAC)) {
+            resolved_config.host_mac = synthesizeMac(config.host_ip);
+        }
         return .{
             .allocator = allocator,
-            .config = config,
+            .config = resolved_config,
             .arp_table = .{},
         };
     }
@@ -162,16 +183,55 @@ pub const VirtualHost = struct {
         return now - self.last_beacon >= BEACON_SEND_INTERVAL_MS;
     }
 
-    /// Build a gratuitous ARP response frame announcing our IP→MAC.
+    /// Build a gratuitous ARP request frame announcing our IP→MAC.
+    /// Uses ARP request opcode with gateway IP as both sender and target IP,
+    /// target MAC zeroed — this is the standard gratuitous ARP format that
+    /// clients use to update their ARP tables.
     pub fn buildGratuitousArp(self: *VirtualHost, now: i64) ArpResponse {
         self.last_beacon = now;
-        // Target is broadcast — this is a gratuitous announcement.
-        return self.buildArpResponse(
-            BROADCAST_MAC,
-            BROADCAST_IP,
-            self.config.host_mac,
-            self.config.host_ip,
-        );
+        var resp = ArpResponse{};
+        var pos: usize = 0;
+
+        // === Ethernet Header (14 bytes) ===
+        // Destination: broadcast.
+        @memcpy(resp.frame[pos..][0..6], &BROADCAST_MAC);
+        pos += 6;
+        // Source: our MAC.
+        @memcpy(resp.frame[pos..][0..6], &self.config.host_mac);
+        pos += 6;
+        resp.frame[pos] = 0x08;
+        resp.frame[pos + 1] = 0x06; // EtherType = ARP
+        pos += 2;
+
+        // === ARP Header (28 bytes) ===
+        resp.frame[pos] = @intCast((ARP_HARDWARE_TYPE_ETHERNET >> 8) & 0xFF);
+        resp.frame[pos + 1] = @intCast(ARP_HARDWARE_TYPE_ETHERNET & 0xFF);
+        pos += 2;
+        resp.frame[pos] = @intCast((ARP_PROTOCOL_TYPE_IPV4 >> 8) & 0xFF);
+        resp.frame[pos + 1] = @intCast(ARP_PROTOCOL_TYPE_IPV4 & 0xFF);
+        pos += 2;
+        resp.frame[pos] = 6;
+        resp.frame[pos + 1] = 4;
+        pos += 2;
+        // Operation: REQUEST (not reply — standard gratuitous ARP format).
+        resp.frame[pos] = @intCast((ARP_OP_REQUEST >> 8) & 0xFF);
+        resp.frame[pos + 1] = @intCast(ARP_OP_REQUEST & 0xFF);
+        pos += 2;
+        // Sender MAC.
+        @memcpy(resp.frame[pos..][0..6], &self.config.host_mac);
+        pos += 6;
+        // Sender IP = gateway IP.
+        writeIpBytes(&resp.frame, pos, self.config.host_ip);
+        pos += 4;
+        // Target MAC: zero (unknown — we're announcing, not requesting).
+        @memset(resp.frame[pos..][0..6], 0x00);
+        pos += 6;
+        // Target IP = gateway IP (sender == target → gratuitous).
+        writeIpBytes(&resp.frame, pos, self.config.host_ip);
+        pos += 4;
+
+        resp.len = pos;
+        return resp;
     }
 
     // ---- ARP cache ---------------------------------------------------------
@@ -180,7 +240,12 @@ pub const VirtualHost = struct {
     fn learn(self: *VirtualHost, ip: u32, mac: [6]u8, now: i64) void {
         // Don't learn broadcast or zero MACs.
         if (mem.eql(u8, &mac, &BROADCAST_MAC)) return;
-        if (mem.eql(u8, &mac, &[_]u8{ 0, 0, 0, 0, 0, 0 })) return;
+        if (mem.eql(u8, &mac, &ZERO_MAC)) return;
+
+        // Reject reserved/unusable IPs.
+        if (ip == 0) return; // 0.0.0.0 — unspecified
+        if (ip == BROADCAST_IP) return; // 255.255.255.255 — broadcast
+        if (ip == self.config.host_ip) return; // gateway's own IP — don't self-learn
 
         // Search for existing entry by IP (linear scan — cache is small).
         for (self.arp_table.items) |*entry| {
@@ -201,9 +266,10 @@ pub const VirtualHost = struct {
     }
 
     /// Look up a MAC address by IP in the ARP cache.
-    pub fn lookupMac(self: *const VirtualHost, ip: u32) ?[6]u8 {
+    /// Entries expired at time `now` are skipped.
+    pub fn lookupMac(self: *const VirtualHost, ip: u32, now: i64) ?[6]u8 {
         for (self.arp_table.items) |entry| {
-            if (entry.ip == ip and !entry.isExpired(0)) {
+            if (entry.ip == ip and !entry.isExpired(now)) {
                 return entry.mac;
             }
         }
@@ -450,8 +516,8 @@ test "ARP reply is learned passively" {
     // ARP reply should not produce a response frame.
     try std.testing.expect(host.handleFrame(&frame, 1000) == null);
     // But the mapping should be learned.
-    try std.testing.expect(host.lookupMac(peer_ip) != null);
-    const learned = host.lookupMac(peer_ip).?;
+    try std.testing.expect(host.lookupMac(peer_ip, 1000) != null);
+    const learned = host.lookupMac(peer_ip, 1000).?;
     try std.testing.expectEqualSlices(u8, &peer_mac, &learned);
 }
 
@@ -473,7 +539,7 @@ test "ARP request sender is learned in cache" {
     _ = host.handleFrame(&frame, 1000);
 
     // Client should now be in the cache.
-    const learned = host.lookupMac(client_ip).?;
+    const learned = host.lookupMac(client_ip, 1000).?;
     try std.testing.expectEqualSlices(u8, &client_mac, &learned);
 }
 
@@ -517,15 +583,15 @@ test "ARP cache entries expire" {
     // Learn at t=1000.
     const frame = makeArpRequestFrame(client_mac, client_ip, host.config.host_ip);
     _ = host.handleFrame(&frame, 1000);
-    try std.testing.expect(host.lookupMac(client_ip) != null);
+    try std.testing.expect(host.lookupMac(client_ip, 1000) != null);
 
     // Still valid at t=30000.
     host.refreshCache(30000);
-    try std.testing.expect(host.lookupMac(client_ip) != null);
+    try std.testing.expect(host.lookupMac(client_ip, 30000) != null);
 
     // Expired at t=31001 (30s + 1ms).
     host.refreshCache(31001);
-    try std.testing.expect(host.lookupMac(client_ip) == null);
+    try std.testing.expect(host.lookupMac(client_ip, 31001) == null);
 }
 
 // ---- Test: gratuitous ARP beacon ----
@@ -578,14 +644,14 @@ test "Gratuitous ARP frame has broadcast dest and our IP→MAC" {
     try std.testing.expectEqualSlices(u8, &BROADCAST_MAC, resp.frame[0..6]);
     // Ethernet src: our MAC.
     try std.testing.expectEqualSlices(u8, &host.config.host_mac, resp.frame[6..12]);
-    // ARP op: reply.
-    try std.testing.expectEqual(@as(u16, ARP_OP_RESPONSE), (@as(u16, resp.frame[20]) << 8) | resp.frame[21]);
+    // ARP op: REQUEST (standard gratuitous ARP format).
+    try std.testing.expectEqual(@as(u16, ARP_OP_REQUEST), (@as(u16, resp.frame[20]) << 8) | resp.frame[21]);
     // ARP sender: our MAC + our IP.
     try std.testing.expectEqualSlices(u8, &host.config.host_mac, resp.frame[22..28]);
     try std.testing.expectEqual(host.config.host_ip, (@as(u32, resp.frame[28]) << 24 | (@as(u32, resp.frame[29]) << 16) | (@as(u32, resp.frame[30]) << 8) | resp.frame[31]));
-    // ARP target: broadcast MAC + broadcast IP.
-    try std.testing.expectEqualSlices(u8, &BROADCAST_MAC, resp.frame[32..38]);
-    try std.testing.expectEqual(BROADCAST_IP, (@as(u32, resp.frame[38]) << 24 | (@as(u32, resp.frame[39]) << 16) | (@as(u32, resp.frame[40]) << 8) | resp.frame[41]));
+    // ARP target: zero MAC + our IP (sender == target → gratuitous).
+    try std.testing.expectEqualSlices(u8, &ZERO_MAC, resp.frame[32..38]);
+    try std.testing.expectEqual(host.config.host_ip, (@as(u32, resp.frame[38]) << 24 | (@as(u32, resp.frame[39]) << 16) | (@as(u32, resp.frame[40]) << 8) | resp.frame[41]));
 }
 
 // ---- Test: disabled host returns null ----
@@ -657,9 +723,9 @@ test "ARP cache handles multiple clients" {
 
     try std.testing.expectEqual(@as(usize, 2), host.arp_table.items.len);
 
-    const learned1 = host.lookupMac(ip1) orelse return error.TestExpectedEqual;
+    const learned1 = host.lookupMac(ip1, 2000) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualSlices(u8, &mac1, &learned1);
-    const learned2 = host.lookupMac(ip2) orelse return error.TestExpectedEqual;
+    const learned2 = host.lookupMac(ip2, 2000) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualSlices(u8, &mac2, &learned2);
 }
 
@@ -687,6 +753,77 @@ test "ARP cache updates MAC for same IP" {
     // Only one entry (same IP).
     try std.testing.expectEqual(@as(usize, 1), host.arp_table.items.len);
     // MAC should be updated to mac2.
-    const updated = host.lookupMac(ip) orelse return error.TestExpectedEqual;
+    const updated = host.lookupMac(ip, 2000) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualSlices(u8, &mac2, &updated);
+}
+
+// ---- Test: MAC auto-synthesis ----
+
+test "MAC auto-synthesized from IP when host_mac is zero" {
+    const host = VirtualHost.init(std.testing.allocator, .{
+        .enabled = true,
+        .host_ip = 0x0A000001, // 10.0.0.1
+    });
+    // synthesizeMac: 52:55:AA:(ip>>16)&0xFF:(ip>>8)&0xFF:ip&0xFF
+    // For 0x0A000001: 52:55:AA:0x00:0x00:0x01
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x52, 0x55, 0xAA, 0x00, 0x00, 0x01 }, &host.config.host_mac);
+}
+
+test "MAC not synthesized when host_mac is explicitly set" {
+    const custom_mac = [6]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01 };
+    const host = VirtualHost.init(std.testing.allocator, .{
+        .enabled = true,
+        .host_ip = 0x0A000001,
+        .host_mac = custom_mac,
+    });
+    try std.testing.expectEqualSlices(u8, &custom_mac, &host.config.host_mac);
+}
+
+// ---- Test: reserved IP rejection in learn() ----
+
+test "learn rejects broadcast IP" {
+    var host = VirtualHost.init(std.testing.allocator, .{
+        .enabled = true,
+        .host_ip = 0x0A000001,
+        .host_mac = .{ 0x5E, 0x01, 0x02, 0x03, 0x04, 0x05 },
+    });
+    defer host.deinit();
+
+    const mac = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+    const frame = makeArpRequestFrame(mac, BROADCAST_IP, host.config.host_ip);
+    _ = host.handleFrame(&frame, 1000);
+
+    // Broadcast IP should not be learned.
+    try std.testing.expect(host.lookupMac(BROADCAST_IP, 1000) == null);
+}
+
+test "learn rejects zero IP" {
+    var host = VirtualHost.init(std.testing.allocator, .{
+        .enabled = true,
+        .host_ip = 0x0A000001,
+        .host_mac = .{ 0x5E, 0x01, 0x02, 0x03, 0x04, 0x05 },
+    });
+    defer host.deinit();
+
+    const mac = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+    const frame = makeArpRequestFrame(mac, 0x00000000, host.config.host_ip);
+    _ = host.handleFrame(&frame, 1000);
+
+    try std.testing.expect(host.lookupMac(0, 1000) == null);
+}
+
+test "learn rejects gateway own IP" {
+    var host = VirtualHost.init(std.testing.allocator, .{
+        .enabled = true,
+        .host_ip = 0x0A000001,
+        .host_mac = .{ 0x5E, 0x01, 0x02, 0x03, 0x04, 0x05 },
+    });
+    defer host.deinit();
+
+    const mac = [6]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+    const frame = makeArpRequestFrame(mac, host.config.host_ip, 0x0A000099);
+    _ = host.handleFrame(&frame, 1000);
+
+    // Gateway's own IP should not be learned from external sources.
+    try std.testing.expect(host.lookupMac(host.config.host_ip, 1000) == null);
 }
