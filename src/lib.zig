@@ -100,6 +100,10 @@ pub const server = struct {
     pub const admin_dispatch = @import("cedar/server/admin/dispatch.zig");
 };
 
+// Admin RPC client (S27) — used by vpncmd standalone binary.
+pub const admin_client = @import("cedar/client/admin_client.zig");
+pub const admin_shell = @import("cli/admin_shell.zig");
+
 // vpnserver executable bootstrap (issue #83) — TLS accept/cert primitives and
 // the shared first-run `--gen-cert` helper. The `exec/vpnserver/main.zig`
 // module root is nested below src/, so it reaches these through `lib` instead

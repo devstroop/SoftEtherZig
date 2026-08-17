@@ -445,6 +445,39 @@ pub fn build(b: *std.Build) void {
     server_run_step.dependOn(&server_run_cmd.step);
 
     // ============================================
+    // VPN COMMAND TOOL (vpncmd) — standalone admin CLI
+    // ============================================
+    // vpncmd is a one-shot tool (C `vpncmd.c`): InitCedar → CommandMain → exit.
+    // It imports the same `softether` module as vpnserver for admin RPC client
+    // access. Unlike vpnserver, it does NOT daemonize or handle signals.
+    const vpncmd = b.addExecutable(.{
+        .name = "vpncmd",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/exec/vpncmd/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "softether", .module = softether_mod },
+            },
+        }),
+    });
+
+    linkOpenSsl(b, vpncmd, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+    vpncmd.linkLibC();
+    addZlib(vpncmd, b);
+
+    b.installArtifact(vpncmd);
+
+    const vpncmd_run_cmd = b.addRunArtifact(vpncmd);
+    vpncmd_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        vpncmd_run_cmd.addArgs(args);
+    }
+
+    const vpncmd_run_step = b.step("run-cmd", "Run the VPN command tool (vpncmd)");
+    vpncmd_run_step.dependOn(&vpncmd_run_cmd.step);
+
+    // ============================================
     // SHARED LIBRARY (for FFI: Flutter, Python, etc.)
     // ============================================
     const shared_lib = b.addLibrary(.{
