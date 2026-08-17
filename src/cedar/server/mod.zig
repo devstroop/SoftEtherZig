@@ -51,6 +51,7 @@ pub const securenat = @import("securenat.zig");
 pub const wpc = @import("wpc.zig");
 pub const udp_accel_server = @import("udp_accel_server.zig");
 pub const farm = @import("farm.zig");
+pub const farm_rpc = @import("farm_rpc.zig");
 
 // Re-export commonly used types
 pub const Hub = auth.Hub;
