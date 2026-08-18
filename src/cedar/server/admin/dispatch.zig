@@ -771,6 +771,210 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         err = dispatchCall(structs.RpcEnumLogFile, &a, allocator, request, ret, stEnumLog);
     } else if (mem.eql(u8, function_name, "GetTraffic")) {
         err = dispatchCall(structs.RpcGetTraffic, &a, allocator, request, ret, stGetTraffic);
+    } else if (mem.eql(u8, function_name, "GetFarmSetting")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetFarmSetting")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetFarmInfo")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumFarmMember")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetFarmConnectionStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DisconnectFarmConnection")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetServerCert")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetServerCert")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetServerCipher")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetServerCipher")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "RegenerateServerCert")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "CreateKeyPair")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnableListener")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetHub")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetHubOnline")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetHubLog")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetHubLog")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetHubExtOptions")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetHubExtOptions")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetHubRadius")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetHubRadius")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetConnectionInfo")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "CreateLink")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetLink")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetLink")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DeleteLink")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "RenameLink")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumLink")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetLinkStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetLinkOnline")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetLinkOffline")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddCa")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumCa")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetCa")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DeleteCa")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddCrl")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DelCrl")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetCrl")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetCrl")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumCrl")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetKeep")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetKeep")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnableSecureNAT")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DisableSecureNAT")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetSecureNATOption")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetSecureNATOption")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumNAT")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumDHCP")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetSecureNATStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumEthernet")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddLocalBridge")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DeleteLocalBridge")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumLocalBridge")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetBridgeSupport")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "RebootServer")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "Crash")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "Flush")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "Debug")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddLicenseKey")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DelLicenseKey")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetConfig")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetConfig")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddL3Switch")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DelL3Switch")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumL3Switch")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "StartL3Switch")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "StopL3Switch")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddL3If")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DelL3If")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumL3If")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddL3Table")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DelL3Table")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumL3Table")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "ReadLogFile")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetSysLog")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetSysLog")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumEthVLan")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetEnableEthVLan")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetHubMsg")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetHubMsg")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetAdminMsg")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetAcList")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetAcList")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumLicenseKey")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetLicenseStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetIPsecServices")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetIPsecServices")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "AddEtherIpId")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetEtherIpId")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "DeleteEtherIpId")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "EnumEtherIpId")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetOpenVpnSstpConfig")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetOpenVpnSstpConfig")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetDDnsClientStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "ChangeDDnsClientHostname")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetDDnsInternetSettng")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetDDnsInternetSettng")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetAzureStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetAzureStatus")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "SetSpecialListener")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "GetSpecialListener")) {
+        err = err_not_supported;
+    } else if (mem.eql(u8, function_name, "MakeOpenVpnConfigFile")) {
+        err = err_not_supported;
     } else {
         err = err_not_supported;
     }
@@ -806,7 +1010,7 @@ fn dispatchCall(
 
 fn inRpcT(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !void {
     switch (T) {
-        structs.RpcServerStatus, structs.RpcListener => t.inRpc(p),
+        structs.RpcServerStatus, structs.RpcListener, structs.RpcFarmConnectionStatus, structs.RpcNatStatus, structs.RpcBridgeSupport, structs.RpcAzureStatus, structs.RpcSpecialListener, structs.RpcLicenseStatus, structs.RpcConnectionInfo => t.inRpc(p),
         else => try inRpcAlloc(T, t, allocator, p),
     }
 }
@@ -842,6 +1046,53 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcEnumIpTable => try t.inRpc(allocator, p),
         structs.RpcDeleteTable => try t.inRpc(allocator, p),
         structs.RpcAdminOption => try t.inRpc(allocator, p),
+        structs.RpcFarmSetting => try t.inRpc(allocator, p),
+        structs.RpcFarmInfo => try t.inRpc(allocator, p),
+        structs.RpcEnumFarm => try t.inRpc(allocator, p),
+        structs.RpcSetHubOnline => try t.inRpc(allocator, p),
+        structs.RpcHubLog => try t.inRpc(allocator, p),
+        structs.RpcRadius => try t.inRpc(allocator, p),
+        structs.RpcMsg => try t.inRpc(allocator, p),
+        structs.RpcKeep => try t.inRpc(allocator, p),
+        structs.RpcSyslogSetting => try t.inRpc(allocator, p),
+        structs.RpcAcList => try t.inRpc(allocator, p),
+        structs.RpcReadLogFile => try t.inRpc(allocator, p),
+        structs.RpcConfig => try t.inRpc(allocator, p),
+        structs.RpcL3Sw => try t.inRpc(allocator, p),
+        structs.RpcEnumL3Sw => try t.inRpc(allocator, p),
+        structs.RpcL3If => try t.inRpc(allocator, p),
+        structs.RpcEnumL3If => try t.inRpc(allocator, p),
+        structs.RpcL3Table => try t.inRpc(allocator, p),
+        structs.RpcEnumL3Table => try t.inRpc(allocator, p),
+        structs.RpcLocalBridge => try t.inRpc(allocator, p),
+        structs.RpcEnumLocalBridge => try t.inRpc(allocator, p),
+        structs.RpcEnumEth => try t.inRpc(allocator, p),
+        structs.RpcEnumEthVLan => try t.inRpc(allocator, p),
+        structs.RpcHubAddCa => try t.inRpc(allocator, p),
+        structs.RpcHubEnumCa => try t.inRpc(allocator, p),
+        structs.RpcHubGetCa => try t.inRpc(allocator, p),
+        structs.RpcHubDeleteCa => try t.inRpc(allocator, p),
+        structs.RpcEnumCrl => try t.inRpc(allocator, p),
+        structs.RpcCrl => try t.inRpc(allocator, p),
+        structs.RpcVhOption => try t.inRpc(allocator, p),
+        structs.RpcEnumNat => try t.inRpc(allocator, p),
+        structs.RpcEnumDhcp => try t.inRpc(allocator, p),
+        structs.RpcIpSecServices => try t.inRpc(allocator, p),
+        structs.RpcEtherIpId => try t.inRpc(allocator, p),
+        structs.RpcEnumEtherIpId => try t.inRpc(allocator, p),
+        structs.RpcOpenVpnSstpConfig => try t.inRpc(allocator, p),
+        structs.RpcDdnsClientStatus => try t.inRpc(allocator, p),
+        structs.RpcInternetSetting => try t.inRpc(allocator, p),
+        structs.RpcAzureStatus => try t.inRpc(allocator, p),
+        structs.RpcSpecialListener => try t.inRpc(allocator, p),
+        structs.RpcEnumLicenseKey => try t.inRpc(allocator, p),
+        structs.RpcLink => try t.inRpc(allocator, p),
+        structs.RpcRenameLink => try t.inRpc(allocator, p),
+        structs.RpcEnumLink => try t.inRpc(allocator, p),
+        structs.RpcCreateLink => try t.inRpc(allocator, p),
+        structs.RpcLinkStatus => try t.inRpc(allocator, p),
+        structs.RpcKeyPair => try t.inRpc(allocator, p),
+        structs.RpcHub => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -879,13 +1130,64 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcEnumIpTable => try t.outRpc(p),
         structs.RpcDeleteTable => try t.outRpc(p),
         structs.RpcAdminOption => try t.outRpc(p),
+        structs.RpcFarmSetting => try t.outRpc(p),
+        structs.RpcFarmInfo => try t.outRpc(p),
+        structs.RpcEnumFarm => try t.outRpc(p),
+        structs.RpcFarmConnectionStatus => try t.outRpc(p),
+        structs.RpcSetHubOnline => try t.outRpc(p),
+        structs.RpcHubLog => try t.outRpc(p),
+        structs.RpcRadius => try t.outRpc(p),
+        structs.RpcMsg => try t.outRpc(p),
+        structs.RpcKeep => try t.outRpc(p),
+        structs.RpcSyslogSetting => try t.outRpc(p),
+        structs.RpcAcList => try t.outRpc(p),
+        structs.RpcReadLogFile => try t.outRpc(p),
+        structs.RpcConfig => try t.outRpc(p),
+        structs.RpcL3Sw => try t.outRpc(p),
+        structs.RpcEnumL3Sw => try t.outRpc(p),
+        structs.RpcL3If => try t.outRpc(p),
+        structs.RpcEnumL3If => try t.outRpc(p),
+        structs.RpcL3Table => try t.outRpc(p),
+        structs.RpcEnumL3Table => try t.outRpc(p),
+        structs.RpcLocalBridge => try t.outRpc(p),
+        structs.RpcEnumLocalBridge => try t.outRpc(p),
+        structs.RpcBridgeSupport => try t.outRpc(p),
+        structs.RpcEnumEth => try t.outRpc(p),
+        structs.RpcEnumEthVLan => try t.outRpc(p),
+        structs.RpcHubAddCa => try t.outRpc(p),
+        structs.RpcHubEnumCa => try t.outRpc(p),
+        structs.RpcHubGetCa => try t.outRpc(p),
+        structs.RpcHubDeleteCa => try t.outRpc(p),
+        structs.RpcEnumCrl => try t.outRpc(p),
+        structs.RpcCrl => try t.outRpc(p),
+        structs.RpcVhOption => try t.outRpc(p),
+        structs.RpcNatStatus => try t.outRpc(p),
+        structs.RpcEnumNat => try t.outRpc(p),
+        structs.RpcEnumDhcp => try t.outRpc(p),
+        structs.RpcIpSecServices => try t.outRpc(p),
+        structs.RpcEtherIpId => try t.outRpc(p),
+        structs.RpcEnumEtherIpId => try t.outRpc(p),
+        structs.RpcOpenVpnSstpConfig => try t.outRpc(p),
+        structs.RpcDdnsClientStatus => try t.outRpc(p),
+        structs.RpcInternetSetting => try t.outRpc(p),
+        structs.RpcAzureStatus => try t.outRpc(p),
+        structs.RpcSpecialListener => try t.outRpc(p),
+        structs.RpcLicenseStatus => try t.outRpc(p),
+        structs.RpcEnumLicenseKey => try t.outRpc(p),
+        structs.RpcLink => try t.outRpc(p),
+        structs.RpcRenameLink => try t.outRpc(p),
+        structs.RpcEnumLink => try t.outRpc(p),
+        structs.RpcCreateLink => try t.outRpc(p),
+        structs.RpcLinkStatus => try t.outRpc(p),
+        structs.RpcKeyPair => try t.outRpc(p),
+        structs.RpcHub => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
 
 fn freeT(comptime T: type, t: *T, allocator: Allocator) void {
     switch (T) {
-        structs.RpcServerStatus, structs.RpcListener => {},
+        structs.RpcServerStatus, structs.RpcListener, structs.RpcFarmConnectionStatus, structs.RpcNatStatus, structs.RpcBridgeSupport, structs.RpcAzureStatus, structs.RpcSpecialListener, structs.RpcLicenseStatus, structs.RpcConnectionInfo => {},
         else => freeAlloc(T, t, allocator),
     }
 }
@@ -921,6 +1223,54 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcEnumIpTable => t.free(allocator),
         structs.RpcDeleteTable => t.free(allocator),
         structs.RpcAdminOption => t.free(allocator),
+        structs.RpcFarmSetting => t.free(allocator),
+        structs.RpcFarmInfo => t.free(allocator),
+        structs.RpcEnumFarm => t.free(allocator),
+        structs.RpcSetHubOnline => t.free(allocator),
+        structs.RpcHubLog => t.free(allocator),
+        structs.RpcRadius => t.free(allocator),
+        structs.RpcMsg => t.free(allocator),
+        structs.RpcKeep => t.free(allocator),
+        structs.RpcSyslogSetting => t.free(allocator),
+        structs.RpcAcList => t.free(allocator),
+        structs.RpcReadLogFile => t.free(allocator),
+        structs.RpcConfig => t.free(allocator),
+        structs.RpcL3Sw => t.free(allocator),
+        structs.RpcEnumL3Sw => t.free(allocator),
+        structs.RpcL3If => t.free(allocator),
+        structs.RpcEnumL3If => t.free(allocator),
+        structs.RpcL3Table => t.free(allocator),
+        structs.RpcEnumL3Table => t.free(allocator),
+        structs.RpcLocalBridge => t.free(allocator),
+        structs.RpcEnumLocalBridge => t.free(allocator),
+        structs.RpcEnumEth => t.free(allocator),
+        structs.RpcEnumEthVLan => t.free(allocator),
+        structs.RpcHubAddCa => t.free(allocator),
+        structs.RpcHubEnumCa => t.free(allocator),
+        structs.RpcHubGetCa => t.free(allocator),
+        structs.RpcHubDeleteCa => t.free(allocator),
+        structs.RpcEnumCrl => t.free(allocator),
+        structs.RpcCrl => t.free(allocator),
+        structs.RpcVhOption => t.free(allocator),
+        structs.RpcEnumNat => t.free(allocator),
+        structs.RpcEnumDhcp => t.free(allocator),
+        structs.RpcIpSecServices => t.free(allocator),
+        structs.RpcEtherIpId => t.free(allocator),
+        structs.RpcEnumEtherIpId => t.free(allocator),
+        structs.RpcOpenVpnSstpConfig => t.free(allocator),
+        structs.RpcDdnsClientStatus => t.free(allocator),
+        structs.RpcInternetSetting => t.free(allocator),
+        structs.RpcAzureStatus => t.free(allocator),
+        structs.RpcSpecialListener => t.free(allocator),
+        structs.RpcLicenseStatus => t.free(allocator),
+        structs.RpcEnumLicenseKey => t.free(allocator),
+        structs.RpcLink => t.free(allocator),
+        structs.RpcRenameLink => t.free(allocator),
+        structs.RpcEnumLink => t.free(allocator),
+        structs.RpcCreateLink => t.free(allocator),
+        structs.RpcLinkStatus => t.free(allocator),
+        structs.RpcKeyPair => t.free(allocator),
+        structs.RpcHub => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
 }
