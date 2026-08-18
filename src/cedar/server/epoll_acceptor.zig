@@ -11,7 +11,8 @@
 
 const std = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
+const builtin = @import("builtin");
+const linux = if (builtin.os.tag == .linux) std.os.linux else struct {};
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.cedar_server);
@@ -265,8 +266,6 @@ pub const PlatformAcceptor = if (builtin.os.tag == .linux) struct {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-const builtin = @import("builtin");
 
 /// Extract IPv4 address from a sockaddr (host byte order).
 fn extractPeerIp4(addr: *const posix.sockaddr) u32 {
