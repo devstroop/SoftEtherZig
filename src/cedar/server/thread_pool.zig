@@ -53,6 +53,7 @@ const Queue = struct {
     fn push(self: *Queue, job: Job) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.shutdown) return false;
         if (self.count >= MAX_QUEUED_JOBS) return false;
         self.buf[self.tail % MAX_QUEUED_JOBS] = job;
         self.tail +|= 1;
@@ -94,6 +95,7 @@ pub const ThreadPool = struct {
     /// Create and start a thread pool with `worker_count` threads.
     /// Each thread runs `workerFn` consuming jobs from the shared queue.
     pub fn start(allocator: Allocator, worker_count: u32) !ThreadPool {
+        if (worker_count == 0) return error.InvalidWorkerCount;
         const queue = try allocator.create(Queue);
         errdefer allocator.destroy(queue);
         queue.* = .{};

@@ -8,6 +8,7 @@
 //! RUDP/UDP/ICMP/DNS/reverse listeners (#85/#86) slot in without renumbering.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const net = std.net;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
@@ -352,6 +353,10 @@ fn acceptOne(fd: posix.socket_t, peer_ip: u32, peer_port: u16, ctx: *anyopaque) 
 
     // Dispatch to thread pool or spawn a thread.
     const job = self.allocator.create(ConnJob) catch {
+        if (self.options.dos_config) |dc| {
+            dc.decUnestablished();
+            dc.decIpCount(peer_ip);
+        }
         conn.close();
         return;
     };
@@ -367,14 +372,22 @@ fn acceptOne(fd: posix.socket_t, peer_ip: u32, peer_port: u16, ctx: *anyopaque) 
 
     if (self.options.thread_pool) |pool| {
         if (!pool.submit(.{ .callback = connThreadPoolFn, .ctx = job })) {
-            // Queue full — reject.
+            // Queue full — roll back counters and reject.
             self.allocator.destroy(job);
+            if (self.options.dos_config) |dc| {
+                dc.decUnestablished();
+                dc.decIpCount(peer_ip);
+            }
             conn.close();
             return;
         }
     } else {
         const t = std.Thread.spawn(.{}, connThreadFn, .{job}) catch {
             self.allocator.destroy(job);
+            if (self.options.dos_config) |dc| {
+                dc.decUnestablished();
+                dc.decIpCount(peer_ip);
+            }
             conn.close();
             return;
         };
@@ -451,15 +464,43 @@ pub const Listener = struct {
             try Address.parseIp4("127.0.0.1", self.port)
         else
             Address{ .inner = net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port) };
-        var listener = try TcpListener.init(addr, backlog);
-        // Set SO_REUSEPORT for multi-queue accept when requested.
-        if (self.options.reuse_port) {
-            const fd = listener.getFd();
-            if (epoll_mod.trySetReusePort(fd)) {
-                log.info("listener port {d}: SO_REUSEPORT enabled", .{self.port});
+
+        // When using epoll edge-triggered, the listener socket must be
+        // nonblocking so the drain-loop accept returns WouldBlock instead
+        // of blocking. We also need SO_REUSEPORT set before bind for
+        // multi-queue accept. Both require creating the socket manually.
+        const use_epoll = builtin.os.tag == .linux;
+        const need_raw_socket = use_epoll or self.options.reuse_port;
+
+        if (need_raw_socket) {
+            const proto: u32 = posix.IPPROTO.TCP;
+            var flags: u32 = posix.SOCK.STREAM | posix.SOCK.CLOEXEC;
+            if (use_epoll) flags |= posix.SOCK.NONBLOCK;
+            const sockfd = try posix.socket(addr.inner.any.family, flags, proto);
+            errdefer posix.close(sockfd);
+
+            if (self.options.reuse_port and @hasDecl(posix.SO, "REUSEPORT")) {
+                const one: c_int = 1;
+                posix.setsockopt(sockfd, posix.SOL.SOCKET, posix.SO.REUSEPORT, std.mem.asBytes(&one)) catch {};
             }
+            const one: c_int = 1;
+            posix.setsockopt(sockfd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch {};
+
+            var socklen = addr.inner.getOsSockLen();
+            try posix.bind(sockfd, &addr.inner.any, socklen);
+            try posix.listen(sockfd, backlog);
+
+            var listen_addr = std.mem.zeroes(net.Address);
+            posix.getsockname(sockfd, &listen_addr.any, &socklen) catch {};
+            return TcpListener{
+                .listener = .{
+                    .listen_address = listen_addr,
+                    .stream = .{ .handle = sockfd },
+                },
+            };
         }
-        return listener;
+
+        return TcpListener.init(addr, backlog);
     }
 
     /// The accept thread. Mirrors C `ListenerTCPMainLoop` (Listener.c:636):
