@@ -2134,6 +2134,1875 @@ pub const RpcEnumLogFile = struct {
     }
 };
 
+pub const RpcFarmSetting = struct {
+    server_type: u32 = 0,
+    ports: []u32 = &.{},
+    public_ip: u32 = 0,
+    controller_name: []const u8 = "",
+    controller_port: u32 = 0,
+    member_password: []const u8 = "",
+    weight: u32 = 0,
+    controller_only: bool = false,
+
+    pub fn inRpc(self: *RpcFarmSetting, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.server_type = p.getInt("ServerType") orelse 0;
+        self.public_ip = p.getInt("PublicIp") orelse 0;
+        self.controller_name = try dupStr(allocator, p.getStr("ControllerName"));
+        self.controller_port = p.getInt("ControllerPort") orelse 0;
+        if (p.getData("MemberPassword")) |d| self.member_password = try allocator.dupe(u8, d);
+        self.weight = p.getInt("Weight") orelse 0;
+        self.controller_only = p.getBool("ControllerOnly") orelse false;
+        const count = p.getValueCount("Ports");
+        if (count > 0) {
+            self.ports = try allocator.alloc(u32, count);
+            for (0..count) |i| self.ports[i] = p.getIntEx("Ports", i) orelse 0;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcFarmSetting, p: *Pack) !void {
+        try p.addInt("ServerType", self.server_type);
+        for (self.ports, 0..) |port, i| try p.addIntEx("Ports", port, i);
+        try p.addInt("PublicIp", self.public_ip);
+        try p.addStr("ControllerName", self.controller_name);
+        try p.addInt("ControllerPort", self.controller_port);
+        try p.addData("MemberPassword", self.member_password);
+        try p.addInt("Weight", self.weight);
+        try p.addBool("ControllerOnly", self.controller_only);
+    }
+
+    pub fn free(self: *RpcFarmSetting, allocator: Allocator) void {
+        allocator.free(self.ports);
+        allocator.free(self.controller_name);
+        allocator.free(self.member_password);
+        self.* = .{};
+    }
+};
+
+pub const RpcFarmInfo = struct {
+    id: u32 = 0,
+    controller: bool = false,
+    connected_time: u64 = 0,
+    ip: u32 = 0,
+    hostname: []const u8 = "",
+    point: u32 = 0,
+    ports: []u32 = &.{},
+    num_sessions: u32 = 0,
+    num_tcp_connections: u32 = 0,
+    weight: u32 = 0,
+
+    pub fn inRpc(self: *RpcFarmInfo, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.id = p.getInt("Id") orelse 0;
+        self.controller = p.getBool("Controller") orelse false;
+        self.connected_time = p.getInt64("ConnectedTime") orelse 0;
+        self.ip = p.getInt("Ip") orelse 0;
+        self.hostname = try dupStr(allocator, p.getStr("Hostname"));
+        self.point = p.getInt("Point") orelse 0;
+        self.num_sessions = p.getInt("NumSessions") orelse 0;
+        self.num_tcp_connections = p.getInt("NumTcpConnections") orelse 0;
+        self.weight = p.getInt("Weight") orelse 0;
+        const count = p.getValueCount("Ports");
+        if (count > 0) {
+            self.ports = try allocator.alloc(u32, count);
+            for (0..count) |i| self.ports[i] = p.getIntEx("Ports", i) orelse 0;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcFarmInfo, p: *Pack) !void {
+        try p.addInt("Id", self.id);
+        try p.addBool("Controller", self.controller);
+        try p.addInt64("ConnectedTime", self.connected_time);
+        try p.addInt("Ip", self.ip);
+        try p.addStr("Hostname", self.hostname);
+        try p.addInt("Point", self.point);
+        for (self.ports, 0..) |port, i| try p.addIntEx("Ports", port, i);
+        try p.addInt("NumSessions", self.num_sessions);
+        try p.addInt("NumTcpConnections", self.num_tcp_connections);
+        try p.addInt("Weight", self.weight);
+    }
+
+    pub fn free(self: *RpcFarmInfo, allocator: Allocator) void {
+        allocator.free(self.ports);
+        allocator.free(self.hostname);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumFarm = struct {
+    items: []EnumFarmItem = &.{},
+
+    pub const EnumFarmItem = struct {
+        id: u32 = 0,
+        controller: bool = false,
+        connected_time: u64 = 0,
+        ip: u32 = 0,
+        hostname: []const u8 = "",
+        point: u32 = 0,
+        num_sessions: u32 = 0,
+        num_tcp_connections: u32 = 0,
+    };
+
+    pub fn inRpc(self: *RpcEnumFarm, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("Id");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumFarmItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .id = p.getIntEx("Id", i) orelse 0,
+                .controller = p.getBoolEx("Controller", i) orelse false,
+                .connected_time = p.getInt64Ex("ConnectedTime", i) orelse 0,
+                .ip = p.getIntEx("Ip", i) orelse 0,
+                .hostname = try dupStr(allocator, p.getStrEx("Hostname", i)),
+                .point = p.getIntEx("Point", i) orelse 0,
+                .num_sessions = p.getIntEx("NumSessions", i) orelse 0,
+                .num_tcp_connections = p.getIntEx("NumTcpConnections", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumFarm, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("Id", item.id, i);
+            try p.addBoolEx("Controller", item.controller, i);
+            try p.addInt64Ex("ConnectedTime", item.connected_time, i);
+            try p.addIntEx("Ip", item.ip, i);
+            try p.addStrEx("Hostname", item.hostname, i);
+            try p.addIntEx("Point", item.point, i);
+            try p.addIntEx("NumSessions", item.num_sessions, i);
+            try p.addIntEx("NumTcpConnections", item.num_tcp_connections, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumFarm, allocator: Allocator) void {
+        for (self.items) |*item| allocator.free(item.hostname);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcFarmConnectionStatus = struct {
+    ip: u32 = 0,
+    port: u32 = 0,
+    online: bool = false,
+    last_error: u32 = 0,
+    started_time: u64 = 0,
+    current_connected_time: u64 = 0,
+    first_connected_time: u64 = 0,
+    num_connected: u32 = 0,
+    num_try: u32 = 0,
+    num_failed: u32 = 0,
+
+    pub fn inRpc(self: *RpcFarmConnectionStatus, p: *const Pack) void {
+        self.* = .{};
+        self.ip = p.getInt("Ip") orelse 0;
+        self.port = p.getInt("Port") orelse 0;
+        self.online = p.getBool("Online") orelse false;
+        self.last_error = p.getInt("LastError") orelse 0;
+        self.started_time = p.getInt64("StartedTime") orelse 0;
+        self.current_connected_time = p.getInt64("CurrentConnectedTime") orelse 0;
+        self.first_connected_time = p.getInt64("FirstConnectedTime") orelse 0;
+        self.num_connected = p.getInt("NumConnected") orelse 0;
+        self.num_try = p.getInt("NumTry") orelse 0;
+        self.num_failed = p.getInt("NumFailed") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcFarmConnectionStatus, p: *Pack) !void {
+        try p.addInt("Ip", self.ip);
+        try p.addInt("Port", self.port);
+        try p.addBool("Online", self.online);
+        try p.addInt("LastError", self.last_error);
+        try p.addInt64("StartedTime", self.started_time);
+        try p.addInt64("CurrentConnectedTime", self.current_connected_time);
+        try p.addInt64("FirstConnectedTime", self.first_connected_time);
+        try p.addInt("NumConnected", self.num_connected);
+        try p.addInt("NumTry", self.num_try);
+        try p.addInt("NumFailed", self.num_failed);
+    }
+};
+
+pub const RpcSetHubOnline = struct {
+    hub_name: []const u8 = "",
+    online: bool = false,
+
+    pub fn inRpc(self: *RpcSetHubOnline, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.online = p.getBool("Online") orelse false;
+    }
+
+    pub fn outRpc(self: *const RpcSetHubOnline, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addBool("Online", self.online);
+    }
+
+    pub fn free(self: *RpcSetHubOnline, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcHubLog = struct {
+    hub_name: []const u8 = "",
+    save_security_log: bool = false,
+    security_log_switch_type: u32 = 0,
+    save_packet_log: bool = false,
+    packet_log_switch_type: u32 = 0,
+    packet_log_config: []u32 = &.{},
+
+    pub fn inRpc(self: *RpcHubLog, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.save_security_log = p.getBool("SaveSecurityLog") orelse false;
+        self.security_log_switch_type = p.getInt("SecurityLogSwitchType") orelse 0;
+        self.save_packet_log = p.getBool("SavePacketLog") orelse false;
+        self.packet_log_switch_type = p.getInt("PacketLogSwitchType") orelse 0;
+        const count = p.getValueCount("PacketLogConfig");
+        if (count > 0) {
+            self.packet_log_config = try allocator.alloc(u32, count);
+            for (0..count) |i| self.packet_log_config[i] = p.getIntEx("PacketLogConfig", i) orelse 0;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcHubLog, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addBool("SaveSecurityLog", self.save_security_log);
+        try p.addInt("SecurityLogSwitchType", self.security_log_switch_type);
+        try p.addBool("SavePacketLog", self.save_packet_log);
+        try p.addInt("PacketLogSwitchType", self.packet_log_switch_type);
+        for (self.packet_log_config, 0..) |cfg, i| try p.addIntEx("PacketLogConfig", cfg, i);
+    }
+
+    pub fn free(self: *RpcHubLog, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.packet_log_config);
+        self.* = .{};
+    }
+};
+
+pub const RpcRadius = struct {
+    radius_server_name: []const u8 = "",
+    radius_port: u32 = 0,
+    hub_name: []const u8 = "",
+    radius_secret: []const u8 = "",
+    radius_retry_interval: u32 = 0,
+
+    pub fn inRpc(self: *RpcRadius, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.radius_server_name = try dupStr(allocator, p.getStr("RadiusServerName"));
+        self.radius_port = p.getInt("RadiusPort") orelse 0;
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.radius_secret = try dupStr(allocator, p.getStr("RadiusSecret"));
+        self.radius_retry_interval = p.getInt("RadiusRetryInterval") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcRadius, p: *Pack) !void {
+        try p.addStr("RadiusServerName", self.radius_server_name);
+        try p.addInt("RadiusPort", self.radius_port);
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("RadiusSecret", self.radius_secret);
+        try p.addInt("RadiusRetryInterval", self.radius_retry_interval);
+    }
+
+    pub fn free(self: *RpcRadius, allocator: Allocator) void {
+        allocator.free(self.radius_server_name);
+        allocator.free(self.hub_name);
+        allocator.free(self.radius_secret);
+        self.* = .{};
+    }
+};
+
+pub const RpcMsg = struct {
+    hub_name: []const u8 = "",
+    msg: []const u8 = "",
+
+    pub fn inRpc(self: *RpcMsg, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        if (p.getData("Msg")) |d| self.msg = try allocator.dupe(u8, d);
+    }
+
+    pub fn outRpc(self: *const RpcMsg, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addData("Msg", self.msg);
+    }
+
+    pub fn free(self: *RpcMsg, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.msg);
+        self.* = .{};
+    }
+};
+
+pub const RpcConnectionInfo = struct {
+    name: []const u8 = "",
+    ip: u32 = 0,
+    port: u32 = 0,
+    connected_time: u64 = 0,
+    hostname: []const u8 = "",
+    server_str: []const u8 = "",
+    client_str: []const u8 = "",
+    server_ver: u32 = 0,
+    server_build: u32 = 0,
+    client_ver: u32 = 0,
+    client_build: u32 = 0,
+    conn_type: u32 = 0,
+
+    pub fn inRpc(self: *RpcConnectionInfo, p: *const Pack) void {
+        self.* = .{};
+        self.name = p.getStr("Name") orelse "";
+        self.ip = p.getInt("Ip") orelse 0;
+        self.port = p.getInt("Port") orelse 0;
+        self.connected_time = p.getInt64("ConnectedTime") orelse 0;
+        self.hostname = p.getStr("Hostname") orelse "";
+        self.server_str = p.getStr("ServerStr") orelse "";
+        self.client_str = p.getStr("ClientStr") orelse "";
+        self.server_ver = p.getInt("ServerVer") orelse 0;
+        self.server_build = p.getInt("ServerBuild") orelse 0;
+        self.client_ver = p.getInt("ClientVer") orelse 0;
+        self.client_build = p.getInt("ClientBuild") orelse 0;
+        self.conn_type = p.getInt("Type") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcConnectionInfo, p: *Pack) !void {
+        try p.addStr("Name", self.name);
+        try p.addInt("Ip", self.ip);
+        try p.addInt("Port", self.port);
+        try p.addInt64("ConnectedTime", self.connected_time);
+        try p.addStr("Hostname", self.hostname);
+        try p.addStr("ServerStr", self.server_str);
+        try p.addStr("ClientStr", self.client_str);
+        try p.addInt("ServerVer", self.server_ver);
+        try p.addInt("ServerBuild", self.server_build);
+        try p.addInt("ClientVer", self.client_ver);
+        try p.addInt("ClientBuild", self.client_build);
+        try p.addInt("Type", self.conn_type);
+    }
+};
+
+pub const RpcKeep = struct {
+    use_keep_connect: bool = false,
+    keep_connect_host: []const u8 = "",
+    keep_connect_port: u32 = 0,
+    keep_connect_protocol: u32 = 0,
+    keep_connect_interval: u32 = 0,
+
+    pub fn inRpc(self: *RpcKeep, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.use_keep_connect = p.getBool("UseKeepConnect") orelse false;
+        self.keep_connect_host = try dupStr(allocator, p.getStr("KeepConnectHost"));
+        self.keep_connect_port = p.getInt("KeepConnectPort") orelse 0;
+        self.keep_connect_protocol = p.getInt("KeepConnectProtocol") orelse 0;
+        self.keep_connect_interval = p.getInt("KeepConnectInterval") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcKeep, p: *Pack) !void {
+        try p.addBool("UseKeepConnect", self.use_keep_connect);
+        try p.addStr("KeepConnectHost", self.keep_connect_host);
+        try p.addInt("KeepConnectPort", self.keep_connect_port);
+        try p.addInt("KeepConnectProtocol", self.keep_connect_protocol);
+        try p.addInt("KeepConnectInterval", self.keep_connect_interval);
+    }
+
+    pub fn free(self: *RpcKeep, allocator: Allocator) void {
+        allocator.free(self.keep_connect_host);
+        self.* = .{};
+    }
+};
+
+pub const RpcSyslogSetting = struct {
+    save_type: u32 = 0,
+    port: u32 = 0,
+    hostname: []const u8 = "",
+
+    pub fn inRpc(self: *RpcSyslogSetting, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.save_type = p.getInt("SaveType") orelse 0;
+        self.port = p.getInt("Port") orelse 0;
+        self.hostname = try dupStr(allocator, p.getStr("Hostname"));
+    }
+
+    pub fn outRpc(self: *const RpcSyslogSetting, p: *Pack) !void {
+        try p.addInt("SaveType", self.save_type);
+        try p.addInt("Port", self.port);
+        try p.addStr("Hostname", self.hostname);
+    }
+
+    pub fn free(self: *RpcSyslogSetting, allocator: Allocator) void {
+        allocator.free(self.hostname);
+        self.* = .{};
+    }
+};
+
+pub const RpcAcList = struct {
+    hub_name: []const u8 = "",
+    items: []AcItem = &.{},
+
+    pub const AcItem = struct {
+        ip_address: u32 = 0,
+        id: u32 = 0,
+        deny: bool = false,
+        masked: bool = false,
+        subnet_mask: u32 = 0,
+        priority: u32 = 0,
+    };
+
+    pub fn inRpc(self: *RpcAcList, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("IpAddress");
+        if (count == 0) return;
+        self.items = try allocator.alloc(AcItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .ip_address = p.getIntEx("IpAddress", i) orelse 0,
+                .id = p.getIntEx("Id", i) orelse 0,
+                .deny = p.getBoolEx("Deny", i) orelse false,
+                .masked = p.getBoolEx("Masked", i) orelse false,
+                .subnet_mask = p.getIntEx("SubnetMask", i) orelse 0,
+                .priority = p.getIntEx("Priority", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcAcList, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("IpAddress", item.ip_address, i);
+            try p.addIntEx("Id", item.id, i);
+            try p.addBoolEx("Deny", item.deny, i);
+            try p.addBoolEx("Masked", item.masked, i);
+            try p.addIntEx("SubnetMask", item.subnet_mask, i);
+            try p.addIntEx("Priority", item.priority, i);
+        }
+    }
+
+    pub fn free(self: *RpcAcList, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcReadLogFile = struct {
+    file_path: []const u8 = "",
+    server_name: []const u8 = "",
+    offset: u32 = 0,
+    buffer: []const u8 = "",
+
+    pub fn inRpc(self: *RpcReadLogFile, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.file_path = try dupStr(allocator, p.getStr("FilePath"));
+        self.server_name = try dupStr(allocator, p.getStr("ServerName"));
+        self.offset = p.getInt("Offset") orelse 0;
+        if (p.getData("Buffer")) |d| self.buffer = try allocator.dupe(u8, d);
+    }
+
+    pub fn outRpc(self: *const RpcReadLogFile, p: *Pack) !void {
+        try p.addStr("FilePath", self.file_path);
+        try p.addStr("ServerName", self.server_name);
+        try p.addInt("Offset", self.offset);
+        try p.addData("Buffer", self.buffer);
+    }
+
+    pub fn free(self: *RpcReadLogFile, allocator: Allocator) void {
+        allocator.free(self.file_path);
+        allocator.free(self.server_name);
+        allocator.free(self.buffer);
+        self.* = .{};
+    }
+};
+
+pub const RpcConfig = struct {
+    file_name: []const u8 = "",
+    file_data: []const u8 = "",
+
+    pub fn inRpc(self: *RpcConfig, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.file_name = try dupStr(allocator, p.getStr("FileName"));
+        if (p.getData("FileData")) |d| self.file_data = try allocator.dupe(u8, d);
+    }
+
+    pub fn outRpc(self: *const RpcConfig, p: *Pack) !void {
+        try p.addStr("FileName", self.file_name);
+        try p.addData("FileData", self.file_data);
+    }
+
+    pub fn free(self: *RpcConfig, allocator: Allocator) void {
+        allocator.free(self.file_name);
+        allocator.free(self.file_data);
+        self.* = .{};
+    }
+};
+
+pub const RpcL3Sw = struct {
+    name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcL3Sw, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.name = try dupStr(allocator, p.getStr("Name"));
+    }
+
+    pub fn outRpc(self: *const RpcL3Sw, p: *Pack) !void {
+        try p.addStr("Name", self.name);
+    }
+
+    pub fn free(self: *RpcL3Sw, allocator: Allocator) void {
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumL3Sw = struct {
+    items: []EnumL3SwItem = &.{},
+
+    pub const EnumL3SwItem = struct {
+        name: []const u8 = "",
+        num_interfaces: u32 = 0,
+        num_tables: u32 = 0,
+        active: bool = false,
+        online: bool = false,
+    };
+
+    pub fn inRpc(self: *RpcEnumL3Sw, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("Name");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumL3SwItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .name = try dupStr(allocator, p.getStrEx("Name", i)),
+                .num_interfaces = p.getIntEx("NumInterfaces", i) orelse 0,
+                .num_tables = p.getIntEx("NumTables", i) orelse 0,
+                .active = p.getBoolEx("Active", i) orelse false,
+                .online = p.getBoolEx("Online", i) orelse false,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumL3Sw, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("Name", item.name, i);
+            try p.addIntEx("NumInterfaces", item.num_interfaces, i);
+            try p.addIntEx("NumTables", item.num_tables, i);
+            try p.addBoolEx("Active", item.active, i);
+            try p.addBoolEx("Online", item.online, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumL3Sw, allocator: Allocator) void {
+        for (self.items) |*item| allocator.free(item.name);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcL3If = struct {
+    name: []const u8 = "",
+    hub_name: []const u8 = "",
+    ip_address: u32 = 0,
+    subnet_mask: u32 = 0,
+
+    pub fn inRpc(self: *RpcL3If, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.ip_address = p.getInt("IpAddress") orelse 0;
+        self.subnet_mask = p.getInt("SubnetMask") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcL3If, p: *Pack) !void {
+        try p.addStr("Name", self.name);
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("IpAddress", self.ip_address);
+        try p.addInt("SubnetMask", self.subnet_mask);
+    }
+
+    pub fn free(self: *RpcL3If, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumL3If = struct {
+    items: []EnumL3IfItem = &.{},
+
+    pub const EnumL3IfItem = struct {
+        name: []const u8 = "",
+        ip_address: u32 = 0,
+        subnet_mask: u32 = 0,
+    };
+
+    pub fn inRpc(self: *RpcEnumL3If, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("Name");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumL3IfItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .name = try dupStr(allocator, p.getStrEx("Name", i)),
+                .ip_address = p.getIntEx("IpAddress", i) orelse 0,
+                .subnet_mask = p.getIntEx("SubnetMask", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumL3If, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("Name", item.name, i);
+            try p.addIntEx("IpAddress", item.ip_address, i);
+            try p.addIntEx("SubnetMask", item.subnet_mask, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumL3If, allocator: Allocator) void {
+        for (self.items) |*item| allocator.free(item.name);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcL3Table = struct {
+    name: []const u8 = "",
+    network_address: u32 = 0,
+    subnet_mask: u32 = 0,
+    gateway_address: u32 = 0,
+    metric: u32 = 0,
+
+    pub fn inRpc(self: *RpcL3Table, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        self.network_address = p.getInt("NetworkAddress") orelse 0;
+        self.subnet_mask = p.getInt("SubnetMask") orelse 0;
+        self.gateway_address = p.getInt("GatewayAddress") orelse 0;
+        self.metric = p.getInt("Metric") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcL3Table, p: *Pack) !void {
+        try p.addStr("Name", self.name);
+        try p.addInt("NetworkAddress", self.network_address);
+        try p.addInt("SubnetMask", self.subnet_mask);
+        try p.addInt("GatewayAddress", self.gateway_address);
+        try p.addInt("Metric", self.metric);
+    }
+
+    pub fn free(self: *RpcL3Table, allocator: Allocator) void {
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumL3Table = struct {
+    items: []EnumL3TableItem = &.{},
+
+    pub const EnumL3TableItem = struct {
+        name: []const u8 = "",
+        network_address: u32 = 0,
+        subnet_mask: u32 = 0,
+        gateway_address: u32 = 0,
+        metric: u32 = 0,
+    };
+
+    pub fn inRpc(self: *RpcEnumL3Table, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("Name");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumL3TableItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .name = try dupStr(allocator, p.getStrEx("Name", i)),
+                .network_address = p.getIntEx("NetworkAddress", i) orelse 0,
+                .subnet_mask = p.getIntEx("SubnetMask", i) orelse 0,
+                .gateway_address = p.getIntEx("GatewayAddress", i) orelse 0,
+                .metric = p.getIntEx("Metric", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumL3Table, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("Name", item.name, i);
+            try p.addIntEx("NetworkAddress", item.network_address, i);
+            try p.addIntEx("SubnetMask", item.subnet_mask, i);
+            try p.addIntEx("GatewayAddress", item.gateway_address, i);
+            try p.addIntEx("Metric", item.metric, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumL3Table, allocator: Allocator) void {
+        for (self.items) |*item| allocator.free(item.name);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcLocalBridge = struct {
+    device_name: []const u8 = "",
+    hub_name_lb: []const u8 = "",
+    tap_mode: bool = false,
+
+    pub fn inRpc(self: *RpcLocalBridge, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.device_name = try dupStr(allocator, p.getStr("DeviceName"));
+        self.hub_name_lb = try dupStr(allocator, p.getStr("HubNameLB"));
+        self.tap_mode = p.getBool("TapMode") orelse false;
+    }
+
+    pub fn outRpc(self: *const RpcLocalBridge, p: *Pack) !void {
+        try p.addStr("DeviceName", self.device_name);
+        try p.addStr("HubNameLB", self.hub_name_lb);
+        try p.addBool("TapMode", self.tap_mode);
+    }
+
+    pub fn free(self: *RpcLocalBridge, allocator: Allocator) void {
+        allocator.free(self.device_name);
+        allocator.free(self.hub_name_lb);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumLocalBridge = struct {
+    items: []EnumLocalBridgeItem = &.{},
+
+    pub const EnumLocalBridgeItem = struct {
+        device_name: []const u8 = "",
+        hub_name_lb: []const u8 = "",
+        online: bool = false,
+        active: bool = false,
+        tap_mode: bool = false,
+    };
+
+    pub fn inRpc(self: *RpcEnumLocalBridge, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("DeviceName");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumLocalBridgeItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .device_name = try dupStr(allocator, p.getStrEx("DeviceName", i)),
+                .hub_name_lb = try dupStr(allocator, p.getStrEx("HubNameLB", i)),
+                .online = p.getBoolEx("Online", i) orelse false,
+                .active = p.getBoolEx("Active", i) orelse false,
+                .tap_mode = p.getBoolEx("TapMode", i) orelse false,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumLocalBridge, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("DeviceName", item.device_name, i);
+            try p.addStrEx("HubNameLB", item.hub_name_lb, i);
+            try p.addBoolEx("Online", item.online, i);
+            try p.addBoolEx("Active", item.active, i);
+            try p.addBoolEx("TapMode", item.tap_mode, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumLocalBridge, allocator: Allocator) void {
+        for (self.items) |*item| {
+            allocator.free(item.device_name);
+            allocator.free(item.hub_name_lb);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcBridgeSupport = struct {
+    is_bridge_supported_os: bool = false,
+    is_winpcap_needed: bool = false,
+
+    pub fn inRpc(self: *RpcBridgeSupport, p: *const Pack) void {
+        self.* = .{};
+        self.is_bridge_supported_os = p.getBool("IsBridgeSupportedOs") orelse false;
+        self.is_winpcap_needed = p.getBool("IsWinPcapNeeded") orelse false;
+    }
+
+    pub fn outRpc(self: *const RpcBridgeSupport, p: *Pack) !void {
+        try p.addBool("IsBridgeSupportedOs", self.is_bridge_supported_os);
+        try p.addBool("IsWinPcapNeeded", self.is_winpcap_needed);
+    }
+};
+
+pub const RpcEnumEth = struct {
+    items: []EnumEthItem = &.{},
+
+    pub const EnumEthItem = struct {
+        device_name: []const u8 = "",
+        network_connection_name: []const u8 = "",
+    };
+
+    pub fn inRpc(self: *RpcEnumEth, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("DeviceName");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumEthItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .device_name = try dupStr(allocator, p.getStrEx("DeviceName", i)),
+                .network_connection_name = try dupStr(allocator, p.getStrEx("NetworkConnectionName", i)),
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumEth, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("DeviceName", item.device_name, i);
+            try p.addStrEx("NetworkConnectionName", item.network_connection_name, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumEth, allocator: Allocator) void {
+        for (self.items) |*item| {
+            allocator.free(item.device_name);
+            allocator.free(item.network_connection_name);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumEthVLan = struct {
+    items: []EnumEthVLanItem = &.{},
+
+    pub const EnumEthVLanItem = struct {
+        device_name: []const u8 = "",
+        guid: []const u8 = "",
+        device_instance_id: []const u8 = "",
+        driver_name: []const u8 = "",
+        driver_type: []const u8 = "",
+        support: bool = false,
+        enabled: bool = false,
+    };
+
+    pub fn inRpc(self: *RpcEnumEthVLan, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("DeviceName");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumEthVLanItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .device_name = try dupStr(allocator, p.getStrEx("DeviceName", i)),
+                .guid = try dupStr(allocator, p.getStrEx("Guid", i)),
+                .device_instance_id = try dupStr(allocator, p.getStrEx("DeviceInstanceId", i)),
+                .driver_name = try dupStr(allocator, p.getStrEx("DriverName", i)),
+                .driver_type = try dupStr(allocator, p.getStrEx("DriverType", i)),
+                .support = p.getBoolEx("Support", i) orelse false,
+                .enabled = p.getBoolEx("Enabled", i) orelse false,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumEthVLan, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("DeviceName", item.device_name, i);
+            try p.addStrEx("Guid", item.guid, i);
+            try p.addStrEx("DeviceInstanceId", item.device_instance_id, i);
+            try p.addStrEx("DriverName", item.driver_name, i);
+            try p.addStrEx("DriverType", item.driver_type, i);
+            try p.addBoolEx("Support", item.support, i);
+            try p.addBoolEx("Enabled", item.enabled, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumEthVLan, allocator: Allocator) void {
+        for (self.items) |*item| {
+            allocator.free(item.device_name);
+            allocator.free(item.guid);
+            allocator.free(item.device_instance_id);
+            allocator.free(item.driver_name);
+            allocator.free(item.driver_type);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcHubAddCa = struct {
+    hub_name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcHubAddCa, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+    }
+
+    pub fn outRpc(self: *const RpcHubAddCa, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+    }
+
+    pub fn free(self: *RpcHubAddCa, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcHubEnumCa = struct {
+    hub_name: []const u8 = "",
+    items: []EnumCaItem = &.{},
+
+    pub const EnumCaItem = struct {
+        key: u32 = 0,
+        subject_name: []const u8 = "",
+        issuer_name: []const u8 = "",
+        expires: u64 = 0,
+    };
+
+    pub fn inRpc(self: *RpcHubEnumCa, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Key");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumCaItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .key = p.getIntEx("Key", i) orelse 0,
+                .subject_name = try dupStr(allocator, p.getUniStrEx("SubjectName", i)),
+                .issuer_name = try dupStr(allocator, p.getUniStrEx("IssuerName", i)),
+                .expires = p.getInt64Ex("Expires", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcHubEnumCa, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("Key", item.key, i);
+            try p.addUniStrEx("SubjectName", item.subject_name, i);
+            try p.addUniStrEx("IssuerName", item.issuer_name, i);
+            try p.addInt64Ex("Expires", item.expires, i);
+        }
+    }
+
+    pub fn free(self: *RpcHubEnumCa, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.items) |*item| {
+            allocator.free(item.subject_name);
+            allocator.free(item.issuer_name);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcHubGetCa = struct {
+    hub_name: []const u8 = "",
+    key: u32 = 0,
+
+    pub fn inRpc(self: *RpcHubGetCa, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.key = p.getInt("Key") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcHubGetCa, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("Key", self.key);
+    }
+
+    pub fn free(self: *RpcHubGetCa, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcHubDeleteCa = struct {
+    hub_name: []const u8 = "",
+    key: u32 = 0,
+
+    pub fn inRpc(self: *RpcHubDeleteCa, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.key = p.getInt("Key") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcHubDeleteCa, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("Key", self.key);
+    }
+
+    pub fn free(self: *RpcHubDeleteCa, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumCrl = struct {
+    hub_name: []const u8 = "",
+    items: []EnumCrlItem = &.{},
+
+    pub const EnumCrlItem = struct {
+        key: u32 = 0,
+        crl_info: []const u8 = "",
+    };
+
+    pub fn inRpc(self: *RpcEnumCrl, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Key");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumCrlItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .key = p.getIntEx("Key", i) orelse 0,
+                .crl_info = try dupStr(allocator, p.getUniStrEx("CrlInfo", i)),
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumCrl, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("Key", item.key, i);
+            try p.addUniStrEx("CrlInfo", item.crl_info, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumCrl, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.items) |*item| allocator.free(item.crl_info);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcCrl = struct {
+    hub_name: []const u8 = "",
+    key: u32 = 0,
+    serial: []const u8 = "",
+    common_name: []const u8 = "",
+    organization: []const u8 = "",
+    unit: []const u8 = "",
+    country: []const u8 = "",
+    state: []const u8 = "",
+    local: []const u8 = "",
+
+    pub fn inRpc(self: *RpcCrl, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.key = p.getInt("Key") orelse 0;
+        if (p.getData("Serial")) |d| self.serial = try allocator.dupe(u8, d);
+        self.common_name = try dupStr(allocator, p.getUniStr("CommonName"));
+        self.organization = try dupStr(allocator, p.getUniStr("Organization"));
+        self.unit = try dupStr(allocator, p.getUniStr("Unit"));
+        self.country = try dupStr(allocator, p.getUniStr("Country"));
+        self.state = try dupStr(allocator, p.getUniStr("State"));
+        self.local = try dupStr(allocator, p.getUniStr("Local"));
+    }
+
+    pub fn outRpc(self: *const RpcCrl, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addInt("Key", self.key);
+        try p.addData("Serial", self.serial);
+        try p.addUniStr("CommonName", self.common_name);
+        try p.addUniStr("Organization", self.organization);
+        try p.addUniStr("Unit", self.unit);
+        try p.addUniStr("Country", self.country);
+        try p.addUniStr("State", self.state);
+        try p.addUniStr("Local", self.local);
+    }
+
+    pub fn free(self: *RpcCrl, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.serial);
+        allocator.free(self.common_name);
+        allocator.free(self.organization);
+        allocator.free(self.unit);
+        allocator.free(self.country);
+        allocator.free(self.state);
+        allocator.free(self.local);
+        self.* = .{};
+    }
+};
+
+pub const RpcVhOption = struct {
+    mac_address: [6]u8 = [_]u8{0} ** 6,
+    ip: u32 = 0,
+    mask: u32 = 0,
+    use_nat: bool = false,
+    mtu: u32 = 0,
+    nat_tcp_timeout: u32 = 0,
+    nat_udp_timeout: u32 = 0,
+    use_dhcp: bool = false,
+    dhcp_lease_ip_start: u32 = 0,
+    dhcp_lease_ip_end: u32 = 0,
+    dhcp_subnet_mask: u32 = 0,
+    dhcp_expire_time_span: u32 = 0,
+    dhcp_gateway_address: u32 = 0,
+    dhcp_dns_server_address: u32 = 0,
+    dhcp_dns_server_address2: u32 = 0,
+    dhcp_domain_name: []const u8 = "",
+    save_log: bool = false,
+    rpc_hub_name: []const u8 = "",
+    apply_dhcp_push_routes: bool = false,
+    dhcp_push_routes: []const u8 = "",
+
+    pub fn inRpc(self: *RpcVhOption, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        if (p.getData("MacAddress")) |d| {
+            const len = @min(d.len, 6);
+            @memcpy(self.mac_address[0..len], d[0..len]);
+        }
+        self.ip = p.getInt("Ip") orelse 0;
+        self.mask = p.getInt("Mask") orelse 0;
+        self.use_nat = p.getBool("UseNat") orelse false;
+        self.mtu = p.getInt("Mtu") orelse 0;
+        self.nat_tcp_timeout = p.getInt("NatTcpTimeout") orelse 0;
+        self.nat_udp_timeout = p.getInt("NatUdpTimeout") orelse 0;
+        self.use_dhcp = p.getBool("UseDhcp") orelse false;
+        self.dhcp_lease_ip_start = p.getInt("DhcpLeaseIPStart") orelse 0;
+        self.dhcp_lease_ip_end = p.getInt("DhcpLeaseIPEnd") orelse 0;
+        self.dhcp_subnet_mask = p.getInt("DhcpSubnetMask") orelse 0;
+        self.dhcp_expire_time_span = p.getInt("DhcpExpireTimeSpan") orelse 0;
+        self.dhcp_gateway_address = p.getInt("DhcpGatewayAddress") orelse 0;
+        self.dhcp_dns_server_address = p.getInt("DhcpDnsServerAddress") orelse 0;
+        self.dhcp_dns_server_address2 = p.getInt("DhcpDnsServerAddress2") orelse 0;
+        self.dhcp_domain_name = try dupStr(allocator, p.getStr("DhcpDomainName"));
+        self.save_log = p.getBool("SaveLog") orelse false;
+        self.rpc_hub_name = try dupStr(allocator, p.getStr("RpcHubName"));
+        self.apply_dhcp_push_routes = p.getBool("ApplyDhcpPushRoutes") orelse false;
+        self.dhcp_push_routes = try dupStr(allocator, p.getStr("DhcpPushRoutes"));
+    }
+
+    pub fn outRpc(self: *const RpcVhOption, p: *Pack) !void {
+        try p.addData("MacAddress", &self.mac_address);
+        try p.addInt("Ip", self.ip);
+        try p.addInt("Mask", self.mask);
+        try p.addBool("UseNat", self.use_nat);
+        try p.addInt("Mtu", self.mtu);
+        try p.addInt("NatTcpTimeout", self.nat_tcp_timeout);
+        try p.addInt("NatUdpTimeout", self.nat_udp_timeout);
+        try p.addBool("UseDhcp", self.use_dhcp);
+        try p.addInt("DhcpLeaseIPStart", self.dhcp_lease_ip_start);
+        try p.addInt("DhcpLeaseIPEnd", self.dhcp_lease_ip_end);
+        try p.addInt("DhcpSubnetMask", self.dhcp_subnet_mask);
+        try p.addInt("DhcpExpireTimeSpan", self.dhcp_expire_time_span);
+        try p.addInt("DhcpGatewayAddress", self.dhcp_gateway_address);
+        try p.addInt("DhcpDnsServerAddress", self.dhcp_dns_server_address);
+        try p.addInt("DhcpDnsServerAddress2", self.dhcp_dns_server_address2);
+        try p.addStr("DhcpDomainName", self.dhcp_domain_name);
+        try p.addBool("SaveLog", self.save_log);
+        try p.addStr("RpcHubName", self.rpc_hub_name);
+        try p.addBool("ApplyDhcpPushRoutes", self.apply_dhcp_push_routes);
+        try p.addStr("DhcpPushRoutes", self.dhcp_push_routes);
+    }
+
+    pub fn free(self: *RpcVhOption, allocator: Allocator) void {
+        allocator.free(self.dhcp_domain_name);
+        allocator.free(self.rpc_hub_name);
+        allocator.free(self.dhcp_push_routes);
+        self.* = .{};
+    }
+};
+
+pub const RpcNatStatus = struct {
+    num_tcp_sessions: u32 = 0,
+    num_udp_sessions: u32 = 0,
+    num_icmp_sessions: u32 = 0,
+    num_dns_sessions: u32 = 0,
+    num_dhcp_clients: u32 = 0,
+    is_kernel_mode: bool = false,
+    is_raw_ip_mode: bool = false,
+    hub_name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcNatStatus, p: *const Pack) void {
+        self.* = .{};
+        self.num_tcp_sessions = p.getInt("NumTcpSessions") orelse 0;
+        self.num_udp_sessions = p.getInt("NumUdpSessions") orelse 0;
+        self.num_icmp_sessions = p.getInt("NumIcmpSessions") orelse 0;
+        self.num_dns_sessions = p.getInt("NumDnsSessions") orelse 0;
+        self.num_dhcp_clients = p.getInt("NumDhcpClients") orelse 0;
+        self.is_kernel_mode = p.getBool("IsKernelMode") orelse false;
+        self.is_raw_ip_mode = p.getBool("IsRawIpMode") orelse false;
+        self.hub_name = p.getStr("HubName") orelse "";
+    }
+
+    pub fn outRpc(self: *const RpcNatStatus, p: *Pack) !void {
+        try p.addInt("NumTcpSessions", self.num_tcp_sessions);
+        try p.addInt("NumUdpSessions", self.num_udp_sessions);
+        try p.addInt("NumIcmpSessions", self.num_icmp_sessions);
+        try p.addInt("NumDnsSessions", self.num_dns_sessions);
+        try p.addInt("NumDhcpClients", self.num_dhcp_clients);
+        try p.addBool("IsKernelMode", self.is_kernel_mode);
+        try p.addBool("IsRawIpMode", self.is_raw_ip_mode);
+        try p.addStr("HubName", self.hub_name);
+    }
+};
+
+pub const RpcEnumNat = struct {
+    hub_name: []const u8 = "",
+    items: []EnumNatItem = &.{},
+
+    pub const EnumNatItem = struct {
+        id: u32 = 0,
+        protocol: u32 = 0,
+        src_ip: u32 = 0,
+        src_host: []const u8 = "",
+        src_port: u32 = 0,
+        dest_ip: u32 = 0,
+        dest_host: []const u8 = "",
+        dest_port: u32 = 0,
+        created_time: u64 = 0,
+        last_comm_time: u64 = 0,
+        send_size: u64 = 0,
+        recv_size: u64 = 0,
+        tcp_status: u32 = 0,
+    };
+
+    pub fn inRpc(self: *RpcEnumNat, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Id");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumNatItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .id = p.getIntEx("Id", i) orelse 0,
+                .protocol = p.getIntEx("Protocol", i) orelse 0,
+                .src_ip = p.getIntEx("SrcIp", i) orelse 0,
+                .src_host = try dupStr(allocator, p.getStrEx("SrcHost", i)),
+                .src_port = p.getIntEx("SrcPort", i) orelse 0,
+                .dest_ip = p.getIntEx("DestIp", i) orelse 0,
+                .dest_host = try dupStr(allocator, p.getStrEx("DestHost", i)),
+                .dest_port = p.getIntEx("DestPort", i) orelse 0,
+                .created_time = p.getInt64Ex("CreatedTime", i) orelse 0,
+                .last_comm_time = p.getInt64Ex("LastCommTime", i) orelse 0,
+                .send_size = p.getInt64Ex("SendSize", i) orelse 0,
+                .recv_size = p.getInt64Ex("RecvSize", i) orelse 0,
+                .tcp_status = p.getIntEx("TcpStatus", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumNat, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("Id", item.id, i);
+            try p.addIntEx("Protocol", item.protocol, i);
+            try p.addIntEx("SrcIp", item.src_ip, i);
+            try p.addStrEx("SrcHost", item.src_host, i);
+            try p.addIntEx("SrcPort", item.src_port, i);
+            try p.addIntEx("DestIp", item.dest_ip, i);
+            try p.addStrEx("DestHost", item.dest_host, i);
+            try p.addIntEx("DestPort", item.dest_port, i);
+            try p.addInt64Ex("CreatedTime", item.created_time, i);
+            try p.addInt64Ex("LastCommTime", item.last_comm_time, i);
+            try p.addInt64Ex("SendSize", item.send_size, i);
+            try p.addInt64Ex("RecvSize", item.recv_size, i);
+            try p.addIntEx("TcpStatus", item.tcp_status, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumNat, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.items) |*item| {
+            allocator.free(item.src_host);
+            allocator.free(item.dest_host);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumDhcp = struct {
+    hub_name: []const u8 = "",
+    items: []EnumDhcpItem = &.{},
+
+    pub const EnumDhcpItem = struct {
+        id: u32 = 0,
+        leased_time: u64 = 0,
+        expire_time: u64 = 0,
+        mac_address: [6]u8 = [_]u8{0} ** 6,
+        ip_address: u32 = 0,
+        mask: u32 = 0,
+        hostname: []const u8 = "",
+    };
+
+    pub fn inRpc(self: *RpcEnumDhcp, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("Id");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumDhcpItem, count);
+        for (0..count) |i| {
+            var item = EnumDhcpItem{
+                .id = p.getIntEx("Id", i) orelse 0,
+                .leased_time = p.getInt64Ex("LeasedTime", i) orelse 0,
+                .expire_time = p.getInt64Ex("ExpireTime", i) orelse 0,
+                .ip_address = p.getIntEx("IpAddress", i) orelse 0,
+                .mask = p.getIntEx("Mask", i) orelse 0,
+                .hostname = try dupStr(allocator, p.getStrEx("Hostname", i)),
+            };
+            if (p.getDataEx("MacAddress", i)) |d| {
+                const len = @min(d.len, 6);
+                @memcpy(item.mac_address[0..len], d[0..len]);
+            }
+            self.items[i] = item;
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumDhcp, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("Id", item.id, i);
+            try p.addInt64Ex("LeasedTime", item.leased_time, i);
+            try p.addInt64Ex("ExpireTime", item.expire_time, i);
+            try p.addDataEx("MacAddress", &item.mac_address, i);
+            try p.addIntEx("IpAddress", item.ip_address, i);
+            try p.addIntEx("Mask", item.mask, i);
+            try p.addStrEx("Hostname", item.hostname, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumDhcp, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.items) |*item| allocator.free(item.hostname);
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcIpSecServices = struct {
+    l2tp_raw: bool = false,
+    l2tp_ipsec: bool = false,
+    etherip_ipsec: bool = false,
+    ipsec_secret: []const u8 = "",
+    l2tp_default_hub: []const u8 = "",
+
+    pub fn inRpc(self: *RpcIpSecServices, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.l2tp_raw = p.getBool("L2TP_Raw") orelse false;
+        self.l2tp_ipsec = p.getBool("L2TP_IPsec") orelse false;
+        self.etherip_ipsec = p.getBool("EtherIP_IPsec") orelse false;
+        self.ipsec_secret = try dupStr(allocator, p.getStr("IPsec_Secret"));
+        self.l2tp_default_hub = try dupStr(allocator, p.getStr("L2TP_DefaultHub"));
+    }
+
+    pub fn outRpc(self: *const RpcIpSecServices, p: *Pack) !void {
+        try p.addBool("L2TP_Raw", self.l2tp_raw);
+        try p.addBool("L2TP_IPsec", self.l2tp_ipsec);
+        try p.addBool("EtherIP_IPsec", self.etherip_ipsec);
+        try p.addStr("IPsec_Secret", self.ipsec_secret);
+        try p.addStr("L2TP_DefaultHub", self.l2tp_default_hub);
+    }
+
+    pub fn free(self: *RpcIpSecServices, allocator: Allocator) void {
+        allocator.free(self.ipsec_secret);
+        allocator.free(self.l2tp_default_hub);
+        self.* = .{};
+    }
+};
+
+pub const RpcEtherIpId = struct {
+    id: []const u8 = "",
+    hub_name: []const u8 = "",
+    user_name: []const u8 = "",
+    password: []const u8 = "",
+
+    pub fn inRpc(self: *RpcEtherIpId, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.id = try dupStr(allocator, p.getStr("Id"));
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.user_name = try dupStr(allocator, p.getStr("UserName"));
+        self.password = try dupStr(allocator, p.getStr("Password"));
+    }
+
+    pub fn outRpc(self: *const RpcEtherIpId, p: *Pack) !void {
+        try p.addStr("Id", self.id);
+        try p.addStr("HubName", self.hub_name);
+        try p.addStr("UserName", self.user_name);
+        try p.addStr("Password", self.password);
+    }
+
+    pub fn free(self: *RpcEtherIpId, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.hub_name);
+        allocator.free(self.user_name);
+        allocator.free(self.password);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumEtherIpId = struct {
+    items: []EnumEtherIpIdItem = &.{},
+
+    pub const EnumEtherIpIdItem = struct {
+        id: []const u8 = "",
+        hub_name: []const u8 = "",
+        user_name: []const u8 = "",
+        password: []const u8 = "",
+    };
+
+    pub fn inRpc(self: *RpcEnumEtherIpId, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("Id");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumEtherIpIdItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .id = try dupStr(allocator, p.getStrEx("Id", i)),
+                .hub_name = try dupStr(allocator, p.getStrEx("HubName", i)),
+                .user_name = try dupStr(allocator, p.getStrEx("UserName", i)),
+                .password = try dupStr(allocator, p.getStrEx("Password", i)),
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumEtherIpId, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addStrEx("Id", item.id, i);
+            try p.addStrEx("HubName", item.hub_name, i);
+            try p.addStrEx("UserName", item.user_name, i);
+            try p.addStrEx("Password", item.password, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumEtherIpId, allocator: Allocator) void {
+        for (self.items) |*item| {
+            allocator.free(item.id);
+            allocator.free(item.hub_name);
+            allocator.free(item.user_name);
+            allocator.free(item.password);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcOpenVpnSstpConfig = struct {
+    enable_open_vpn: bool = false,
+    enable_sstp: bool = false,
+    open_vpn_port_list: []const u8 = "",
+
+    pub fn inRpc(self: *RpcOpenVpnSstpConfig, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.enable_open_vpn = p.getBool("EnableOpenVPN") orelse false;
+        self.enable_sstp = p.getBool("EnableSSTP") orelse false;
+        self.open_vpn_port_list = try dupStr(allocator, p.getStr("OpenVPNPortList"));
+    }
+
+    pub fn outRpc(self: *const RpcOpenVpnSstpConfig, p: *Pack) !void {
+        try p.addBool("EnableOpenVPN", self.enable_open_vpn);
+        try p.addBool("EnableSSTP", self.enable_sstp);
+        try p.addStr("OpenVPNPortList", self.open_vpn_port_list);
+    }
+
+    pub fn free(self: *RpcOpenVpnSstpConfig, allocator: Allocator) void {
+        allocator.free(self.open_vpn_port_list);
+        self.* = .{};
+    }
+};
+
+pub const RpcDdnsClientStatus = struct {
+    err_ipv4: u32 = 0,
+    err_ipv6: u32 = 0,
+    current_host_name: []const u8 = "",
+    current_fqdn: []const u8 = "",
+    dns_suffix: []const u8 = "",
+    current_ipv4: []const u8 = "",
+    current_ipv6: []const u8 = "",
+
+    pub fn inRpc(self: *RpcDdnsClientStatus, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.err_ipv4 = p.getInt("Err_IPv4") orelse 0;
+        self.err_ipv6 = p.getInt("Err_IPv6") orelse 0;
+        self.current_host_name = try dupStr(allocator, p.getStr("CurrentHostName"));
+        self.current_fqdn = try dupStr(allocator, p.getStr("CurrentFqdn"));
+        self.dns_suffix = try dupStr(allocator, p.getStr("DnsSuffix"));
+        self.current_ipv4 = try dupStr(allocator, p.getStr("CurrentIPv4"));
+        self.current_ipv6 = try dupStr(allocator, p.getStr("CurrentIPv6"));
+    }
+
+    pub fn outRpc(self: *const RpcDdnsClientStatus, p: *Pack) !void {
+        try p.addInt("Err_IPv4", self.err_ipv4);
+        try p.addInt("Err_IPv6", self.err_ipv6);
+        try p.addStr("CurrentHostName", self.current_host_name);
+        try p.addStr("CurrentFqdn", self.current_fqdn);
+        try p.addStr("DnsSuffix", self.dns_suffix);
+        try p.addStr("CurrentIPv4", self.current_ipv4);
+        try p.addStr("CurrentIPv6", self.current_ipv6);
+    }
+
+    pub fn free(self: *RpcDdnsClientStatus, allocator: Allocator) void {
+        allocator.free(self.current_host_name);
+        allocator.free(self.current_fqdn);
+        allocator.free(self.dns_suffix);
+        allocator.free(self.current_ipv4);
+        allocator.free(self.current_ipv6);
+        self.* = .{};
+    }
+};
+
+pub const RpcInternetSetting = struct {
+    proxy_type: u32 = 0,
+    proxy_host_name: []const u8 = "",
+    proxy_port: u32 = 0,
+    proxy_username: []const u8 = "",
+    proxy_password: []const u8 = "",
+
+    pub fn inRpc(self: *RpcInternetSetting, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.proxy_type = p.getInt("ProxyType") orelse 0;
+        self.proxy_host_name = try dupStr(allocator, p.getStr("ProxyHostName"));
+        self.proxy_port = p.getInt("ProxyPort") orelse 0;
+        self.proxy_username = try dupStr(allocator, p.getStr("ProxyUsername"));
+        self.proxy_password = try dupStr(allocator, p.getStr("ProxyPassword"));
+    }
+
+    pub fn outRpc(self: *const RpcInternetSetting, p: *Pack) !void {
+        try p.addInt("ProxyType", self.proxy_type);
+        try p.addStr("ProxyHostName", self.proxy_host_name);
+        try p.addInt("ProxyPort", self.proxy_port);
+        try p.addStr("ProxyUsername", self.proxy_username);
+        try p.addStr("ProxyPassword", self.proxy_password);
+    }
+
+    pub fn free(self: *RpcInternetSetting, allocator: Allocator) void {
+        allocator.free(self.proxy_host_name);
+        allocator.free(self.proxy_username);
+        allocator.free(self.proxy_password);
+        self.* = .{};
+    }
+};
+
+pub const RpcAzureStatus = struct {
+    is_connected: bool = false,
+    is_enabled: bool = false,
+
+    pub fn inRpc(self: *RpcAzureStatus, p: *const Pack) void {
+        self.* = .{};
+        self.is_connected = p.getBool("IsConnected") orelse false;
+        self.is_enabled = p.getBool("IsEnabled") orelse false;
+    }
+
+    pub fn outRpc(self: *const RpcAzureStatus, p: *Pack) !void {
+        try p.addBool("IsConnected", self.is_connected);
+        try p.addBool("IsEnabled", self.is_enabled);
+    }
+};
+
+pub const RpcSpecialListener = struct {
+    vpn_over_icmp_listener: bool = false,
+    vpn_over_dns_listener: bool = false,
+
+    pub fn inRpc(self: *RpcSpecialListener, p: *const Pack) void {
+        self.* = .{};
+        self.vpn_over_icmp_listener = p.getBool("VpnOverIcmpListener") orelse false;
+        self.vpn_over_dns_listener = p.getBool("VpnOverDnsListener") orelse false;
+    }
+
+    pub fn outRpc(self: *const RpcSpecialListener, p: *Pack) !void {
+        try p.addBool("VpnOverIcmpListener", self.vpn_over_icmp_listener);
+        try p.addBool("VpnOverDnsListener", self.vpn_over_dns_listener);
+    }
+};
+
+pub const RpcEnumLicenseKey = struct {
+    items: []EnumLicenseKeyItem = &.{},
+
+    pub const EnumLicenseKeyItem = struct {
+        id: u32 = 0,
+        license_key: []const u8 = "",
+        license_id: []const u8 = "",
+        license_name: []const u8 = "",
+        expires: u64 = 0,
+        status: u32 = 0,
+        product_id: u32 = 0,
+        system_id: u64 = 0,
+        serial_id: u32 = 0,
+    };
+
+    pub fn inRpc(self: *RpcEnumLicenseKey, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        const count = p.getValueCount("Id");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumLicenseKeyItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .id = p.getIntEx("Id", i) orelse 0,
+                .license_key = try dupStr(allocator, p.getStrEx("LicenseKey", i)),
+                .license_id = try dupStr(allocator, p.getStrEx("LicenseId", i)),
+                .license_name = try dupStr(allocator, p.getStrEx("LicenseName", i)),
+                .expires = p.getInt64Ex("Expires", i) orelse 0,
+                .status = p.getIntEx("Status", i) orelse 0,
+                .product_id = p.getIntEx("ProductId", i) orelse 0,
+                .system_id = p.getInt64Ex("SystemId", i) orelse 0,
+                .serial_id = p.getIntEx("SerialId", i) orelse 0,
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumLicenseKey, p: *Pack) !void {
+        for (self.items, 0..) |item, i| {
+            try p.addIntEx("Id", item.id, i);
+            try p.addStrEx("LicenseKey", item.license_key, i);
+            try p.addStrEx("LicenseId", item.license_id, i);
+            try p.addStrEx("LicenseName", item.license_name, i);
+            try p.addInt64Ex("Expires", item.expires, i);
+            try p.addIntEx("Status", item.status, i);
+            try p.addIntEx("ProductId", item.product_id, i);
+            try p.addInt64Ex("SystemId", item.system_id, i);
+            try p.addIntEx("SerialId", item.serial_id, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumLicenseKey, allocator: Allocator) void {
+        for (self.items) |*item| {
+            allocator.free(item.license_key);
+            allocator.free(item.license_id);
+            allocator.free(item.license_name);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcLicenseStatus = struct {
+    edition_id: u32 = 0,
+    edition_str: []const u8 = "",
+    system_id: u64 = 0,
+    system_expires: u64 = 0,
+    num_client_connect_license: u32 = 0,
+    num_bridge_connect_license: u32 = 0,
+    need_subscription: bool = false,
+    allow_enterprise_function: bool = false,
+    subscription_expires: u64 = 0,
+    is_subscription_expired: bool = false,
+    num_user_creation_license: u32 = 0,
+    release_date: u64 = 0,
+
+    pub fn inRpc(self: *RpcLicenseStatus, p: *const Pack) void {
+        self.* = .{};
+        self.edition_id = p.getInt("EditionId") orelse 0;
+        self.edition_str = p.getStr("EditionStr") orelse "";
+        self.system_id = p.getInt64("SystemId") orelse 0;
+        self.system_expires = p.getInt64("SystemExpires") orelse 0;
+        self.num_client_connect_license = p.getInt("NumClientConnectLicense") orelse 0;
+        self.num_bridge_connect_license = p.getInt("NumBridgeConnectLicense") orelse 0;
+        self.need_subscription = p.getBool("NeedSubscription") orelse false;
+        self.allow_enterprise_function = p.getBool("AllowEnterpriseFunction") orelse false;
+        self.subscription_expires = p.getInt64("SubscriptionExpires") orelse 0;
+        self.is_subscription_expired = p.getBool("IsSubscriptionExpired") orelse false;
+        self.num_user_creation_license = p.getInt("NumUserCreationLicense") orelse 0;
+        self.release_date = p.getInt64("ReleaseDate") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcLicenseStatus, p: *Pack) !void {
+        try p.addInt("EditionId", self.edition_id);
+        try p.addStr("EditionStr", self.edition_str);
+        try p.addInt64("SystemId", self.system_id);
+        try p.addInt64("SystemExpires", self.system_expires);
+        try p.addInt("NumClientConnectLicense", self.num_client_connect_license);
+        try p.addInt("NumBridgeConnectLicense", self.num_bridge_connect_license);
+        try p.addBool("NeedSubscription", self.need_subscription);
+        try p.addBool("AllowEnterpriseFunction", self.allow_enterprise_function);
+        try p.addInt64("SubscriptionExpires", self.subscription_expires);
+        try p.addBool("IsSubscriptionExpired", self.is_subscription_expired);
+        try p.addInt("NumUserCreationLicense", self.num_user_creation_license);
+        try p.addInt64("ReleaseDate", self.release_date);
+    }
+};
+
+pub const RpcLink = struct {
+    hub_name: []const u8 = "",
+    account_name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcLink, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.account_name = try dupStr(allocator, p.getUniStr("AccountName"));
+    }
+
+    pub fn outRpc(self: *const RpcLink, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addUniStr("AccountName", self.account_name);
+    }
+
+    pub fn free(self: *RpcLink, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.account_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcRenameLink = struct {
+    hub_name: []const u8 = "",
+    old_account_name: []const u8 = "",
+    new_account_name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcRenameLink, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        self.old_account_name = try dupStr(allocator, p.getUniStr("OldAccountName"));
+        self.new_account_name = try dupStr(allocator, p.getUniStr("NewAccountName"));
+    }
+
+    pub fn outRpc(self: *const RpcRenameLink, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        try p.addUniStr("OldAccountName", self.old_account_name);
+        try p.addUniStr("NewAccountName", self.new_account_name);
+    }
+
+    pub fn free(self: *RpcRenameLink, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.old_account_name);
+        allocator.free(self.new_account_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcEnumLink = struct {
+    hub_name: []const u8 = "",
+    items: []EnumLinkItem = &.{},
+
+    pub const EnumLinkItem = struct {
+        account_name: []const u8 = "",
+        hostname: []const u8 = "",
+        connected_hub_name: []const u8 = "",
+        online: bool = false,
+        connected_time: u64 = 0,
+        connected: bool = false,
+        last_error: u32 = 0,
+        target_hub_name: []const u8 = "",
+    };
+
+    pub fn inRpc(self: *RpcEnumLink, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+        const count = p.getValueCount("AccountName");
+        if (count == 0) return;
+        self.items = try allocator.alloc(EnumLinkItem, count);
+        for (0..count) |i| {
+            self.items[i] = .{
+                .account_name = try dupStr(allocator, p.getUniStrEx("AccountName", i)),
+                .hostname = try dupStr(allocator, p.getStrEx("Hostname", i)),
+                .connected_hub_name = try dupStr(allocator, p.getStrEx("ConnectedHubName", i)),
+                .online = p.getBoolEx("Online", i) orelse false,
+                .connected_time = p.getInt64Ex("ConnectedTime", i) orelse 0,
+                .connected = p.getBoolEx("Connected", i) orelse false,
+                .last_error = p.getIntEx("LastError", i) orelse 0,
+                .target_hub_name = try dupStr(allocator, p.getStrEx("TargetHubName", i)),
+            };
+        }
+    }
+
+    pub fn outRpc(self: *const RpcEnumLink, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+        for (self.items, 0..) |item, i| {
+            try p.addUniStrEx("AccountName", item.account_name, i);
+            try p.addStrEx("Hostname", item.hostname, i);
+            try p.addStrEx("ConnectedHubName", item.connected_hub_name, i);
+            try p.addBoolEx("Online", item.online, i);
+            try p.addInt64Ex("ConnectedTime", item.connected_time, i);
+            try p.addBoolEx("Connected", item.connected, i);
+            try p.addIntEx("LastError", item.last_error, i);
+            try p.addStrEx("TargetHubName", item.target_hub_name, i);
+        }
+    }
+
+    pub fn free(self: *RpcEnumLink, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        for (self.items) |*item| {
+            allocator.free(item.account_name);
+            allocator.free(item.hostname);
+            allocator.free(item.connected_hub_name);
+            allocator.free(item.target_hub_name);
+        }
+        allocator.free(self.items);
+        self.* = .{};
+    }
+};
+
+pub const RpcCreateLink = struct {
+    hub_name: []const u8 = "",
+    online: bool = false,
+    check_server_cert: bool = false,
+
+    pub fn inRpc(self: *RpcCreateLink, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName_Ex"));
+        self.online = p.getBool("Online") orelse false;
+        self.check_server_cert = p.getBool("CheckServerCert") orelse false;
+    }
+
+    pub fn outRpc(self: *const RpcCreateLink, p: *Pack) !void {
+        try p.addStr("HubName_Ex", self.hub_name);
+        try p.addBool("Online", self.online);
+        try p.addBool("CheckServerCert", self.check_server_cert);
+    }
+
+    pub fn free(self: *RpcCreateLink, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+pub const RpcLinkStatus = struct {
+    hub_name: []const u8 = "",
+    account_name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcLinkStatus, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName_Ex"));
+        self.account_name = try dupStr(allocator, p.getUniStr("AccountName"));
+    }
+
+    pub fn outRpc(self: *const RpcLinkStatus, p: *Pack) !void {
+        try p.addStr("HubName_Ex", self.hub_name);
+        try p.addUniStr("AccountName", self.account_name);
+    }
+
+    pub fn free(self: *RpcLinkStatus, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        allocator.free(self.account_name);
+        self.* = .{};
+    }
+};
+
 // ============================================================================
 // IP helpers (C: PackAddIp32Ex2 / PackAddIpEx2 / PackGetIpEx wire format)
 // ============================================================================
@@ -2292,9 +4161,49 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
         RpcGetTraffic => try t.inRpc(allocator, p),
         RpcSetGroup => try t.inRpc(allocator, p),
         RpcEnumGroup => try t.inRpc(allocator, p),
+        RpcKeyPair => try t.inRpc(allocator, p),
+        RpcHub => try t.inRpc(allocator, p),
         else => @compileError("no inRpc for " ++ @typeName(T)),
     }
 }
+
+pub const RpcKeyPair = struct {
+    flag1: u32 = 0,
+
+    pub fn inRpc(self: *RpcKeyPair, allocator: Allocator, p: *const Pack) !void {
+        _ = allocator;
+        self.* = .{};
+        self.flag1 = p.getInt("Flag1") orelse 0;
+    }
+
+    pub fn outRpc(self: *const RpcKeyPair, p: *Pack) !void {
+        try p.addInt("Flag1", self.flag1);
+    }
+
+    pub fn free(self: *RpcKeyPair, allocator: Allocator) void {
+        _ = allocator;
+        self.* = .{};
+    }
+};
+
+pub const RpcHub = struct {
+    hub_name: []const u8 = "",
+
+    pub fn inRpc(self: *RpcHub, allocator: Allocator, p: *const Pack) !void {
+        self.free(allocator);
+        self.* = .{};
+        self.hub_name = try dupStr(allocator, p.getStr("HubName"));
+    }
+
+    pub fn outRpc(self: *const RpcHub, p: *Pack) !void {
+        try p.addStr("HubName", self.hub_name);
+    }
+
+    pub fn free(self: *RpcHub, allocator: Allocator) void {
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
 
 fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
     switch (T) {
@@ -2322,6 +4231,8 @@ fn outRpcGeneric(comptime T: type, t: *const T, p: *Pack) !void {
         RpcGetTraffic => try t.outRpc(p),
         RpcSetGroup => try t.outRpc(p),
         RpcEnumGroup => try t.outRpc(p),
+        RpcKeyPair => try t.outRpc(p),
+        RpcHub => try t.outRpc(p),
         else => @compileError("no outRpc for " ++ @typeName(T)),
     }
 }
