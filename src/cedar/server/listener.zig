@@ -17,6 +17,8 @@ const socket = @import("../../mayaqua/network/socket.zig");
 const TcpListener = socket.TcpListener;
 const TcpSocket = socket.TcpSocket;
 const Address = socket.Address;
+const epoll_mod = @import("epoll_acceptor.zig");
+const thread_pool_mod = @import("thread_pool.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -267,6 +269,12 @@ pub const ListenerOptions = struct {
     /// participates in global DoS protection (Checks 2-4).
     dos_config: ?*DoSConfig = null,
     backlog: u31 = 128,
+    /// Enable SO_REUSEPORT for multi-queue accept (Linux 3.9+).
+    /// When true, the accept loop uses epoll edge-triggered batch-accept.
+    reuse_port: bool = false,
+    /// Optional thread pool for connection handling. When set, accepted
+    /// connections are dispatched to the pool instead of spawning threads.
+    thread_pool: ?*thread_pool_mod.ThreadPool = null,
 };
 
 const ConnJob = struct {
@@ -288,6 +296,96 @@ fn connThreadFn(job: *ConnJob) void {
     }
     const allocator = job.allocator;
     allocator.destroy(job);
+}
+
+/// Callback invoked by the acceptor for each accepted connection fd.
+/// Wraps fd into TcpSocket and dispatches through DoS gate + thread pool/spawn.
+fn acceptOne(fd: posix.socket_t, peer_ip: u32, peer_port: u16, ctx: *anyopaque) void {
+    const self: *Listener = @ptrCast(@alignCast(ctx));
+    // Wrap the raw fd into a TcpSocket for the handler.
+    var conn = TcpSocket{ .stream = .{ .handle = fd } };
+
+    // DoS gate (C CheckDosAttack — Check 1).
+    if (!self.options.disable_dos) {
+        if (!self.dos.check(peer_ip, std.time.milliTimestamp())) {
+            log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (DoS)", .{
+                self.port,
+                (peer_ip >> 24) & 0xff,
+                (peer_ip >> 16) & 0xff,
+                (peer_ip >> 8) & 0xff,
+                peer_ip & 0xff,
+            });
+            conn.close();
+            return;
+        }
+    }
+
+    // Checks 2-4: global disable, per-IP limit, unestablished limit.
+    if (self.options.dos_config) |dc| {
+        if (!dc.global_disable_dos.load(.acquire)) {
+            if (!dc.checkIpLimit(peer_ip)) {
+                log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (per-IP limit)", .{
+                    self.port,
+                    (peer_ip >> 24) & 0xff,
+                    (peer_ip >> 16) & 0xff,
+                    (peer_ip >> 8) & 0xff,
+                    peer_ip & 0xff,
+                });
+                conn.close();
+                return;
+            }
+            if (!dc.checkUnestablishedLimit()) {
+                log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (unestablished limit)", .{
+                    self.port,
+                    (peer_ip >> 24) & 0xff,
+                    (peer_ip >> 16) & 0xff,
+                    (peer_ip >> 8) & 0xff,
+                    peer_ip & 0xff,
+                });
+                conn.close();
+                return;
+            }
+        }
+        dc.incUnestablished();
+        dc.incIpCount(peer_ip);
+    }
+
+    // Dispatch to thread pool or spawn a thread.
+    const job = self.allocator.create(ConnJob) catch {
+        conn.close();
+        return;
+    };
+    job.* = .{
+        .allocator = self.allocator,
+        .handler = self.handler,
+        .ctx = self.ctx,
+        .sock = conn,
+        .peer_ip = peer_ip,
+        .peer_port = peer_port,
+        .dos_config = self.options.dos_config,
+    };
+
+    if (self.options.thread_pool) |pool| {
+        if (!pool.submit(.{ .callback = connThreadPoolFn, .ctx = job })) {
+            // Queue full — reject.
+            self.allocator.destroy(job);
+            conn.close();
+            return;
+        }
+    } else {
+        const t = std.Thread.spawn(.{}, connThreadFn, .{job}) catch {
+            self.allocator.destroy(job);
+            conn.close();
+            return;
+        };
+        t.detach();
+    }
+}
+
+/// Thread pool callback wrapper: casts ctx from *anyopaque to *ConnJob.
+fn connThreadPoolFn(ctx: *anyopaque) void {
+    const job: *ConnJob = @ptrCast(@alignCast(ctx));
+    connThreadFn(job);
 }
 
 /// One listening endpoint. `start` spawns the accept thread; `stop` joins it
@@ -353,12 +451,21 @@ pub const Listener = struct {
             try Address.parseIp4("127.0.0.1", self.port)
         else
             Address{ .inner = net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port) };
-        return TcpListener.init(addr, backlog);
+        var listener = try TcpListener.init(addr, backlog);
+        // Set SO_REUSEPORT for multi-queue accept when requested.
+        if (self.options.reuse_port) {
+            const fd = listener.getFd();
+            if (epoll_mod.trySetReusePort(fd)) {
+                log.info("listener port {d}: SO_REUSEPORT enabled", .{self.port});
+            }
+        }
+        return listener;
     }
 
     /// The accept thread. Mirrors C `ListenerTCPMainLoop` (Listener.c:636):
-    /// bind with retry, then accept in a poll loop, handing each connection to
-    /// a per-connection thread after the DoS gate.
+    /// bind with retry, then accept in an epoll/poll loop, handing each
+    /// connection to a per-connection thread (or thread pool) after the
+    /// DoS gate.
     fn acceptLoop(self: *Listener) void {
         while (!self.halt.load(.acquire)) {
             self.status.store(.trying, .release);
@@ -378,90 +485,28 @@ pub const Listener = struct {
             self.status.store(.listening, .release);
             log.info("listener listening on port {d}", .{self.bound_port.load(.acquire)});
 
-            // Accept loop.
+            // Initialize the platform-specific acceptor (epoll on Linux, poll elsewhere).
+            const listen_fd = listener.?.getFd();
+            var acceptor = epoll_mod.PlatformAcceptor.init(listen_fd) catch |err| {
+                log.warn("listener port {d}: acceptor init failed ({s})", .{ self.port, @errorName(err) });
+                listener.?.close();
+                continue;
+            };
+            defer acceptor.deinit();
+
+            // Accept loop — batch-accept multiple connections per wakeup.
             while (!self.halt.load(.acquire)) {
-                var pfd = [_]posix.pollfd{
-                    .{ .fd = listener.?.getFd(), .events = posix.POLL.IN, .revents = 0 },
-                };
-                const n = posix.poll(&pfd, 1000) catch break;
+                const count = acceptor.waitAndAccept(
+                    listen_fd,
+                    acceptOne,
+                    self,
+                    epoll_mod.EPOLL_WAIT_TIMEOUT_MS,
+                    epoll_mod.MAX_ACCEPT_BATCH,
+                ) catch break;
+
                 if (self.halt.load(.acquire)) break;
-                if (n == 0) continue; // timeout
-
-                var conn = listener.?.acceptEx() catch break;
-                const peer_ip = peerIpv4(conn.peer);
-                const peer_port = conn.peer.getPort();
-
-                // DoS gate (C CheckDosAttack — Check 1).
-                if (!self.options.disable_dos) {
-                    if (!self.dos.check(peer_ip, std.time.milliTimestamp())) {
-                        log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (DoS)", .{
-                            self.port,
-                            (peer_ip >> 24) & 0xff,
-                            (peer_ip >> 16) & 0xff,
-                            (peer_ip >> 8) & 0xff,
-                            peer_ip & 0xff,
-                        });
-                        conn.socket.close();
-                        continue;
-                    }
-                }
-
-                // Checks 2-4: global disable, per-IP limit, unestablished limit.
-                if (self.options.dos_config) |dc| {
-                    // Check 2: global DisableDosProction flag (C `disable_dos` static).
-                    if (dc.global_disable_dos.load(.acquire)) {
-                        // Global DoS protection disabled — skip remaining checks.
-                    } else {
-                        // Check 3: per-IP concurrent connection limit.
-                        if (!dc.checkIpLimit(peer_ip)) {
-                            log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (per-IP limit)", .{
-                                self.port,
-                                (peer_ip >> 24) & 0xff,
-                                (peer_ip >> 16) & 0xff,
-                                (peer_ip >> 8) & 0xff,
-                                peer_ip & 0xff,
-                            });
-                            conn.socket.close();
-                            continue;
-                        }
-                        // Check 4: global unestablished connection limit.
-                        if (!dc.checkUnestablishedLimit()) {
-                            log.warn("listener port {d}: connection rejected from {d}.{d}.{d}.{d} (unestablished limit)", .{
-                                self.port,
-                                (peer_ip >> 24) & 0xff,
-                                (peer_ip >> 16) & 0xff,
-                                (peer_ip >> 8) & 0xff,
-                                peer_ip & 0xff,
-                            });
-                            conn.socket.close();
-                            continue;
-                        }
-                    }
-                    // Track unestablished connection.
-                    dc.incUnestablished();
-                    dc.incIpCount(peer_ip);
-                }
-
-                // Thread-per-connection (C TCPAccepted -> NewThread).
-                const job = self.allocator.create(ConnJob) catch {
-                    conn.socket.close();
-                    continue;
-                };
-                job.* = .{
-                    .allocator = self.allocator,
-                    .handler = self.handler,
-                    .ctx = self.ctx,
-                    .sock = conn.socket,
-                    .peer_ip = peer_ip,
-                    .peer_port = peer_port,
-                    .dos_config = self.options.dos_config,
-                };
-                const t = std.Thread.spawn(.{}, connThreadFn, .{job}) catch {
-                    self.allocator.destroy(job);
-                    conn.socket.close();
-                    continue;
-                };
-                t.detach();
+                // On Linux edge-triggered, count may be 0 on spurious wakeup.
+                if (count == 0) continue;
             }
 
             listener.?.close();
