@@ -1761,7 +1761,7 @@ test "buildAnonymousAuth creates valid Pack" {
 test "HTTP header building" {
     const allocator = std.testing.allocator;
 
-    const header = try buildSignatureHttpHeader(allocator, "vpn.example.com", 1234);
+    const header = try buildSignatureHttpHeader(allocator, "vpn.example.com", 1234, null);
     defer allocator.free(header);
 
     try std.testing.expect(mem.indexOf(u8, header, "POST /vpnsvc/connect.cgi HTTP/1.1") != null);

@@ -4264,7 +4264,7 @@ test "AdapterWrapper" {
 
     // Opening a real utun device requires root privileges,
     // so we just test the initialization and configuration APIs
-    ad.configure(0x0A000001, 0xFFFFFF00, 0x0A000001); // 10.0.0.1/24
+    try ad.configure(0x0A000001, 0xFFFFFF00, 0x0A000001); // 10.0.0.1/24
     try std.testing.expectEqual(@as(u32, 0x0A000001), ad.ip_address);
     try std.testing.expectEqual(@as(u32, 0xFFFFFF00), ad.netmask);
 

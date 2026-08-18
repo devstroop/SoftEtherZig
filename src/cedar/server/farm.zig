@@ -95,7 +95,7 @@ pub const FarmMember = struct {
     /// List of HUBs hosted by this member.
     hub_list: std.ArrayListUnmanaged(FarmHub) = .{},
     /// Task queue for RPC dispatch (protected by `queue_lock`).
-    task_queue: std.ArrayListUnmanaged(FarmTask) = .{},
+    task_queue: std.ArrayListUnmanaged(*FarmTask) = .{},
     /// Lock protecting `task_queue` between the service loop (consumer)
     /// and `postTask` callers (producer).
     queue_lock: std.Thread.Mutex = .{},
@@ -127,8 +127,9 @@ pub const FarmMember = struct {
             _ = hub;
         }
         self.hub_list.deinit(self.allocator);
-        for (self.task_queue.items) |*task| {
-            task.deinit(self.allocator);
+        for (self.task_queue.items) |task| {
+            task.deinit();
+            self.allocator.destroy(task);
         }
         self.task_queue.deinit(self.allocator);
         if (self.server_cert) |cert| self.allocator.free(cert);
@@ -150,9 +151,12 @@ pub const FarmTask = struct {
     complete: bool = false,
     task_name: [260:0]u8 = .{0} ** 260,
     host_name: [260:0]u8 = .{0} ** 260,
+    request: ?@import("../../cedar/protocol/pack.zig").Pack = null,
+    response: ?@import("../../cedar/protocol/pack.zig").Pack = null,
 
     pub fn deinit(self: *FarmTask) void {
-        _ = self;
+        if (self.request) |*r| r.deinit();
+        if (self.response) |*r| r.deinit();
     }
 };
 
@@ -516,7 +520,7 @@ test "setServerType validates member params" {
     try std.testing.expectEqual(@as(u32, 200), state.weight);
     try std.testing.expectEqual(@as(u32, 0x0A00_0001), state.public_ip);
     try std.testing.expectEqual(@as(u32, 995), state.controller_port);
-    try std.testing.expect(state.member_password != [_]u8{0} ** sha1_size);
+    try std.testing.expect(!std.mem.eql(u8, &state.member_password, &([_]u8{0} ** sha1_size)));
 
     // controller_only set for controller type.
     state.setServerType(
