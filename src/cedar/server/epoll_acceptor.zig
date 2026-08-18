@@ -293,6 +293,11 @@ fn extractPeerPort(addr: *const posix.sockaddr) u16 {
 /// Attempt to set SO_REUSEPORT on a socket. Returns whether the option was
 /// successfully set (non-Linux platforms may not support it).
 pub fn trySetReusePort(fd: posix.socket_t) bool {
+    // SO_REUSEPORT is only available on Linux (3.9+) and some BSDs.
+    // Not available on Windows, so we guard at comptime.
+    const has_reuse_port = @hasDecl(posix.SO, "REUSEPORT");
+    if (!has_reuse_port) return false;
+
     const one: c_int = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEPORT, std.mem.asBytes(&one)) catch {
         return false;
