@@ -12,7 +12,6 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
-const linux = if (builtin.os.tag == .linux) std.os.linux else struct {};
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.cedar_server);
@@ -46,84 +45,11 @@ pub const AcceptedFd = struct {
 };
 
 // ============================================================================
-// EpollAcceptor (Linux)
+// Acceptor (cross-platform)
 // ============================================================================
-
-/// Linux epoll-based acceptor with edge-triggered notifications.
-/// Accepts all ready connections in a batch per wakeup.
-const EpollAcceptor = struct {
-    epoll_fd: posix.fd_t,
-
-    pub fn init(listen_fd: posix.socket_t) !EpollAcceptor {
-        const epfd = linux.epoll_create1(0);
-        if (@as(isize, @bitCast(epfd)) < 0) {
-            log.err("epoll_create1 failed: {}", .{posix.errno(epfd)});
-            return error.SystemResources;
-        }
-
-        var ev = linux.epoll_event{
-            .events = linux.EPOLL.IN | linux.EPOLL.ET,
-            .data = .{ .fd = listen_fd },
-        };
-        const rc = linux.epoll_ctl(@intCast(epfd), linux.EPOLL.CTL_ADD, listen_fd, &ev);
-        if (@as(isize, @bitCast(rc)) < 0) {
-            posix.close(@intCast(epfd));
-            log.err("epoll_ctl ADD failed: {}", .{posix.errno(rc)});
-            return error.SystemResources;
-        }
-
-        return .{ .epoll_fd = @intCast(epfd) };
-    }
-
-    pub fn deinit(self: *EpollAcceptor) void {
-        posix.close(self.epoll_fd);
-    }
-
-    /// Wait for events. Returns the number of ready events.
-    pub fn wait(self: *EpollAcceptor, events: []linux.epoll_event, timeout_ms: i32) !u32 {
-        const n = linux.epoll_wait(self.epoll_fd, events.ptr, @intCast(events.len), timeout_ms);
-        const signed_n: isize = @bitCast(n);
-        if (signed_n < 0) {
-            const errno = posix.errno(n);
-            if (errno == .INTR) return 0;
-            log.err("epoll_wait failed: {}", .{errno});
-            return error.Io;
-        }
-        return @intCast(signed_n);
-    }
-};
-
-// ============================================================================
-// PollAcceptor (fallback for non-Linux)
-// ============================================================================
-
-/// Poll-based acceptor for platforms without epoll.
-const PollAcceptor = struct {
-    listen_fd: posix.socket_t,
-
-    pub fn init(listen_fd: posix.socket_t) !PollAcceptor {
-        return .{ .listen_fd = listen_fd };
-    }
-
-    pub fn deinit(self: *PollAcceptor) void {
-        _ = self;
-    }
-
-    pub fn wait(self: *PollAcceptor, timeout_ms: i32) !bool {
-        var pfd = [_]posix.pollfd{
-            .{ .fd = self.listen_fd, .events = posix.POLL.IN, .revents = 0 },
-        };
-        const n = try posix.poll(&pfd, timeout_ms);
-        return n > 0 and (pfd[0].revents & posix.POLL.IN) != 0;
-    }
-};
 
 /// Callback signature for accepted connections: fd, peer_ip, peer_port, context.
 pub const AcceptCallback = *const fn (fd: posix.socket_t, peer_ip: u32, peer_port: u16, ctx: *anyopaque) void;
-
-// ============================================================================
-// Acceptor (cross-platform)
-// ============================================================================
 
 pub const Acceptor = struct {
     listen_fd: posix.socket_t,
@@ -171,14 +97,33 @@ pub const Acceptor = struct {
 /// The core accept loop type. On Linux this uses epoll edge-triggered;
 /// on other platforms it uses poll.
 pub const PlatformAcceptor = if (builtin.os.tag == .linux) struct {
-    epoll: EpollAcceptor,
+    const linux = std.os.linux;
+
+    epoll_fd: posix.fd_t,
 
     pub fn init(listen_fd: posix.socket_t) !PlatformAcceptor {
-        return .{ .epoll = try EpollAcceptor.init(listen_fd) };
+        const epfd = linux.epoll_create1(0);
+        if (@as(isize, @bitCast(epfd)) < 0) {
+            log.err("epoll_create1 failed: {}", .{posix.errno(epfd)});
+            return error.SystemResources;
+        }
+
+        var ev = linux.epoll_event{
+            .events = linux.EPOLL.IN | linux.EPOLL.ET,
+            .data = .{ .fd = listen_fd },
+        };
+        const rc = linux.epoll_ctl(@intCast(epfd), linux.EPOLL.CTL_ADD, listen_fd, &ev);
+        if (@as(isize, @bitCast(rc)) < 0) {
+            posix.close(@intCast(epfd));
+            log.err("epoll_ctl ADD failed: {}", .{posix.errno(rc)});
+            return error.SystemResources;
+        }
+
+        return .{ .epoll_fd = @intCast(epfd) };
     }
 
     pub fn deinit(self: *PlatformAcceptor) void {
-        self.epoll.deinit();
+        posix.close(self.epoll_fd);
     }
 
     /// Wait and batch-accept. Calls `callback(fd, peer_ip, peer_port, ctx)` for
@@ -192,15 +137,23 @@ pub const PlatformAcceptor = if (builtin.os.tag == .linux) struct {
         max_batch: u32,
     ) !u32 {
         var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
-        const n = try self.epoll.wait(&events, timeout_ms);
+        const n = linux.epoll_wait(self.epoll_fd, &events, @intCast(events.len), timeout_ms);
+        const signed_n: isize = @bitCast(n);
+        if (signed_n < 0) {
+            const errno = posix.errno(n);
+            if (errno == .INTR) return 0;
+            log.err("epoll_wait failed: {}", .{errno});
+            return error.Io;
+        }
+        const count: u32 = @intCast(signed_n);
 
         var total: u32 = 0;
-        for (events[0..n]) |ev| {
+        for (events[0..count]) |ev| {
             if (ev.data.fd == listen_fd) {
                 // Edge-triggered: drain all pending connections.
-                var addr: posix.sockaddr = undefined;
-                var addrlen: posix.socklen_t = @sizeOf(posix.sockaddr);
                 while (total < max_batch) {
+                    var addr: posix.sockaddr = undefined;
+                    var addrlen: posix.socklen_t = @sizeOf(posix.sockaddr);
                     const conn_fd = posix.accept(listen_fd, &addr, &addrlen, 0) catch |err| switch (err) {
                         error.WouldBlock, error.ConnectionAborted => break,
                         error.FileDescriptorNotASocket, error.ConnectionResetByPeer => break,
@@ -219,28 +172,29 @@ pub const PlatformAcceptor = if (builtin.os.tag == .linux) struct {
         return total;
     }
 } else struct {
-    poll: PollAcceptor,
+    listen_fd: posix.socket_t,
 
     pub fn init(listen_fd: posix.socket_t) !PlatformAcceptor {
-        return .{ .poll = try PollAcceptor.init(listen_fd) };
+        return .{ .listen_fd = listen_fd };
     }
 
-    pub fn deinit(self: *PlatformAcceptor) void {
-        self.poll.deinit();
-    }
+    pub fn deinit(_: *PlatformAcceptor) void {}
 
     /// Poll + accept. On non-Linux, accepts at most one connection per poll
     /// wakeup (poll is level-triggered).
     pub fn waitAndAccept(
-        self: *PlatformAcceptor,
+        _: *PlatformAcceptor,
         listen_fd: posix.socket_t,
         callback: AcceptCallback,
         ctx: *anyopaque,
         timeout_ms: i32,
         max_batch: u32,
     ) !u32 {
-        const ready = try self.poll.wait(timeout_ms);
-        if (!ready) return 0;
+        var pfd = [_]posix.pollfd{
+            .{ .fd = listen_fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+        const n = try posix.poll(&pfd, timeout_ms);
+        if (n == 0 or (pfd[0].revents & posix.POLL.IN) == 0) return 0;
 
         var count: u32 = 0;
         while (count < max_batch) {
