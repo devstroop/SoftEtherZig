@@ -603,6 +603,7 @@ pub fn build(b: *std.Build) void {
     const test_standalone_step = b.step("test-standalone", "Run standalone unit tests");
     const test_ffi_step = b.step("test-ffi", "Run FFI unit tests");
     const test_all_step = b.step("test-all", "Run whole-package unit tests");
+    const test_bpf_step = b.step("test-bpf", "Run BPF adapter unit tests");
     const test_server_exe_step = b.step("test-server-exe", "Run vpnserver executable tests");
     const test_integration_step = b.step("test-integration", "Run protocol integration tests");
     const test_dhcpv6_step = b.step("test-dhcpv6", "Run DHCPv6 wire-format tests");
@@ -780,6 +781,34 @@ pub fn build(b: *std.Build) void {
         test_all_step.dependOn(&run_all_test.step);
     }
 
+    // BPF adapter tests — targeted subset of whole-package tests for the
+    // macOS live-smoke CI step.  Uses the same ffi.zig root (which pulls in
+    // adapter/bpf.zig via bridge.loop → port → mod) but filters to only
+    // bpfPort tests.  This avoids the full test-all compilation that hangs
+    // on macOS/Windows CI (issue #107).
+    {
+        const bpf_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ffi.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "build_options", .module = build_options_mod },
+                    .{ .name = "md4", .module = md4_mod },
+                },
+            }),
+            .filters = &.{"bpfPort"},
+        });
+        linkOpenSsl(b, bpf_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+        addZlib(bpf_test, b);
+        if (is_android) setupAndroidNdk(b, bpf_test, target_arch);
+        bpf_test.linkLibC();
+
+        const run_bpf_test = b.addRunArtifact(bpf_test);
+        test_step.dependOn(&run_bpf_test.step);
+        test_bpf_step.dependOn(&run_bpf_test.step);
+    }
+
     // vpnserver executable tests (issue #83) — standalone module sharing the
     // vpnserver target's named imports and linkage. The filter restricts
     // execution to this file's `server.exe.*` test blocks.
@@ -887,6 +916,7 @@ pub fn build(b: *std.Build) void {
         \\  zig build test-standalone - Run standalone unit tests
         \\  zig build test-ffi       - Run FFI unit tests
         \\  zig build test-all       - Run whole-package unit tests
+        \\  zig build test-bpf       - Run BPF adapter unit tests
         \\  zig build test-server-exe - Run vpnserver executable tests
         \\  zig build test-integration - Run protocol integration tests
         \\  zig build test-dhcpv6    - Run DHCPv6 wire-format tests

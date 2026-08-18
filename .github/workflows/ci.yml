@@ -135,7 +135,7 @@ jobs:
         run: zig build test-ffi --release=fast --summary all
 
       - name: Run tests (whole package)
-        if: always() && matrix.test
+        if: always() && matrix.test && runner.os == 'Linux'
         timeout-minutes: 10
         run: zig build test-all --release=fast --summary all
 
@@ -155,11 +155,13 @@ jobs:
         run: zig build test-dhcpv6 --release=fast --summary all
 
       # Bridge BPF live smoke (issue #60): install the SUID helper from the
-      # shared-lib build output (built above) and re-run the test suite so
-      # the bpf.zig live tests exercise a real /dev/bpfN attach on lo0.
+      # shared-lib build output (built above) and re-run the BPF test subset
+      # so the bpf.zig live tests exercise a real /dev/bpfN attach on lo0.
       # GitHub macOS runners provide passwordless sudo. On the plain test
       # run above the live tests skip cleanly (no privileged path); with the
       # helper in place they assert real BPF round-trips.
+      # NOTE: Uses test-bpf (not test-all) because the full whole-package
+      # compilation hangs on macOS/Windows CI (Zig compiler issue).
       - name: Bridge BPF live smoke (macOS, setuid helper)
         if: always() && runner.os == 'macOS' && matrix.test
         timeout-minutes: 10
@@ -168,4 +170,4 @@ jobs:
           sudo cp zig-out/bin/softether-utun-helper /usr/local/libexec/softether-utun-helper
           sudo chown root:wheel /usr/local/libexec/softether-utun-helper
           sudo chmod 4755 /usr/local/libexec/softether-utun-helper
-          zig build test-all --release=fast --summary all
+          zig build test-bpf --release=fast --summary all
