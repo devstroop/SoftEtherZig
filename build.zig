@@ -445,6 +445,38 @@ pub fn build(b: *std.Build) void {
     server_run_step.dependOn(&server_run_cmd.step);
 
     // ============================================
+    // VPN BRIDGE — bridge-mode server entry point
+    // ============================================
+    // vpnbridge is identical to vpnserver except bridge_mode = true on the
+    // ServerContext (C `StStartServer(true)`). Same CLI args, same module.
+    const vpnbridge = b.addExecutable(.{
+        .name = "vpnbridge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/exec/vpnbridge/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "softether", .module = softether_mod },
+            },
+        }),
+    });
+
+    linkOpenSsl(b, vpnbridge, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+    vpnbridge.linkLibC();
+    addZlib(vpnbridge, b);
+
+    b.installArtifact(vpnbridge);
+
+    const bridge_run_cmd = b.addRunArtifact(vpnbridge);
+    bridge_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        bridge_run_cmd.addArgs(args);
+    }
+
+    const bridge_run_step = b.step("run-bridge", "Run the VPN bridge");
+    bridge_run_step.dependOn(&bridge_run_cmd.step);
+
+    // ============================================
     // VPN COMMAND TOOL (vpncmd) — standalone admin CLI
     // ============================================
     // vpncmd is a one-shot tool (C `vpncmd.c`): InitCedar → CommandMain → exit.
@@ -834,6 +866,28 @@ pub fn build(b: *std.Build) void {
         test_server_exe_step.dependOn(&run_server_exe_test.step);
     }
 
+    // vpnbridge executable tests — same pattern as vpnserver tests.
+    {
+        const bridge_exe_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/exec/vpnbridge/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "softether", .module = softether_mod },
+                },
+            }),
+            .filters = &.{"bridge.exe"},
+        });
+        linkOpenSsl(b, bridge_exe_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+        addZlib(bridge_exe_test, b);
+        if (is_android) setupAndroidNdk(b, bridge_exe_test, target_arch);
+        bridge_exe_test.linkLibC();
+
+        const run_bridge_exe_test = b.addRunArtifact(bridge_exe_test);
+        test_step.dependOn(&run_bridge_exe_test.step);
+    }
+
     // Protocol integration tests — drive the full handshake (signature →
     // hello → auth) against a scripted in-memory transport. Lives under
     // test/integration so it is clearly separate from in-source unit tests.
@@ -912,6 +966,8 @@ pub fn build(b: *std.Build) void {
         \\  zig build run          - Build and run VPN client
         \\  zig build shared-lib   - Build shared library for FFI
         \\  zig build static-lib   - Build static library (iOS/Android)
+        \\  zig build run-server   - Run the VPN server
+        \\  zig build run-bridge   - Run the VPN bridge
         \\  zig build test           - Run all unit tests
         \\  zig build test-standalone - Run standalone unit tests
         \\  zig build test-ffi       - Run FFI unit tests
