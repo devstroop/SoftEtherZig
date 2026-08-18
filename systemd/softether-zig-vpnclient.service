@@ -1,0 +1,44 @@
+# systemd/softether-zig-vpnclient.service
+#
+# Systemd unit for the SoftEtherZig VPN client (mirrors the service files
+# shipped by the original SoftEtherVPN repo, adapted to this client's CLI).
+#
+# Requirements:
+#   - vpnclient installed at /usr/local/bin/vpnclient (release asset)
+#   - config at /etc/softether-zig/config.json (see scripts/install_systemd.sh)
+#
+# Usage:
+#   sudo bash scripts/install_systemd.sh
+#   systemctl status softether-zig-vpnclient
+
+[Unit]
+Description=SoftEtherZig VPN Client
+Documentation=https://github.com/devstroop/SoftEtherZig
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=exec: the client runs in the foreground; --daemon keeps it alive with
+# PID-file/signal handling and auto-reconnect until stopped.
+Type=exec
+ExecStart=/usr/local/bin/vpnclient connect -d --config /etc/softether-zig/config.json
+ExecStop=/bin/kill -s TERM $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+
+# TUN device + route management require root or CAP_NET_ADMIN
+User=root
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run /tmp
+DeviceAllow=/dev/net/tun rw
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_NICE
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

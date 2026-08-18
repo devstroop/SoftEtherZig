@@ -218,6 +218,12 @@ jobs:
               mkdir -p "$STAGE/include"
               cp -r include/. "$STAGE/include/"
             fi
+            # Ship systemd unit + installer with Linux artifacts
+            if [[ "$A" == *linux* ]]; then
+              cp -r systemd "$STAGE/"
+              cp scripts/install_systemd.sh "$STAGE/"
+              chmod +x "$STAGE/install_systemd.sh"
+            fi
             echo "${{ steps.version.outputs.tag }}" > "$STAGE/VERSION"
             echo "${{ github.sha }}" > "$STAGE/COMMIT"
           done
