@@ -594,7 +594,19 @@ pub fn build(b: *std.Build) void {
     // ============================================
     // TESTS
     // ============================================
+    //
+    // Each test group is exposed as a separate named step so CI can run
+    // them independently with per-group timeouts.  The umbrella ``test``
+    // step runs all groups sequentially (backward-compatible default).
     const test_step = b.step("test", "Run unit tests");
+
+    const test_standalone_step = b.step("test-standalone", "Run standalone unit tests");
+    const test_ffi_step = b.step("test-ffi", "Run FFI unit tests");
+    const test_all_step = b.step("test-all", "Run whole-package unit tests");
+    const test_bpf_step = b.step("test-bpf", "Run BPF adapter unit tests");
+    const test_server_exe_step = b.step("test-server-exe", "Run vpnserver executable tests");
+    const test_integration_step = b.step("test-integration", "Run protocol integration tests");
+    const test_dhcpv6_step = b.step("test-dhcpv6", "Run DHCPv6 wire-format tests");
 
     // Test modules — each source file with `test` blocks
     // NOTE: Files under src/app/ and src/net/ import sibling modules and
@@ -657,6 +669,7 @@ pub fn build(b: *std.Build) void {
 
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
+        test_standalone_step.dependOn(&run_t.step);
     }
 
     // FFI tests — ffi.zig imports the full client module tree, so it builds
@@ -684,6 +697,7 @@ pub fn build(b: *std.Build) void {
 
         const run_ffi_test = b.addRunArtifact(ffi_test);
         test_step.dependOn(&run_ffi_test.step);
+        test_ffi_step.dependOn(&run_ffi_test.step);
     }
 
     // Whole-package test — same root as shared-lib (ffi.zig).
@@ -764,6 +778,35 @@ pub fn build(b: *std.Build) void {
 
         const run_all_test = b.addRunArtifact(all_test);
         test_step.dependOn(&run_all_test.step);
+        test_all_step.dependOn(&run_all_test.step);
+    }
+
+    // BPF adapter tests — targeted subset of whole-package tests for the
+    // macOS live-smoke CI step.  Uses the same ffi.zig root (which pulls in
+    // adapter/bpf.zig via bridge.loop → port → mod) but filters to only
+    // bpfPort tests.  This avoids the full test-all compilation that hangs
+    // on macOS/Windows CI (issue #107).
+    {
+        const bpf_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ffi.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "build_options", .module = build_options_mod },
+                    .{ .name = "md4", .module = md4_mod },
+                },
+            }),
+            .filters = &.{"bpfPort"},
+        });
+        linkOpenSsl(b, bpf_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
+        addZlib(bpf_test, b);
+        if (is_android) setupAndroidNdk(b, bpf_test, target_arch);
+        bpf_test.linkLibC();
+
+        const run_bpf_test = b.addRunArtifact(bpf_test);
+        test_step.dependOn(&run_bpf_test.step);
+        test_bpf_step.dependOn(&run_bpf_test.step);
     }
 
     // vpnserver executable tests (issue #83) — standalone module sharing the
@@ -788,6 +831,7 @@ pub fn build(b: *std.Build) void {
 
         const run_server_exe_test = b.addRunArtifact(server_exe_test);
         test_step.dependOn(&run_server_exe_test.step);
+        test_server_exe_step.dependOn(&run_server_exe_test.step);
     }
 
     // Protocol integration tests — drive the full handshake (signature →
@@ -826,6 +870,7 @@ pub fn build(b: *std.Build) void {
 
         const run_integration_test = b.addRunArtifact(integration_test);
         test_step.dependOn(&run_integration_test.step);
+        test_integration_step.dependOn(&run_integration_test.step);
     }
 
     // DHCPv6 wire-format tests — validates byte layout of Solicit/Request/Reply
@@ -849,6 +894,7 @@ pub fn build(b: *std.Build) void {
         }
         const run_dhcpv6_test = b.addRunArtifact(dhcpv6_test);
         test_step.dependOn(&run_dhcpv6_test.step);
+        test_dhcpv6_step.dependOn(&run_dhcpv6_test.step);
     }
 
     // ============================================
@@ -866,7 +912,14 @@ pub fn build(b: *std.Build) void {
         \\  zig build run          - Build and run VPN client
         \\  zig build shared-lib   - Build shared library for FFI
         \\  zig build static-lib   - Build static library (iOS/Android)
-        \\  zig build test         - Run unit tests
+        \\  zig build test           - Run all unit tests
+        \\  zig build test-standalone - Run standalone unit tests
+        \\  zig build test-ffi       - Run FFI unit tests
+        \\  zig build test-all       - Run whole-package unit tests
+        \\  zig build test-bpf       - Run BPF adapter unit tests
+        \\  zig build test-server-exe - Run vpnserver executable tests
+        \\  zig build test-integration - Run protocol integration tests
+        \\  zig build test-dhcpv6    - Run DHCPv6 wire-format tests
         \\
         \\Build Options:
         \\  -Doptimize=<mode>  - Debug, ReleaseSafe, ReleaseFast (default), ReleaseSmall

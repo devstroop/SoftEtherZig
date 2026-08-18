@@ -124,21 +124,50 @@ jobs:
         shell: bash
         run: ls -lhR zig-out/
 
-      - name: Run tests
-        if: matrix.test
-        run: zig build test --release=fast --summary all
+      - name: Run tests (standalone)
+        if: always() && matrix.test
+        timeout-minutes: 5
+        run: zig build test-standalone --release=fast --summary all
+
+      - name: Run tests (FFI)
+        if: always() && matrix.test
+        timeout-minutes: 5
+        run: zig build test-ffi --release=fast --summary all
+
+      - name: Run tests (whole package)
+        if: always() && matrix.test && runner.os == 'Linux'
+        timeout-minutes: 10
+        run: zig build test-all --release=fast --summary all
+
+      - name: Run tests (vpnserver)
+        if: always() && matrix.test
+        timeout-minutes: 5
+        run: zig build test-server-exe --release=fast --summary all
+
+      - name: Run tests (integration)
+        if: always() && matrix.test
+        timeout-minutes: 5
+        run: zig build test-integration --release=fast --summary all
+
+      - name: Run tests (DHCPv6)
+        if: always() && matrix.test
+        timeout-minutes: 5
+        run: zig build test-dhcpv6 --release=fast --summary all
 
       # Bridge BPF live smoke (issue #60): install the SUID helper from the
-      # shared-lib build output (built above) and re-run the test suite so
-      # the bpf.zig live tests exercise a real /dev/bpfN attach on lo0.
+      # shared-lib build output (built above) and re-run the BPF test subset
+      # so the bpf.zig live tests exercise a real /dev/bpfN attach on lo0.
       # GitHub macOS runners provide passwordless sudo. On the plain test
       # run above the live tests skip cleanly (no privileged path); with the
       # helper in place they assert real BPF round-trips.
+      # NOTE: Uses test-bpf (not test-all) because the full whole-package
+      # compilation hangs on macOS/Windows CI (Zig compiler issue).
       - name: Bridge BPF live smoke (macOS, setuid helper)
-        if: runner.os == 'macOS' && matrix.test
+        if: always() && runner.os == 'macOS' && matrix.test
+        timeout-minutes: 10
         run: |
           sudo mkdir -p /usr/local/libexec
           sudo cp zig-out/bin/softether-utun-helper /usr/local/libexec/softether-utun-helper
           sudo chown root:wheel /usr/local/libexec/softether-utun-helper
           sudo chmod 4755 /usr/local/libexec/softether-utun-helper
-          zig build test --release=fast --summary all
+          zig build test-bpf --release=fast --summary all
