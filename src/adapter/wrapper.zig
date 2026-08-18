@@ -269,6 +269,40 @@ pub const AdapterWrapper = struct {
         return null;
     }
 
+    /// Get total dropped packet count from the device's ring buffer.
+    /// Returns 0 for non-FdAdapter devices (desktop utun/tun have no ring).
+    pub fn getTxDrops(self: *const Self) u64 {
+        if (self.real_adapter) |*adapter| {
+            return adapter.getTxDrops();
+        }
+        return 0;
+    }
+
+    /// Return the NetPort for this adapter, if a port has been opened.
+    /// The data pump should route all I/O through this; callers must not
+    /// reach into `real_adapter` directly.
+    pub fn getPort(self: *const Self) ?adapter_mod.NetPort {
+        if (self.real_adapter) |*adapter| {
+            return adapter.port;
+        }
+        return null;
+    }
+
+    /// Acquire the fd_guard lock (protects fd from mid-poll replacement).
+    /// Pair with `releaseGuard()` after poll() returns.
+    pub fn acquireGuard(self: *Self) void {
+        if (self.real_adapter) |*adapter| {
+            adapter.fd_guard.lock();
+        }
+    }
+
+    /// Release the fd_guard lock.
+    pub fn releaseGuard(self: *Self) void {
+        if (self.real_adapter) |*adapter| {
+            adapter.fd_guard.unlock();
+        }
+    }
+
     /// Check if DHCP is complete
     pub fn isDhcpComplete(self: *const Self) bool {
         if (self.real_adapter) |*adapter| {
