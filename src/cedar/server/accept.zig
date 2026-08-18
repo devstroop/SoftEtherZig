@@ -123,6 +123,10 @@ pub const ServerContext = struct {
     /// Admin RPC dispatch server (issue #99): when non-null, enables the
     /// admin method in `handleConnection` for vpncmd-style RPC connections.
     admin_server: ?*dispatch_mod.Server = null,
+    /// Bridge mode (C `StStartServer(true)`): when set, the server operates
+    /// as a bridge — hub creation is restricted, LocalBridge is the primary
+    /// role. Set by the vpnbridge executable.
+    bridge_mode: bool = false,
 };
 
 /// The `AcceptHandler` entry point (listener.zig). Runs on the per-connection
