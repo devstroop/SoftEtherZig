@@ -1655,15 +1655,13 @@ pub const VpnClient = struct {
                 //         std.log.info("[ICMP-IN] {d}.{d}.{d}.{d} -> {d}.{d}.{d}.{d} type={d} code={d} len={d}", .{ src.a, src.b, src.c, src.d, dst.a, dst.b, dst.c, dst.d, icmp_type, icmp_code, block_data.len - 14 });
                 //     }
                 // }
-                if (adapter.real_adapter) |*real| {
-                    if (real.write(block_data[14..])) |_| {
-                        // Write succeeded — clear backpressure from any prior
-                        // EAGAIN so inbound processing resumes.
-                        self.tun_write_blocked = false;
-                    } else |_| {
-                        self.tun_write_blocked = true;
-                        self.tun_eagain_count += 1;
-                    }
+                if (adapter.write(block_data[14..])) |_| {
+                    // Write succeeded — clear backpressure from any prior
+                    // EAGAIN so inbound processing resumes.
+                    self.tun_write_blocked = false;
+                } else |_| {
+                    self.tun_write_blocked = true;
+                    self.tun_eagain_count += 1;
                 }
             } else if (ethertype == 0x0806) {
                 if (tunnel_mod.getArpOperation(block_data)) |arp_op| {
@@ -1762,11 +1760,9 @@ pub const VpnClient = struct {
                     }
                     std.log.info("DHCP: Lease time {d}s", .{response.config.lease_time});
 
-                    if (adapter.real_adapter) |*real| {
-                        real.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
-                            std.log.err("Failed to configure interface: {}", .{err});
-                        };
-                    }
+                    adapter.configure(response.config.ip_address, response.config.subnet_mask, response.config.gateway) catch |err| {
+                        std.log.err("Failed to configure interface: {}", .{err});
+                    };
 
                     {
                         const ip = tunnel_mod.formatIpForLog(response.config.ip_address);
@@ -1897,17 +1893,15 @@ pub const VpnClient = struct {
     /// Each element in `batch` is a slice of the IP packet (without Ethernet header).
     /// Stops on first write error and sets tun_write_blocked.
     fn flushTunWriteBatch(self: *Self, adapter: *AdapterWrapper, batch: []const []const u8) void {
-        if (adapter.real_adapter) |*real| {
-            for (batch) |data| {
-                if (real.write(data)) |_| {
-                    // Write succeeded — clear backpressure from any prior
-                    // EAGAIN so inbound processing resumes.
-                    self.tun_write_blocked = false;
-                } else |_| {
-                    self.tun_write_blocked = true;
-                    self.tun_eagain_count += 1;
-                    return;
-                }
+        for (batch) |data| {
+            if (adapter.write(data)) |_| {
+                // Write succeeded — clear backpressure from any prior
+                // EAGAIN so inbound processing resumes.
+                self.tun_write_blocked = false;
+            } else |_| {
+                self.tun_write_blocked = true;
+                self.tun_eagain_count += 1;
+                return;
             }
         }
     }
@@ -1950,12 +1944,9 @@ pub const VpnClient = struct {
             // We'll poll TUN separately with WaitForSingleObject.
             break :win_blk @as(std.posix.fd_t, std.os.windows.INVALID_HANDLE_VALUE);
         } else blk: {
-            if (adapter.real_adapter) |*real| {
-                const fd = real.getFd();
-                if (fd < 0) return ClientError.AdapterConfigurationFailed;
-                break :blk fd;
-            }
-            return ClientError.AdapterConfigurationFailed;
+            const fd = adapter.getFd();
+            if (fd < 0) return ClientError.AdapterConfigurationFailed;
+            break :blk fd;
         };
 
         const tun_fd_int: usize = if (builtin.os.tag == .windows) @intFromPtr(tun_fd) else @as(usize, @intCast(tun_fd));
@@ -2275,11 +2266,9 @@ pub const VpnClient = struct {
             var tun_fd_guard_locked = false;
             if (builtin.os.tag != .windows) {
                 if (self.adapter_ctx) |*ac| {
-                    if (ac.real_adapter) |*ra| {
-                        ra.fd_guard.lock();
-                        tun_fd_guard_locked = true;
-                        poll_tun_sock = ra.getFd();
-                    }
+                    ac.acquireGuard();
+                    tun_fd_guard_locked = true;
+                    poll_tun_sock = ac.getFd();
                 }
             }
             // Latency tracking: capture wall-clock at the very start of every
@@ -2379,9 +2368,7 @@ pub const VpnClient = struct {
             if (tun_fd_guard_locked) {
                 tun_fd_guard_locked = false;
                 if (self.adapter_ctx) |*ac| {
-                    if (ac.real_adapter) |*ra| {
-                        ra.fd_guard.unlock();
-                    }
+                    ac.releaseGuard();
                 }
             }
             const poll_us: u32 = @intCast(@max(0, std.time.microTimestamp() - poll_t0));
@@ -2603,9 +2590,7 @@ pub const VpnClient = struct {
                         if (udp_data.len > 14 and is_configured) {
                             const ethertype_udp = (@as(u16, udp_data[12]) << 8) | udp_data[13];
                             if (ethertype_udp == 0x0800 or ethertype_udp == 0x86DD) {
-                                if (adapter.real_adapter) |*real| {
-                                    _ = real.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
-                                }
+                                _ = adapter.write(udp_data[14..]) catch |e| std.log.warn("UDP accel write failed: {}", .{e});
                             }
                             self.stats.recordReceived(udp_data.len);
                         }
@@ -2702,156 +2687,154 @@ pub const VpnClient = struct {
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
-                if (adapter.real_adapter) |*real| {
-                    if (real.port) |tun_port| {
-                        var sendq: u32 = 0;
-                        const is_multi = self.conn_manager != null;
-                        if (single_sock) |ss| {
-                            sendq = @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32)));
-                        } else if (self.conn_manager) |*cm| {
-                            // In multi-conn mode there's no head-of-line blocking
-                            // across connections — if one is slow, others can drain.
-                            // Use AVG to avoid throttling ALL connections because
-                            // ONE connection's buffer is full. Single-conn uses MAX
-                            // (the only connection IS the bottleneck).
-                            var sq_sum: u64 = 0;
-                            var sq_count: u32 = 0;
-                            for (cm.connections[0..cm.count]) |*slot| {
-                                if (slot.*) |*conn| {
-                                    if (conn.established) {
-                                        const sq: u32 = @intCast(@min(conn.tls_socket.kernelSendQueue(), std.math.maxInt(u32)));
-                                        sq_sum += sq;
-                                        sq_count += 1;
-                                    }
+                if (adapter.getPort()) |tun_port| {
+                    var sendq: u32 = 0;
+                    const is_multi = self.conn_manager != null;
+                    if (single_sock) |ss| {
+                        sendq = @intCast(@min(ss.kernelSendQueue(), std.math.maxInt(u32)));
+                    } else if (self.conn_manager) |*cm| {
+                        // In multi-conn mode there's no head-of-line blocking
+                        // across connections — if one is slow, others can drain.
+                        // Use AVG to avoid throttling ALL connections because
+                        // ONE connection's buffer is full. Single-conn uses MAX
+                        // (the only connection IS the bottleneck).
+                        var sq_sum: u64 = 0;
+                        var sq_count: u32 = 0;
+                        for (cm.connections[0..cm.count]) |*slot| {
+                            if (slot.*) |*conn| {
+                                if (conn.established) {
+                                    const sq: u32 = @intCast(@min(conn.tls_socket.kernelSendQueue(), std.math.maxInt(u32)));
+                                    sq_sum += sq;
+                                    sq_count += 1;
                                 }
                             }
-                            if (sq_count > 0) sendq = @intCast(@min(sq_sum / sq_count, std.math.maxInt(u32)));
                         }
-                        const batch_limit_base: usize = if (sendq >= sendq_throttle_critical)
-                            @min(OUTBOUND_BATCH, 1)
-                        else if (!is_multi and sendq >= sendq_throttle_high)
-                            @min(OUTBOUND_BATCH, 4)
-                        else if (sendq >= sendq_throttle_med)
-                            OUTBOUND_BATCH / 2
-                        else
-                            OUTBOUND_BATCH;
-                        // Fair scheduling: when inbound data was just processed,
-                        // cap the outbound batch to prevent UL processing from
-                        // delaying the next inbound poll cycle. New DL data may
-                        // arrive (in the kernel TCP buffer) during outbound
-                        // processing; a smaller outbound batch means the next
-                        // poll() runs sooner and catches it. Without this cap,
-                        // a 64-packet UL batch at 50 Mbps takes ~3-4ms of
-                        // encrypt+send, during which 50+ KB of DL can arrive
-                        // and sit idle.
-                        const batch_limit: usize = if (had_inbound_this_iter)
-                            @min(batch_limit_base, 16) // light outbound when DL is active
-                        else
-                            batch_limit_base;
+                        if (sq_count > 0) sendq = @intCast(@min(sq_sum / sq_count, std.math.maxInt(u32)));
+                    }
+                    const batch_limit_base: usize = if (sendq >= sendq_throttle_critical)
+                        @min(OUTBOUND_BATCH, 1)
+                    else if (!is_multi and sendq >= sendq_throttle_high)
+                        @min(OUTBOUND_BATCH, 4)
+                    else if (sendq >= sendq_throttle_med)
+                        OUTBOUND_BATCH / 2
+                    else
+                        OUTBOUND_BATCH;
+                    // Fair scheduling: when inbound data was just processed,
+                    // cap the outbound batch to prevent UL processing from
+                    // delaying the next inbound poll cycle. New DL data may
+                    // arrive (in the kernel TCP buffer) during outbound
+                    // processing; a smaller outbound batch means the next
+                    // poll() runs sooner and catches it. Without this cap,
+                    // a 64-packet UL batch at 50 Mbps takes ~3-4ms of
+                    // encrypt+send, during which 50+ KB of DL can arrive
+                    // and sit idle.
+                    const batch_limit: usize = if (had_inbound_this_iter)
+                        @min(batch_limit_base, 16) // light outbound when DL is active
+                    else
+                        batch_limit_base;
 
-                        // iOS send-buffer backpressure: when TCP_NOTSENT_LOWAT is
-                        // unavailable (iOS direct POSIX sockets don't support it),
-                        // the kernel output queue can fill with UL data, delaying
-                        // DL TCP ACKs behind it. When the sendq is critically deep,
-                        // skip the outbound section entirely for this iteration so
-                        // the kernel can drain without new data being queued.
-                        // Without this, the throttle at batch=1 still adds 1 packet
-                        // (up to ~15KB) per iteration, keeping the send buffer near
-                        // the ceiling forever — DL ACKs never get a clear channel.
-                        // One idle iteration at ~1ms gives the kernel time to
-                        // transmit ~15KB of queued data (at 12 Mbps line rate),
-                        // which is enough to let a few DL ACKs through.
-                        //
-                        // Dynamic skip: DL-active uses med (768KB) to clear ACKs
-                        // fast. UL-only uses critical (1.5MB) — keep sendq shallow.
-                        const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_med else sendq_throttle_critical;
-                        if (builtin.os.tag == .ios and sendq >= ios_skip_threshold) {
-                            last_iter_had_work = false;
-                            skip_ul_poll = true;
-                        } else {
-                            // Normal outbound path: read UL from TUN, bundle, send.
-                            skip_ul_poll = false;
-                            var outbound_blocks: [64][]const u8 = undefined;
-                            var outbound_count: usize = 0;
-                            var outbound_bytes: usize = 0;
+                    // iOS send-buffer backpressure: when TCP_NOTSENT_LOWAT is
+                    // unavailable (iOS direct POSIX sockets don't support it),
+                    // the kernel output queue can fill with UL data, delaying
+                    // DL TCP ACKs behind it. When the sendq is critically deep,
+                    // skip the outbound section entirely for this iteration so
+                    // the kernel can drain without new data being queued.
+                    // Without this, the throttle at batch=1 still adds 1 packet
+                    // (up to ~15KB) per iteration, keeping the send buffer near
+                    // the ceiling forever — DL ACKs never get a clear channel.
+                    // One idle iteration at ~1ms gives the kernel time to
+                    // transmit ~15KB of queued data (at 12 Mbps line rate),
+                    // which is enough to let a few DL ACKs through.
+                    //
+                    // Dynamic skip: DL-active uses med (768KB) to clear ACKs
+                    // fast. UL-only uses critical (1.5MB) — keep sendq shallow.
+                    const ios_skip_threshold = if (had_inbound_this_iter) sendq_throttle_med else sendq_throttle_critical;
+                    if (builtin.os.tag == .ios and sendq >= ios_skip_threshold) {
+                        last_iter_had_work = false;
+                        skip_ul_poll = true;
+                    } else {
+                        // Normal outbound path: read UL from TUN, bundle, send.
+                        skip_ul_poll = false;
+                        var outbound_blocks: [64][]const u8 = undefined;
+                        var outbound_count: usize = 0;
+                        var outbound_bytes: usize = 0;
 
-                            while (outbound_count < batch_limit) {
-                                diag.tun_read_attempts += 1;
-                                if (tun_port.read(&tun_read_bufs[outbound_count])) |maybe_len| {
-                                    if (maybe_len) |ip_len| {
-                                        if (ip_len > 0 and ip_len <= 1500) {
-                                            diag.tun_reads += 1;
-                                            diag.tun_bytes += ip_len;
-                                            const gw_mac = loop_state.gateway_mac orelse blk: {
-                                                var random_mac: [6]u8 = undefined;
-                                                std.crypto.random.bytes(&random_mac);
-                                                random_mac[0] = (random_mac[0] & 0xFE) | 0x02;
-                                                break :blk random_mac;
-                                            };
-                                            if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
-                                                diag.eth_pkts += 1;
-                                                diag.eth_bytes += eth_frame.len;
-                                                if (eth_frame.len >= 200) {
-                                                    diag.pkt_large += 1;
-                                                } else {
-                                                    diag.pkt_small += 1;
-                                                }
-                                                outbound_blocks[outbound_count] = eth_frame;
-                                                outbound_bytes += eth_frame.len;
-                                                outbound_count += 1;
+                        while (outbound_count < batch_limit) {
+                            diag.tun_read_attempts += 1;
+                            if (tun_port.read(&tun_read_bufs[outbound_count])) |maybe_len| {
+                                if (maybe_len) |ip_len| {
+                                    if (ip_len > 0 and ip_len <= 1500) {
+                                        diag.tun_reads += 1;
+                                        diag.tun_bytes += ip_len;
+                                        const gw_mac = loop_state.gateway_mac orelse blk: {
+                                            var random_mac: [6]u8 = undefined;
+                                            std.crypto.random.bytes(&random_mac);
+                                            random_mac[0] = (random_mac[0] & 0xFE) | 0x02;
+                                            break :blk random_mac;
+                                        };
+                                        if (tunnel_mod.wrapIpInEthernet(tun_read_bufs[outbound_count][0..ip_len], gw_mac, mac, &outbound_eth_bufs[outbound_count])) |eth_frame| {
+                                            diag.eth_pkts += 1;
+                                            diag.eth_bytes += eth_frame.len;
+                                            if (eth_frame.len >= 200) {
+                                                diag.pkt_large += 1;
+                                            } else {
+                                                diag.pkt_small += 1;
                                             }
+                                            outbound_blocks[outbound_count] = eth_frame;
+                                            outbound_bytes += eth_frame.len;
+                                            outbound_count += 1;
                                         }
-                                    } else break; // No more packets available
-                                } else |_| break;
-                            }
+                                    }
+                                } else break; // No more packets available
+                            } else |_| break;
+                        }
 
-                            if (outbound_count > 0) {
-                                // Try UDP first, track how many succeeded
-                                var udp_sent_count: usize = 0;
-                                if (self.udp_accel) |*ua| {
-                                    for (outbound_blocks[0..outbound_count]) |frame| {
-                                        if (!(ua.sendData(frame) catch false)) break;
-                                        udp_sent_count += 1;
-                                    }
+                        if (outbound_count > 0) {
+                            // Try UDP first, track how many succeeded
+                            var udp_sent_count: usize = 0;
+                            if (self.udp_accel) |*ua| {
+                                for (outbound_blocks[0..outbound_count]) |frame| {
+                                    if (!(ua.sendData(frame) catch false)) break;
+                                    udp_sent_count += 1;
                                 }
-                                // Send remaining packets (not sent via UDP) over TCP.
-                                // iOS kernel queue drop gate: when sendq + pending data would
-                                // exceed the drop threshold, discard BEFORE reaching kernel.
-                                // Matches original SoftEther SendFifo drop-on-full policy.
-                                const drop_threshold: u32 = if (is_multi) sendq_throttle_drop / @max(self.config.max_connections, 1) else sendq_throttle_drop;
-                                if (builtin.os.tag == .ios and sendq + outbound_bytes > drop_threshold) {
-                                    diag.tcp_drops_pkts += outbound_count - udp_sent_count;
-                                    skip_ul_poll = true;
-                                } else if (udp_sent_count < outbound_count) {
-                                    var tls_send_ok = true;
-                                    var send_bytes: usize = 0;
-                                    for (outbound_blocks[udp_sent_count..outbound_count]) |b| send_bytes += b.len;
-                                    diag.tls_send_calls += 1;
-                                    diag.tls_send_bytes += send_bytes;
-                                    send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
-                                        error.ConnectionClosed, error.BrokenPipe => {
-                                            std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
-                                            self.disconnect_reason = .network_error;
-                                            return error.ConnectionLost;
-                                        },
-                                        else => {
-                                            tls_send_ok = false;
-                                        },
-                                    };
-                                    if (tls_send_ok) {
-                                        diag.pkts_out += outbound_count - udp_sent_count;
-                                        for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
-                                    } else {
-                                        diag.tcp_drops_pkts += outbound_count - udp_sent_count;
-                                    }
-                                }
-                                // DIAG: count UDP-sent too
-                                if (udp_sent_count > 0) {
-                                    diag.pkts_out += udp_sent_count;
-                                    for (outbound_blocks[0..udp_sent_count]) |b| diag.bytes_out += b.len;
-                                }
-                                self.stats.recordSent(outbound_bytes);
                             }
+                            // Send remaining packets (not sent via UDP) over TCP.
+                            // iOS kernel queue drop gate: when sendq + pending data would
+                            // exceed the drop threshold, discard BEFORE reaching kernel.
+                            // Matches original SoftEther SendFifo drop-on-full policy.
+                            const drop_threshold: u32 = if (is_multi) sendq_throttle_drop / @max(self.config.max_connections, 1) else sendq_throttle_drop;
+                            if (builtin.os.tag == .ios and sendq + outbound_bytes > drop_threshold) {
+                                diag.tcp_drops_pkts += outbound_count - udp_sent_count;
+                                skip_ul_poll = true;
+                            } else if (udp_sent_count < outbound_count) {
+                                var tls_send_ok = true;
+                                var send_bytes: usize = 0;
+                                for (outbound_blocks[udp_sent_count..outbound_count]) |b| send_bytes += b.len;
+                                diag.tls_send_calls += 1;
+                                diag.tls_send_bytes += send_bytes;
+                                send_helper.get().sendBlocksZeroCopy(outbound_blocks[udp_sent_count..outbound_count], send_buffer) catch |err| switch (err) {
+                                    error.ConnectionClosed, error.BrokenPipe => {
+                                        std.log.err("Outbound send failed, exiting data loop: {s}", .{@errorName(err)});
+                                        self.disconnect_reason = .network_error;
+                                        return error.ConnectionLost;
+                                    },
+                                    else => {
+                                        tls_send_ok = false;
+                                    },
+                                };
+                                if (tls_send_ok) {
+                                    diag.pkts_out += outbound_count - udp_sent_count;
+                                    for (outbound_blocks[udp_sent_count..outbound_count]) |b| diag.bytes_out += b.len;
+                                } else {
+                                    diag.tcp_drops_pkts += outbound_count - udp_sent_count;
+                                }
+                            }
+                            // DIAG: count UDP-sent too
+                            if (udp_sent_count > 0) {
+                                diag.pkts_out += udp_sent_count;
+                                for (outbound_blocks[0..udp_sent_count]) |b| diag.bytes_out += b.len;
+                            }
+                            self.stats.recordSent(outbound_bytes);
                         }
                     }
                 }
@@ -3170,10 +3153,7 @@ pub const VpnClient = struct {
                     // On desktop (utun/tun) this always returns 0; on mobile it reveals
                     // how many packets were dropped because the ring was full — the
                     // smoking gun for TCP retrans storms and bufferbloat.
-                    const tx_drops_now: u64 = if (adapter.real_adapter) |*ra|
-                        ra.getTxDrops()
-                    else
-                        0;
+                    const tx_drops_now: u64 = adapter.getTxDrops();
                     diag.tx_drops_delta = tx_drops_now -| diag.tx_drops_last;
                     diag.tx_drops_last = tx_drops_now;
 
