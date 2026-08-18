@@ -13,6 +13,16 @@ fn parseVersion(comptime zon: []const u8) []const u8 {
     return zon[start..end];
 }
 
+/// Apply the local .sframe-stripped libc workaround when present (see build()).
+fn useLibcFile(step: *std.Build.Step.Compile, use_local_crt: bool, local_libc_conf: []const u8) void {
+    if (use_local_crt) step.setLibCFile(.{ .cwd_relative = local_libc_conf });
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{
@@ -23,6 +33,28 @@ pub fn build(b: *std.Build) void {
     const target_abi = target.result.abi;
     const target_arch = target.result.cpu.arch;
     const is_android = target_os == .linux and (target_abi == .android or target_abi == .androideabi);
+
+    // zig 0.15.x bundles lld 18, which cannot handle the .sframe section
+    // relocations emitted by newer system glibc (2.44+, gcc 16) crt1.o on
+    // Linux. Workaround: scripts/setup_zig_0152.sh installs a copy of the
+    // CRT objects with .sframe stripped plus a libc paths file. When present
+    // on a native Linux build, use it so the bundled lld can link. Other
+    // platforms/machines are unaffected (no libc file → default detection).
+    const local_crt_dir = "/usr/local/zig-crt-0152";
+    const local_libc_conf = "/usr/local/etc/zig-glibc-0152.conf";
+    const builtin = @import("builtin");
+    // Validate the workaround is fully installed — a partially created or
+    // stale setup directory must not silently force the libc file on every
+    // native Linux compile step; fall back to default detection instead.
+    const use_local_crt = target_os == .linux and !is_android and
+        target_arch == builtin.cpu.arch and target_abi == builtin.abi and
+        pathExists(local_crt_dir) and
+        pathExists(local_libc_conf) and
+        pathExists("/usr/local/zig-crt-0152/crt1.o") and
+        pathExists("/usr/local/zig-crt-0152/crti.o") and
+        pathExists("/usr/local/zig-crt-0152/crtn.o") and
+        pathExists("/usr/local/zig-crt-0152/libc.so") and
+        pathExists("/usr/local/zig-crt-0152/libm.so");
 
     // Parse version from build.zig.zon (single source of truth)
     const version = comptime parseVersion(build_zon);
@@ -159,7 +191,14 @@ pub fn build(b: *std.Build) void {
         .riscv64 => "riscv64-linux-gnu",
         else => null,
     } else null;
-    const linux_lib_dir = if (linux_multiarch) |t| b.fmt("/usr/lib/{s}", .{t}) else null;
+    const linux_lib_dir: ?[]const u8 = if (linux_multiarch) |t| blk: {
+        // Only add the multiarch lib dir if it actually exists (Debian/Ubuntu
+        // layout). On other distros (e.g. Arch: /usr/lib) it does not, and
+        // linking with a missing -L dir is a hard error on zig 0.15.x.
+        const dir = b.fmt("/usr/lib/{s}", .{t});
+        if (pathExists(dir)) break :blk dir;
+        break :blk null;
+    } else null;
 
     // Print build configuration
     std.debug.print("Build Configuration:\n", .{});
@@ -364,6 +403,7 @@ pub fn build(b: *std.Build) void {
     linkOpenSsl(b, vpnclient, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
     vpnclient.linkLibC();
     addZlib(vpnclient, b);
+    useLibcFile(vpnclient, use_local_crt, local_libc_conf);
 
     b.installArtifact(vpnclient);
 
@@ -411,6 +451,7 @@ pub fn build(b: *std.Build) void {
     // Link OpenSSL for shared library too
     linkOpenSsl(b, shared_lib, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);
     addZlib(shared_lib, b);
+    useLibcFile(shared_lib, use_local_crt, local_libc_conf);
 
     // Android 15+ requires 16KB-aligned PT_LOAD segments. `patchelf
     // --page-size` does not physically re-align segments, so set the lld
@@ -472,6 +513,7 @@ pub fn build(b: *std.Build) void {
     }
     static_lib.linkLibC();
     addZlib(static_lib, b);
+    useLibcFile(static_lib, use_local_crt, local_libc_conf);
 
     const install_static_lib = b.addInstallArtifact(static_lib, .{});
 
@@ -558,6 +600,7 @@ pub fn build(b: *std.Build) void {
         }
         if (is_android) setupAndroidNdk(b, t, target_arch);
         t.linkLibC();
+        useLibcFile(t, use_local_crt, local_libc_conf);
 
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
@@ -584,6 +627,7 @@ pub fn build(b: *std.Build) void {
         addZlib(ffi_test, b);
         if (is_android) setupAndroidNdk(b, ffi_test, target_arch);
         ffi_test.linkLibC();
+        useLibcFile(ffi_test, use_local_crt, local_libc_conf);
 
         const run_ffi_test = b.addRunArtifact(ffi_test);
         test_step.dependOn(&run_ffi_test.step);
@@ -629,6 +673,7 @@ pub fn build(b: *std.Build) void {
         addZlib(all_test, b);
         if (is_android) setupAndroidNdk(b, all_test, target_arch);
         all_test.linkLibC();
+        useLibcFile(all_test, use_local_crt, local_libc_conf);
 
         const run_all_test = b.addRunArtifact(all_test);
         test_step.dependOn(&run_all_test.step);
@@ -664,6 +709,7 @@ pub fn build(b: *std.Build) void {
         addZlib(integration_test, b);
         if (is_android) setupAndroidNdk(b, integration_test, target_arch);
         integration_test.linkLibC();
+        useLibcFile(integration_test, use_local_crt, local_libc_conf);
 
         const run_integration_test = b.addRunArtifact(integration_test);
         test_step.dependOn(&run_integration_test.step);
@@ -688,6 +734,7 @@ pub fn build(b: *std.Build) void {
         if (target_os == .macos) {
             dhcpv6_test.linkLibC();
         }
+        useLibcFile(dhcpv6_test, use_local_crt, local_libc_conf);
         const run_dhcpv6_test = b.addRunArtifact(dhcpv6_test);
         test_step.dependOn(&run_dhcpv6_test.step);
     }
