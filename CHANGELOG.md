@@ -8,6 +8,16 @@ they are called out under **Breaking** in each entry.
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-08-18
+
+### Fixed
+
+- **Release assets crash on older CPUs (`SIGILL`).** Native release builds
+  defaulted to the GitHub runner's CPU, baking AVX/AVX2 instructions into
+  the distributed binaries. `release.yml` now builds with `-Dcpu=baseline`,
+  so assets run on any x86_64/arm64 host. (Verified: v0.3.12 linux-x86_64
+  asset fails at startup on a pre-AVX machine; baseline build runs fine.)
+
 ## [0.3.12] - 2026-08-18
 
 ### Fixed
