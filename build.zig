@@ -43,10 +43,18 @@ pub fn build(b: *std.Build) void {
     const local_crt_dir = "/usr/local/zig-crt-0152";
     const local_libc_conf = "/usr/local/etc/zig-glibc-0152.conf";
     const builtin = @import("builtin");
+    // Validate the workaround is fully installed — a partially created or
+    // stale setup directory must not silently force the libc file on every
+    // native Linux compile step; fall back to default detection instead.
     const use_local_crt = target_os == .linux and !is_android and
         target_arch == builtin.cpu.arch and target_abi == builtin.abi and
         pathExists(local_crt_dir) and
-        pathExists(local_libc_conf);
+        pathExists(local_libc_conf) and
+        pathExists("/usr/local/zig-crt-0152/crt1.o") and
+        pathExists("/usr/local/zig-crt-0152/crti.o") and
+        pathExists("/usr/local/zig-crt-0152/crtn.o") and
+        pathExists("/usr/local/zig-crt-0152/libc.so") and
+        pathExists("/usr/local/zig-crt-0152/libm.so");
 
     // Parse version from build.zig.zon (single source of truth)
     const version = comptime parseVersion(build_zon);
