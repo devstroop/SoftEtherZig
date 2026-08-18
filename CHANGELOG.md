@@ -8,6 +8,24 @@ they are called out under **Breaking** in each entry.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-08-18
+
+### Fixed
+
+- **Native Linux builds on newer system glibc (2.44+, gcc 16).** zig 0.15.x
+  bundles lld 18, which cannot handle the `.sframe` section relocations
+  emitted by the new `crt1.o`/`libc_nonshared.a` and fails with
+  `unhandled relocation type R_X86_64_PC64` at link time. `build.zig` now
+  auto-detects a local `.sframe`-stripped CRT directory via a libc paths
+  file (`/usr/local/etc/zig-glibc-0152.conf`) on native Linux builds only;
+  other platforms and machines are unaffected. `scripts/setup_zig_0152.sh`
+  installs everything (stripped CRT copies, linker scripts, libc file,
+  pinned `zig` symlink) and is idempotent with timestamped backups.
+- **Linux build failure on non-Debian distros.** The multiarch library
+  directory (`/usr/lib/x86_64-linux-gnu`) was always added to the link
+  path; on distros without that layout (e.g. Arch) the missing `-L` dir is
+  a hard error on zig 0.15.x. It is now only added when it exists.
+
 ## [0.3.10] - 2026-08-14
 
 ### Added
