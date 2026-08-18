@@ -178,9 +178,12 @@ jobs:
           printf '%s\n' "${{ matrix.targets }}" | while IFS= read -r t; do
             [ -z "$t" ] && continue
             if [ "$t" = "exe" ]; then
-              zig build --release=fast --summary all
+              # -Dcpu=baseline: distributable binaries must run on any CPU
+              # (native default would bake in runner AVX etc. → SIGILL on
+              # older machines). Cross-compiles default to baseline anyway.
+              zig build --release=fast -Dcpu=baseline --summary all
             else
-              zig build $t --release=fast --summary all
+              zig build $t --release=fast -Dcpu=baseline --summary all
             fi
           done
 
@@ -193,9 +196,9 @@ jobs:
             $t = $t.Trim()
             if ($t -eq "") { continue }
             if ($t -eq 'exe') {
-              zig build --release=fast --summary all
+              zig build --release=fast -Dcpu=baseline --summary all
             } else {
-              zig build $t --release=fast --summary all
+              zig build $t --release=fast -Dcpu=baseline --summary all
             }
           }
 
