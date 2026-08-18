@@ -133,6 +133,11 @@ src/
 ## Commands
 
 ```bash
+# === Toolchain (Linux) ===
+bash scripts/setup_zig_0152.sh        # pin `zig` to 0.15.2 + work around lld 18 vs
+                                      # glibc 2.44+ .sframe relocations (run as root;
+                                      # re-run after glibc upgrades)
+
 # === Build ===
 zig build                              # CLI (debug)
 zig build --release=fast               # CLI (release)
@@ -339,6 +344,7 @@ No other external dependencies. All crypto (SHA-0, AES, HMAC) is pure Zig in `ma
 | **iOS simulator** | Network Extension unavailable | Must use physical device + release build |
 | **TUN permission denied** | Adapter init failure on Linux | Run with `sudo` or set `CAP_NET_ADMIN` capability |
 | **Stale `zig-out/`** | CLI/shared lib mismatch after code change | `zig build` recompiles but old artifacts may linger — `rm -rf zig-out` if suspect |
+| **zig 0.15.2 vs glibc 2.44+** | `unhandled relocation type R_X86_64_PC64` in `.sframe` of crt1.o/libc_nonshared.a at link time | Run `scripts/setup_zig_0152.sh` — installs .sframe-stripped CRT copies + libc file (`/usr/local/etc/zig-glibc-0152.conf`), auto-detected by build.zig for native Linux only |
 | **WorxVPN vs SE submodule drift** | Same library, different commits | SE at `7c798c39`, WX at `442d7656` — confirm FFI ABI compatible |
 | **utun_escalate SUID** | macOS TUN permission error | `chown root:wheel` + `chmod u+s` the helper binary |
 
