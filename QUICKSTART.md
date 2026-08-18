@@ -95,6 +95,26 @@ sudo setcap cap_net_admin+ep zig-out/bin/vpnclient
 ./zig-out/bin/vpnclient ...
 ```
 
+### Run as a systemd service (no terminal needed)
+
+```bash
+# 1. Install vpnclient (release asset or zig build --release=fast)
+sudo cp zig-out/bin/vpnclient /usr/local/bin/
+
+# 2. Create /etc/softether-zig/config.json (see Config File section below)
+#    Or let the installer copy ~/.config/softether-zig/config.json:
+sudo bash scripts/install_systemd.sh
+
+# 3. Manage the service
+systemctl status softether-zig-vpnclient
+sudo systemctl restart softether-zig-vpnclient
+sudo systemctl stop softether-zig-vpnclient
+```
+
+The service connects at boot, auto-reconnects on drop, and restarts on
+failure. Unit file: `systemd/softether-zig-vpnclient.service` (Linux release
+archives ship it plus the installer script).
+
 ### Shared library for Flutter/Linux
 
 ```bash
