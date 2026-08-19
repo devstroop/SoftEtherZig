@@ -44,6 +44,8 @@ const Pack = pack_mod.Pack;
 const rpc_mod = @import("rpc.zig");
 const structs = @import("structs.zig");
 const hash_mod = @import("../../../mayaqua/encrypt/hash.zig");
+const x509_mod = @import("../../../mayaqua/encrypt/x509.zig");
+const ssl = @import("../../protocol/c_imports.zig").c;
 const auth = @import("../auth.zig");
 const session_registry = @import("../session_registry.zig");
 const session_main = @import("../session_main.zig");
@@ -622,6 +624,13 @@ pub const Server = struct {
     /// Active local bridges (AddLocalBridge/DeleteLocalBridge/EnumLocalBridge).
     local_bridges: std.ArrayListUnmanaged(LocalBridgeEntry) = .{},
 
+    /// Server certificate PEM (C: cedar->ServerX serialized to PEM).
+    cert_pem: []const u8 = "",
+    /// Server private key PEM (C: cedar->ServerK serialized to PEM).
+    key_pem: []const u8 = "",
+    /// TLS cipher list string (C: cedar->CipherList).
+    cipher_list: []const u8 = "",
+
 /// Back-pointer to the runtime `ServerContext` (accept.zig). Set once at
     /// startup so admin handlers can create/destroy runtime objects (e.g.
     /// LocalBridge). The dispatch Server outlives all connections.
@@ -673,6 +682,9 @@ pub const Server = struct {
         self.listeners.deinit(allocator);
         for (self.local_bridges.items) |*lb| lb.deinit(allocator);
         self.local_bridges.deinit(allocator);
+        allocator.free(self.cert_pem);
+        allocator.free(self.key_pem);
+        allocator.free(self.cipher_list);
         self.sessions.deinit();
         self.* = .{
             .allocator = allocator,
@@ -836,15 +848,15 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "DisconnectFarmConnection")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "SetServerCert")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcKeyPair, &a, allocator, request, ret, stSetServerCert);
     } else if (mem.eql(u8, function_name, "GetServerCert")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcKeyPair, &a, allocator, request, ret, stGetServerCert);
     } else if (mem.eql(u8, function_name, "GetServerCipher")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcStr, &a, allocator, request, ret, stGetServerCipher);
     } else if (mem.eql(u8, function_name, "SetServerCipher")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcStr, &a, allocator, request, ret, stSetServerCipher);
     } else if (mem.eql(u8, function_name, "RegenerateServerCert")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcTest, &a, allocator, request, ret, stRegenerateServerCert);
     } else if (mem.eql(u8, function_name, "CreateKeyPair")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "EnableListener")) {
@@ -1322,6 +1334,7 @@ fn freeAlloc(comptime T: type, t: *T, allocator: Allocator) void {
         structs.RpcCreateLink => t.free(allocator),
         structs.RpcLinkStatus => t.free(allocator),
         structs.RpcKeyPair => t.free(allocator),
+        structs.RpcStr => t.free(allocator),
         structs.RpcHub => t.free(allocator),
         else => @compileError("no Free for " ++ @typeName(T)),
     }
@@ -2579,6 +2592,128 @@ fn stGetBridgeSupport(a: *AdminCtx, t: *structs.RpcBridgeSupport, allocator: All
     _ = allocator;
     t.is_bridge_supported_os = true;
     t.is_winpcap_needed = false;
+    return err_no_error;
+}
+
+// ============================================================================
+// Certificate & Cipher (C Admin.c:9366-9446, 2157)
+// ============================================================================
+
+/// C `StRegenerateServerCert` (Admin.c:2157). `RPC_TEST` — `StrValue` is the
+/// CN for the new self-signed cert; empty → hostname default.
+fn stRegenerateServerCert(a: *AdminCtx, t: *structs.RpcTest, allocator: Allocator) u32 {
+    const s = a.server;
+    const cn = if (t.str_value.len > 0) t.str_value else s.host_name;
+
+    const result = x509_mod.generateSelfSigned(allocator, .{
+        .common_name = cn,
+        .organization = "SoftEther VPN Server",
+    }, 365 * 10) catch return err_internal_error;
+    defer result.cert.deinit(allocator);
+    defer allocator.free(result.key);
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const old_cert = s.cert_pem;
+    const old_key = s.key_pem;
+    s.cert_pem = allocator.dupe(u8, result.cert.data) catch return err_internal_error;
+    s.key_pem = allocator.dupe(u8, result.key) catch {
+        allocator.free(s.cert_pem);
+        s.cert_pem = old_cert;
+        return err_internal_error;
+    };
+    allocator.free(old_cert);
+    allocator.free(old_key);
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StSetServerCert` (Admin.c:9446). `RPC_KEY_PAIR` — `Cert` and `Key` are
+/// PEM-encoded. Validates key matches cert.
+fn stSetServerCert(a: *AdminCtx, t: *structs.RpcKeyPair, allocator: Allocator) u32 {
+    if (t.cert.len == 0 or t.key.len == 0) return err_invalid_parameter;
+
+    // Validate: cert and key must both parse.
+    const x509 = x509_mod.pemToX509(allocator, t.cert) catch return err_invalid_parameter;
+    defer ssl.X509_free(x509);
+
+    const pkey = x509_mod.pemToEvpPkey(allocator, t.key, true) catch return err_invalid_parameter;
+    defer ssl.EVP_PKEY_free(pkey);
+
+    // Validate: key matches cert.
+    if (ssl.X509_check_private_key(x509, pkey) != 1) return err_invalid_parameter;
+
+    const s = a.server;
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const old_cert = s.cert_pem;
+    const old_key = s.key_pem;
+    s.cert_pem = allocator.dupe(u8, t.cert) catch return err_internal_error;
+    s.key_pem = allocator.dupe(u8, t.key) catch {
+        allocator.free(s.cert_pem);
+        s.cert_pem = old_cert;
+        return err_internal_error;
+    };
+    allocator.free(old_cert);
+    allocator.free(old_key);
+    s.config_revision +|= 1;
+    t.flag1 = 1;
+    return err_no_error;
+}
+
+/// C `StGetServerCert` (Admin.c:9419). `RPC_KEY_PAIR` — returns cert PEM in
+/// `Cert`; private key in `Key` only for server admins.
+fn stGetServerCert(a: *AdminCtx, t: *structs.RpcKeyPair, allocator: Allocator) u32 {
+    const s = a.server;
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    t.free(allocator);
+    t.* = .{};
+
+    if (s.cert_pem.len > 0) {
+        t.cert = allocator.dupe(u8, s.cert_pem) catch return err_internal_error;
+    }
+    // Private key only returned to server admins.
+    if (a.server_admin and s.key_pem.len > 0) {
+        t.key = allocator.dupe(u8, s.key_pem) catch {
+            allocator.free(t.cert);
+            t.cert = "";
+            return err_internal_error;
+        };
+    }
+    t.flag1 = 1;
+    return err_no_error;
+}
+
+/// C `StGetServerCipher` (Admin.c:9401). `RPC_STR` — returns the cipher list.
+fn stGetServerCipher(a: *AdminCtx, t: *structs.RpcStr, allocator: Allocator) u32 {
+    const s = a.server;
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    t.free(allocator);
+    t.* = .{};
+    if (s.cipher_list.len > 0) {
+        t.string = allocator.dupe(u8, s.cipher_list) catch return err_internal_error;
+    }
+    return err_no_error;
+}
+
+/// C `StSetServerCipher` (Admin.c:9366). `RPC_STR` — sets the cipher list.
+fn stSetServerCipher(a: *AdminCtx, t: *structs.RpcStr, allocator: Allocator) u32 {
+    if (t.string.len == 0) return err_invalid_parameter;
+
+    const s = a.server;
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const old = s.cipher_list;
+    s.cipher_list = allocator.dupe(u8, t.string) catch return err_internal_error;
+    allocator.free(old);
+    s.config_revision +|= 1;
     return err_no_error;
 }
 
