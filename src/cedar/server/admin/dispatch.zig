@@ -1306,6 +1306,7 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcLinkStatus => try t.inRpc(allocator, p),
         structs.RpcKeyPair => try t.inRpc(allocator, p),
         structs.RpcHub => try t.inRpc(allocator, p),
+        structs.RpcStr => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -1394,6 +1395,8 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcLinkStatus => try t.outRpc(p),
         structs.RpcKeyPair => try t.outRpc(p),
         structs.RpcHub => try t.outRpc(p),
+        structs.RpcStr => try t.outRpc(p),
+        structs.RpcConnectionInfo => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -2754,7 +2757,7 @@ fn stRegenerateServerCert(a: *AdminCtx, t: *structs.RpcTest, allocator: Allocato
     const s = a.server;
     const cn = if (t.str_value.len > 0) t.str_value else s.host_name;
 
-    const result = x509_mod.generateSelfSigned(allocator, .{
+    var result = x509_mod.generateSelfSigned(allocator, .{
         .common_name = cn,
         .organization = "SoftEther VPN Server",
     }, 365 * 10) catch return err_internal_error;
@@ -3084,13 +3087,13 @@ fn stGetConnectionInfo(a: *AdminCtx, t: *structs.RpcConnectionInfo, allocator: A
 
     for (snaps) |*snap| {
         if (std.ascii.eqlIgnoreCase(snap.session_name, t.name)) {
-            t.free(allocator);
+            allocator.free(t.name);
             t.* = .{};
             t.name = dupStr(allocator, snap.session_name) catch return err_internal_error;
             t.hostname = "";
             t.ip = snap.peer_ip;
             t.port = 0;
-            t.connected_time = snap.created_time;
+            t.connected_time = @intCast(snap.created_time);
             t.server_str = "";
             t.server_ver = s.version;
             t.server_build = s.build;
@@ -3241,9 +3244,10 @@ fn stGetSecureNATStatus(a: *AdminCtx, t: *structs.RpcNatStatus, allocator: Alloc
     if (t.hub_name.len == 0) return err_invalid_parameter;
     if (findHub(s, t.hub_name) == null) return err_hub_not_found;
 
-    t.free(allocator);
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    allocator.free(t.hub_name);
     t.* = .{};
-    t.hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.hub_name = hub_name;
     return err_no_error;
 }
 
@@ -3878,7 +3882,7 @@ fn stEnumL3If(a: *AdminCtx, t: *structs.RpcEnumL3If, allocator: Allocator) u32 {
     t.items = allocator.alloc(structs.RpcEnumL3If.EnumL3IfItem, sw.interfaces.items.len) catch return err_internal_error;
     for (sw.interfaces.items, 0..) |intf, i| {
         t.items[i] = .{
-            .hub_name = dupStr(allocator, intf.hub_name) catch return err_internal_error,
+            .name = dupStr(allocator, intf.hub_name) catch return err_internal_error,
             .ip_address = intf.ip_address,
             .subnet_mask = intf.subnet_mask,
         };
