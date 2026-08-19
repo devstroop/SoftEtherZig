@@ -20,13 +20,13 @@
 //!
 //! ## Encryption note
 //!
-//! The M1 data channel is plaintext-over-TLS: the Zig client's tunnel reads
-//! and writes the `TlsSocket` directly (RCA-01 — the client AES-256-CBC path
-//! is dead code; `connection_manager.zig`/`vpn_client.zig` wire the tunnel
-//! straight to the TLS socket). This module therefore operates on the framed
-//! byte stream without any application-layer cipher. `ConnectionCipher`
-//! (`session.zig`) remains available for a future data-channel hardening
-//! layer and is deliberately not interposed here.
+//! The data channel supports three encryption modes negotiated during session
+//! setup: none (plaintext-over-TLS), fast RC4 (symmetric stream cipher per
+//! TCP socket), and AES-256-CBC (block cipher with per-packet IV). When
+//! encryption is active, `ConnectionCipher` (`session.zig`) is interposed
+//! between the tunnel framing and the hub packet adapter: received blocks
+//! are decrypted before delivery to the hub, and outbound frames are
+//! encrypted before transmission through the tunnel.
 
 const std = @import("std");
 const mem = std.mem;
@@ -160,6 +160,9 @@ pub const SessionMain = struct {
     tunnel: *TunnelConnection,
     pa: PacketAdapter,
     config: SessionConfig,
+    /// Per-TCP-socket cipher for data-channel encryption. Created from the
+    /// session's key material via `ServerSession.newConnectionCipher`.
+    cipher: ?@import("session.zig").ConnectionCipher = null,
 
     /// Set by `requestStop` (any thread); the loop ends with `error.Stopped`.
     halt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -265,9 +268,18 @@ pub const SessionMain = struct {
                 };
                 if (recv_count > 0) {
                     for (self.recv_out[0..recv_count]) |frame| {
+                        // Decrypt the block payload if a cipher is active.
+                        const plaintext = if (self.cipher) |*c|
+                            c.decryptRecv(self.allocator, frame) catch |err| {
+                                log.warn("decrypt failed: {}", .{err});
+                                return error.ConnectionClosed;
+                            }
+                        else
+                            frame;
+                        defer if (self.cipher != null) self.allocator.free(plaintext);
                         self.stats.rx_blocks += 1;
-                        self.stats.rx_bytes += frame.len;
-                        if (!self.pa.put(self.pa.ctx, frame)) return error.PacketAdapterPutFailed;
+                        self.stats.rx_bytes += plaintext.len;
+                        if (!self.pa.put(self.pa.ctx, plaintext)) return error.PacketAdapterPutFailed;
                     }
                 }
                 if (self.tunnel.total_recv > recv_start) {
@@ -405,17 +417,27 @@ pub const SessionMain = struct {
         // TLS path: batch frames and send via tunnel.
         while (count < self.send_batch.len) {
             const frame = self.pa.get(self.pa.ctx) orelse break;
-            // C drops frames once the pending send queue is over budget
-            // (Session.c:473-479).
-            if (self.send_queue_bytes + frame.len > self.config.max_buffering_size) {
-                self.allocator.free(frame);
+            // Encrypt the block payload if a cipher is active.
+            const ciphertext = if (self.cipher) |*c|
+                c.encryptSend(self.allocator, frame) catch |err| {
+                    self.allocator.free(frame);
+                    log.warn("encrypt failed: {}", .{err});
+                    return error.ConnectionClosed;
+                }
+            else
+                frame;
+            if (self.cipher != null) self.allocator.free(frame);
+            // Budget check against the encrypted size (AES-CBC adds IV +
+            // padding overhead) so batches never exceed max_buffering_size.
+            if (self.send_queue_bytes + ciphertext.len > self.config.max_buffering_size) {
+                self.allocator.free(ciphertext);
                 log.warn("dropping frame: send queue over buffering budget", .{});
                 continue;
             }
-            self.send_batch[count] = frame;
+            self.send_batch[count] = ciphertext;
             count += 1;
-            sent_bytes += frame.len;
-            self.send_queue_bytes += frame.len;
+            sent_bytes += ciphertext.len;
+            self.send_queue_bytes += ciphertext.len;
         }
 
         if (count == 0) return false;
