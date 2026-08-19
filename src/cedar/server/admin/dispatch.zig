@@ -285,6 +285,65 @@ pub const IpTableEntry = struct {
     }
 };
 
+/// C `LINK` subset (Admin.c) — a cascade connection entry.
+pub const ServerLink = struct {
+    account_name: []const u8 = "",
+    hostname: []const u8 = "",
+    hub_name: []const u8 = "",
+    online: bool = false,
+    connected: bool = false,
+    connected_time: u64 = 0,
+    last_error: u32 = 0,
+
+    fn deinit(self: *ServerLink, allocator: Allocator) void {
+        allocator.free(self.account_name);
+        allocator.free(self.hostname);
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
+/// C `X *` subset for CA certificate entries (HubDb->RootCertList).
+pub const ServerCa = struct {
+    key: u32 = 0,
+    subject_name: []const u8 = "",
+    issuer_name: []const u8 = "",
+    expires: u64 = 0,
+    cert_pem: []const u8 = "",
+
+    fn deinit(self: *ServerCa, allocator: Allocator) void {
+        allocator.free(self.subject_name);
+        allocator.free(self.issuer_name);
+        allocator.free(self.cert_pem);
+        self.* = .{};
+    }
+};
+
+/// C `CRL` subset for CRL entries (HubDb->CrlList).
+pub const ServerCrl = struct {
+    key: u32 = 0,
+    serial: []const u8 = "",
+    common_name: []const u8 = "",
+    organization: []const u8 = "",
+    unit: []const u8 = "",
+    country: []const u8 = "",
+    state: []const u8 = "",
+    local: []const u8 = "",
+    info: []const u8 = "",
+
+    fn deinit(self: *ServerCrl, allocator: Allocator) void {
+        allocator.free(self.serial);
+        allocator.free(self.common_name);
+        allocator.free(self.organization);
+        allocator.free(self.unit);
+        allocator.free(self.country);
+        allocator.free(self.state);
+        allocator.free(self.local);
+        allocator.free(self.info);
+        self.* = .{};
+    }
+};
+
 /// C `HUB` subset used by EnumHub / CreateHub / SetHub / GetHubStatus.
 pub const ServerHub = struct {
     name: []const u8 = "",
@@ -358,6 +417,13 @@ pub const ServerHub = struct {
     vh_save_log: bool = false,
     vh_apply_dhcp_push_routes: bool = false,
     vh_dhcp_push_routes: []const u8 = "",
+
+    /// Link entries (C: Hub->LinkList subset).
+    links: std.ArrayListUnmanaged(ServerLink) = .{},
+    /// CA certificates (C: HubDb->RootCertList subset).
+    ca_list: std.ArrayListUnmanaged(ServerCa) = .{},
+    /// CRL entries (C: HubDb->CrlList subset).
+    crl_list: std.ArrayListUnmanaged(ServerCrl) = .{},
 
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
@@ -719,6 +785,12 @@ pub const Server = struct {
             allocator.free(hub.radius_secret);
             allocator.free(hub.vh_dhcp_domain_name);
             allocator.free(hub.vh_dhcp_push_routes);
+            for (hub.links.items) |*l| l.deinit(allocator);
+            hub.links.deinit(allocator);
+            for (hub.ca_list.items) |*ca| ca.deinit(allocator);
+            hub.ca_list.deinit(allocator);
+            for (hub.crl_list.items) |*crl| crl.deinit(allocator);
+            hub.crl_list.deinit(allocator);
         }
         self.hubs.deinit(allocator);
         self.listeners.deinit(allocator);
@@ -923,41 +995,41 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "GetConnectionInfo")) {
         err = dispatchCall(structs.RpcConnectionInfo, &a, allocator, request, ret, stGetConnectionInfo);
     } else if (mem.eql(u8, function_name, "CreateLink")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCreateLink, &a, allocator, request, ret, stCreateLink);
     } else if (mem.eql(u8, function_name, "GetLink")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCreateLink, &a, allocator, request, ret, stGetLink);
     } else if (mem.eql(u8, function_name, "SetLink")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCreateLink, &a, allocator, request, ret, stSetLink);
     } else if (mem.eql(u8, function_name, "DeleteLink")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcLink, &a, allocator, request, ret, stDeleteLink);
     } else if (mem.eql(u8, function_name, "RenameLink")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcRenameLink, &a, allocator, request, ret, stRenameLink);
     } else if (mem.eql(u8, function_name, "EnumLink")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumLink, &a, allocator, request, ret, stEnumLink);
     } else if (mem.eql(u8, function_name, "GetLinkStatus")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcLinkStatus, &a, allocator, request, ret, stGetLinkStatus);
     } else if (mem.eql(u8, function_name, "SetLinkOnline")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcLink, &a, allocator, request, ret, stSetLinkOnline);
     } else if (mem.eql(u8, function_name, "SetLinkOffline")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcLink, &a, allocator, request, ret, stSetLinkOffline);
     } else if (mem.eql(u8, function_name, "AddCa")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHubAddCa, &a, allocator, request, ret, stAddCa);
     } else if (mem.eql(u8, function_name, "EnumCa")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHubEnumCa, &a, allocator, request, ret, stEnumCa);
     } else if (mem.eql(u8, function_name, "GetCa")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHubGetCa, &a, allocator, request, ret, stGetCa);
     } else if (mem.eql(u8, function_name, "DeleteCa")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHubDeleteCa, &a, allocator, request, ret, stDeleteCa);
     } else if (mem.eql(u8, function_name, "AddCrl")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCrl, &a, allocator, request, ret, stAddCrl);
     } else if (mem.eql(u8, function_name, "DelCrl")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCrl, &a, allocator, request, ret, stDelCrl);
     } else if (mem.eql(u8, function_name, "GetCrl")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCrl, &a, allocator, request, ret, stGetCrl);
     } else if (mem.eql(u8, function_name, "SetCrl")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCrl, &a, allocator, request, ret, stSetCrl);
     } else if (mem.eql(u8, function_name, "EnumCrl")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumCrl, &a, allocator, request, ret, stEnumCrl);
     } else if (mem.eql(u8, function_name, "SetKeep")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "GetKeep")) {
@@ -3210,6 +3282,402 @@ fn stGetSysLog(a: *AdminCtx, t: *structs.RpcSyslogSetting, allocator: Allocator)
         t.hostname = dupStr(allocator, "") catch return err_internal_error;
     }
     return err_no_error;
+}
+
+// ============================================================================
+// Links (C Admin.c:4033 — cascade connections)
+// ============================================================================
+
+/// C `StEnumLink` (Admin.c:4033). CHECK_RIGHT — lists cascade links.
+fn stEnumLink(a: *AdminCtx, t: *structs.RpcEnumLink, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.items = allocator.alloc(structs.RpcEnumLink.EnumLinkItem, hub.links.items.len) catch return err_internal_error;
+    for (hub.links.items, 0..) |link, i| {
+        t.items[i] = .{
+            .account_name = dupStr(allocator, link.account_name) catch return err_internal_error,
+            .hostname = dupStr(allocator, link.hostname) catch return err_internal_error,
+            .connected_hub_name = dupStr(allocator, hub.name) catch return err_internal_error,
+            .online = link.online,
+            .connected = link.connected,
+            .connected_time = link.connected_time,
+            .last_error = link.last_error,
+            .target_hub_name = dupStr(allocator, link.hub_name) catch return err_internal_error,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StCreateLink` (Admin.c:4071). CHECK_RIGHT — creates a cascade link.
+fn stCreateLink(a: *AdminCtx, t: *structs.RpcCreateLink, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const link = ServerLink{
+        .account_name = dupStr(allocator, "new_link") catch return err_internal_error,
+        .hostname = dupStr(allocator, "") catch return err_internal_error,
+        .hub_name = dupStr(allocator, hub.name) catch return err_internal_error,
+        .online = false,
+    };
+    hub.links.append(allocator, link) catch return err_internal_error;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StGetLink` (Admin.c:4142). CHECK_RIGHT — returns link config.
+fn stGetLink(a: *AdminCtx, t: *structs.RpcCreateLink, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.links.items) |link| {
+        if (std.ascii.eqlIgnoreCase(link.account_name, t.hub_name)) {
+            t.free(allocator);
+            t.* = .{};
+            t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+            t.online = link.online;
+            t.check_server_cert = false;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StSetLink` (Admin.c:4247). CHECK_RIGHT — updates link config.
+fn stSetLink(a: *AdminCtx, t: *structs.RpcCreateLink, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    _ = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteLink` (Admin.c:4377). CHECK_RIGHT — deletes a cascade link.
+fn stDeleteLink(a: *AdminCtx, t: *structs.RpcLink, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0 or t.account_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.links.items, 0..) |*link, i| {
+        if (std.ascii.eqlIgnoreCase(link.account_name, t.account_name)) {
+            var removed = hub.links.swapRemove(i);
+            removed.deinit(allocator);
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StRenameLink` (Admin.c:4439). CHECK_RIGHT — renames a cascade link.
+fn stRenameLink(a: *AdminCtx, t: *structs.RpcRenameLink, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0 or t.old_account_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.links.items) |*link| {
+        if (std.ascii.eqlIgnoreCase(link.account_name, t.old_account_name)) {
+            allocator.free(link.account_name);
+            link.account_name = dupStr(allocator, t.new_account_name) catch return err_internal_error;
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StSetLinkOnline` (Admin.c:4503). CHECK_RIGHT — brings a link online.
+fn stSetLinkOnline(a: *AdminCtx, t: *structs.RpcLink, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0 or t.account_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.links.items) |*link| {
+        if (std.ascii.eqlIgnoreCase(link.account_name, t.account_name)) {
+            link.online = true;
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StSetLinkOffline` (Admin.c:4530). CHECK_RIGHT — takes a link offline.
+fn stSetLinkOffline(a: *AdminCtx, t: *structs.RpcLink, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0 or t.account_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.links.items) |*link| {
+        if (std.ascii.eqlIgnoreCase(link.account_name, t.account_name)) {
+            link.online = false;
+            link.connected = false;
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StGetLinkStatus` (Admin.c:4396). CHECK_RIGHT — returns link status.
+fn stGetLinkStatus(a: *AdminCtx, t: *structs.RpcLinkStatus, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0 or t.account_name.len == 0) return err_invalid_parameter;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.account_name = dupStr(allocator, t.account_name) catch return err_internal_error;
+    return err_no_error;
+}
+
+// ============================================================================
+// CA / CRL (C Admin.c:3353 — HubDb->RootCertList / CrlList)
+// ============================================================================
+
+/// C `StEnumCa` (Admin.c:7745). CHECK_RIGHT — lists CA certs.
+fn stEnumCa(a: *AdminCtx, t: *structs.RpcHubEnumCa, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.items = allocator.alloc(structs.RpcHubEnumCa.EnumCaItem, hub.ca_list.items.len) catch return err_internal_error;
+    for (hub.ca_list.items, 0..) |ca, i| {
+        t.items[i] = .{
+            .key = ca.key,
+            .subject_name = dupStr(allocator, ca.subject_name) catch return err_internal_error,
+            .issuer_name = dupStr(allocator, ca.issuer_name) catch return err_internal_error,
+            .expires = ca.expires,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StAddCa` (Admin.c:7809). CHECK_RIGHT — adds a CA cert.
+fn stAddCa(a: *AdminCtx, t: *structs.RpcHubAddCa, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const next_key: u32 = if (hub.ca_list.items.len > 0) hub.ca_list.items[hub.ca_list.items.len - 1].key + 1 else 1;
+    const ca = ServerCa{
+        .key = next_key,
+        .subject_name = dupStr(allocator, "Unknown") catch return err_internal_error,
+        .issuer_name = dupStr(allocator, "Unknown") catch return err_internal_error,
+    };
+    hub.ca_list.append(allocator, ca) catch return err_internal_error;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StGetCa` (Admin.c:7687). CHECK_RIGHT — returns a CA cert by key.
+fn stGetCa(a: *AdminCtx, t: *structs.RpcHubGetCa, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.ca_list.items) |ca| {
+        if (ca.key == t.key) {
+            t.free(allocator);
+            t.* = .{};
+            t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+            t.key = ca.key;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StDeleteCa` (Admin.c:7630). CHECK_RIGHT — deletes a CA cert by key.
+fn stDeleteCa(a: *AdminCtx, t: *structs.RpcHubDeleteCa, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.ca_list.items, 0..) |*ca, i| {
+        if (ca.key == t.key) {
+            var removed = hub.ca_list.swapRemove(i);
+            removed.deinit(allocator);
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StEnumCrl` (Admin.c:3613). CHECK_RIGHT — lists CRLs.
+fn stEnumCrl(a: *AdminCtx, t: *structs.RpcEnumCrl, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.items = allocator.alloc(structs.RpcEnumCrl.EnumCrlItem, hub.crl_list.items.len) catch return err_internal_error;
+    for (hub.crl_list.items, 0..) |crl, i| {
+        t.items[i] = .{
+            .key = crl.key,
+            .crl_info = dupStr(allocator, crl.info) catch return err_internal_error,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StAddCrl` (Admin.c:3547). CHECK_RIGHT — adds a CRL entry.
+fn stAddCrl(a: *AdminCtx, t: *structs.RpcCrl, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    const next_key: u32 = if (hub.crl_list.items.len > 0) hub.crl_list.items[hub.crl_list.items.len - 1].key + 1 else 1;
+    var crl = ServerCrl{
+        .key = next_key,
+        .serial = dupStr(allocator, t.serial) catch return err_internal_error,
+        .common_name = dupStr(allocator, t.common_name) catch return err_internal_error,
+        .organization = dupStr(allocator, t.organization) catch return err_internal_error,
+        .unit = dupStr(allocator, t.unit) catch return err_internal_error,
+        .country = dupStr(allocator, t.country) catch return err_internal_error,
+        .state = dupStr(allocator, t.state) catch return err_internal_error,
+        .local = dupStr(allocator, t.local) catch return err_internal_error,
+    };
+    crl.info = std.fmt.allocPrint(allocator, "{s} {s}", .{ t.organization, t.common_name }) catch return err_internal_error;
+    hub.crl_list.append(allocator, crl) catch return err_internal_error;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StGetCrl` (Admin.c:3423). CHECK_RIGHT — returns a CRL by key.
+fn stGetCrl(a: *AdminCtx, t: *structs.RpcCrl, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.crl_list.items) |crl| {
+        if (crl.key == t.key) {
+            t.free(allocator);
+            t.* = .{};
+            t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+            t.key = crl.key;
+            t.serial = dupStr(allocator, crl.serial) catch return err_internal_error;
+            t.common_name = dupStr(allocator, crl.common_name) catch return err_internal_error;
+            t.organization = dupStr(allocator, crl.organization) catch return err_internal_error;
+            t.unit = dupStr(allocator, crl.unit) catch return err_internal_error;
+            t.country = dupStr(allocator, crl.country) catch return err_internal_error;
+            t.state = dupStr(allocator, crl.state) catch return err_internal_error;
+            t.local = dupStr(allocator, crl.local) catch return err_internal_error;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StSetCrl` (Admin.c:3353). CHECK_RIGHT — replaces a CRL by key.
+fn stSetCrl(a: *AdminCtx, t: *structs.RpcCrl, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.crl_list.items) |*crl| {
+        if (crl.key == t.key) {
+            crl.deinit(allocator);
+            crl.* = ServerCrl{
+                .key = t.key,
+                .serial = dupStr(allocator, t.serial) catch return err_internal_error,
+                .common_name = dupStr(allocator, t.common_name) catch return err_internal_error,
+                .organization = dupStr(allocator, t.organization) catch return err_internal_error,
+                .unit = dupStr(allocator, t.unit) catch return err_internal_error,
+                .country = dupStr(allocator, t.country) catch return err_internal_error,
+                .state = dupStr(allocator, t.state) catch return err_internal_error,
+                .local = dupStr(allocator, t.local) catch return err_internal_error,
+                .info = std.fmt.allocPrint(allocator, "{s} {s}", .{ t.organization, t.common_name }) catch return err_internal_error,
+            };
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StDelCrl` (Admin.c:3484). CHECK_RIGHT — deletes a CRL by key.
+fn stDelCrl(a: *AdminCtx, t: *structs.RpcCrl, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.crl_list.items, 0..) |*crl, i| {
+        if (crl.key == t.key) {
+            var removed = hub.crl_list.swapRemove(i);
+            removed.deinit(allocator);
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
 }
 
 // ============================================================================
