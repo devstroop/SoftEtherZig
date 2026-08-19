@@ -2742,6 +2742,7 @@ pub const RpcL3If = struct {
 };
 
 pub const RpcEnumL3If = struct {
+    name: []const u8 = "",
     items: []EnumL3IfItem = &.{},
 
     pub const EnumL3IfItem = struct {
@@ -2753,12 +2754,14 @@ pub const RpcEnumL3If = struct {
     pub fn inRpc(self: *RpcEnumL3If, allocator: Allocator, p: *const Pack) !void {
         self.free(allocator);
         self.* = .{};
-        const count = p.getValueCount("Name");
-        if (count == 0) return;
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        const raw_count = p.getValueCount("Name");
+        if (raw_count <= 1) return;
+        const count = raw_count - 1;
         self.items = try allocator.alloc(EnumL3IfItem, count);
         for (0..count) |i| {
             self.items[i] = .{
-                .name = try dupStr(allocator, p.getStrEx("Name", i)),
+                .name = try dupStr(allocator, p.getStrEx("Name", i + 1)),
                 .ip_address = p.getIntEx("IpAddress", i) orelse 0,
                 .subnet_mask = p.getIntEx("SubnetMask", i) orelse 0,
             };
@@ -2766,14 +2769,16 @@ pub const RpcEnumL3If = struct {
     }
 
     pub fn outRpc(self: *const RpcEnumL3If, p: *Pack) !void {
+        try p.addStr("Name", self.name);
         for (self.items, 0..) |item, i| {
-            try p.addStrEx("Name", item.name, i);
+            try p.addStrEx("Name", item.name, i + 1);
             try p.addIntEx("IpAddress", item.ip_address, i);
             try p.addIntEx("SubnetMask", item.subnet_mask, i);
         }
     }
 
     pub fn free(self: *RpcEnumL3If, allocator: Allocator) void {
+        allocator.free(self.name);
         for (self.items) |*item| allocator.free(item.name);
         allocator.free(self.items);
         self.* = .{};
