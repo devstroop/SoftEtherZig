@@ -20,13 +20,13 @@
 //!
 //! ## Encryption note
 //!
-//! The M1 data channel is plaintext-over-TLS: the Zig client's tunnel reads
-//! and writes the `TlsSocket` directly (RCA-01 — the client AES-256-CBC path
-//! is dead code; `connection_manager.zig`/`vpn_client.zig` wire the tunnel
-//! straight to the TLS socket). This module therefore operates on the framed
-//! byte stream without any application-layer cipher. `ConnectionCipher`
-//! (`session.zig`) remains available for a future data-channel hardening
-//! layer and is deliberately not interposed here.
+//! The data channel supports three encryption modes negotiated during session
+//! setup: none (plaintext-over-TLS), fast RC4 (symmetric stream cipher per
+//! TCP socket), and AES-256-CBC (block cipher with per-packet IV). When
+//! encryption is active, `ConnectionCipher` (`session.zig`) is interposed
+//! between the tunnel framing and the hub packet adapter: received blocks
+//! are decrypted before delivery to the hub, and outbound frames are
+//! encrypted before transmission through the tunnel.
 
 const std = @import("std");
 const mem = std.mem;
@@ -38,6 +38,9 @@ const tunnel_mod = @import("../protocol/tunnel.zig");
 const TunnelConnection = tunnel_mod.TunnelConnection;
 const MAX_PACKET_SIZE = tunnel_mod.MAX_PACKET_SIZE;
 const MAX_RECV_BLOCKS = tunnel_mod.MAX_RECV_BLOCKS;
+
+const session_mod = @import("session.zig");
+const ConnectionCipher = session_mod.ConnectionCipher;
 
 /// Default session inactivity timeout (C server policy default: 5 minutes).
 /// When no bytes have flowed in either direction for this long, the session
@@ -160,6 +163,9 @@ pub const SessionMain = struct {
     tunnel: *TunnelConnection,
     pa: PacketAdapter,
     config: SessionConfig,
+    /// Per-TCP-socket cipher for data-channel encryption. Created from the
+    /// session's key material via `ServerSession.newConnectionCipher`.
+    cipher: ?ConnectionCipher = null,
 
     /// Set by `requestStop` (any thread); the loop ends with `error.Stopped`.
     halt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -265,9 +271,18 @@ pub const SessionMain = struct {
                 };
                 if (recv_count > 0) {
                     for (self.recv_out[0..recv_count]) |frame| {
+                        // Decrypt the block payload if a cipher is active.
+                        const plaintext = if (self.cipher) |*c|
+                            c.decryptRecv(self.allocator, frame) catch |err| {
+                                log.warn("decrypt failed: {}", .{err});
+                                return error.ConnectionClosed;
+                            }
+                        else
+                            frame;
+                        defer if (self.cipher != null) self.allocator.free(plaintext);
                         self.stats.rx_blocks += 1;
-                        self.stats.rx_bytes += frame.len;
-                        if (!self.pa.put(self.pa.ctx, frame)) return error.PacketAdapterPutFailed;
+                        self.stats.rx_bytes += plaintext.len;
+                        if (!self.pa.put(self.pa.ctx, plaintext)) return error.PacketAdapterPutFailed;
                     }
                 }
                 if (self.tunnel.total_recv > recv_start) {
@@ -412,10 +427,20 @@ pub const SessionMain = struct {
                 log.warn("dropping frame: send queue over buffering budget", .{});
                 continue;
             }
-            self.send_batch[count] = frame;
+            // Encrypt the block payload if a cipher is active.
+            const ciphertext = if (self.cipher) |*c|
+                c.encryptSend(self.allocator, frame) catch |err| {
+                    self.allocator.free(frame);
+                    log.warn("encrypt failed: {}", .{err});
+                    return error.ConnectionClosed;
+                }
+            else
+                frame;
+            if (self.cipher != null) self.allocator.free(frame);
+            self.send_batch[count] = ciphertext;
             count += 1;
-            sent_bytes += frame.len;
-            self.send_queue_bytes += frame.len;
+            sent_bytes += ciphertext.len;
+            self.send_queue_bytes += ciphertext.len;
         }
 
         if (count == 0) return false;
@@ -948,4 +973,59 @@ test "server.session_main packet adapter init failure halts the session" {
     defer session.deinit();
 
     try testing.expectError(error.PacketAdapterInitFailed, session.run());
+}
+
+test "server.session_main encrypts outbound frames with RC4 cipher" {
+    const allocator = testing.allocator;
+    const Rc4 = @import("../../mayaqua/encrypt/rc4.zig").Rc4;
+
+    // Generate an RC4 key pair and create a cipher.
+    const key_pair = session_mod.Rc4KeyPair.generate();
+    var cipher = session_mod.ConnectionCipher{
+        .mode = .fast_rc4,
+        .send_rc4 = Rc4.init(&key_pair.server_to_client),
+        .recv_rc4 = Rc4.init(&key_pair.client_to_server),
+    };
+
+    // Manually encrypt a frame to get expected ciphertext.
+    const plaintext = "hello-encryption-test";
+    const expected = try cipher.encryptSend(allocator, plaintext);
+    defer allocator.free(expected);
+
+    // Plaintext and ciphertext must differ (RC4 is not identity).
+    try testing.expect(expected.len > 0);
+    var differs = false;
+    for (plaintext, expected[0..@min(plaintext.len, expected.len)]) |p, e| {
+        if (p != e) {
+            differs = true;
+            break;
+        }
+    }
+    try testing.expect(differs);
+}
+
+test "server.session_main RC4 decrypt inverts encrypt" {
+    const allocator = testing.allocator;
+    const Rc4 = @import("../../mayaqua/encrypt/rc4.zig").Rc4;
+
+    const key_pair = session_mod.Rc4KeyPair.generate();
+
+    // Separate cipher instances for send and recv (simulating two peers).
+    var send_cipher = session_mod.ConnectionCipher{
+        .mode = .fast_rc4,
+        .send_rc4 = Rc4.init(&key_pair.server_to_client),
+    };
+    var recv_cipher = session_mod.ConnectionCipher{
+        .mode = .fast_rc4,
+        .recv_rc4 = Rc4.init(&key_pair.server_to_client),
+    };
+
+    const plaintext = "round-trip-rc4-payload-data";
+    const encrypted = try send_cipher.encryptSend(allocator, plaintext);
+    defer allocator.free(encrypted);
+
+    const decrypted = try recv_cipher.decryptRecv(allocator, encrypted);
+    defer allocator.free(decrypted);
+
+    try testing.expectEqualStrings(plaintext, decrypted);
 }
