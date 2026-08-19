@@ -793,6 +793,13 @@ pub const Server = struct {
     syslog_hostname: []const u8 = "",
     syslog_port: u32 = 0,
 
+    /// Special listener settings (C: `SPECIAL_LISTENER`).
+    vpn_over_icmp_listener: bool = false,
+    vpn_over_dns_listener: bool = false,
+
+    /// Server admin message (C: `SERVER_ADMIN_MSG`).
+    admin_msg: []const u8 = "",
+
 /// Back-pointer to the runtime `ServerContext` (accept.zig). Set once at
     /// startup so admin handlers can create/destroy runtime objects (e.g.
     /// LocalBridge). The dispatch Server outlives all connections.
@@ -862,6 +869,7 @@ pub const Server = struct {
         allocator.free(self.cipher_list);
         allocator.free(self.keep_connect_host);
         allocator.free(self.syslog_hostname);
+        allocator.free(self.admin_msg);
         self.sessions.deinit();
         self.* = .{
             .allocator = allocator,
@@ -1111,7 +1119,7 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "GetSecureNATStatus")) {
         err = dispatchCall(structs.RpcNatStatus, &a, allocator, request, ret, stGetSecureNATStatus);
     } else if (mem.eql(u8, function_name, "EnumEthernet")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumEth, &a, allocator, request, ret, stEnumEthernet);
     } else if (mem.eql(u8, function_name, "AddLocalBridge")) {
         err = dispatchCall(structs.RpcLocalBridge, &a, allocator, request, ret, stAddLocalBridge);
     } else if (mem.eql(u8, function_name, "DeleteLocalBridge")) {
@@ -1159,7 +1167,7 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "EnumL3Table")) {
         err = dispatchCall(structs.RpcEnumL3Table, &a, allocator, request, ret, stEnumL3Table);
     } else if (mem.eql(u8, function_name, "ReadLogFile")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcReadLogFile, &a, allocator, request, ret, stReadLogFile);
     } else if (mem.eql(u8, function_name, "SetSysLog")) {
         err = dispatchCall(structs.RpcSyslogSetting, &a, allocator, request, ret, stSetSysLog);
     } else if (mem.eql(u8, function_name, "GetSysLog")) {
@@ -1173,7 +1181,7 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "GetHubMsg")) {
         err = dispatchCall(structs.RpcMsg, &a, allocator, request, ret, stGetHubMsg);
     } else if (mem.eql(u8, function_name, "GetAdminMsg")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcMsg, &a, allocator, request, ret, stGetAdminMsg);
     } else if (mem.eql(u8, function_name, "SetAcList")) {
         err = dispatchCall(structs.RpcAcList, &a, allocator, request, ret, stSetAcList);
     } else if (mem.eql(u8, function_name, "GetAcList")) {
@@ -1211,9 +1219,9 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "SetAzureStatus")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "SetSpecialListener")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcSpecialListener, &a, allocator, request, ret, stSetSpecialListener);
     } else if (mem.eql(u8, function_name, "GetSpecialListener")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcSpecialListener, &a, allocator, request, ret, stGetSpecialListener);
     } else if (mem.eql(u8, function_name, "MakeOpenVpnConfigFile")) {
         err = err_not_supported;
     } else {
@@ -3327,6 +3335,22 @@ fn stGetHubMsg(a: *AdminCtx, t: *structs.RpcMsg, allocator: Allocator) u32 {
     return err_no_error;
 }
 
+/// C `StGetAdminMsg` (Admin.c:4535). SERVER_ADMIN_ONLY — reads the server admin message.
+fn stGetAdminMsg(a: *AdminCtx, t: *structs.RpcMsg, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    t.free(allocator);
+    t.* = .{
+        .hub_name = dupStr(allocator, "") catch return err_internal_error,
+        .msg = dupStr(allocator, s.admin_msg) catch return err_internal_error,
+    };
+    return err_no_error;
+}
+
 // ============================================================================
 // Keep-Alive (C Admin.c:4789, 4833 — SetKeep / GetKeep)
 // ============================================================================
@@ -3480,6 +3504,82 @@ fn stGetSysLog(a: *AdminCtx, t: *structs.RpcSyslogSetting, allocator: Allocator)
     } else {
         t.hostname = dupStr(allocator, "") catch return err_internal_error;
     }
+    return err_no_error;
+}
+
+/// C `StReadLogFile` (Admin.c:3386). SERVER_ADMIN_ONLY — reads a log file by path.
+fn stReadLogFile(a: *AdminCtx, t: *structs.RpcReadLogFile, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    if (t.file_path.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    t.free(allocator);
+    t.* = .{};
+    t.file_path = dupStr(allocator, t.file_path) catch return err_internal_error;
+
+    // Read up to 64 KiB from the requested offset.
+    const max_read: usize = 65536;
+    const file = std.fs.cwd().openFile(t.file_path, .{}) catch return err_object_not_found;
+    defer file.close();
+
+    const offset: u64 = @intCast(t.offset);
+    file.seekTo(offset) catch return err_internal_error;
+
+    const buf = allocator.alloc(u8, max_read) catch return err_internal_error;
+    const n = file.read(buf) catch {
+        allocator.free(buf);
+        return err_internal_error;
+    };
+    t.buffer = buf[0..n];
+    return err_no_error;
+}
+
+/// C `StSetSpecialListener` (Admin.c:4474). SERVER_ADMIN_ONLY — configures VPN-over-ICMP/DNS.
+fn stSetSpecialListener(a: *AdminCtx, t: *structs.RpcSpecialListener, _: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    s.vpn_over_icmp_listener = t.vpn_over_icmp_listener;
+    s.vpn_over_dns_listener = t.vpn_over_dns_listener;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StGetSpecialListener` (Admin.c:4463). SERVER_ADMIN_ONLY — reads VPN-over-ICMP/DNS state.
+fn stGetSpecialListener(a: *AdminCtx, t: *structs.RpcSpecialListener, _: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+    t.vpn_over_icmp_listener = s.vpn_over_icmp_listener;
+    t.vpn_over_dns_listener = s.vpn_over_dns_listener;
+    return err_no_error;
+}
+
+/// C `StEnumEthernet` (Admin.c:2387). SERVER_ADMIN_ONLY — lists network adapters.
+/// Returns a single "eth0" placeholder; full NIC enumeration requires platform
+/// calls (ioctl / netlink / GetAdaptersAddresses).
+fn stEnumEthernet(a: *AdminCtx, t: *structs.RpcEnumEth, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    t.free(allocator);
+    t.* = .{};
+    t.items = allocator.alloc(structs.RpcEnumEth.EnumEthItem, 1) catch return err_internal_error;
+    t.items[0] = .{
+        .device_name = dupStr(allocator, "eth0") catch return err_internal_error,
+        .network_connection_name = dupStr(allocator, "Ethernet") catch return err_internal_error,
+    };
     return err_no_error;
 }
 
