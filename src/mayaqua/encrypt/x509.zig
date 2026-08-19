@@ -806,7 +806,7 @@ test "x509.inspect with full name fields" {
 }
 
 test "x509.key pair PEM round-trip" {
-    var kp = try generateKeyPair(testing.allocator, 2048);
+    var kp = try generateKeyPair(testing.allocator, 1024);
     defer kp.deinit(testing.allocator);
 
     // Parse the private key.

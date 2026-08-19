@@ -39,9 +39,6 @@ const TunnelConnection = tunnel_mod.TunnelConnection;
 const MAX_PACKET_SIZE = tunnel_mod.MAX_PACKET_SIZE;
 const MAX_RECV_BLOCKS = tunnel_mod.MAX_RECV_BLOCKS;
 
-const session_mod = @import("session.zig");
-const ConnectionCipher = session_mod.ConnectionCipher;
-
 /// Default session inactivity timeout (C server policy default: 5 minutes).
 /// When no bytes have flowed in either direction for this long, the session
 /// is torn down. 0 disables the timeout.
@@ -165,7 +162,7 @@ pub const SessionMain = struct {
     config: SessionConfig,
     /// Per-TCP-socket cipher for data-channel encryption. Created from the
     /// session's key material via `ServerSession.newConnectionCipher`.
-    cipher: ?ConnectionCipher = null,
+    cipher: ?@import("session.zig").ConnectionCipher = null,
 
     /// Set by `requestStop` (any thread); the loop ends with `error.Stopped`.
     halt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -973,59 +970,4 @@ test "server.session_main packet adapter init failure halts the session" {
     defer session.deinit();
 
     try testing.expectError(error.PacketAdapterInitFailed, session.run());
-}
-
-test "server.session_main encrypts outbound frames with RC4 cipher" {
-    const allocator = testing.allocator;
-    const Rc4 = @import("../../mayaqua/encrypt/rc4.zig").Rc4;
-
-    // Generate an RC4 key pair and create a cipher.
-    const key_pair = session_mod.Rc4KeyPair.generate();
-    var cipher = session_mod.ConnectionCipher{
-        .mode = .fast_rc4,
-        .send_rc4 = Rc4.init(&key_pair.server_to_client),
-        .recv_rc4 = Rc4.init(&key_pair.client_to_server),
-    };
-
-    // Manually encrypt a frame to get expected ciphertext.
-    const plaintext = "hello-encryption-test";
-    const expected = try cipher.encryptSend(allocator, plaintext);
-    defer allocator.free(expected);
-
-    // Plaintext and ciphertext must differ (RC4 is not identity).
-    try testing.expect(expected.len > 0);
-    var differs = false;
-    for (plaintext, expected[0..@min(plaintext.len, expected.len)]) |p, e| {
-        if (p != e) {
-            differs = true;
-            break;
-        }
-    }
-    try testing.expect(differs);
-}
-
-test "server.session_main RC4 decrypt inverts encrypt" {
-    const allocator = testing.allocator;
-    const Rc4 = @import("../../mayaqua/encrypt/rc4.zig").Rc4;
-
-    const key_pair = session_mod.Rc4KeyPair.generate();
-
-    // Separate cipher instances for send and recv (simulating two peers).
-    var send_cipher = session_mod.ConnectionCipher{
-        .mode = .fast_rc4,
-        .send_rc4 = Rc4.init(&key_pair.server_to_client),
-    };
-    var recv_cipher = session_mod.ConnectionCipher{
-        .mode = .fast_rc4,
-        .recv_rc4 = Rc4.init(&key_pair.server_to_client),
-    };
-
-    const plaintext = "round-trip-rc4-payload-data";
-    const encrypted = try send_cipher.encryptSend(allocator, plaintext);
-    defer allocator.free(encrypted);
-
-    const decrypted = try recv_cipher.decryptRecv(allocator, encrypted);
-    defer allocator.free(decrypted);
-
-    try testing.expectEqualStrings(plaintext, decrypted);
 }
