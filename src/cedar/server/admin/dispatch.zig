@@ -67,6 +67,8 @@ pub const err_listener_not_found: u32 = 53;
 pub const err_listener_already_exists: u32 = 54;
 pub const err_hub_already_exists: u32 = 57;
 pub const err_too_many_hubs: u32 = 58;
+pub const err_object_already_exists: u32 = 59;
+pub const err_object_in_use: u32 = 60;
 pub const err_too_many_user: u32 = 63;
 pub const err_user_already_exists: u32 = 66;
 pub const err_not_supported_auth_on_opensource: u32 = 143;
@@ -281,6 +283,33 @@ pub const IpTableEntry = struct {
 
     fn free(self: *IpTableEntry, allocator: Allocator) void {
         allocator.free(self.session_name);
+        self.* = .{};
+    }
+};
+
+/// C `L3SW` subset — a Layer-3 virtual switch with interfaces.
+pub const ServerL3Switch = struct {
+    name: []const u8 = "",
+    online: bool = false,
+    active: bool = false,
+    interfaces: std.ArrayListUnmanaged(ServerL3Interface) = .{},
+
+    fn deinit(self: *ServerL3Switch, allocator: Allocator) void {
+        for (self.interfaces.items) |*intf| intf.deinit(allocator);
+        self.interfaces.deinit(allocator);
+        allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+/// C `L3IF` subset — an interface attached to an L3 switch.
+pub const ServerL3Interface = struct {
+    hub_name: []const u8 = "",
+    ip_address: u32 = 0,
+    subnet_mask: u32 = 0,
+
+    fn deinit(self: *ServerL3Interface, allocator: Allocator) void {
+        allocator.free(self.hub_name);
         self.* = .{};
     }
 };
@@ -723,6 +752,9 @@ pub const Server = struct {
     /// Active local bridges (AddLocalBridge/DeleteLocalBridge/EnumLocalBridge).
     local_bridges: std.ArrayListUnmanaged(LocalBridgeEntry) = .{},
 
+    /// L3 switch entries (C: `SERVER->L3SwList` subset).
+    l3_switches: std.ArrayListUnmanaged(ServerL3Switch) = .{},
+
     /// Server certificate PEM (C: cedar->ServerX serialized to PEM).
     cert_pem: []const u8 = "",
     /// Server private key PEM (C: cedar->ServerK serialized to PEM).
@@ -796,6 +828,8 @@ pub const Server = struct {
         self.listeners.deinit(allocator);
         for (self.local_bridges.items) |*lb| lb.deinit(allocator);
         self.local_bridges.deinit(allocator);
+        for (self.l3_switches.items) |*sw| sw.deinit(allocator);
+        self.l3_switches.deinit(allocator);
         allocator.free(self.cert_pem);
         allocator.free(self.key_pem);
         allocator.free(self.cipher_list);
@@ -1075,21 +1109,21 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "SetConfig")) {
         err = dispatchCall(structs.RpcConfig, &a, allocator, request, ret, stSetConfig);
     } else if (mem.eql(u8, function_name, "AddL3Switch")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3Sw, &a, allocator, request, ret, stAddL3Switch);
     } else if (mem.eql(u8, function_name, "DelL3Switch")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3Sw, &a, allocator, request, ret, stDelL3Switch);
     } else if (mem.eql(u8, function_name, "EnumL3Switch")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumL3Sw, &a, allocator, request, ret, stEnumL3Switch);
     } else if (mem.eql(u8, function_name, "StartL3Switch")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3Sw, &a, allocator, request, ret, stStartL3Switch);
     } else if (mem.eql(u8, function_name, "StopL3Switch")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3Sw, &a, allocator, request, ret, stStopL3Switch);
     } else if (mem.eql(u8, function_name, "AddL3If")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3If, &a, allocator, request, ret, stAddL3If);
     } else if (mem.eql(u8, function_name, "DelL3If")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3If, &a, allocator, request, ret, stDelL3If);
     } else if (mem.eql(u8, function_name, "EnumL3If")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumL3If, &a, allocator, request, ret, stEnumL3If);
     } else if (mem.eql(u8, function_name, "AddL3Table")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "DelL3Table")) {
@@ -3678,6 +3712,178 @@ fn stDelCrl(a: *AdminCtx, t: *structs.RpcCrl, allocator: Allocator) u32 {
         }
     }
     return err_object_not_found;
+}
+
+// ============================================================================
+// L3 Switch (C Admin.c:3832 — L3 switch management)
+// ============================================================================
+
+/// C `StEnumL3Switch` (Admin.c:4062). CHECK_RIGHT — lists L3 switches.
+fn stEnumL3Switch(a: *AdminCtx, t: *structs.RpcEnumL3Sw, allocator: Allocator) u32 {
+    const s = a.server;
+    t.free(allocator);
+    t.* = .{};
+    t.items = allocator.alloc(structs.RpcEnumL3Sw.EnumL3SwItem, s.l3_switches.items.len) catch return err_internal_error;
+    for (s.l3_switches.items, 0..) |sw, i| {
+        t.items[i] = .{
+            .name = dupStr(allocator, sw.name) catch return err_internal_error,
+            .num_interfaces = @intCast(sw.interfaces.items.len),
+            .num_tables = 0,
+            .active = sw.active,
+            .online = sw.online,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StAddL3Switch` (Admin.c:4130). CHECK_RIGHT — creates an L3 switch.
+fn stAddL3Switch(a: *AdminCtx, t: *structs.RpcL3Sw, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    for (s.l3_switches.items) |sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) return err_object_already_exists;
+    }
+
+    const sw = ServerL3Switch{
+        .name = dupStr(allocator, t.name) catch return err_internal_error,
+    };
+    s.l3_switches.append(allocator, sw) catch return err_internal_error;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StDelL3Switch` (Admin.c:4100). CHECK_RIGHT — deletes an L3 switch.
+fn stDelL3Switch(a: *AdminCtx, t: *structs.RpcL3Sw, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    for (s.l3_switches.items, 0..) |*sw, i| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) {
+            if (sw.active) return err_object_in_use;
+            var removed = s.l3_switches.swapRemove(i);
+            removed.deinit(allocator);
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StStartL3Switch` (Admin.c:4013). CHECK_RIGHT — starts an L3 switch.
+fn stStartL3Switch(a: *AdminCtx, t: *structs.RpcL3Sw, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    for (s.l3_switches.items) |*sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) {
+            if (sw.interfaces.items.len == 0) return err_invalid_parameter;
+            if (sw.active) return err_object_in_use;
+            sw.active = true;
+            sw.online = true;
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StStopL3Switch` (Admin.c:3978). CHECK_RIGHT — stops an L3 switch.
+fn stStopL3Switch(a: *AdminCtx, t: *structs.RpcL3Sw, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    for (s.l3_switches.items) |*sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) {
+            sw.active = false;
+            sw.online = false;
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StAddL3If` (Admin.c:3920). CHECK_RIGHT — adds an interface to an L3 switch.
+fn stAddL3If(a: *AdminCtx, t: *structs.RpcL3If, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0 or t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const sw = for (s.l3_switches.items) |*sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) break sw;
+    } else return err_object_not_found;
+
+    const intf = ServerL3Interface{
+        .hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error,
+        .ip_address = t.ip_address,
+        .subnet_mask = t.subnet_mask,
+    };
+    sw.interfaces.append(allocator, intf) catch return err_internal_error;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StDelL3If` (Admin.c:3884). CHECK_RIGHT — removes an interface from an L3 switch.
+fn stDelL3If(a: *AdminCtx, t: *structs.RpcL3If, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0 or t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const sw = for (s.l3_switches.items) |*sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) break sw;
+    } else return err_object_not_found;
+
+    for (sw.interfaces.items, 0..) |*intf, i| {
+        if (std.ascii.eqlIgnoreCase(intf.hub_name, t.hub_name)) {
+            var removed = sw.interfaces.swapRemove(i);
+            removed.deinit(allocator);
+            s.config_revision +|= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StEnumL3If` (Admin.c:3832). CHECK_RIGHT — lists interfaces on an L3 switch.
+fn stEnumL3If(a: *AdminCtx, t: *structs.RpcEnumL3If, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    const sw = for (s.l3_switches.items) |sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) break sw;
+    } else return err_object_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.name = dupStr(allocator, sw.name) catch return err_internal_error;
+    t.items = allocator.alloc(structs.RpcEnumL3If.EnumL3IfItem, sw.interfaces.items.len) catch return err_internal_error;
+    for (sw.interfaces.items, 0..) |intf, i| {
+        t.items[i] = .{
+            .hub_name = dupStr(allocator, intf.hub_name) catch return err_internal_error,
+            .ip_address = intf.ip_address,
+            .subnet_mask = intf.subnet_mask,
+        };
+    }
+    return err_no_error;
 }
 
 // ============================================================================
