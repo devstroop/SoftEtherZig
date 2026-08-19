@@ -3093,7 +3093,7 @@ fn stGetConnectionInfo(a: *AdminCtx, t: *structs.RpcConnectionInfo, allocator: A
             t.hostname = "";
             t.ip = snap.peer_ip;
             t.port = 0;
-            t.connected_time = snap.created_time;
+            t.connected_time = @intCast(snap.created_time);
             t.server_str = "";
             t.server_ver = s.version;
             t.server_build = s.build;
@@ -3882,7 +3882,7 @@ fn stEnumL3If(a: *AdminCtx, t: *structs.RpcEnumL3If, allocator: Allocator) u32 {
     t.items = allocator.alloc(structs.RpcEnumL3If.EnumL3IfItem, sw.interfaces.items.len) catch return err_internal_error;
     for (sw.interfaces.items, 0..) |intf, i| {
         t.items[i] = .{
-            .hub_name = dupStr(allocator, intf.hub_name) catch return err_internal_error,
+            .name = dupStr(allocator, intf.hub_name) catch return err_internal_error,
             .ip_address = intf.ip_address,
             .subnet_mask = intf.subnet_mask,
         };
