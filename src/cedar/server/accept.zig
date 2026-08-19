@@ -53,6 +53,8 @@ const UdpAccelServer = udp_accel_mod.UdpAccelServer;
 const ServerSession = session_mod.ServerSession;
 const SessionMain = @import("session_main.zig").SessionMain;
 const session_registry_mod = @import("session_registry.zig");
+const bridge_mod = @import("../../bridge/mod.zig");
+const loop_mod = @import("../../bridge/loop.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -127,7 +129,70 @@ pub const ServerContext = struct {
     /// as a bridge — hub creation is restricted, LocalBridge is the primary
     /// role. Set by the vpnbridge executable.
     bridge_mode: bool = false,
+    /// Active LocalBridge instances (admin RPC AddLocalBridge/DeleteLocalBridge).
+    local_bridges: std.ArrayListUnmanaged(bridge_mod.LocalBridge) = .{},
+
+    /// Tear down runtime bridges and free the local_bridges list.
+    pub fn deinit(self: *ServerContext) void {
+        for (self.local_bridges.items) |*lb| {
+            lb.stop();
+            if (lb.bridge_loop) |*bl| bl.deinit();
+            lb.bridge_loop = null;
+            lb.af_port = null;
+        }
+        self.local_bridges.deinit(self.allocator);
+    }
 };
+
+// ============================================================================
+// Bridge operations vtable — wired into dispatch_mod.BridgeOps
+// ============================================================================
+
+pub fn bridgeCreate(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) void {
+    const self: *ServerContext = @ptrCast(@alignCast(ctx));
+    var lb = bridge_mod.LocalBridge.init(self.allocator, device_name, hub_name);
+    lb.tap_mode = tap_mode;
+
+    // Open the NIC port.  Failures are non-fatal — the bridge is stored but
+    // inactive (online=false) so the admin can see the error and retry.
+    lb.openPort() catch |err| {
+        log.warn("LocalBridge: open {s} failed: {s}", .{ device_name, @errorName(err) });
+        self.local_bridges.append(self.allocator, lb) catch |oom| {
+            log.err("LocalBridge: OOM appending bridge: {s}", .{@errorName(oom)});
+        };
+        return;
+    };
+
+    // Start the pump thread (stub sink — frames are dropped until a VPN
+    // session is wired to the hub).
+    const noop_sink = loop_mod.SessionSink{
+        .ctx = undefined,
+        .send = &struct {
+            fn noop(_: *anyopaque, _: []const u8) anyerror!void {}
+        }.noop,
+    };
+    lb.start(noop_sink) catch |err| {
+        log.warn("LocalBridge: start {s} failed: {s}", .{ device_name, @errorName(err) });
+        // Port is open but pump failed — store as inactive.
+    };
+
+    self.local_bridges.append(self.allocator, lb) catch |oom| {
+        log.err("LocalBridge: OOM appending bridge: {s}", .{@errorName(oom)});
+    };
+}
+
+pub fn bridgeDestroy(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8) bool {
+    const self: *ServerContext = @ptrCast(@alignCast(ctx));
+    for (self.local_bridges.items, 0..) |lb, i| {
+        if (std.mem.eql(u8, lb.device_name, device_name) and std.mem.eql(u8, lb.hub_name, hub_name)) {
+            var removed = self.local_bridges.swapRemove(i);
+            removed.stop();
+            if (removed.bridge_loop) |*bl| bl.deinit();
+            return true;
+        }
+    }
+    return false;
+}
 
 /// The `AcceptHandler` entry point (listener.zig). Runs on the per-connection
 /// thread. On failure the connection is closed and the error is logged.
@@ -551,6 +616,7 @@ fn acceptAdmin(
     server: *dispatch_mod.Server,
     hubname: []const u8,
 ) void {
+    server.server_ctx = @ptrCast(self);
     var rpc = rpc_mod.startRpcServer(self.allocator, tls_sock, dispatch_mod.adminDispatch, @ptrCast(server));
     rpc.server_mode = true;
     rpc.server_admin_mode = hubname.len == 0;

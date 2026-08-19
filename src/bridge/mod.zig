@@ -11,6 +11,7 @@ const std = @import("std");
 pub const fdb = @import("fdb.zig");
 pub const engine = @import("engine.zig");
 pub const loop = @import("loop.zig");
+pub const local_bridge = @import("local_bridge.zig");
 
 // Re-export main types
 pub const FdbTable = fdb.FdbTable;
@@ -22,6 +23,7 @@ pub const PortCounters = engine.PortCounters;
 pub const BridgeLoop = loop.BridgeLoop;
 pub const BridgeStats = loop.BridgeStats;
 pub const SessionSink = loop.SessionSink;
+pub const LocalBridge = local_bridge.LocalBridge;
 
 // ============================================================================
 // Tests
