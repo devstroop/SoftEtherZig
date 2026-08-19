@@ -4168,20 +4168,27 @@ fn inRpcGeneric(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !
 }
 
 pub const RpcKeyPair = struct {
+    cert: []const u8 = "",
+    key: []const u8 = "",
     flag1: u32 = 0,
 
     pub fn inRpc(self: *RpcKeyPair, allocator: Allocator, p: *const Pack) !void {
-        _ = allocator;
+        self.free(allocator);
         self.* = .{};
+        self.cert = try dupStr(allocator, p.getStr("Cert"));
+        self.key = try dupStr(allocator, p.getStr("Key"));
         self.flag1 = p.getInt("Flag1") orelse 0;
     }
 
     pub fn outRpc(self: *const RpcKeyPair, p: *Pack) !void {
+        try p.addStr("Cert", self.cert);
+        try p.addStr("Key", self.key);
         try p.addInt("Flag1", self.flag1);
     }
 
     pub fn free(self: *RpcKeyPair, allocator: Allocator) void {
-        _ = allocator;
+        allocator.free(self.cert);
+        allocator.free(self.key);
         self.* = .{};
     }
 };
