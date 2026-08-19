@@ -207,7 +207,7 @@ pub const SessionOptions = struct {
     max_connection: u32 = 1,
     half_connection: bool = false,
     qos: bool = true,
-    use_encrypt: bool = true,
+    use_encrypt: bool = false,
     use_fast_rc4: bool = false,
     use_compress: bool = false,
     /// Monitor session request (H-4): when true the auth pack carries
