@@ -118,8 +118,8 @@ pub fn generateSelfSigned(
     const pkey = try generateRsaKey(allocator, 2048);
     defer c.EVP_PKEY_free(pkey);
 
-    // 2. Build certificate.
-    const x509 = try buildCertificate(allocator, pkey, pkey, name, days, false, false);
+    // 2. Build certificate (self-signed: issuer_name = null → issuer = subject).
+    const x509 = try buildCertificate(allocator, pkey, pkey, name, null, days, false);
     defer c.X509_free(x509);
 
     // 3. Serialize.
@@ -141,7 +141,7 @@ pub fn generateRootCA(
     const pkey = try generateRsaKey(allocator, 2048);
     defer c.EVP_PKEY_free(pkey);
 
-    const x509 = try buildCertificate(allocator, pkey, pkey, name, days, true, false);
+    const x509 = try buildCertificate(allocator, pkey, pkey, name, null, days, true);
     defer c.X509_free(x509);
 
     const cert_pem = try x509ToPem(allocator, x509);
@@ -168,12 +168,34 @@ pub fn generateSigned(
     const ca_pkey = try pemToEvpPkey(allocator, ca_key_pem, true);
     defer c.EVP_PKEY_free(ca_pkey);
 
+    // Extract CA's subject name for the issuer field.
+    const ca_subject = c.X509_get_subject_name(ca_x509);
+    var ca_cn: ?[]const u8 = null;
+    var ca_org: ?[]const u8 = null;
+    var ca_country: ?[]const u8 = null;
+    if (ca_subject != null) {
+        ca_cn = getTextByNid(allocator, ca_subject.?, c.NID_commonName);
+        ca_org = getTextByNid(allocator, ca_subject.?, c.NID_organizationName);
+        ca_country = getTextByNid(allocator, ca_subject.?, c.NID_countryName);
+    }
+    defer {
+        if (ca_cn) |s| allocator.free(s);
+        if (ca_org) |s| allocator.free(s);
+        if (ca_country) |s| allocator.free(s);
+    }
+
+    const issuer = Name{
+        .common_name = ca_cn,
+        .organization = ca_org,
+        .country = ca_country,
+    };
+
     // Generate new keypair for the signed cert.
     const new_pkey = try generateRsaKey(allocator, 2048);
     defer c.EVP_PKEY_free(new_pkey);
 
-    // Build certificate signed by CA.
-    const x509 = try buildCertificate(allocator, new_pkey, ca_pkey, name, days, false, false);
+    // Build certificate signed by CA with correct issuer.
+    const x509 = try buildCertificate(allocator, new_pkey, ca_pkey, name, issuer, days, false);
     defer c.X509_free(x509);
 
     const cert_pem = try x509ToPem(allocator, x509);
@@ -415,9 +437,9 @@ fn buildCertificate(
     subject_key: *c.EVP_PKEY,
     issuer_key: *c.EVP_PKEY,
     name: Name,
+    issuer_name: ?Name,
     days: u32,
     is_ca: bool,
-    is_root: bool,
 ) !*c.X509 {
     const x509 = c.X509_new() orelse {
         log.err("X509_new failed", .{});
@@ -431,11 +453,16 @@ fn buildCertificate(
         return error.OpenSSLFailed;
     }
 
-    // Serial number (random 64-bit).
+    // Serial number (random positive 63-bit to avoid negative ASN.1 serials).
     var serial_bytes: [8]u8 = undefined;
     std.crypto.random.bytes(&serial_bytes);
+    serial_bytes[0] &= 0x7f; // Clear high bit → guaranteed positive.
     const serial_asn1 = c.X509_get_serialNumber(x509);
-    _ = c.ASN1_INTEGER_set(serial_asn1, @bitCast(serial_bytes));
+    if (c.ASN1_INTEGER_set(serial_asn1, @bitCast(serial_bytes)) != 1) {
+        c.X509_free(x509);
+        logOpenSslErrors();
+        return error.OpenSSLFailed;
+    }
 
     // Subject name.
     const subject_name = c.X509_get_subject_name(x509) orelse {
@@ -443,17 +470,20 @@ fn buildCertificate(
         return error.OutOfMemory;
     };
     try populateX509Name(allocator, subject_name, name);
-    if (c.X509_set_issuer_name(x509, subject_name) != 1) {
-        c.X509_free(x509);
-        logOpenSslErrors();
-        return error.OpenSSLFailed;
-    }
 
-    // Issuer name (same as subject for self-signed).
-    if (!is_root) {
-        // For CA-signed: issuer is the CA's subject. Use subject for now
-        // (caller sets issuer via the issuer_key parameter).
-        // TODO: support separate issuer name.
+    // Issuer name — use provided issuer_name, or fall back to subject (self-signed).
+    const issuer_x509_name = c.X509_get_issuer_name(x509) orelse {
+        c.X509_free(x509);
+        return error.OutOfMemory;
+    };
+    if (issuer_name) |ina| {
+        try populateX509Name(allocator, issuer_x509_name, ina);
+    } else {
+        if (c.X509_set_issuer_name(x509, subject_name) != 1) {
+            c.X509_free(x509);
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
 
     // Validity.
@@ -497,32 +527,50 @@ fn populateX509Name(allocator: Allocator, x509_name: *c.X509_NAME, name: Name) !
     if (name.common_name) |cn| {
         const cn_z = try allocator.dupeZ(u8, cn);
         defer allocator.free(cn_z);
-        _ = c.X509_NAME_add_entry_by_NID(x509_name, c.NID_commonName, c.MBSTRING_ASC, @ptrCast(cn_z.ptr), -1, -1, 0);
+        if (c.X509_NAME_add_entry_by_NID(x509_name, c.NID_commonName, c.MBSTRING_ASC, @ptrCast(cn_z.ptr), -1, -1, 0) != 1) {
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
     if (name.organization) |org| {
         const org_z = try allocator.dupeZ(u8, org);
         defer allocator.free(org_z);
-        _ = c.X509_NAME_add_entry_by_NID(x509_name, c.NID_organizationName, c.MBSTRING_ASC, @ptrCast(org_z.ptr), -1, -1, 0);
+        if (c.X509_NAME_add_entry_by_NID(x509_name, c.NID_organizationName, c.MBSTRING_ASC, @ptrCast(org_z.ptr), -1, -1, 0) != 1) {
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
     if (name.organizational_unit) |ou| {
         const ou_z = try allocator.dupeZ(u8, ou);
         defer allocator.free(ou_z);
-        _ = c.X509_NAME_add_entry_by_NID(x509_name, c.NID_organizationalUnitName, c.MBSTRING_ASC, @ptrCast(ou_z.ptr), -1, -1, 0);
+        if (c.X509_NAME_add_entry_by_NID(x509_name, c.NID_organizationalUnitName, c.MBSTRING_ASC, @ptrCast(ou_z.ptr), -1, -1, 0) != 1) {
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
     if (name.country) |c_val| {
         const c_z = try allocator.dupeZ(u8, c_val);
         defer allocator.free(c_z);
-        _ = c.X509_NAME_add_entry_by_NID(x509_name, c.NID_countryName, c.MBSTRING_ASC, @ptrCast(c_z.ptr), -1, -1, 0);
+        if (c.X509_NAME_add_entry_by_NID(x509_name, c.NID_countryName, c.MBSTRING_ASC, @ptrCast(c_z.ptr), -1, -1, 0) != 1) {
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
     if (name.state) |st| {
         const st_z = try allocator.dupeZ(u8, st);
         defer allocator.free(st_z);
-        _ = c.X509_NAME_add_entry_by_NID(x509_name, c.NID_stateOrProvinceName, c.MBSTRING_ASC, @ptrCast(st_z.ptr), -1, -1, 0);
+        if (c.X509_NAME_add_entry_by_NID(x509_name, c.NID_stateOrProvinceName, c.MBSTRING_ASC, @ptrCast(st_z.ptr), -1, -1, 0) != 1) {
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
     if (name.locality) |l| {
         const l_z = try allocator.dupeZ(u8, l);
         defer allocator.free(l_z);
-        _ = c.X509_NAME_add_entry_by_NID(x509_name, c.NID_localityName, c.MBSTRING_ASC, @ptrCast(l_z.ptr), -1, -1, 0);
+        if (c.X509_NAME_add_entry_by_NID(x509_name, c.NID_localityName, c.MBSTRING_ASC, @ptrCast(l_z.ptr), -1, -1, 0) != 1) {
+            logOpenSslErrors();
+            return error.OpenSSLFailed;
+        }
     }
 }
 
@@ -613,15 +661,13 @@ fn getNameString(allocator: Allocator, name: *c.X509_NAME) ?[]const u8 {
     return allocator.dupe(u8, mem_ptr.?[0..@intCast(len)]) catch null;
 }
 
-/// Convert ASN1_TIME to Unix timestamp (i64).
+/// Convert ASN1_TIME to Unix timestamp (i64) using ASN1_TIME_to_tm + timegm.
 fn asn1TimeToI64(asn1_time: *const c.ASN1_TIME) i64 {
-    var day: c_int = 0;
-    var sec: c_int = 0;
-    if (c.ASN1_TIME_diff(&day, &sec, null, asn1_time) != 0) {
-        // Approximate: days * 86400 + seconds
-        return @as(i64, @intCast(day)) * 86400 + @as(i64, @intCast(sec));
-    }
-    return 0;
+    var tm: c.struct_tm = std.mem.zeroes(c.struct_tm);
+    if (c.ASN1_TIME_to_tm(asn1_time, &tm) != 1) return 0;
+    // timegm interprets struct tm as UTC and returns seconds since epoch.
+    var tm_copy = tm;
+    return @intCast(c.timegm(&tm_copy));
 }
 
 /// Drain the OpenSSL error queue and log errors.
