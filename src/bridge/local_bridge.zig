@@ -148,7 +148,8 @@ pub const LocalBridge = struct {
         while (!self.stop_flag.load(.seq_cst)) {
             // Poll the L2 port for incoming frames
             var pfd = [_]std.posix.pollfd{.{
-                .fd = port_fd,
+                // pollfd.fd is a SOCKET pointer on Windows, not an int.
+                .fd = if (comptime builtin.os.tag == .windows) @ptrCast(port_fd) else port_fd,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
             }};
