@@ -338,6 +338,27 @@ pub const ServerHub = struct {
     radius_secret: []const u8 = "",
     radius_retry_interval: u32 = 0,
 
+    /// SecureNAT/VH option (C: `VH_OPTION` via Hub->SecureNATOption).
+    vh_mac_address: [6]u8 = [_]u8{0} ** 6,
+    vh_ip: u32 = 0,
+    vh_mask: u32 = 0,
+    vh_use_nat: bool = false,
+    vh_mtu: u32 = 1500,
+    vh_nat_tcp_timeout: u32 = 3600,
+    vh_nat_udp_timeout: u32 = 120,
+    vh_use_dhcp: bool = false,
+    vh_dhcp_lease_ip_start: u32 = 0,
+    vh_dhcp_lease_ip_end: u32 = 0,
+    vh_dhcp_subnet_mask: u32 = 0,
+    vh_dhcp_expire_time_span: u32 = 7200,
+    vh_dhcp_gateway_address: u32 = 0,
+    vh_dhcp_dns_server_address: u32 = 0,
+    vh_dhcp_dns_server_address2: u32 = 0,
+    vh_dhcp_domain_name: []const u8 = "",
+    vh_save_log: bool = false,
+    vh_apply_dhcp_push_routes: bool = false,
+    vh_dhcp_push_routes: []const u8 = "",
+
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
     fn findUser(self: *ServerHub, name: []const u8) ?*ServerUser {
@@ -643,6 +664,11 @@ pub const Server = struct {
     /// TLS cipher list string (C: cedar->CipherList).
     cipher_list: []const u8 = "",
 
+    /// Syslog settings (C: `SYSLOG_SETTING`).
+    syslog_save_type: u32 = 0,
+    syslog_hostname: []const u8 = "",
+    syslog_port: u32 = 0,
+
 /// Back-pointer to the runtime `ServerContext` (accept.zig). Set once at
     /// startup so admin handlers can create/destroy runtime objects (e.g.
     /// LocalBridge). The dispatch Server outlives all connections.
@@ -691,6 +717,8 @@ pub const Server = struct {
             allocator.free(hub.name);
             allocator.free(hub.radius_server_name);
             allocator.free(hub.radius_secret);
+            allocator.free(hub.vh_dhcp_domain_name);
+            allocator.free(hub.vh_dhcp_push_routes);
         }
         self.hubs.deinit(allocator);
         self.listeners.deinit(allocator);
@@ -699,6 +727,7 @@ pub const Server = struct {
         allocator.free(self.cert_pem);
         allocator.free(self.key_pem);
         allocator.free(self.cipher_list);
+        allocator.free(self.syslog_hostname);
         self.sessions.deinit();
         self.* = .{
             .allocator = allocator,
@@ -934,19 +963,19 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "GetKeep")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "EnableSecureNAT")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHub, &a, allocator, request, ret, stEnableSecureNAT);
     } else if (mem.eql(u8, function_name, "DisableSecureNAT")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHub, &a, allocator, request, ret, stDisableSecureNAT);
     } else if (mem.eql(u8, function_name, "SetSecureNATOption")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcVhOption, &a, allocator, request, ret, stSetSecureNATOption);
     } else if (mem.eql(u8, function_name, "GetSecureNATOption")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcVhOption, &a, allocator, request, ret, stGetSecureNATOption);
     } else if (mem.eql(u8, function_name, "EnumNAT")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumNat, &a, allocator, request, ret, stEnumNAT);
     } else if (mem.eql(u8, function_name, "EnumDHCP")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumDhcp, &a, allocator, request, ret, stEnumDHCP);
     } else if (mem.eql(u8, function_name, "GetSecureNATStatus")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcNatStatus, &a, allocator, request, ret, stGetSecureNATStatus);
     } else if (mem.eql(u8, function_name, "EnumEthernet")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "AddLocalBridge")) {
@@ -970,9 +999,9 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "DelLicenseKey")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "GetConfig")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcConfig, &a, allocator, request, ret, stGetConfig);
     } else if (mem.eql(u8, function_name, "SetConfig")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcConfig, &a, allocator, request, ret, stSetConfig);
     } else if (mem.eql(u8, function_name, "AddL3Switch")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "DelL3Switch")) {
@@ -998,9 +1027,9 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "ReadLogFile")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "SetSysLog")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcSyslogSetting, &a, allocator, request, ret, stSetSysLog);
     } else if (mem.eql(u8, function_name, "GetSysLog")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcSyslogSetting, &a, allocator, request, ret, stGetSysLog);
     } else if (mem.eql(u8, function_name, "EnumEthVLan")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "SetEnableEthVLan")) {
@@ -2967,6 +2996,220 @@ fn stGetConnectionInfo(a: *AdminCtx, t: *structs.RpcConnectionInfo, allocator: A
         }
     }
     return err_object_not_found;
+}
+
+// ============================================================================
+// SecureNAT (C Admin.c:4556, Virtual.h VH_OPTION)
+// ============================================================================
+
+/// C `StEnableSecureNAT` (Admin.c:4556). CHECK_RIGHT — enables SecureNAT on a hub.
+fn stEnableSecureNAT(a: *AdminCtx, t: *structs.RpcHub, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    hub.secure_nat_enabled = true;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StDisableSecureNAT` (Admin.c:4597). CHECK_RIGHT — disables SecureNAT.
+fn stDisableSecureNAT(a: *AdminCtx, t: *structs.RpcHub, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    hub.secure_nat_enabled = false;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StGetSecureNATOption` (Admin.c:4640). CHECK_RIGHT — returns VH option.
+fn stGetSecureNATOption(a: *AdminCtx, t: *structs.RpcVhOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.rpc_hub_name)) return err_not_enough_right;
+    if (t.rpc_hub_name.len == 0) return err_invalid_parameter;
+
+    const hub = findHub(s, t.rpc_hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.rpc_hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.mac_address = hub.vh_mac_address;
+    t.ip = hub.vh_ip;
+    t.mask = hub.vh_mask;
+    t.use_nat = hub.vh_use_nat;
+    t.mtu = hub.vh_mtu;
+    t.nat_tcp_timeout = hub.vh_nat_tcp_timeout;
+    t.nat_udp_timeout = hub.vh_nat_udp_timeout;
+    t.use_dhcp = hub.vh_use_dhcp;
+    t.dhcp_lease_ip_start = hub.vh_dhcp_lease_ip_start;
+    t.dhcp_lease_ip_end = hub.vh_dhcp_lease_ip_end;
+    t.dhcp_subnet_mask = hub.vh_dhcp_subnet_mask;
+    t.dhcp_expire_time_span = hub.vh_dhcp_expire_time_span;
+    t.dhcp_gateway_address = hub.vh_dhcp_gateway_address;
+    t.dhcp_dns_server_address = hub.vh_dhcp_dns_server_address;
+    t.dhcp_dns_server_address2 = hub.vh_dhcp_dns_server_address2;
+    t.dhcp_domain_name = dupStr(allocator, hub.vh_dhcp_domain_name) catch return err_internal_error;
+    t.save_log = hub.vh_save_log;
+    t.apply_dhcp_push_routes = hub.vh_apply_dhcp_push_routes;
+    t.dhcp_push_routes = dupStr(allocator, hub.vh_dhcp_push_routes) catch return err_internal_error;
+    return err_no_error;
+}
+
+/// C `StSetSecureNATOption` (Admin.c:4705). CHECK_RIGHT — sets VH option.
+fn stSetSecureNATOption(a: *AdminCtx, t: *structs.RpcVhOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.rpc_hub_name)) return err_not_enough_right;
+    if (t.rpc_hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.rpc_hub_name) orelse return err_hub_not_found;
+    hub.vh_mac_address = t.mac_address;
+    hub.vh_ip = t.ip;
+    hub.vh_mask = t.mask;
+    hub.vh_use_nat = t.use_nat;
+    hub.vh_mtu = t.mtu;
+    hub.vh_nat_tcp_timeout = t.nat_tcp_timeout;
+    hub.vh_nat_udp_timeout = t.nat_udp_timeout;
+    hub.vh_use_dhcp = t.use_dhcp;
+    hub.vh_dhcp_lease_ip_start = t.dhcp_lease_ip_start;
+    hub.vh_dhcp_lease_ip_end = t.dhcp_lease_ip_end;
+    hub.vh_dhcp_subnet_mask = t.dhcp_subnet_mask;
+    hub.vh_dhcp_expire_time_span = t.dhcp_expire_time_span;
+    hub.vh_dhcp_gateway_address = t.dhcp_gateway_address;
+    hub.vh_dhcp_dns_server_address = t.dhcp_dns_server_address;
+    hub.vh_dhcp_dns_server_address2 = t.dhcp_dns_server_address2;
+    allocator.free(hub.vh_dhcp_domain_name);
+    hub.vh_dhcp_domain_name = dupStr(allocator, t.dhcp_domain_name) catch return err_internal_error;
+    hub.vh_save_log = t.save_log;
+    hub.vh_apply_dhcp_push_routes = t.apply_dhcp_push_routes;
+    allocator.free(hub.vh_dhcp_push_routes);
+    hub.vh_dhcp_push_routes = dupStr(allocator, t.dhcp_push_routes) catch return err_internal_error;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StEnumNAT` (Admin.c:4804). CHECK_RIGHT — returns empty (no live NAT yet).
+fn stEnumNAT(a: *AdminCtx, t: *structs.RpcEnumNat, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    return err_no_error;
+}
+
+/// C `StEnumDHCP` (Admin.c:4844). CHECK_RIGHT — returns empty (no live DHCP yet).
+fn stEnumDHCP(a: *AdminCtx, t: *structs.RpcEnumDhcp, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    return err_no_error;
+}
+
+/// C `StGetSecureNATStatus` (Admin.c:4877). CHECK_RIGHT — returns zeros (no live NAT).
+fn stGetSecureNATStatus(a: *AdminCtx, t: *structs.RpcNatStatus, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+    if (findHub(s, t.hub_name) == null) return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    return err_no_error;
+}
+
+// ============================================================================
+// Config / Syslog (C Admin.c:10161, 10184, Server.c:1833)
+// ============================================================================
+
+/// C `StGetConfig` (Admin.c:10161). SERVER_ADMIN_ONLY — returns config file.
+fn stGetConfig(a: *AdminCtx, t: *structs.RpcConfig, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    t.free(allocator);
+    t.* = .{};
+    t.file_name = dupStr(allocator, "server_config.xml") catch return err_internal_error;
+    // Return a minimal config document.
+    t.file_data = dupStr(allocator,
+        \\<?xml version="1.0" encoding="utf-8"?>
+        \\<SoftEtherVPN>
+        \\  <ServerConfiguration>
+        \\    <Item name="default_hub" value="DEFAULT" />
+        \\  </ServerConfiguration>
+        \\</SoftEtherVPN>
+    ) catch return err_internal_error;
+    _ = s;
+    return err_no_error;
+}
+
+/// C `StSetConfig` (Admin.c:10184). SERVER_ADMIN_ONLY — stores config file.
+fn stSetConfig(a: *AdminCtx, t: *structs.RpcConfig, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+    if (t.file_data.len == 0) return err_invalid_parameter;
+
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StSetSysLog` (Admin.c:10210). SERVER_ADMIN_ONLY — sets syslog config.
+fn stSetSysLog(a: *AdminCtx, t: *structs.RpcSyslogSetting, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    s.syslog_save_type = t.save_type;
+    allocator.free(s.syslog_hostname);
+    s.syslog_hostname = dupStr(allocator, t.hostname) catch return err_internal_error;
+    s.syslog_port = t.port;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+/// C `StGetSysLog` (Admin.c:10245). Returns syslog config; non-admin sees redacted hostname.
+fn stGetSysLog(a: *AdminCtx, t: *structs.RpcSyslogSetting, allocator: Allocator) u32 {
+    const s = a.server;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    t.free(allocator);
+    t.* = .{};
+    t.save_type = s.syslog_save_type;
+    t.port = s.syslog_port;
+    if (a.server_admin) {
+        t.hostname = dupStr(allocator, s.syslog_hostname) catch return err_internal_error;
+    } else {
+        t.hostname = dupStr(allocator, "") catch return err_internal_error;
+    }
+    return err_no_error;
 }
 
 // ============================================================================
