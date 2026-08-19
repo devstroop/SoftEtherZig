@@ -293,6 +293,8 @@ pub const Hub = struct {
     secure_nat: ?*anyopaque = null,
     /// Hub-level access list (ingress/egress packet filtering).
     access_list: AccessList = undefined,
+    /// Hub message of the day (C: `HUB.HubMsg`).
+    hub_msg: []const u8 = "",
     /// Hub-level protocol filters (PPPoE, OSPF, IPv4/IPv6/NonIP/BPDU).
     filters: HubFilters = .{},
     /// Hub log configuration.
@@ -339,6 +341,7 @@ pub const Hub = struct {
         self.sessions.deinit(allocator);
         self.mutex.unlock();
         allocator.free(self.name);
+        if (self.hub_msg.len > 0) allocator.free(self.hub_msg);
         allocator.destroy(self);
     }
 
