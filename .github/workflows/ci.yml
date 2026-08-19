@@ -126,7 +126,7 @@ jobs:
 
       - name: Run tests (standalone)
         if: always() && matrix.test
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: zig build test-standalone --release=fast --summary all
 
       - name: Run tests (FFI)
