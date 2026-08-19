@@ -417,13 +417,6 @@ pub const SessionMain = struct {
         // TLS path: batch frames and send via tunnel.
         while (count < self.send_batch.len) {
             const frame = self.pa.get(self.pa.ctx) orelse break;
-            // C drops frames once the pending send queue is over budget
-            // (Session.c:473-479).
-            if (self.send_queue_bytes + frame.len > self.config.max_buffering_size) {
-                self.allocator.free(frame);
-                log.warn("dropping frame: send queue over buffering budget", .{});
-                continue;
-            }
             // Encrypt the block payload if a cipher is active.
             const ciphertext = if (self.cipher) |*c|
                 c.encryptSend(self.allocator, frame) catch |err| {
@@ -434,6 +427,13 @@ pub const SessionMain = struct {
             else
                 frame;
             if (self.cipher != null) self.allocator.free(frame);
+            // Budget check against the encrypted size (AES-CBC adds IV +
+            // padding overhead) so batches never exceed max_buffering_size.
+            if (self.send_queue_bytes + ciphertext.len > self.config.max_buffering_size) {
+                self.allocator.free(ciphertext);
+                log.warn("dropping frame: send queue over buffering budget", .{});
+                continue;
+            }
             self.send_batch[count] = ciphertext;
             count += 1;
             sent_bytes += ciphertext.len;
