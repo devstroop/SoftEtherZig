@@ -801,6 +801,7 @@ pub fn build(b: *std.Build) void {
                 "extractCertCommonName",
                 "SHA-0 determinism",
                 "MS-CHAPv2",
+                "x509.",
             },
         });
         linkOpenSsl(b, all_test, target_os, is_android, target_arch, openssl_lib, openssl_include, win_openssl_lib, win_openssl_include, android_ssl_lib, android_ssl_include, linux_lib_dir);

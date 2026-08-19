@@ -40,6 +40,7 @@ test-logs/
 *.exe
 *.dll
 *.o
+*.a
 main
 
 # Temporary build files
