@@ -325,14 +325,14 @@ pub fn x509ToPem(allocator: Allocator, x509: *c.X509) !CertPem {
         return error.OpenSSLFailed;
     }
 
-    var mem_ptr: ?[*]u8 = null;
-    const len = c.BIO_get_mem_data(bio, @ptrCast(&mem_ptr));
+    var mem_ptr: [*c]u8 = null;
+    const len = c.BIO_get_mem_data(bio, @as([*c][*c]u8, @ptrCast(&mem_ptr)));
     if (len <= 0 or mem_ptr == null) {
         log.err("BIO_get_mem_data returned empty", .{});
         return error.OpenSSLFailed;
     }
 
-    return .{ .data = try allocator.dupe(u8, mem_ptr.?[0..@intCast(len)]) };
+    return .{ .data = try allocator.dupe(u8, mem_ptr[0..@intCast(len)]) };
 }
 
 /// Parse a PEM-encoded private key. If `is_private` is true, reads as private key;
@@ -376,14 +376,14 @@ pub fn evpPkeyToPem(allocator: Allocator, pkey: *c.EVP_PKEY, is_private: bool) !
         return error.OpenSSLFailed;
     }
 
-    var mem_ptr: ?[*]u8 = null;
-    const len = c.BIO_get_mem_data(bio, @ptrCast(&mem_ptr));
+    var mem_ptr: [*c]u8 = null;
+    const len = c.BIO_get_mem_data(bio, @as([*c][*c]u8, @ptrCast(&mem_ptr)));
     if (len <= 0 or mem_ptr == null) {
         log.err("BIO_get_mem_data returned empty", .{});
         return error.OpenSSLFailed;
     }
 
-    return allocator.dupe(u8, mem_ptr.?[0..@intCast(len)]);
+    return allocator.dupe(u8, mem_ptr[0..@intCast(len)]);
 }
 
 // ============================================================================

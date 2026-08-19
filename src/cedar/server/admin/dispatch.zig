@@ -1306,6 +1306,7 @@ fn inRpcAlloc(comptime T: type, t: *T, allocator: Allocator, p: *const Pack) !vo
         structs.RpcLinkStatus => try t.inRpc(allocator, p),
         structs.RpcKeyPair => try t.inRpc(allocator, p),
         structs.RpcHub => try t.inRpc(allocator, p),
+        structs.RpcStr => try t.inRpc(allocator, p),
         else => @compileError("no InRpc for " ++ @typeName(T)),
     }
 }
@@ -1394,6 +1395,8 @@ fn outRpcT(comptime T: type, t: *const T, p: *Pack) !void {
         structs.RpcLinkStatus => try t.outRpc(p),
         structs.RpcKeyPair => try t.outRpc(p),
         structs.RpcHub => try t.outRpc(p),
+        structs.RpcStr => try t.outRpc(p),
+        structs.RpcConnectionInfo => try t.outRpc(p),
         else => @compileError("no OutRpc for " ++ @typeName(T)),
     }
 }
@@ -3084,7 +3087,7 @@ fn stGetConnectionInfo(a: *AdminCtx, t: *structs.RpcConnectionInfo, allocator: A
 
     for (snaps) |*snap| {
         if (std.ascii.eqlIgnoreCase(snap.session_name, t.name)) {
-            t.free(allocator);
+            allocator.free(t.name);
             t.* = .{};
             t.name = dupStr(allocator, snap.session_name) catch return err_internal_error;
             t.hostname = "";
@@ -3241,9 +3244,10 @@ fn stGetSecureNATStatus(a: *AdminCtx, t: *structs.RpcNatStatus, allocator: Alloc
     if (t.hub_name.len == 0) return err_invalid_parameter;
     if (findHub(s, t.hub_name) == null) return err_hub_not_found;
 
-    t.free(allocator);
+    const hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    allocator.free(t.hub_name);
     t.* = .{};
-    t.hub_name = dupStr(allocator, t.hub_name) catch return err_internal_error;
+    t.hub_name = hub_name;
     return err_no_error;
 }
 
