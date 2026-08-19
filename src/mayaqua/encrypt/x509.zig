@@ -123,7 +123,7 @@ pub fn generateSelfSigned(
     defer c.X509_free(x509);
 
     // 3. Serialize.
-    const cert_pem = try x509ToPem(allocator, x509);
+    var cert_pem = try x509ToPem(allocator, x509);
     errdefer cert_pem.deinit(allocator);
 
     const key_pem = try evpPkeyToPem(allocator, pkey, true);
@@ -144,7 +144,7 @@ pub fn generateRootCA(
     const x509 = try buildCertificate(allocator, pkey, pkey, name, null, days, true);
     defer c.X509_free(x509);
 
-    const cert_pem = try x509ToPem(allocator, x509);
+    var cert_pem = try x509ToPem(allocator, x509);
     errdefer cert_pem.deinit(allocator);
 
     const key_pem = try evpPkeyToPem(allocator, pkey, true);
@@ -755,8 +755,8 @@ test "x509.generate signed cert from CA" {
 }
 
 test "x509.generate key pair" {
-    const kp = try generateKeyPair(testing.allocator, 2048);
-    kp.deinit(testing.allocator);
+    var kp = try generateKeyPair(testing.allocator, 2048);
+    defer kp.deinit(testing.allocator);
 
     try testing.expect(kp.pub_pem.len > 0);
     try testing.expect(kp.priv_pem.len > 0);
