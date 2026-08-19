@@ -917,7 +917,9 @@ test "server.accept full handshake over TLS" {
     const writer = protocol_mod.Writer{ .context = &io, .writeFn = ClientIo.write };
     const reader = protocol_mod.Reader{ .context = &io, .readFn = ClientIo.read };
 
-    var result = try protocol_mod.performHandshake(allocator, writer, reader, "accept.test", "VPN", "alice", "hunter2", false);
+    // This test exercises the TLS handshake, not encryption — send
+    // use_encrypt=false so the server stays in plaintext-over-TLS mode.
+    var result = try protocol_mod.performHandshakeWithOpts(allocator, writer, reader, "accept.test", "VPN", "alice", "hunter2", false, .{ .use_encrypt = false });
     defer result.hello.deinit(allocator);
     defer result.auth.deinit(allocator);
 
@@ -926,7 +928,7 @@ test "server.accept full handshake over TLS" {
     try testing.expectEqualStrings("SoftEther VPN Server", result.hello.server_str);
     try testing.expectEqual(@as(u32, server_version), result.hello.server_ver);
     try testing.expectEqual(@as(u32, server_build), result.hello.server_build);
-    // M1 negotiates plaintext-over-TLS: the client must see encryption off.
+    // Plaintext-over-TLS: the client must see encryption off.
     try testing.expect(!result.auth.server_use_encrypt);
 
     // Closing the client lets the server session loop observe EOF and end.
