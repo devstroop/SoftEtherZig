@@ -293,11 +293,28 @@ pub const ServerL3Switch = struct {
     online: bool = false,
     active: bool = false,
     interfaces: std.ArrayListUnmanaged(ServerL3Interface) = .{},
+    /// L3 routing table entries (C: `L3SW->TableList`).
+    routing_table: std.ArrayListUnmanaged(L3TableEntry) = .{},
 
     fn deinit(self: *ServerL3Switch, allocator: Allocator) void {
         for (self.interfaces.items) |*intf| intf.deinit(allocator);
         self.interfaces.deinit(allocator);
+        for (self.routing_table.items) |*entry| entry.deinit(allocator);
+        self.routing_table.deinit(allocator);
         allocator.free(self.name);
+        self.* = .{};
+    }
+};
+
+/// C `L3TABLE` — a routing table entry within an L3 switch.
+pub const L3TableEntry = struct {
+    network_address: u32 = 0,
+    subnet_mask: u32 = 0,
+    gateway_address: u32 = 0,
+    metric: u32 = 0,
+
+    fn deinit(self: *L3TableEntry, allocator: Allocator) void {
+        _ = allocator;
         self.* = .{};
     }
 };
@@ -1136,11 +1153,11 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "EnumL3If")) {
         err = dispatchCall(structs.RpcEnumL3If, &a, allocator, request, ret, stEnumL3If);
     } else if (mem.eql(u8, function_name, "AddL3Table")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3Table, &a, allocator, request, ret, stAddL3Table);
     } else if (mem.eql(u8, function_name, "DelL3Table")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcL3Table, &a, allocator, request, ret, stDelL3Table);
     } else if (mem.eql(u8, function_name, "EnumL3Table")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumL3Table, &a, allocator, request, ret, stEnumL3Table);
     } else if (mem.eql(u8, function_name, "ReadLogFile")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "SetSysLog")) {
@@ -4029,6 +4046,87 @@ fn stEnumL3If(a: *AdminCtx, t: *structs.RpcEnumL3If, allocator: Allocator) u32 {
             .name = dupStr(allocator, intf.hub_name) catch return err_internal_error,
             .ip_address = intf.ip_address,
             .subnet_mask = intf.subnet_mask,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StAddL3Table` (Admin.c:3779). CHECK_RIGHT — adds a routing entry to an L3 switch.
+fn stAddL3Table(a: *AdminCtx, t: *structs.RpcL3Table, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const sw = for (s.l3_switches.items) |*sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) break sw;
+    } else return err_object_not_found;
+
+    // C: check for duplicate entry.
+    for (sw.routing_table.items) |entry| {
+        if (entry.network_address == t.network_address and
+            entry.subnet_mask == t.subnet_mask and
+            entry.gateway_address == t.gateway_address)
+            return err_object_already_exists;
+    }
+
+    sw.routing_table.append(allocator, .{
+        .network_address = t.network_address,
+        .subnet_mask = t.subnet_mask,
+        .gateway_address = t.gateway_address,
+        .metric = t.metric,
+    }) catch return err_internal_error;
+    s.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDelL3Table` (Admin.c:3732). CHECK_RIGHT — removes a routing entry from an L3 switch.
+fn stDelL3Table(a: *AdminCtx, t: *structs.RpcL3Table, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const sw = for (s.l3_switches.items) |*sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) break sw;
+    } else return err_object_not_found;
+
+    for (sw.routing_table.items, 0..) |*entry, i| {
+        if (entry.network_address == t.network_address and
+            entry.subnet_mask == t.subnet_mask and
+            entry.gateway_address == t.gateway_address)
+        {
+            var removed = sw.routing_table.swapRemove(i);
+            removed.deinit(allocator);
+            s.config_revision +%= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StEnumL3Table` (Admin.c:3676). CHECK_RIGHT — lists routing entries of an L3 switch.
+fn stEnumL3Table(a: *AdminCtx, t: *structs.RpcEnumL3Table, allocator: Allocator) u32 {
+    const s = a.server;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    const sw = for (s.l3_switches.items) |sw| {
+        if (std.ascii.eqlIgnoreCase(sw.name, t.name)) break sw;
+    } else return err_object_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.name = dupStr(allocator, sw.name) catch return err_internal_error;
+    t.items = allocator.alloc(structs.RpcEnumL3Table.EnumL3TableItem, sw.routing_table.items.len) catch return err_internal_error;
+    for (sw.routing_table.items, 0..) |entry, i| {
+        t.items[i] = .{
+            .name = dupStr(allocator, sw.name) catch return err_internal_error,
+            .network_address = entry.network_address,
+            .subnet_mask = entry.subnet_mask,
+            .gateway_address = entry.gateway_address,
+            .metric = entry.metric,
         };
     }
     return err_no_error;

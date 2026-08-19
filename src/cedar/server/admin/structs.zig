@@ -2817,6 +2817,7 @@ pub const RpcL3Table = struct {
 };
 
 pub const RpcEnumL3Table = struct {
+    name: []const u8 = "",
     items: []EnumL3TableItem = &.{},
 
     pub const EnumL3TableItem = struct {
@@ -2830,12 +2831,14 @@ pub const RpcEnumL3Table = struct {
     pub fn inRpc(self: *RpcEnumL3Table, allocator: Allocator, p: *const Pack) !void {
         self.free(allocator);
         self.* = .{};
-        const count = p.getValueCount("Name");
-        if (count == 0) return;
+        self.name = try dupStr(allocator, p.getStr("Name"));
+        const raw_count = p.getValueCount("Name");
+        if (raw_count <= 1) return;
+        const count = raw_count - 1;
         self.items = try allocator.alloc(EnumL3TableItem, count);
         for (0..count) |i| {
             self.items[i] = .{
-                .name = try dupStr(allocator, p.getStrEx("Name", i)),
+                .name = try dupStr(allocator, p.getStrEx("Name", i + 1)),
                 .network_address = p.getIntEx("NetworkAddress", i) orelse 0,
                 .subnet_mask = p.getIntEx("SubnetMask", i) orelse 0,
                 .gateway_address = p.getIntEx("GatewayAddress", i) orelse 0,
@@ -2845,8 +2848,9 @@ pub const RpcEnumL3Table = struct {
     }
 
     pub fn outRpc(self: *const RpcEnumL3Table, p: *Pack) !void {
+        try p.addStr("Name", self.name);
         for (self.items, 0..) |item, i| {
-            try p.addStrEx("Name", item.name, i);
+            try p.addStrEx("Name", item.name, i + 1);
             try p.addIntEx("NetworkAddress", item.network_address, i);
             try p.addIntEx("SubnetMask", item.subnet_mask, i);
             try p.addIntEx("GatewayAddress", item.gateway_address, i);
@@ -2855,6 +2859,7 @@ pub const RpcEnumL3Table = struct {
     }
 
     pub fn free(self: *RpcEnumL3Table, allocator: Allocator) void {
+        allocator.free(self.name);
         for (self.items) |*item| allocator.free(item.name);
         allocator.free(self.items);
         self.* = .{};
