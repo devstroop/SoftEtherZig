@@ -1556,6 +1556,9 @@ pub fn uploadAuth(
     };
 }
 
+/// Result of performHandshake / performHandshakeWithOpts.
+pub const HandshakeResult = struct { hello: HelloResponse, auth: AuthResult };
+
 /// Perform complete handshake sequence
 pub fn performHandshake(
     allocator: Allocator,
@@ -1566,7 +1569,21 @@ pub fn performHandshake(
     username: []const u8,
     password: ?[]const u8,
     udp_accel: bool,
-) !struct { hello: HelloResponse, auth: AuthResult } {
+) !HandshakeResult {
+    return performHandshakeWithOpts(allocator, writer, reader, host, hub_name, username, password, udp_accel, null);
+}
+
+pub fn performHandshakeWithOpts(
+    allocator: Allocator,
+    writer: Writer,
+    reader: Reader,
+    host: []const u8,
+    hub_name: []const u8,
+    username: []const u8,
+    password: ?[]const u8,
+    udp_accel: bool,
+    maybe_opts: ?SessionOptions,
+) !HandshakeResult {
     // Step 1: Upload signature
     try uploadSignature(allocator, writer, host, null);
 
@@ -1575,7 +1592,7 @@ pub fn performHandshake(
     errdefer hello.deinit(allocator);
 
     // Step 3: Build and upload auth
-    const default_opts = SessionOptions{};
+    const default_opts = maybe_opts orelse SessionOptions{};
     const auth_data = if (password) |pwd|
         try buildPasswordAuth(allocator, username, pwd, hub_name, &hello.random, 0, "", udp_accel, null, default_opts)
     else
