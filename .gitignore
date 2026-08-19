@@ -51,4 +51,4 @@ config.json
 config*.json
 
 *.speed
-*.tsv
+*.tsv.worktrees/
