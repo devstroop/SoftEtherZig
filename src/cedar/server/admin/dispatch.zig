@@ -171,6 +171,40 @@ pub const ServerListener = struct {
     disable_dos: bool = false,
 };
 
+/// Bridge operations vtable. Set by `accept.zig` at server startup so the
+/// admin dispatch can create/destroy runtime `LocalBridge` instances without
+/// importing `accept.zig` (which would create a circular import).
+pub const BridgeOps = struct {
+    ctx: ?*anyopaque = null,
+    /// Create and start a bridge on `device_name` for `hub_name`.
+    /// Returns true if the bridge is online and active.
+    create: *const fn (ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) bool = &noopCreate,
+    /// Destroy a bridge by device+hub. Returns true if found and removed.
+    destroy: *const fn (ctx: *anyopaque, device_name: []const u8, hub_name: []const u8) bool = &noopDestroy,
+
+    fn noopCreate(_: *anyopaque, _: []const u8, _: []const u8, _: bool) bool {
+        return false;
+    }
+    fn noopDestroy(_: *anyopaque, _: []const u8, _: []const u8) bool {
+        return false;
+    }
+};
+
+/// Local bridge admin-model entry (C `LOCALBRIDGE` subset).
+pub const LocalBridgeEntry = struct {
+    device_name: []const u8 = "",
+    hub_name: []const u8 = "",
+    online: bool = false,
+    active: bool = false,
+    tap_mode: bool = false,
+
+    pub fn deinit(self: *LocalBridgeEntry, allocator: Allocator) void {
+        allocator.free(self.device_name);
+        allocator.free(self.hub_name);
+        self.* = .{};
+    }
+};
+
 /// C `USER` subset backing the user endpoints. All string fields are owned
 /// (always duplicated on creation), so `free` may release them unconditionally.
 pub const ServerUser = struct {
@@ -585,6 +619,18 @@ pub const Server = struct {
     listeners: std.ArrayListUnmanaged(ServerListener) = .{},
     hubs: std.ArrayListUnmanaged(ServerHub) = .{},
 
+    /// Active local bridges (AddLocalBridge/DeleteLocalBridge/EnumLocalBridge).
+    local_bridges: std.ArrayListUnmanaged(LocalBridgeEntry) = .{},
+
+/// Back-pointer to the runtime `ServerContext` (accept.zig). Set once at
+    /// startup so admin handlers can create/destroy runtime objects (e.g.
+    /// LocalBridge). The dispatch Server outlives all connections.
+    server_ctx: ?*anyopaque = null,
+
+    /// Bridge operations vtable — set by accept.zig to wire admin dispatch
+    /// to the runtime ServerContext. Avoids circular import.
+    bridge_ops: BridgeOps = .{},
+
     /// Live sessions (C `SERVER->SessionList` + `ConnectionList` subset).
     /// `accept.zig`'s data-plane sessions register into their own registry; the
     /// admin dispatch model keeps a standalone one so `EnumSession` &
@@ -625,6 +671,8 @@ pub const Server = struct {
         }
         self.hubs.deinit(allocator);
         self.listeners.deinit(allocator);
+        for (self.local_bridges.items) |*lb| lb.deinit(allocator);
+        self.local_bridges.deinit(allocator);
         self.sessions.deinit();
         self.* = .{
             .allocator = allocator,
@@ -655,6 +703,9 @@ pub const AdminCtx = struct {
     server: *Server,
     server_admin: bool = false,
     hub_name: []const u8 = "",
+    /// Runtime server context (ServerContext from accept.zig). Null in unit
+    /// tests that use `Server.init()` directly — handlers must check.
+    server_ctx: ?*anyopaque = null,
 };
 
 // ============================================================================
@@ -671,6 +722,7 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
         .server = server,
         .server_admin = rpc_self.server_admin_mode,
         .hub_name = rpc_self.hub_name,
+        .server_ctx = server.server_ctx,
     };
 
     // Serialize concurrent admin connections against the shared hub/listener
@@ -872,13 +924,13 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "EnumEthernet")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "AddLocalBridge")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcLocalBridge, &a, allocator, request, ret, stAddLocalBridge);
     } else if (mem.eql(u8, function_name, "DeleteLocalBridge")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcLocalBridge, &a, allocator, request, ret, stDeleteLocalBridge);
     } else if (mem.eql(u8, function_name, "EnumLocalBridge")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcEnumLocalBridge, &a, allocator, request, ret, stEnumLocalBridge);
     } else if (mem.eql(u8, function_name, "GetBridgeSupport")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcBridgeSupport, &a, allocator, request, ret, stGetBridgeSupport);
     } else if (mem.eql(u8, function_name, "RebootServer")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "Crash")) {
@@ -2450,6 +2502,83 @@ fn stSetHubAdminOptions(a: *AdminCtx, t: *structs.RpcAdminOption, allocator: All
     t.items = &.{};
 
     s.config_revision +%= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// LocalBridge endpoints (#97)
+// ============================================================================
+
+/// C `StAddLocalBridge` (Admin.c). Adds a bridge entry to the admin model
+/// and creates the runtime LocalBridge instance.
+fn stAddLocalBridge(a: *AdminCtx, t: *structs.RpcLocalBridge, allocator: Allocator) u32 {
+    if (!a.server_admin) return err_not_enough_right;
+    if (t.device_name.len == 0 or t.hub_name_lb.len == 0) return err_invalid_parameter;
+    for (a.server.local_bridges.items) |lb| {
+        if (mem.eql(u8, lb.device_name, t.device_name) and mem.eql(u8, lb.hub_name, t.hub_name_lb))
+            return err_listener_already_exists;
+    }
+
+    // Create the runtime bridge (calls through vtable -> accept.zig).
+    const bridge_active = blk: {
+        if (a.server.bridge_ops.ctx) |ctx| {
+            break :blk a.server.bridge_ops.create(ctx, t.device_name, t.hub_name_lb, t.tap_mode);
+        }
+        break :blk false;
+    };
+
+    a.server.local_bridges.append(allocator, .{
+        .device_name = allocator.dupe(u8, t.device_name) catch return err_internal_error,
+        .hub_name = allocator.dupe(u8, t.hub_name_lb) catch return err_internal_error,
+        .online = bridge_active,
+        .active = bridge_active,
+        .tap_mode = t.tap_mode,
+    }) catch return err_internal_error;
+    a.server.config_revision +%= 1;
+    return err_no_error;
+}
+
+/// C `StDeleteLocalBridge` (Admin.c). Removes a bridge entry and destroys
+/// the runtime LocalBridge instance.
+fn stDeleteLocalBridge(a: *AdminCtx, t: *structs.RpcLocalBridge, allocator: Allocator) u32 {
+    _ = allocator;
+    if (!a.server_admin) return err_not_enough_right;
+    for (a.server.local_bridges.items, 0..) |lb, i| {
+        if (mem.eql(u8, lb.device_name, t.device_name) and mem.eql(u8, lb.hub_name, t.hub_name_lb)) {
+            // Destroy the runtime bridge (calls through vtable → accept.zig).
+            if (a.server.bridge_ops.ctx) |ctx| {
+                _ = a.server.bridge_ops.destroy(ctx, t.device_name, t.hub_name_lb);
+            }
+            var removed = a.server.local_bridges.swapRemove(i);
+            removed.deinit(a.server.allocator);
+            a.server.config_revision +%= 1;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
+}
+
+/// C `StEnumLocalBridge` (Admin.c). Returns all bridge entries.
+fn stEnumLocalBridge(a: *AdminCtx, t: *structs.RpcEnumLocalBridge, allocator: Allocator) u32 {
+    t.items = allocator.alloc(structs.RpcEnumLocalBridge.EnumLocalBridgeItem, a.server.local_bridges.items.len) catch return err_internal_error;
+    for (a.server.local_bridges.items, 0..) |lb, i| {
+        t.items[i] = .{
+            .device_name = allocator.dupe(u8, lb.device_name) catch return err_internal_error,
+            .hub_name_lb = allocator.dupe(u8, lb.hub_name) catch return err_internal_error,
+            .online = lb.online,
+            .active = lb.active,
+            .tap_mode = lb.tap_mode,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StGetBridgeSupport` (Admin.c). Reports platform bridge capability.
+fn stGetBridgeSupport(a: *AdminCtx, t: *structs.RpcBridgeSupport, allocator: Allocator) u32 {
+    _ = a;
+    _ = allocator;
+    t.is_bridge_supported_os = true;
+    t.is_winpcap_needed = false;
     return err_no_error;
 }
 
@@ -5726,4 +5855,103 @@ test "server.admin_dispatch SetHubAdminOptions validates hub and rights" {
     var resp2 = try call(allocator, &server, false, "VPN", "SetHubAdminOptions", &req2);
     defer { resp2.deinit(); allocator.destroy(resp2); }
     try assertErr(resp2, err_not_enough_right);
+}
+
+// ============================================================================
+// LocalBridge dispatch tests (#97)
+// ============================================================================
+
+test "server.admin_dispatch AddLocalBridge / EnumLocalBridge / DeleteLocalBridge round-trip" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+
+    // Add a bridge
+    {
+        var req = try makeRequest(allocator, "AddLocalBridge");
+        defer req.deinit();
+        try req.addStr("DeviceName", "eth0");
+        try req.addStr("HubNameLB", "VPN");
+        try req.addBool("TapMode", false);
+        var resp = try call(allocator, &server, true, "", "AddLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertOk(resp);
+    }
+
+    // Enumerate — should have one entry
+    {
+        var req = try makeRequest(allocator, "EnumLocalBridge");
+        defer req.deinit();
+        var resp = try call(allocator, &server, true, "", "EnumLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertOk(resp);
+        try testing.expectEqualStrings("eth0", resp.getStrEx("DeviceName", 0) orelse "");
+        try testing.expectEqualStrings("VPN", resp.getStrEx("HubNameLB", 0) orelse "");
+    }
+
+    // Duplicate add should fail
+    {
+        var req = try makeRequest(allocator, "AddLocalBridge");
+        defer req.deinit();
+        try req.addStr("DeviceName", "eth0");
+        try req.addStr("HubNameLB", "VPN");
+        var resp = try call(allocator, &server, true, "", "AddLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertErr(resp, err_listener_already_exists);
+    }
+
+    // Delete
+    {
+        var req = try makeRequest(allocator, "DeleteLocalBridge");
+        defer req.deinit();
+        try req.addStr("DeviceName", "eth0");
+        try req.addStr("HubNameLB", "VPN");
+        var resp = try call(allocator, &server, true, "", "DeleteLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertOk(resp);
+    }
+
+    // Enumerate after delete — should be empty
+    {
+        var req = try makeRequest(allocator, "EnumLocalBridge");
+        defer req.deinit();
+        var resp = try call(allocator, &server, true, "", "EnumLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertOk(resp);
+    }
+
+    // Delete non-existent — should fail
+    {
+        var req = try makeRequest(allocator, "DeleteLocalBridge");
+        defer req.deinit();
+        try req.addStr("DeviceName", "nope");
+        try req.addStr("HubNameLB", "NOPE");
+        var resp = try call(allocator, &server, true, "", "DeleteLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertErr(resp, err_object_not_found);
+    }
+
+    // Non-admin should be rejected
+    {
+        var req = try makeRequest(allocator, "AddLocalBridge");
+        defer req.deinit();
+        try req.addStr("DeviceName", "eth1");
+        try req.addStr("HubNameLB", "VPN");
+        var resp = try call(allocator, &server, false, "VPN", "AddLocalBridge", &req);
+        defer { resp.deinit(); allocator.destroy(resp); }
+        try assertErr(resp, err_not_enough_right);
+    }
+}
+
+test "server.admin_dispatch GetBridgeSupport returns supported=true" {
+    const allocator = testing.allocator;
+    var server = try Server.init(allocator);
+    defer server.deinit();
+
+    var req = try makeRequest(allocator, "GetBridgeSupport");
+    defer req.deinit();
+    var resp = try call(allocator, &server, true, "", "GetBridgeSupport", &req);
+    defer { resp.deinit(); allocator.destroy(resp); }
+    try assertOk(resp);
+    try testing.expect(resp.getBool("IsBridgeSupportedOs") orelse false);
 }

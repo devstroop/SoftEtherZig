@@ -125,7 +125,15 @@ pub const ServerState = struct {
         }
         self.session_registry = null;
 
-        if (self.server_ctx) |ctx| self.allocator.destroy(ctx);
+        if (self.admin_server) |server| {
+            server.server_ctx = null;
+            server.bridge_ops.ctx = null;
+        }
+
+        if (self.server_ctx) |ctx| {
+            ctx.deinit();
+            self.allocator.destroy(ctx);
+        }
         self.server_ctx = null;
 
         if (self.admin_server) |server| {
@@ -325,6 +333,14 @@ fn buildServer(state: *ServerState) !void {
         .bridge_mode = true,
     };
     state.server_ctx = ctx;
+
+    // Wire the bridge operations vtable so admin RPC can create/destroy
+    // runtime LocalBridge instances.
+    admin.bridge_ops = .{
+        .ctx = @ptrCast(ctx),
+        .create = &softether.server.accept.bridgeCreate,
+        .destroy = &softether.server.accept.bridgeDestroy,
+    };
 }
 
 fn startListeners(state: *ServerState) !void {
