@@ -2757,7 +2757,7 @@ fn stRegenerateServerCert(a: *AdminCtx, t: *structs.RpcTest, allocator: Allocato
     const s = a.server;
     const cn = if (t.str_value.len > 0) t.str_value else s.host_name;
 
-    const result = x509_mod.generateSelfSigned(allocator, .{
+    var result = x509_mod.generateSelfSigned(allocator, .{
         .common_name = cn,
         .organization = "SoftEther VPN Server",
     }, 365 * 10) catch return err_internal_error;

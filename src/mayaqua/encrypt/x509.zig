@@ -198,7 +198,7 @@ pub fn generateSigned(
     const x509 = try buildCertificate(allocator, new_pkey, ca_pkey, name, issuer, days, false);
     defer c.X509_free(x509);
 
-    const cert_pem = try x509ToPem(allocator, x509);
+    var cert_pem = try x509ToPem(allocator, x509);
     errdefer cert_pem.deinit(allocator);
 
     const key_pem = try evpPkeyToPem(allocator, new_pkey, true);
@@ -273,7 +273,7 @@ pub fn inspectX509(allocator: Allocator, x509: *c.X509) !CertInfo {
     // CA check: basic constraints.
     const bc_ext = c.X509_get_ext_d2i(x509, c.NID_basic_constraints, null, null);
     if (bc_ext != null) {
-        const bc: *c.BASIC_CONSTRAINTS = @ptrCast(bc_ext);
+        const bc: *c.BASIC_CONSTRAINTS = @alignCast(@ptrCast(bc_ext));
         info.is_ca = (bc.ca != 0);
         c.BASIC_CONSTRAINTS_free(bc);
     }
@@ -281,7 +281,7 @@ pub fn inspectX509(allocator: Allocator, x509: *c.X509) !CertInfo {
     // Key usage.
     const ku_ext = c.X509_get_ext_d2i(x509, c.NID_key_usage, null, null);
     if (ku_ext != null) {
-        const ku: *c.ASN1_BIT_STRING = @ptrCast(ku_ext);
+        const ku: *c.ASN1_BIT_STRING = @alignCast(@ptrCast(ku_ext));
         if (ku.length > 0) {
             info.key_usage = @intCast(ku.data[0]);
         }
@@ -654,11 +654,11 @@ fn getNameString(allocator: Allocator, name: *c.X509_NAME) ?[]const u8 {
 
     _ = c.X509_NAME_print_ex(bio, name, -1, c.XN_FLAG_ONELINE);
 
-    var mem_ptr: ?[*]u8 = null;
-    const len = c.BIO_get_mem_data(bio, @ptrCast(&mem_ptr));
+    var mem_ptr: [*c]u8 = null;
+    const len = c.BIO_get_mem_data(bio, @as([*c][*c]u8, @ptrCast(&mem_ptr)));
     if (len <= 0 or mem_ptr == null) return null;
 
-    return allocator.dupe(u8, mem_ptr.?[0..@intCast(len)]) catch null;
+    return allocator.dupe(u8, mem_ptr[0..@intCast(len)]) catch null;
 }
 
 /// Convert ASN1_TIME to Unix timestamp (i64) using ASN1_TIME_to_tm + timegm.
@@ -683,7 +683,7 @@ fn logOpenSslErrors() void {
 // ============================================================================
 
 test "x509.generate self-signed cert" {
-    const result = try generateSelfSigned(testing.allocator, .{
+    var result = try generateSelfSigned(testing.allocator, .{
         .common_name = "test.softether.vpn",
         .organization = "SoftEther",
         .country = "US",
@@ -698,7 +698,7 @@ test "x509.generate self-signed cert" {
 }
 
 test "x509.inspect self-signed cert" {
-    const gen = try generateSelfSigned(testing.allocator, .{
+    var gen = try generateSelfSigned(testing.allocator, .{
         .common_name = "inspect.test.vpn",
     }, 365);
     defer gen.cert.deinit(testing.allocator);
@@ -717,7 +717,7 @@ test "x509.inspect self-signed cert" {
 }
 
 test "x509.generate root CA" {
-    const gen = try generateRootCA(testing.allocator, .{
+    var gen = try generateRootCA(testing.allocator, .{
         .common_name = "Test Root CA",
         .organization = "SoftEther Test",
     }, 3650);
@@ -733,14 +733,14 @@ test "x509.generate root CA" {
 
 test "x509.generate signed cert from CA" {
     // First generate a CA.
-    const ca = try generateRootCA(testing.allocator, .{
+    var ca = try generateRootCA(testing.allocator, .{
         .common_name = "Test CA",
     }, 3650);
     defer ca.cert.deinit(testing.allocator);
     defer testing.allocator.free(ca.key);
 
     // Then sign a cert with it.
-    const signed = try generateSigned(testing.allocator, ca.cert.data, ca.key, .{
+    var signed = try generateSigned(testing.allocator, ca.cert.data, ca.key, .{
         .common_name = "signed.test.vpn",
     }, 365);
     defer signed.cert.deinit(testing.allocator);
@@ -765,7 +765,7 @@ test "x509.generate key pair" {
 }
 
 test "x509.round-trip PEM parse and serialize" {
-    const gen = try generateSelfSigned(testing.allocator, .{
+    var gen = try generateSelfSigned(testing.allocator, .{
         .common_name = "roundtrip.test.vpn",
     }, 365);
     defer gen.cert.deinit(testing.allocator);
@@ -776,7 +776,7 @@ test "x509.round-trip PEM parse and serialize" {
     defer c.X509_free(x509);
 
     // Re-serialize.
-    const re = try x509ToPem(testing.allocator, x509);
+    var re = try x509ToPem(testing.allocator, x509);
     defer re.deinit(testing.allocator);
 
     // Should produce a valid PEM.
@@ -784,7 +784,7 @@ test "x509.round-trip PEM parse and serialize" {
 }
 
 test "x509.inspect with full name fields" {
-    const gen = try generateSelfSigned(testing.allocator, .{
+    var gen = try generateSelfSigned(testing.allocator, .{
         .common_name = "full.test.vpn",
         .organization = "Test Org",
         .organizational_unit = "Test Unit",
@@ -805,7 +805,7 @@ test "x509.inspect with full name fields" {
 }
 
 test "x509.key pair PEM round-trip" {
-    const kp = try generateKeyPair(testing.allocator, 2048);
+    var kp = try generateKeyPair(testing.allocator, 2048);
     defer kp.deinit(testing.allocator);
 
     // Parse the private key.
