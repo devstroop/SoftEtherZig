@@ -326,6 +326,18 @@ pub const ServerHub = struct {
     /// SecureNAT enabled on this hub (C: `h->SecureNAT != NULL`).
     secure_nat_enabled: bool = false,
 
+    /// Hub log settings (C: HUB_LOG via Hub->LogSetting).
+    log_save_security_log: bool = false,
+    log_security_switch_type: u32 = 0,
+    log_save_packet_log: bool = false,
+    log_packet_switch_type: u32 = 0,
+
+    /// Hub RADIUS settings (C: Hub->RadiusServerName etc.).
+    radius_server_name: []const u8 = "",
+    radius_port: u32 = 0,
+    radius_secret: []const u8 = "",
+    radius_retry_interval: u32 = 0,
+
     /// Look up a user by name, matching case-insensitively (C `SearchUser`
     /// with `StrCmpi`; account names are not case-sensitive).
     fn findUser(self: *ServerHub, name: []const u8) ?*ServerUser {
@@ -677,6 +689,8 @@ pub const Server = struct {
             hub.deinitAccessList(allocator);
             hub.deinitAdminOptions(allocator);
             allocator.free(hub.name);
+            allocator.free(hub.radius_server_name);
+            allocator.free(hub.radius_secret);
         }
         self.hubs.deinit(allocator);
         self.listeners.deinit(allocator);
@@ -860,25 +874,25 @@ pub fn adminDispatch(rpc: *anyopaque, function_name: []const u8, request: *Pack)
     } else if (mem.eql(u8, function_name, "CreateKeyPair")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "EnableListener")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcListener, &a, allocator, request, ret, stEnableListener);
     } else if (mem.eql(u8, function_name, "GetHub")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcCreateHub, &a, allocator, request, ret, stGetHub);
     } else if (mem.eql(u8, function_name, "SetHubOnline")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcSetHubOnline, &a, allocator, request, ret, stSetHubOnline);
     } else if (mem.eql(u8, function_name, "SetHubLog")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHubLog, &a, allocator, request, ret, stSetHubLog);
     } else if (mem.eql(u8, function_name, "GetHubLog")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcHubLog, &a, allocator, request, ret, stGetHubLog);
     } else if (mem.eql(u8, function_name, "GetHubExtOptions")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcAdminOption, &a, allocator, request, ret, stGetHubExtOptions);
     } else if (mem.eql(u8, function_name, "SetHubExtOptions")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcAdminOption, &a, allocator, request, ret, stSetHubExtOptions);
     } else if (mem.eql(u8, function_name, "GetHubRadius")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcRadius, &a, allocator, request, ret, stGetHubRadius);
     } else if (mem.eql(u8, function_name, "SetHubRadius")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcRadius, &a, allocator, request, ret, stSetHubRadius);
     } else if (mem.eql(u8, function_name, "GetConnectionInfo")) {
-        err = err_not_supported;
+        err = dispatchCall(structs.RpcConnectionInfo, &a, allocator, request, ret, stGetConnectionInfo);
     } else if (mem.eql(u8, function_name, "CreateLink")) {
         err = err_not_supported;
     } else if (mem.eql(u8, function_name, "GetLink")) {
@@ -2715,6 +2729,244 @@ fn stSetServerCipher(a: *AdminCtx, t: *structs.RpcStr, allocator: Allocator) u32
     allocator.free(old);
     s.config_revision +|= 1;
     return err_no_error;
+}
+
+// ============================================================================
+// Listener Enable/Disable (C Admin.c:9726)
+// ============================================================================
+
+/// C `StEnableListener` (Admin.c:9726). SERVER_ADMIN_ONLY — toggles a
+/// listener on/off by port number.
+fn stEnableListener(a: *AdminCtx, t: *structs.RpcListener, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const idx = findListenerIndex(s, t.port) orelse return err_object_not_found;
+    s.listeners.items[idx].enabled = t.enable;
+    s.listeners.items[idx].has_error = false;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Hub Get/Set (C Admin.c:8991, 9092)
+// ============================================================================
+
+/// C `StGetHub` (Admin.c:8991). CHECK_RIGHT — returns hub settings via
+/// `RPC_CREATE_HUB` (HubName, Online, HubOption, HubType).
+fn stGetHub(a: *AdminCtx, t: *structs.RpcCreateHub, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.online = hub.online;
+    t.hub_option = .{ .max_session = hub.max_session, .no_enum = hub.no_enum };
+    t.hub_type = hub.hub_type;
+    return err_no_error;
+}
+
+// ============================================================================
+// Hub Online/Offline (C Admin.c:9191)
+// ============================================================================
+
+/// C `StSetHubOnline` (Admin.c:9191). CHECK_RIGHT — brings a hub online or
+/// offline.
+fn stSetHubOnline(a: *AdminCtx, t: *structs.RpcSetHubOnline, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    hub.online = t.online;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Hub Log Settings (C Admin.c:8341)
+// ============================================================================
+
+/// C `StGetHubLog` (Admin.c:8341). CHECK_RIGHT — reads hub log settings.
+fn stGetHubLog(a: *AdminCtx, t: *structs.RpcHubLog, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.save_security_log = hub.log_save_security_log;
+    t.security_log_switch_type = hub.log_security_switch_type;
+    t.save_packet_log = hub.log_save_packet_log;
+    t.packet_log_switch_type = hub.log_packet_switch_type;
+    return err_no_error;
+}
+
+/// C `StSetHubLog` (Admin.c:8375). CHECK_RIGHT — updates hub log settings.
+fn stSetHubLog(a: *AdminCtx, t: *structs.RpcHubLog, allocator: Allocator) u32 {
+    _ = allocator;
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    hub.log_save_security_log = t.save_security_log;
+    hub.log_security_switch_type = t.security_log_switch_type;
+    hub.log_save_packet_log = t.save_packet_log;
+    hub.log_packet_switch_type = t.packet_log_switch_type;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Hub Extended Options (C Admin.c:4301)
+// ============================================================================
+
+/// C `StGetHubExtOptions` (Admin.c:4381). CHECK_RIGHT — returns all hub admin
+/// options.
+fn stGetHubExtOptions(a: *AdminCtx, t: *structs.RpcAdminOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+
+    t.items = allocator.alloc(structs.AdminOption, hub.admin_options.items.len) catch return err_internal_error;
+    for (hub.admin_options.items, 0..) |opt, i| {
+        t.items[i] = .{
+            .name = dupStr(allocator, opt.name) catch return err_internal_error,
+            .value = opt.value,
+        };
+    }
+    return err_no_error;
+}
+
+/// C `StSetHubExtOptions` (Admin.c:4301). CHECK_RIGHT — replaces all hub admin
+/// options.
+fn stSetHubExtOptions(a: *AdminCtx, t: *structs.RpcAdminOption, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    for (hub.admin_options.items) |*opt| opt.free(allocator);
+    hub.admin_options.deinit(allocator);
+    hub.admin_options = .{};
+
+    hub.admin_options.ensureTotalCapacity(allocator, t.items.len) catch return err_internal_error;
+    for (t.items) |opt| {
+        hub.admin_options.append(allocator, .{
+            .name = dupStr(allocator, opt.name) catch return err_internal_error,
+            .value = opt.value,
+        }) catch return err_internal_error;
+    }
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Hub RADIUS (C Admin.c:4165)
+// ============================================================================
+
+/// C `StGetHubRadius` (Admin.c:4203). CHECK_RIGHT — returns RADIUS settings.
+fn stGetHubRadius(a: *AdminCtx, t: *structs.RpcRadius, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+
+    t.free(allocator);
+    t.* = .{};
+    t.hub_name = dupStr(allocator, hub.name) catch return err_internal_error;
+    t.radius_server_name = dupStr(allocator, hub.radius_server_name) catch return err_internal_error;
+    t.radius_port = hub.radius_port;
+    t.radius_secret = dupStr(allocator, hub.radius_secret) catch return err_internal_error;
+    t.radius_retry_interval = hub.radius_retry_interval;
+    return err_no_error;
+}
+
+/// C `StSetHubRadius` (Admin.c:4165). CHECK_RIGHT — sets RADIUS settings.
+fn stSetHubRadius(a: *AdminCtx, t: *structs.RpcRadius, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin and !std.ascii.eqlIgnoreCase(a.hub_name, t.hub_name)) return err_not_enough_right;
+    if (t.hub_name.len == 0) return err_invalid_parameter;
+
+    s.mutex.lock();
+    defer s.mutex.unlock();
+
+    const hub = findHub(s, t.hub_name) orelse return err_hub_not_found;
+    allocator.free(hub.radius_server_name);
+    hub.radius_server_name = dupStr(allocator, t.radius_server_name) catch return err_internal_error;
+    hub.radius_port = t.radius_port;
+    allocator.free(hub.radius_secret);
+    hub.radius_secret = dupStr(allocator, t.radius_secret) catch return err_internal_error;
+    hub.radius_retry_interval = t.radius_retry_interval;
+    s.config_revision +|= 1;
+    return err_no_error;
+}
+
+// ============================================================================
+// Connection Info (C Admin.c:4759)
+// ============================================================================
+
+/// C `StGetConnectionInfo` (Admin.c:4759). SERVER_ADMIN_ONLY — returns
+/// connection details.
+fn stGetConnectionInfo(a: *AdminCtx, t: *structs.RpcConnectionInfo, allocator: Allocator) u32 {
+    const s = a.server;
+    if (!a.server_admin) return err_not_enough_right;
+    if (t.name.len == 0) return err_invalid_parameter;
+
+    // Search sessions for a matching name.
+    const snaps = s.sessions.snapshot(allocator) catch return err_internal_error;
+    defer session_registry.SessionRegistry.freeSnapshot(allocator, snaps);
+
+    for (snaps) |*snap| {
+        if (std.ascii.eqlIgnoreCase(snap.session_name, t.name)) {
+            t.free(allocator);
+            t.* = .{};
+            t.name = dupStr(allocator, snap.session_name) catch return err_internal_error;
+            t.hostname = "";
+            t.ip = snap.peer_ip;
+            t.port = 0;
+            t.connected_time = snap.created_time;
+            t.server_str = "";
+            t.server_ver = s.version;
+            t.server_build = s.build;
+            t.client_str = "";
+            t.client_ver = 0;
+            t.client_build = 0;
+            t.conn_type = 0;
+            return err_no_error;
+        }
+    }
+    return err_object_not_found;
 }
 
 // ============================================================================
