@@ -125,6 +125,11 @@ pub const ServerState = struct {
         }
         self.session_registry = null;
 
+        if (self.admin_server) |server| {
+            server.server_ctx = null;
+            server.bridge_ops.ctx = null;
+        }
+
         if (self.server_ctx) |ctx| {
             ctx.deinit();
             self.allocator.destroy(ctx);
