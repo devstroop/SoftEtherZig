@@ -453,12 +453,13 @@ fn buildCertificate(
         return error.OpenSSLFailed;
     }
 
-    // Serial number (random positive 63-bit to avoid negative ASN.1 serials).
-    var serial_bytes: [8]u8 = undefined;
+    // Serial number (random positive 31-bit to avoid negative ASN.1 serials).
+    var serial_bytes: [4]u8 = undefined;
     std.crypto.random.bytes(&serial_bytes);
     serial_bytes[0] &= 0x7f; // Clear high bit → guaranteed positive.
+    const serial_val: u32 = @bitCast(serial_bytes);
     const serial_asn1 = c.X509_get_serialNumber(x509);
-    if (c.ASN1_INTEGER_set(serial_asn1, @bitCast(serial_bytes)) != 1) {
+    if (c.ASN1_INTEGER_set(serial_asn1, @as(c_long, @intCast(serial_val))) != 1) {
         c.X509_free(x509);
         logOpenSslErrors();
         return error.OpenSSLFailed;
