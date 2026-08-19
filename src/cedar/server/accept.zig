@@ -53,6 +53,8 @@ const UdpAccelServer = udp_accel_mod.UdpAccelServer;
 const ServerSession = session_mod.ServerSession;
 const SessionMain = @import("session_main.zig").SessionMain;
 const session_registry_mod = @import("session_registry.zig");
+const bridge_mod = @import("../../bridge/mod.zig");
+const loop_mod = @import("../../bridge/loop.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -127,7 +129,88 @@ pub const ServerContext = struct {
     /// as a bridge — hub creation is restricted, LocalBridge is the primary
     /// role. Set by the vpnbridge executable.
     bridge_mode: bool = false,
+    /// Active LocalBridge instances (admin RPC AddLocalBridge/DeleteLocalBridge).
+    local_bridges: std.ArrayListUnmanaged(bridge_mod.LocalBridge) = .{},
+
+    /// Tear down runtime bridges and free the local_bridges list.
+    pub fn deinit(self: *ServerContext) void {
+        for (self.local_bridges.items) |*lb| {
+            lb.stop();
+            if (lb.bridge_loop) |*bl| bl.deinit();
+            lb.bridge_loop = null;
+            if (lb.af_port) |*port| port.close();
+            lb.af_port = null;
+        }
+        self.local_bridges.deinit(self.allocator);
+    }
 };
+
+// ============================================================================
+// Bridge operations vtable — wired into dispatch_mod.BridgeOps
+// ============================================================================
+
+pub fn bridgeCreate(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) bool {
+    const self: *ServerContext = @ptrCast(@alignCast(ctx));
+
+    // Duplicate strings so the runtime bridge owns its own copies.
+    const owned_dev = self.allocator.dupe(u8, device_name) catch return false;
+    errdefer self.allocator.free(owned_dev);
+    const owned_hub = self.allocator.dupe(u8, hub_name) catch return false;
+    errdefer self.allocator.free(owned_hub);
+
+    var lb = bridge_mod.LocalBridge.init(self.allocator, owned_dev, owned_hub);
+    lb.tap_mode = tap_mode;
+
+    // Append to the list BEFORE starting the thread so the pump thread
+    // references stable storage (not a stack local).
+    self.local_bridges.append(self.allocator, lb) catch |oom| {
+        log.err("LocalBridge: OOM appending bridge: {s}", .{@errorName(oom)});
+        return false;
+    };
+
+    // Open the NIC port.  Failures are non-fatal — the bridge is stored but
+    // inactive (online=false) so the admin can see the error and retry.
+    const last = &self.local_bridges.items[self.local_bridges.items.len - 1];
+    last.openPort() catch |err| {
+        log.warn("LocalBridge: open {s} failed: {s}", .{ device_name, @errorName(err) });
+        return false;
+    };
+
+    // Start the pump thread.
+    // NOTE: The sink is a noop placeholder.  Full data-plane integration
+    // (LAN -> session forwarding) requires wiring to the hub's packet
+    // adapter — tracked as a follow-up task.
+    const noop_sink = loop_mod.SessionSink{
+        .ctx = undefined,
+        .send = &struct {
+            fn noop(_: *anyopaque, _: []const u8) anyerror!void {}
+        }.noop,
+    };
+    last.start(noop_sink) catch |err| {
+        log.warn("LocalBridge: start {s} failed: {s}", .{ device_name, @errorName(err) });
+        return false;
+    };
+
+    return true;
+}
+
+pub fn bridgeDestroy(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8) bool {
+    const self: *ServerContext = @ptrCast(@alignCast(ctx));
+    for (self.local_bridges.items, 0..) |*lb, i| {
+        if (std.mem.eql(u8, lb.device_name, device_name) and std.mem.eql(u8, lb.hub_name, hub_name)) {
+            var removed = self.local_bridges.swapRemove(i);
+            removed.stop();
+            if (removed.bridge_loop) |*bl| bl.deinit();
+            removed.bridge_loop = null;
+            if (removed.af_port) |*port| port.close();
+            removed.af_port = null;
+            self.allocator.free(removed.device_name);
+            self.allocator.free(removed.hub_name);
+            return true;
+        }
+    }
+    return false;
+}
 
 /// The `AcceptHandler` entry point (listener.zig). Runs on the per-connection
 /// thread. On failure the connection is closed and the error is logged.
@@ -551,6 +634,7 @@ fn acceptAdmin(
     server: *dispatch_mod.Server,
     hubname: []const u8,
 ) void {
+    server.server_ctx = @ptrCast(self);
     var rpc = rpc_mod.startRpcServer(self.allocator, tls_sock, dispatch_mod.adminDispatch, @ptrCast(server));
     rpc.server_mode = true;
     rpc.server_admin_mode = hubname.len == 0;
