@@ -15,6 +15,7 @@ pub const encrypt = struct {
     pub const sha0 = @import("encrypt/sha0.zig");
     pub const md4 = @import("md4");
     pub const rc4 = @import("encrypt/rc4.zig");
+    pub const x509 = @import("encrypt/x509.zig");
 };
 
 pub const kernel = @import("kernel/mod.zig");
