@@ -110,6 +110,7 @@ pub const admin_shell = @import("cli/admin_shell.zig");
 // of escaping relative imports (Zig 0.15 module-root rule).
 pub const server_tls = @import("mayaqua/network/tls.zig");
 pub const server_cert = @import("app/gen_cert.zig");
+pub const x509 = @import("mayaqua/encrypt/x509.zig");
 
 // CLI display/args (used by the vpnserver executable, whose module root is
 // nested below src/ and reaches these through `lib`).
