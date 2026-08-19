@@ -170,6 +170,13 @@ pub const ServerState = struct {
         }
         self.session_registry = null;
 
+        if (self.admin_server) |server| {
+            // Null the bridge vtable context before destroying ServerContext
+            // so any in-flight RPC handler falls back to no-op safely.
+            server.server_ctx = null;
+            server.bridge_ops.ctx = null;
+        }
+
         if (self.server_ctx) |ctx| {
             ctx.deinit();
             self.allocator.destroy(ctx);

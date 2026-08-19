@@ -177,12 +177,14 @@ pub const ServerListener = struct {
 pub const BridgeOps = struct {
     ctx: ?*anyopaque = null,
     /// Create and start a bridge on `device_name` for `hub_name`.
-    /// Returns a human-readable error string on failure (empty = success).
-    create: *const fn (ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) void = &noopCreate,
+    /// Returns true if the bridge is online and active.
+    create: *const fn (ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) bool = &noopCreate,
     /// Destroy a bridge by device+hub. Returns true if found and removed.
     destroy: *const fn (ctx: *anyopaque, device_name: []const u8, hub_name: []const u8) bool = &noopDestroy,
 
-    fn noopCreate(_: *anyopaque, _: []const u8, _: []const u8, _: bool) void {}
+    fn noopCreate(_: *anyopaque, _: []const u8, _: []const u8, _: bool) bool {
+        return false;
+    }
     fn noopDestroy(_: *anyopaque, _: []const u8, _: []const u8) bool {
         return false;
     }
@@ -2517,12 +2519,10 @@ fn stAddLocalBridge(a: *AdminCtx, t: *structs.RpcLocalBridge, allocator: Allocat
             return err_listener_already_exists;
     }
 
-    // Create the runtime bridge (calls through vtable → accept.zig).
+    // Create the runtime bridge (calls through vtable -> accept.zig).
     const bridge_active = blk: {
         if (a.server.bridge_ops.ctx) |ctx| {
-            a.server.bridge_ops.create(ctx, t.device_name, t.hub_name_lb, t.tap_mode);
-            // Runtime bridge exists if the vtable was wired (non-noop).
-            break :blk true;
+            break :blk a.server.bridge_ops.create(ctx, t.device_name, t.hub_name_lb, t.tap_mode);
         }
         break :blk false;
     };

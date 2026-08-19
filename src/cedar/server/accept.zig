@@ -138,6 +138,7 @@ pub const ServerContext = struct {
             lb.stop();
             if (lb.bridge_loop) |*bl| bl.deinit();
             lb.bridge_loop = null;
+            if (lb.af_port) |*port| port.close();
             lb.af_port = null;
         }
         self.local_bridges.deinit(self.allocator);
@@ -148,46 +149,63 @@ pub const ServerContext = struct {
 // Bridge operations vtable — wired into dispatch_mod.BridgeOps
 // ============================================================================
 
-pub fn bridgeCreate(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) void {
+pub fn bridgeCreate(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8, tap_mode: bool) bool {
     const self: *ServerContext = @ptrCast(@alignCast(ctx));
-    var lb = bridge_mod.LocalBridge.init(self.allocator, device_name, hub_name);
+
+    // Duplicate strings so the runtime bridge owns its own copies.
+    const owned_dev = self.allocator.dupe(u8, device_name) catch return false;
+    errdefer self.allocator.free(owned_dev);
+    const owned_hub = self.allocator.dupe(u8, hub_name) catch return false;
+    errdefer self.allocator.free(owned_hub);
+
+    var lb = bridge_mod.LocalBridge.init(self.allocator, owned_dev, owned_hub);
     lb.tap_mode = tap_mode;
+
+    // Append to the list BEFORE starting the thread so the pump thread
+    // references stable storage (not a stack local).
+    self.local_bridges.append(self.allocator, lb) catch |oom| {
+        log.err("LocalBridge: OOM appending bridge: {s}", .{@errorName(oom)});
+        return false;
+    };
 
     // Open the NIC port.  Failures are non-fatal — the bridge is stored but
     // inactive (online=false) so the admin can see the error and retry.
-    lb.openPort() catch |err| {
+    const last = &self.local_bridges.items[self.local_bridges.items.len - 1];
+    last.openPort() catch |err| {
         log.warn("LocalBridge: open {s} failed: {s}", .{ device_name, @errorName(err) });
-        self.local_bridges.append(self.allocator, lb) catch |oom| {
-            log.err("LocalBridge: OOM appending bridge: {s}", .{@errorName(oom)});
-        };
-        return;
+        return false;
     };
 
-    // Start the pump thread (stub sink — frames are dropped until a VPN
-    // session is wired to the hub).
+    // Start the pump thread.
+    // NOTE: The sink is a noop placeholder.  Full data-plane integration
+    // (LAN -> session forwarding) requires wiring to the hub's packet
+    // adapter — tracked as a follow-up task.
     const noop_sink = loop_mod.SessionSink{
         .ctx = undefined,
         .send = &struct {
             fn noop(_: *anyopaque, _: []const u8) anyerror!void {}
         }.noop,
     };
-    lb.start(noop_sink) catch |err| {
+    last.start(noop_sink) catch |err| {
         log.warn("LocalBridge: start {s} failed: {s}", .{ device_name, @errorName(err) });
-        // Port is open but pump failed — store as inactive.
+        return false;
     };
 
-    self.local_bridges.append(self.allocator, lb) catch |oom| {
-        log.err("LocalBridge: OOM appending bridge: {s}", .{@errorName(oom)});
-    };
+    return true;
 }
 
 pub fn bridgeDestroy(ctx: *anyopaque, device_name: []const u8, hub_name: []const u8) bool {
     const self: *ServerContext = @ptrCast(@alignCast(ctx));
-    for (self.local_bridges.items, 0..) |lb, i| {
+    for (self.local_bridges.items, 0..) |*lb, i| {
         if (std.mem.eql(u8, lb.device_name, device_name) and std.mem.eql(u8, lb.hub_name, hub_name)) {
             var removed = self.local_bridges.swapRemove(i);
             removed.stop();
             if (removed.bridge_loop) |*bl| bl.deinit();
+            removed.bridge_loop = null;
+            if (removed.af_port) |*port| port.close();
+            removed.af_port = null;
+            self.allocator.free(removed.device_name);
+            self.allocator.free(removed.hub_name);
             return true;
         }
     }

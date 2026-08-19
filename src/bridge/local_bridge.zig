@@ -73,6 +73,7 @@ pub const LocalBridge = struct {
         self.stop();
         if (self.bridge_loop) |*bl| bl.deinit();
         self.bridge_loop = null;
+        if (self.af_port) |*port| port.close();
         self.af_port = null;
     }
 
