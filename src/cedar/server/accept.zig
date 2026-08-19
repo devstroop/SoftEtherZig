@@ -18,9 +18,6 @@
 //!
 //! ## M1 scope
 //!
-//! - Data plane is plaintext-over-TLS (session_main.zig encryption note): the
-//!   server always negotiates `use_encrypt=false`, so the client tunnels
-//!   framed blocks directly over the TLS socket without an app-layer cipher.
 //! - Single virtual hub: the client's `hubname` must equal the server hub name
 //!   (case-insensitive), else ERR_HUB_NOT_FOUND. Cluster redirect, tickets,
 //!   certificates and RADIUS/NT auth are out of scope (auth.zig notes).
@@ -423,13 +420,18 @@ fn authenticateVpn(
         return null;
     };
 
-    // Build the session with server policy. M1 data plane is plaintext-over-
-    // TLS, so encryption is never negotiated regardless of the client request.
+    // Negotiate encryption based on client request (C: Protocol.c:3958-3962).
+    // Echo back whatever the client asked for; the crypto primitives are
+    // already implemented in session.zig (ConnectionCipher, Rc4KeyPair).
+    // Default false: a missing field means the client does not expect an
+    // app-layer cipher (plaintext-over-TLS), matching the pre-M7 behavior.
+    const client_use_encrypt = pack.getBool("use_encrypt") orelse false;
+    const client_use_fast_rc4 = pack.getBool("use_fast_rc4") orelse false;
     var session = ServerSession.initWithOptions(self.allocator, hello_random, .{
         .max_connection = 1,
         .timeout = timeout_default_ms,
     });
-    session.negotiate(false, false);
+    session.negotiate(client_use_encrypt, client_use_fast_rc4);
 
     // Session/connection names (C: `SID-<UPPERUSER>-<tick>`).
     const counter = self.session_counter.fetchAdd(1, .seq_cst);
@@ -698,6 +700,8 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
     }
 
     var main = try SessionMain.init(self.allocator, &tunnel, pa.pa(), session_config);
+    // Interpose the per-socket cipher for data-channel encryption (M7).
+    main.cipher = established.session.newConnectionCipher();
     defer main.deinit();
 
     // Register with the session registry (issue #88) so the admin dispatcher
@@ -913,7 +917,9 @@ test "server.accept full handshake over TLS" {
     const writer = protocol_mod.Writer{ .context = &io, .writeFn = ClientIo.write };
     const reader = protocol_mod.Reader{ .context = &io, .readFn = ClientIo.read };
 
-    var result = try protocol_mod.performHandshake(allocator, writer, reader, "accept.test", "VPN", "alice", "hunter2", false);
+    // This test exercises the TLS handshake, not encryption — send
+    // use_encrypt=false so the server stays in plaintext-over-TLS mode.
+    var result = try protocol_mod.performHandshakeWithOpts(allocator, writer, reader, "accept.test", "VPN", "alice", "hunter2", false, .{ .use_encrypt = false });
     defer result.hello.deinit(allocator);
     defer result.auth.deinit(allocator);
 
@@ -922,7 +928,7 @@ test "server.accept full handshake over TLS" {
     try testing.expectEqualStrings("SoftEther VPN Server", result.hello.server_str);
     try testing.expectEqual(@as(u32, server_version), result.hello.server_ver);
     try testing.expectEqual(@as(u32, server_build), result.hello.server_build);
-    // M1 negotiates plaintext-over-TLS: the client must see encryption off.
+    // Plaintext-over-TLS: the client must see encryption off.
     try testing.expect(!result.auth.server_use_encrypt);
 
     // Closing the client lets the server session loop observe EOF and end.
@@ -1102,12 +1108,12 @@ test "server.accept two sessions exchange a frame through the hub" {
     const writer_b = protocol_mod.Writer{ .context = &io_b, .writeFn = ClientIo.write };
     const reader_b = protocol_mod.Reader{ .context = &io_b, .readFn = ClientIo.read };
 
-    var ha = try protocol_mod.performHandshake(allocator, writer_a, reader_a, "accept.test", "VPN", "alice", "hunter2", false);
+    var ha = try protocol_mod.performHandshakeWithOpts(allocator, writer_a, reader_a, "accept.test", "VPN", "alice", "hunter2", false, .{ .use_encrypt = false });
     defer ha.hello.deinit(allocator);
     defer ha.auth.deinit(allocator);
     try testing.expect(ha.auth.success);
 
-    var hb = try protocol_mod.performHandshake(allocator, writer_b, reader_b, "accept.test", "VPN", "alice", "hunter2", false);
+    var hb = try protocol_mod.performHandshakeWithOpts(allocator, writer_b, reader_b, "accept.test", "VPN", "alice", "hunter2", false, .{ .use_encrypt = false });
     defer hb.hello.deinit(allocator);
     defer hb.auth.deinit(allocator);
     try testing.expect(hb.auth.success);
@@ -1126,8 +1132,9 @@ test "server.accept two sessions exchange a frame through the hub" {
     }
     try testing.expectEqual(@as(usize, 2), attached);
 
-    // Wrap each client socket as a TunnelConnection (M1 negotiates plaintext,
-    // so the data plane is raw block framing over TLS).
+    // Wrap each client socket as a TunnelConnection. The test opts out of
+    // encryption via use_encrypt=false, so the data plane is raw block
+    // framing over TLS.
     var tunnel_a = tunnel_mod.TunnelConnection.init(allocator, &io_a, ClientIo.read, ClientIo.write);
     var tunnel_b = tunnel_mod.TunnelConnection.init(allocator, &io_b, ClientIo.read, ClientIo.write);
 
