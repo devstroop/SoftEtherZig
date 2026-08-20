@@ -65,6 +65,9 @@ def main() -> int:
             print("ERROR: 'set' requires a version argument (e.g., set 1.0.0)", file=sys.stderr)
             return 1
         new = sys.argv[2]
+        if not re.match(r'^\d+\.\d+\.\d+$', new):
+            print(f"ERROR: Invalid version format '{new}'. Expected X.Y.Z (e.g., 1.0.0)", file=sys.stderr)
+            return 1
     else:
         new = bump(old, action)
 

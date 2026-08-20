@@ -69,7 +69,7 @@ def main() -> None:
 
     categories = categorize(commits)
     version = subprocess.run(
-        ["grep", "-oP", r'\\.version\\s*=\\s*"\\K[^"]+'],
+        ["grep", "-oP", r'\.version\s*=\s*"\K[^"]+'],
         capture_output=True, text=True
     ).stdout.strip() or "unknown"
 
