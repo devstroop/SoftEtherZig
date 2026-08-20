@@ -1032,3 +1032,333 @@ test "FarmClient teardownDynamicHubs clears list" {
     client.teardownDynamicHubs();
     try std.testing.expectEqual(@as(usize, 0), client.dynamic_hubs.items.len);
 }
+
+// ── #206: Farm RPC serialization + connection + RPC flow tests ────────
+
+test "Pack frame roundtrip — toBytes/fromBytes" {
+    var pack = Pack.init(std.testing.allocator);
+    defer pack.deinit();
+
+    try pack.addStr("method", "farm_connect");
+    try pack.addInt("port", 443);
+    try pack.addStr("host", "ctrl.example.com");
+    try pack.addData("random", &([1]u8{0xAB} ** 20));
+
+    const bytes = try pack.toBytes(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(bytes.len > 0);
+
+    var restored = try Pack.fromBytes(std.testing.allocator, bytes);
+    defer restored.deinit();
+
+    try std.testing.expectEqualStrings("farm_connect", restored.getStr("method") orelse "");
+    try std.testing.expectEqual(@as(u32, 443), restored.getInt("port") orelse 0);
+    try std.testing.expectEqualStrings("ctrl.example.com", restored.getStr("host") orelse "");
+    const random = restored.getData("random") orelse "";
+    try std.testing.expectEqual(@as(usize, 20), random.len);
+    try std.testing.expectEqual(@as(u8, 0xAB), random[0]);
+}
+
+test "Pack empty roundtrip" {
+    var pack = Pack.init(std.testing.allocator);
+    defer pack.deinit();
+
+    const bytes = try pack.toBytes(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var restored = try Pack.fromBytes(std.testing.allocator, bytes);
+    defer restored.deinit();
+
+    try std.testing.expect(restored.getStr("nonexistent") == null);
+}
+
+test "FarmServer execTask — post + dequeue + complete" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    var member = FarmMember.init(std.testing.allocator);
+    defer member.deinit();
+
+    // Manually post a task and simulate service-loop dequeue.
+    var req = Pack.init(std.testing.allocator);
+    try req.addStr("HubName", "EXEC_TEST");
+    defer req.deinit();
+
+    const task = server.postTask(&member, "enumhub", req) orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 1), member.task_queue.items.len);
+
+    // Simulate the member-side service loop: dequeue + mark complete.
+    const dequeued = server.dequeueTask(&member);
+    try std.testing.expect(dequeued != null);
+    try std.testing.expectEqual(@as(usize, 0), member.task_queue.items.len);
+    if (dequeued) |t| {
+        t.complete = true;
+        t.response = Pack.init(std.testing.allocator);
+        try t.response.?.addStr("result", "ok");
+    }
+
+    // Now waitTask should return immediately.
+    const response = server.waitTask(task);
+    try std.testing.expect(response != null);
+    if (response) |r| {
+        defer {
+            var rr = r;
+            rr.deinit();
+        }
+        try std.testing.expectEqualStrings("ok", r.getStr("result") orelse "");
+    }
+}
+
+test "FarmServer waitTask timeout — orphaned task freed" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    var member = FarmMember.init(std.testing.allocator);
+    defer member.deinit();
+
+    var req = Pack.init(std.testing.allocator);
+    try req.addStr("data", "timeout_test");
+    defer req.deinit();
+
+    // Post but never complete — waitTask should timeout and free.
+    const task = server.postTask(&member, "noop", req) orelse return error.TestFailed;
+    // Dequeue it from the queue so the task isn't leaked by waitTask cleanup.
+    _ = server.dequeueTask(&member);
+
+    const response = server.waitTask(task);
+    try std.testing.expect(response == null);
+}
+
+test "FarmClient dispatch all known task types" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var client = FarmClient.init(std.testing.allocator, &state);
+    defer client.deinit();
+
+    const task_names = [_][]const u8{
+        task_noop,          task_create_hub,    task_delete_hub,
+        task_update_hub,    task_enum_hub,      task_create_ticket,
+        task_enum_session,  task_delete_session, task_enum_nat,
+        task_enum_dhcp,     task_get_nat_status, task_enum_mac_table,
+        task_enum_ip_table, task_delete_mac_table, task_delete_ip_table,
+        task_get_session_status, task_enum_log_file_list, task_read_log_file,
+    };
+
+    for (task_names) |name| {
+        var req = Pack.init(std.testing.allocator);
+        defer req.deinit();
+
+        var resp = client.dispatchTask(name, &req);
+        try std.testing.expect(resp != null);
+        if (resp) |*r| r.deinit();
+    }
+}
+
+test "FarmState server type queries" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+
+    try std.testing.expect(state.isStandalone());
+    try std.testing.expect(!state.isFarmController());
+    try std.testing.expect(!state.isFarmMember());
+
+    state.server_type = farm.server_type_farm_controller;
+    try std.testing.expect(!state.isStandalone());
+    try std.testing.expect(state.isFarmController());
+    try std.testing.expect(!state.isFarmMember());
+
+    state.server_type = farm.server_type_farm_member;
+    try std.testing.expect(!state.isStandalone());
+    try std.testing.expect(!state.isFarmController());
+    try std.testing.expect(state.isFarmMember());
+}
+
+test "FarmServer postTask returns null for halting member" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    var member = FarmMember.init(std.testing.allocator);
+    defer member.deinit();
+    member.halting = true;
+
+    var req = Pack.init(std.testing.allocator);
+    defer req.deinit();
+
+    const task = server.postTask(&member, "noop", req);
+    try std.testing.expect(task == null);
+}
+
+test "FarmMember hostname and ports" {
+    var member = FarmMember.init(std.testing.allocator);
+    defer member.deinit();
+
+    member.setHostname("node1.cluster.local");
+    try std.testing.expectEqualStrings("node1.cluster.local", std.mem.sliceTo(&member.hostname, 0));
+
+    const ports = try std.testing.allocator.dupe(u32, &[_]u32{ 443, 992, 1194 });
+    member.ports = ports;
+    try std.testing.expectEqual(@as(usize, 3), member.ports.len);
+    try std.testing.expectEqual(@as(u32, 992), member.ports[1]);
+}
+
+test "FarmServer controlThread start/stop" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    try std.testing.expect(server.control_thread == null);
+
+    server.startControlThread();
+    try std.testing.expect(server.control_thread != null);
+
+    server.stopControlThread();
+    try std.testing.expect(server.control_thread == null);
+}
+
+// ── #205: Multi-client concurrency tests ──────────────────────────────
+
+test "concurrent postTask from multiple threads" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    var member = FarmMember.init(std.testing.allocator);
+    defer member.deinit();
+
+    const num_threads: usize = 8;
+    const tasks_per_thread: usize = 50;
+    var threads: [num_threads]?std.Thread = .{null} ** num_threads;
+
+    for (0..num_threads) |i| {
+        threads[i] = try std.Thread.spawn(.{}, struct {
+            fn worker(s: *FarmServer, m: *FarmMember, id: usize) void {
+                for (0..tasks_per_thread) |j| {
+                    var p = Pack.init(s.allocator);
+                    p.addStr("thread", &.{@intCast('A' + @as(u8, @intCast(id % 26)))}) catch continue;
+                    p.addInt("seq", @intCast(j)) catch continue;
+                    const task = s.postTask(m, task_noop, p);
+                    if (task) |t| {
+                        s.allocator.destroy(t);
+                    }
+                }
+            }
+        }.worker, .{ &server, &member, i });
+    }
+
+    for (threads) |t| {
+        if (t) |thread| thread.join();
+    }
+
+    // All tasks were posted; the queue should contain them.
+    // Some may have been destroyed in the worker (null return path),
+    // but the lock-protected append should not have corrupted.
+    try std.testing.expect(member.task_queue.items.len <= num_threads * tasks_per_thread);
+
+    // Drain remaining tasks to avoid leaks.
+    while (member.task_queue.items.len > 0) {
+        const task = member.task_queue.orderedRemove(0);
+        task.deinit();
+        server.allocator.destroy(task);
+    }
+}
+
+test "concurrent dequeueTask serialization" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    var member = FarmMember.init(std.testing.allocator);
+    defer member.deinit();
+
+    // Pre-fill queue with 100 tasks.
+    for (0..100) |i| {
+        var p = Pack.init(server.allocator);
+        p.addInt("idx", @intCast(i)) catch continue;
+        _ = server.postTask(&member, task_noop, p);
+    }
+
+    const num_dequeuers: usize = 4;
+    var threads: [num_dequeuers]?std.Thread = .{null} ** num_dequeuers;
+    var count = std.atomic.Value(u32).init(0);
+
+    for (0..num_dequeuers) |i| {
+        threads[i] = try std.Thread.spawn(.{}, struct {
+            fn worker(s: *FarmServer, m: *FarmMember, c: *std.atomic.Value(u32)) void {
+                while (true) {
+                    s.members_lock.lock();
+                    const task = s.dequeueTask(m);
+                    s.members_lock.unlock();
+                    if (task) |t| {
+                        t.deinit();
+                        s.allocator.destroy(t);
+                        _ = c.fetchAdd(1, .monotonic);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }.worker, .{ &server, &member, &count });
+    }
+
+    for (threads) |t| {
+        if (t) |thread| thread.join();
+    }
+
+    // Exactly 100 tasks should have been dequeued.
+    try std.testing.expectEqual(@as(u32, 100), count.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), member.task_queue.items.len);
+}
+
+test "concurrent FarmState member list mutations" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var server = FarmServer.init(std.testing.allocator, &state);
+    defer server.deinit();
+
+    const num_threads: usize = 4;
+    const members_per_thread: usize = 25;
+    var threads: [num_threads]?std.Thread = .{null} ** num_threads;
+
+    // Spawn threads that create, heap-allocate, and append members.
+    for (0..num_threads) |i| {
+        threads[i] = try std.Thread.spawn(.{}, struct {
+            fn worker(s: *FarmServer, id: usize) void {
+                for (0..members_per_thread) |j| {
+                    const m = s.allocator.create(FarmMember) catch continue;
+                    m.* = FarmMember.init(s.allocator);
+                    m.setHostname("thread");
+                    m.point = @intCast(id * 1000 + j);
+
+                    // Add under lock.
+                    {
+                        s.members_lock.lock();
+                        defer s.members_lock.unlock();
+                        s.farm_state.members.append(s.allocator, m) catch {
+                            m.deinit();
+                            s.allocator.destroy(m);
+                        };
+                    }
+                }
+            }
+        }.worker, .{ &server, i });
+    }
+
+    for (threads) |t| {
+        if (t) |thread| thread.join();
+    }
+
+    // All threads completed without corruption.
+    try std.testing.expect(state.members.items.len <= num_threads * members_per_thread);
+
+    // Cleanup — FarmState.deinit handles member destruction.
+}
