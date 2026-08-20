@@ -37,6 +37,9 @@ Implements the full SoftEther VPN protocol: HTTPS tunnel, AES-256-CBC session en
 | Data-plane health check | ✅ |
 | Interactive CLI shell | ✅ |
 | Daemon mode | ✅ |
+| L2 bridge mode (per-port rate limiting, 802.1Q VLAN trunking) | ✅ (Linux only) |
+
+> **Bridge mode** (`--mode bridge`) operates on Linux only and requires `AF_PACKET` access (run as root or with `CAP_NET_RAW`). On macOS, BPF-based bridge mode is under development. Other platforms do not yet support L2 bridge mode.
 
 ## Output Targets
 
