@@ -544,7 +544,7 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     // Read type
     const type_int = try reader.readInt(u32, .big);
     if (type_int > 4) {
-        std.log.err("Invalid element type {d} for '{s}'", .{ type_int, safe_name });
+        std.log.debug("Invalid element type {d} for '{s}'", .{ type_int, safe_name });
         return error.InvalidElementType;
     }
     const value_type: ValueType = @enumFromInt(type_int);
@@ -552,7 +552,7 @@ fn readElement(allocator: Allocator, reader: anytype, pack_obj: *Pack) !void {
     // Read number of values
     const num_values = try reader.readInt(u32, .big);
     if (num_values > MAX_VALUE_NUM) {
-        std.log.err("Element '{s}': type={d}, num_values={d} exceeds MAX_VALUE_NUM", .{ safe_name, type_int, num_values });
+        std.log.debug("Element '{s}': type={d}, num_values={d} exceeds MAX_VALUE_NUM", .{ safe_name, type_int, num_values });
         return error.TooManyValues;
     }
 
@@ -726,4 +726,200 @@ test "Pack indexed accessors (PackGetIntEx/IndexCount)" {
     try testing.expectEqualStrings("first", p.getStrEx("ExOOOStr", 0).?);
     try testing.expectEqualStrings("second", p.getStrEx("ExOOOStr", 1).?);
     try testing.expectEqualStrings("rewritten", p.getStrEx("ExOOOStr", 2).?);
+}
+
+test "Pack.fromBytes rejects empty input" {
+    const data: [0]u8 = .{};
+    try testing.expectError(error.EndOfStream, Pack.fromBytes(testing.allocator, &data));
+}
+
+test "Pack.fromBytes rejects truncated element count" {
+    try testing.expectError(error.EndOfStream, Pack.fromBytes(testing.allocator, &.{ 0x00, 0x01 }));
+}
+
+test "Pack.fromBytes rejects oversized element count" {
+    const buf = [4]u8{ 0x00, 0x02, 0x01, 0x00 };
+    try testing.expectError(error.TooManyElements, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes rejects invalid element type" {
+    // Valid element count (1), valid name length (1+1=2 → "X"), type=5 (invalid), num_values=0
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x02, // name_len = 2 (includes phantom null)
+        'X', // name body (1 byte)
+        0x00, 0x00, 0x00, 0x05, // type = 5 (invalid, max is 4)
+        0x00, 0x00, 0x00, 0x00, // num_values = 0
+    };
+    try testing.expectError(error.InvalidElementType, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes rejects oversized value count" {
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x02, // name_len = 2
+        'X', // name body
+        0x00, 0x00, 0x00, 0x00, // type = int
+        0x00, 0x01, 0x00, 0x01, // num_values = 65537 (exceeds MAX_VALUE_NUM=65536)
+        0x00, 0x00, 0x00, 0x2A, // value = 42 (would be read if num_values check passed)
+    };
+    try testing.expectError(error.TooManyValues, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes rejects truncated name" {
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x0A, // name_len = 10 (claims 9-byte name)
+        'a', 'b', // only 2 bytes available
+    };
+    try testing.expectError(error.UnexpectedEof, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes rejects zero-length name" {
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x00, // name_len = 0 (invalid)
+    };
+    try testing.expectError(error.InvalidStringLength, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes rejects truncated int value" {
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x02, // name_len = 2
+        'X', // name body
+        0x00, 0x00, 0x00, 0x00, // type = int
+        0x00, 0x00, 0x00, 0x01, // num_values = 1
+        // missing int value bytes
+    };
+    try testing.expectError(error.EndOfStream, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes round-trips all five value types with binary data" {
+    var p = Pack.init(testing.allocator);
+    defer p.deinit();
+
+    try p.addInt("i", 0xDEAD_BEEF);
+    try p.addInt64("i64", 0x0102030405060708);
+    try p.addData("d", &[_]u8{ 0x00, 0xFF, 0x80, 0x7F });
+    try p.addStr("s", "hello\x00world");
+    try p.addUniStr("u", "cafe\u{0301}");
+
+    const bytes = try p.toBytes(testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    var p2 = try Pack.fromBytes(testing.allocator, bytes);
+    defer p2.deinit();
+
+    try testing.expectEqual(@as(u32, 0xDEAD_BEEF), p2.getInt("i").?);
+    try testing.expectEqual(@as(u64, 0x0102030405060708), p2.getInt64("i64").?);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0xFF, 0x80, 0x7F }, p2.getData("d").?);
+    try testing.expectEqualStrings("hello\x00world", p2.getStr("s").?);
+    try testing.expectEqualStrings("cafe\u{0301}", p2.getUniStr("u").?);
+}
+
+test "Pack.fromBytes handles empty pack (zero elements)" {
+    const buf = [4]u8{ 0x00, 0x00, 0x00, 0x00 };
+    var p = try Pack.fromBytes(testing.allocator, &buf);
+    defer p.deinit();
+    try testing.expectEqual(@as(usize, 0), p.elements.items.len);
+}
+
+test "Pack.fromBytes rejects random garbage gracefully" {
+    const garbage = [_]u8{ 0xA7, 0x3F, 0x01, 0x9C, 0x55, 0xE0, 0x0B, 0x72, 0xD4, 0x88, 0x1F, 0x63 };
+    // Must return an error (not crash or leak memory)
+    const result = Pack.fromBytes(testing.allocator, &garbage);
+    try testing.expect(result == error.TooManyElements or result == error.EndOfStream or
+        result == error.InvalidElementType or result == error.InvalidStringLength);
+}
+
+test "Pack.fromBytes rejects string value with oversized length" {
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x02, // name_len = 2
+        'X', // name body
+        0x00, 0x00, 0x00, 0x02, // type = str
+        0x00, 0x00, 0x00, 0x01, // num_values = 1
+        0x7F, 0xFF, 0xFF, 0xFF, // len = MAX_VALUE_SIZE+1 (too large)
+    };
+    try testing.expectError(error.StringTooLong, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes rejects data value with oversized length" {
+    const buf = [_]u8{
+        0x00, 0x00, 0x00, 0x01, // num_elements = 1
+        0x00, 0x00, 0x00, 0x02, // name_len = 2
+        'X', // name body
+        0x00, 0x00, 0x00, 0x01, // type = data
+        0x00, 0x00, 0x00, 0x01, // num_values = 1
+        0x7F, 0xFF, 0xFF, 0xFF, // size = MAX_VALUE_SIZE+1 (too large)
+    };
+    try testing.expectError(error.DataTooLarge, Pack.fromBytes(testing.allocator, &buf));
+}
+
+test "Pack.fromBytes mangled valid pack returns error" {
+    // Build a valid pack, then flip bits in the middle
+    var p = Pack.init(testing.allocator);
+    defer p.deinit();
+    try p.addInt("key", 42);
+
+    const bytes = try p.toBytes(testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    // Flip a byte in the middle of the serialized data
+    var mutated = try testing.allocator.dupe(u8, bytes);
+    defer testing.allocator.free(mutated);
+    mutated[8] ^= 0xFF;
+
+    // May succeed (if mutation is benign) or fail — must not crash
+    if (Pack.fromBytes(testing.allocator, mutated)) |mutated_pack| {
+        var mp = mutated_pack;
+        mp.deinit();
+    } else |_| {}
+}
+
+test "Pack round-trip preserves binary element name" {
+    var p = Pack.init(testing.allocator);
+    defer p.deinit();
+
+    // Element names can be arbitrary bytes (the C code uses StrLen, not strlen)
+    const name = [_]u8{ 0x00, 0x80, 0xFF, 0x41 };
+    // We need to use the addInt API — it takes a []const u8 name
+    try p.addInt(&name, 1);
+
+    const bytes = try p.toBytes(testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    var p2 = try Pack.fromBytes(testing.allocator, bytes);
+    defer p2.deinit();
+
+    try testing.expectEqual(@as(u32, 1), p2.getInt(&name).?);
+}
+
+test "Pack.fromBytes handles large valid pack" {
+    var p = Pack.init(testing.allocator);
+    defer p.deinit();
+
+    // Add 100 elements, each with 10 int values
+    for (0..100) |i| {
+        const name = try std.fmt.allocPrint(testing.allocator, "field_{d}", .{i});
+        defer testing.allocator.free(name);
+        for (0..10) |j| {
+            try p.addIntEx(name, @intCast(i * 100 + j), j);
+        }
+    }
+
+    const bytes = try p.toBytes(testing.allocator);
+    defer testing.allocator.free(bytes);
+
+    var p2 = try Pack.fromBytes(testing.allocator, bytes);
+    defer p2.deinit();
+
+    try testing.expectEqual(@as(usize, 100), p2.elements.items.len);
+    for (0..100) |i| {
+        const name = try std.fmt.allocPrint(testing.allocator, "field_{d}", .{i});
+        defer testing.allocator.free(name);
+        try testing.expectEqual(@as(usize, 10), p2.getValueCount(name));
+        try testing.expectEqual(@as(u32, @intCast(i * 100 + 5)), p2.getIntEx(name, 5).?);
+    }
 }
