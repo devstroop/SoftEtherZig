@@ -211,6 +211,11 @@ pub const SessionRegistry = struct {
     /// Returns the session's `SessionMain` pointer if the session is alive and
     /// not halting, or null if not found/already tearing down. The pointer is
     /// snapshot under the lock to avoid use-after-free.
+    ///
+    /// When found, atomically increments `extra_slot_ref` on the session while
+    /// still holding the registry mutex, so the session cannot be torn down
+    /// between this lookup and the caller's use of the pointer. The caller
+    /// **must** call `extra_slot_ref.fetchSub(1, .release)` when done.
     pub fn findBySessionKeyAndReserve(
         self: *SessionRegistry,
         key: *const [20]u8,
@@ -223,6 +228,9 @@ pub const SessionRegistry = struct {
                 // consistent view — the session may begin teardown after we
                 // release the mutex.
                 if (rec.main.isStopRequested()) return null;
+                // Pin the session alive for the caller. deinit() spin-waits
+                // for this ref to reach zero before freeing resources.
+                _ = rec.main.extra_slot_ref.fetchAdd(1, .release);
                 return rec.main;
             }
         }

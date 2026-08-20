@@ -48,6 +48,11 @@ pub const DEFAULT_TIMEOUT_MS: u32 = 300000;
 /// `session_poll_ms`).
 const UDP_POLL_MS: u32 = 250;
 
+/// Data-plane poll timeout for extra connection fds. Must match the value in
+/// accept.zig (`session_poll_ms`) so the recv and wait paths use the same
+/// interval.
+const session_poll_ms: u32 = 250;
+
 /// Max frames pulled from the packet adapter per loop iteration
 /// (C: `MAX_SEND_SOCKET_QUEUE_NUM` = 128, Cedar.h:248).
 pub const DEFAULT_MAX_SEND_BATCH: usize = 128;
@@ -149,6 +154,36 @@ pub const SessionConfig = struct {
     udp_fd_fn: ?*const fn (ctx: *anyopaque) ?posix.socket_t = null,
 };
 
+/// A TCP connection slot in the multi-TCP pool (C: `TCPSOCK`). Each additional
+/// connection accepted via `additional_connect` gets its own slot with an
+/// independent `TunnelConnection` state machine, cipher, and congestion counter.
+pub const ConnectionSlot = struct {
+    /// The block framing state machine for this TCP connection.
+    tunnel: TunnelConnection,
+    /// Per-socket cipher for data-channel encryption.
+    cipher: ?@import("session.zig").ConnectionCipher = null,
+    /// Direction: TCP_BOTH=0, TCP_SERVER_TO_CLIENT=1, TCP_CLIENT_TO_SERVER=2.
+    direction: u32 = 0,
+    /// Congestion counter for send-side socket selection (C: `TCPSOCK.LateCount`).
+    /// Incremented when a send returns `WouldBlock`; reset on successful send.
+    late_count: u32 = 0,
+    /// Set to false when the socket disconnects; cleaned up after recv iteration.
+    alive: bool = true,
+    /// The TCP socket fd, for poll()-based waiting.
+    fd: posix.socket_t = undefined,
+
+    /// Type-erased TLS I/O context (e.g., heap-allocated `TlsConn`). Owned by
+    /// this slot — freed when the slot is destroyed.
+    tls_context: *anyopaque,
+    tls_context_destroy: *const fn (*anyopaque) void,
+
+    pub fn destroy(self: *ConnectionSlot, allocator: Allocator) void {
+        self.tunnel.deinit();
+        self.tls_context_destroy(self.tls_context);
+        allocator.destroy(self);
+    }
+};
+
 /// The session main loop. Owns no sockets and no hub state — it coordinates a
 /// borrowed `TunnelConnection` (wire I/O) and a `PacketAdapter` (hub I/O).
 ///
@@ -164,6 +199,11 @@ pub const SessionMain = struct {
     /// session's key material via `ServerSession.newConnectionCipher`.
     cipher: ?@import("session.zig").ConnectionCipher = null,
 
+    /// Borrowed pointer to the `ServerSession` that owns the key material.
+    /// Used by `handleAdditionalConnect` to create per-socket ciphers for
+    /// extra connections. Valid for the entire session lifetime.
+    server_session: ?*const @import("session.zig").ServerSession = null,
+
     /// Set by `requestStop` (any thread); the loop ends with `error.Stopped`.
     halt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
@@ -178,6 +218,22 @@ pub const SessionMain = struct {
     /// `s->Connection->CurrentNumConnection`). Starts at 1 for the primary
     /// connection; incremented/decremented by `additional_connect` handling.
     current_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+
+    /// Additional TCP connection slots for multi-TCP (C: `Tcp->TcpSockList`).
+    /// Each entry is heap-allocated so the `TunnelConnection` inside it stays at
+    /// a stable address (it contains zlib state with internal pointers).
+    extra: std.ArrayListUnmanaged(*ConnectionSlot) = .{},
+    /// Mutex guarding `extra` — held only for brief list mutations, never
+    /// across I/O calls.
+    extra_mutex: std.Thread.Mutex = .{},
+    /// Congestion counter for the primary tunnel (C: primary `TCPSOCK.LateCount`).
+    primary_late_count: u32 = 0,
+
+    /// Reference count held by `handleAdditionalConnect` while it accesses the
+    /// session after `findBySessionKeyAndReserve` returns. Prevents use-after-
+    /// free when the session thread tears down between the registry lookup and
+    /// slot insertion. `deinit` waits for this to reach zero.
+    extra_slot_ref: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     // Heap buffers (large; must not live on the stack).
     recv_out: [][]u8,
@@ -222,11 +278,50 @@ pub const SessionMain = struct {
     }
 
     pub fn deinit(self: *SessionMain) void {
+        // Wait for any concurrent `handleAdditionalConnect` to finish before
+        // tearing down the session. Without this, the accept thread could be
+        // between `findBySessionKeyAndReserve` and `addExtraSlot`, holding a
+        // pointer to a stack-local `SessionMain` that is about to be reclaimed.
+        while (self.extra_slot_ref.load(.acquire) > 0) {
+            std.Thread.yield() catch {};
+        }
+        // Destroy all extra connection slots.
+        {
+            self.extra_mutex.lock();
+            defer self.extra_mutex.unlock();
+            for (self.extra.items) |slot| slot.destroy(self.allocator);
+            self.extra.deinit(self.allocator);
+        }
         self.allocator.free(self.send_buf);
         self.allocator.free(self.send_batch);
         self.allocator.free(self.recv_scratch);
         self.allocator.free(self.recv_out);
         self.* = undefined;
+    }
+
+    /// Push an additional connection slot into the pool (called from the accept
+    /// thread). The slot is heap-allocated by the caller and ownership transfers
+    /// here.
+    pub fn addExtraSlot(self: *SessionMain, slot: *ConnectionSlot) !void {
+        self.extra_mutex.lock();
+        defer self.extra_mutex.unlock();
+        try self.extra.append(self.allocator, slot);
+    }
+
+    /// Remove and destroy any dead extra slots (alive == false). Called at the
+    /// end of each recv iteration from the session thread.
+    fn cleanupDeadSlots(self: *SessionMain) void {
+        self.extra_mutex.lock();
+        defer self.extra_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.extra.items.len) {
+            if (!self.extra.items[i].alive) {
+                const removed = self.extra.swapRemove(i);
+                removed.destroy(self.allocator);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Ask the loop to stop; `run` returns `error.Stopped`. Thread-safe:
@@ -311,6 +406,74 @@ pub const SessionMain = struct {
             // sessions (Session.c:440-449) — the hub flush hook.
             if (!self.pa.flush(self.pa.ctx)) return error.PacketAdapterFlushFailed;
 
+            // 1b. Receive from additional TCP connections (multi-TCP pool).
+            // Snapshot the pointer list under the lock (microseconds), then
+            // iterate the snapshot lock-free. Slots are heap-allocated so the
+            // pointers remain valid even if the list is concurrently modified.
+            {
+                self.extra_mutex.lock();
+                const extra_n = self.extra.items.len;
+                var snap_buf: [8]*ConnectionSlot = undefined;
+                const snap = if (extra_n <= 8) blk: {
+                    @memcpy(snap_buf[0..extra_n], self.extra.items[0..extra_n]);
+                    break :blk snap_buf[0..extra_n];
+                } else blk: {
+                    const buf = try self.allocator.alloc(*ConnectionSlot, extra_n);
+                    @memcpy(buf, self.extra.items[0..extra_n]);
+                    self.extra_mutex.unlock();
+                    defer self.allocator.free(buf);
+                    break :blk buf;
+                };
+                if (extra_n > 8) {} else self.extra_mutex.unlock();
+
+                for (snap) |slot| {
+                    if (!slot.alive) continue;
+                    var extra_batches: usize = 0;
+                    while (true) {
+                        const recv_start = slot.tunnel.total_recv;
+                        const recv_count = slot.tunnel.receiveBlocksBatch(self.recv_out, self.recv_scratch) catch |err| switch (err) {
+                            error.WouldBlock => break,
+                            else => {
+                                slot.alive = false;
+                                _ = self.current_connections.fetchSub(1, .seq_cst);
+                                log.info("extra connection error: {} (conns={d})", .{ err, self.current_connections.load(.acquire) });
+                                break;
+                            },
+                        };
+                        if (recv_count > 0) {
+                            for (self.recv_out[0..recv_count]) |frame| {
+                                const plaintext = if (slot.cipher) |*c|
+                                    c.decryptRecv(self.allocator, frame) catch |dec_err| {
+                                        log.warn("extra decrypt failed: {}", .{dec_err});
+                                        slot.alive = false;
+                                        _ = self.current_connections.fetchSub(1, .seq_cst);
+                                        break;
+                                    }
+                                else
+                                    frame;
+                                defer if (slot.cipher != null) self.allocator.free(plaintext);
+                                if (!slot.alive) break; // decrypt failed
+                                self.stats.rx_blocks += 1;
+                                self.stats.rx_bytes += plaintext.len;
+                                if (!self.pa.put(self.pa.ctx, plaintext)) return error.PacketAdapterPutFailed;
+                            }
+                            if (!slot.alive) break;
+                        }
+                        if (slot.tunnel.total_recv > recv_start) {
+                            self.stats.keepalives_recv = slot.tunnel.keepalives_recv;
+                            self.touchComm();
+                            progress = true;
+                        }
+                        if (recv_count == 0) continue;
+                        extra_batches += 1;
+                        if (extra_batches >= MAX_RECV_BLOCKS) break;
+                        if (self.halt.load(.seq_cst)) break;
+                    }
+                }
+            }
+            // Remove dead extra slots after iteration.
+            self.cleanupDeadSlots();
+
             // 2b. Poll UDP acceleration. Drain all pending blocks into the hub
             // (same path as TLS-received blocks — C: ConnectionReceive drains
             // UdpAccel->RecvBlockQueue into ReceivedBlocks).
@@ -332,10 +495,36 @@ pub const SessionMain = struct {
 
             // 3. Keep-alive on idle wire — C sends it at the top of
             //    ConnectionSend, BEFORE the data batch (Connection.c:1080-1088).
+            //    Each TCP socket gets its own keepalive (Connection.c:1073-1091).
             const now = std.time.milliTimestamp();
             if (self.config.enable_keepalive and now >= self.next_keepalive_time) {
                 try self.tunnel.sendKeepalive();
                 self.stats.keepalives_sent = self.tunnel.keepalives_sent;
+                // Send keep-alive on extra connections too.
+                {
+                    self.extra_mutex.lock();
+                    const ek_n = self.extra.items.len;
+                    var ek_buf: [8]*ConnectionSlot = undefined;
+                    const ek_snap = if (ek_n <= 8) blk: {
+                        @memcpy(ek_buf[0..ek_n], self.extra.items[0..ek_n]);
+                        break :blk ek_buf[0..ek_n];
+                    } else blk: {
+                        const buf = try self.allocator.alloc(*ConnectionSlot, ek_n);
+                        @memcpy(buf, self.extra.items[0..ek_n]);
+                        self.extra_mutex.unlock();
+                        defer self.allocator.free(buf);
+                        break :blk buf;
+                    };
+                    if (ek_n > 8) {} else self.extra_mutex.unlock();
+                    for (ek_snap) |slot| {
+                        if (!slot.alive) continue;
+                        slot.tunnel.sendKeepalive() catch |err| {
+                            log.warn("extra keepalive failed: {}", .{err});
+                            slot.alive = false;
+                            _ = self.current_connections.fetchSub(1, .seq_cst);
+                        };
+                    }
+                }
                 self.next_keepalive_time = now + self.genNextKeepAliveSpan();
                 self.touchComm();
                 progress = true;
@@ -356,19 +545,54 @@ pub const SessionMain = struct {
             if (!progress) {
                 if (self.config.wait_fn) |w| {
                     w(self.config.wait_ctx orelse self.pa.ctx);
-                } else if (self.config.udp_fd_fn) |udp_fd_fn| {
-                    // Combined wait: poll both TLS (via wait_ctx) and UDP.
-                    if (self.config.udp_ctx) |ctx| {
-                        if (udp_fd_fn(ctx)) |udp_fd| {
-                            var pfd = [_]posix.pollfd{
-                                .{ .fd = udp_fd, .events = posix.POLL.IN, .revents = 0 },
-                            };
-                            _ = posix.poll(&pfd, UDP_POLL_MS) catch 0;
+                }
+                // Poll extra connection fds (and optionally UDP) together so
+                // we wake up quickly when any additional connection has data.
+                // Build a single pollfd array for all extra sockets + UDP.
+                {
+                    self.extra_mutex.lock();
+                    const wn = self.extra.items.len;
+                    var w_buf: [8]*ConnectionSlot = undefined;
+                    const w_snap = if (wn <= 8) blk: {
+                        @memcpy(w_buf[0..wn], self.extra.items[0..wn]);
+                        break :blk w_buf[0..wn];
+                    } else blk: {
+                        const buf = try self.allocator.alloc(*ConnectionSlot, wn);
+                        @memcpy(buf, self.extra.items[0..wn]);
+                        self.extra_mutex.unlock();
+                        break :blk buf;
+                    };
+                    if (wn > 8) {} else self.extra_mutex.unlock();
+
+                    // +1 for optional UDP fd, +1 for optional TLS primary.
+                    const extra_count = w_snap.len;
+                    const has_udp = self.config.udp_fd_fn != null and self.config.udp_ctx != null;
+                    const total = extra_count + @as(usize, if (has_udp) 1 else 0);
+
+                    if (total > 0) {
+                        var pfds_buf: [9]posix.pollfd = undefined;
+                        var allocated: ?[]posix.pollfd = null;
+                        const pfds = if (total <= pfds_buf.len) pfds_buf[0..total] else blk: {
+                            const b = try self.allocator.alloc(posix.pollfd, total);
+                            allocated = b;
+                            break :blk b;
+                        };
+                        defer if (allocated) |b| self.allocator.free(b);
+
+                        for (w_snap[0..extra_count], 0..) |slot, i| {
+                            pfds[i] = .{ .fd = slot.fd, .events = posix.POLL.IN, .revents = 0 };
                         }
+                        var next: usize = extra_count;
+                        if (has_udp) {
+                            if (self.config.udp_fd_fn.?(self.config.udp_ctx.?)) |udp_fd| {
+                                pfds[next] = .{ .fd = udp_fd, .events = posix.POLL.IN, .revents = 0 };
+                                next += 1;
+                            }
+                        }
+                        _ = posix.poll(pfds[0..next], session_poll_ms) catch 0;
+                    } else if (self.config.wait_fn == null) {
+                        std.Thread.sleep(std.time.ns_per_ms);
                     }
-                    std.Thread.sleep(std.time.ns_per_ms);
-                } else {
-                    std.Thread.sleep(std.time.ns_per_ms);
                 }
             }
         }
@@ -422,11 +646,29 @@ pub const SessionMain = struct {
             return false;
         }
 
-        // TLS path: batch frames and send via tunnel.
+        // TLS path: batch frames and send via the best available tunnel.
+        // The "best" tunnel has the lowest late_count (C: `min LateCount`).
+        // Snapshot extra slots under lock to find the best send target.
+        var send_tunnel = self.tunnel;
+        var send_late: *u32 = &self.primary_late_count;
+        var send_cipher: *?@import("session.zig").ConnectionCipher = &self.cipher;
+        {
+            self.extra_mutex.lock();
+            for (self.extra.items) |slot| {
+                if (!slot.alive) continue;
+                if (slot.late_count < send_late.*) {
+                    send_tunnel = &slot.tunnel;
+                    send_late = &slot.late_count;
+                    send_cipher = &slot.cipher;
+                }
+            }
+            self.extra_mutex.unlock();
+        }
+
+        // Encrypt with the selected tunnel's cipher.
         while (count < self.send_batch.len) {
             const frame = self.pa.get(self.pa.ctx) orelse break;
-            // Encrypt the block payload if a cipher is active.
-            const ciphertext = if (self.cipher) |*c|
+            const ciphertext = if (send_cipher.*) |*c|
                 c.encryptSend(self.allocator, frame) catch |err| {
                     self.allocator.free(frame);
                     log.warn("encrypt failed: {}", .{err});
@@ -434,9 +676,7 @@ pub const SessionMain = struct {
                 }
             else
                 frame;
-            if (self.cipher != null) self.allocator.free(frame);
-            // Budget check against the encrypted size (AES-CBC adds IV +
-            // padding overhead) so batches never exceed max_buffering_size.
+            if (send_cipher.* != null) self.allocator.free(frame);
             if (self.send_queue_bytes + ciphertext.len > self.config.max_buffering_size) {
                 self.allocator.free(ciphertext);
                 log.warn("dropping frame: send queue over buffering budget", .{});
@@ -450,8 +690,20 @@ pub const SessionMain = struct {
 
         if (count == 0) return false;
 
-        errdefer for (self.send_batch[0..count]) |f| self.allocator.free(f);
-        try self.tunnel.sendBlocksZeroCopy(self.send_batch[0..count], self.send_buf);
+        send_tunnel.sendBlocksZeroCopy(self.send_batch[0..count], self.send_buf) catch |err| {
+            // Track congestion: increment late_count on WouldBlock, abort on
+            // hard errors.
+            if (err == error.WouldBlock) {
+                send_late.* += 1;
+                return false;
+            } else {
+                for (self.send_batch[0..count]) |f| self.allocator.free(f);
+                self.send_queue_bytes = 0;
+                return err;
+            }
+        };
+        // Reset congestion counter on successful send.
+        send_late.* = 0;
 
         // The frames are owned by the session; free them after the copy.
         for (self.send_batch[0..count]) |f| self.allocator.free(f);
