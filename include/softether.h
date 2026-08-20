@@ -49,6 +49,13 @@ typedef enum {
     SOFTETHER_ERR_INTERNAL        = -99,
 } softether_error_t;
 
+/**
+ * Get a human-readable string for an error code.
+ * Returns a pointer to a static, NUL-terminated string.
+ * Unknown codes return "Unknown error".
+ */
+const char* softether_error_string(int code);
+
 /* ========================================================================== */
 /* State & Event Enums                                                        */
 /* ========================================================================== */
@@ -192,6 +199,38 @@ int softether_run_data_loop(softether_client_t client);
 void softether_request_stop(softether_client_t client);
 
 /* ========================================================================== */
+/* Async Data Loop                                                            */
+/* ========================================================================== */
+
+/** Callback for each received frame in async mode. */
+typedef void (*softether_data_loop_frame_fn)(
+    softether_client_t client,
+    const uint8_t* frame, uint32_t frame_len,
+    void* user_data);
+
+/** Callback when async data loop exits. error_code=0 on clean shutdown. */
+typedef void (*softether_data_loop_done_fn)(
+    softether_client_t client,
+    int error_code,
+    void* user_data);
+
+/**
+ * Start the data loop in a background thread with per-frame callbacks.
+ * Must call softether_connect() first (which spawns the native data loop).
+ * The frame_fn callback is invoked from the data loop thread for each
+ * inbound Ethernet frame. Returns 0 on success, negative SoftetherError
+ * on failure.
+ */
+int softether_run_data_loop_async(
+    softether_client_t client,
+    softether_data_loop_frame_fn frame_fn,
+    softether_data_loop_done_fn done_fn,
+    void* user_data);
+
+/** Cancel a running async data loop (signal-safe, non-blocking). */
+void softether_cancel_data_loop(softether_client_t client);
+
+/* ========================================================================== */
 /* State & Stats Queries                                                      */
 /* ========================================================================== */
 
@@ -248,6 +287,12 @@ uint32_t softether_get_assigned_mask(const softether_client_t client);
  * backend the session landed on.
  */
 uint32_t softether_get_effective_server_ip(const softether_client_t client);
+
+/**
+ * Get assigned IPv6 address (16 bytes copied into buf).
+ * Returns 0 on success, -1 if not assigned or invalid arguments.
+ */
+int softether_get_assigned_ip_v6(const softether_client_t client, uint8_t buf[16]);
 
 /* ========================================================================== */
 /* Configuration (call before connect)                                        */
