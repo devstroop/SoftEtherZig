@@ -280,6 +280,18 @@ uint32_t softether_get_gateway_ip(const softether_client_t client);
 /** Get DHCP-assigned subnet mask (host byte order, 0 if not assigned). */
 uint32_t softether_get_assigned_mask(const softether_client_t client);
 
+/** Get first DHCP-assigned DNS server (host byte order, 0 if none). */
+uint32_t softether_get_assigned_dns1(const softether_client_t client);
+
+/** Get second DHCP-assigned DNS server (host byte order, 0 if none). */
+uint32_t softether_get_assigned_dns2(const softether_client_t client);
+
+/**
+ * Get the last error code for a failed connection. Returns the SoftetherError
+ * enum value (negative on error, 0 = no error recorded).
+ */
+int softether_get_last_error(const softether_client_t client);
+
 /**
  * Get the IPv4 server address actually connected to (host byte order, 0 if
  * not connected or if the target is IPv6). After a cluster redirect this
@@ -334,6 +346,33 @@ void softether_set_read_timeout(softether_client_t client, uint32_t ms);
 
 /** Set TCP keepalive interval in milliseconds (0 = disable). */
 void softether_set_keepalive_interval(softether_client_t client, uint32_t ms);
+
+/** Set gratuitous ARP interval in milliseconds. Must be called before connect(). */
+void softether_set_garp_interval(softether_client_t client, uint32_t ms);
+
+/** Set TCP_NODELAY (disable Nagle's algorithm for low latency). Default: true. */
+void softether_set_tcp_nodelay(softether_client_t client, bool enabled);
+
+/** Set static IPv4 address. Must be called before connect(). */
+void softether_set_static_ipv4(softether_client_t client, const char* addr);
+
+/** Set static IPv4 netmask. Must be called before connect(). */
+void softether_set_static_ipv4_netmask(softether_client_t client, const char* addr);
+
+/** Set static IPv4 gateway. Must be called before connect(). */
+void softether_set_static_ipv4_gateway(softether_client_t client, const char* addr);
+
+/** Set static IPv6 address. Must be called before connect(). */
+void softether_set_static_ipv6(softether_client_t client, const char* addr);
+
+/** Set static IPv6 prefix length. Must be called before connect(). */
+void softether_set_static_ipv6_prefix(softether_client_t client, uint8_t prefix);
+
+/** Set static IPv6 gateway. Must be called before connect(). */
+void softether_set_static_ipv6_gateway(softether_client_t client, const char* addr);
+
+/** Set DNS servers (comma-separated IPs). Must be called before connect(). */
+void softether_set_dns_servers(softether_client_t client, const char* servers);
 
 /** Set IP version preference.
  *  version: 0=try both, 4=IPv4 only, 6=IPv6 only.
@@ -412,6 +451,33 @@ void softether_set_event_callback(
 void softether_set_proxy(softether_client_t client, int proxy_type, const char* host, uint16_t port, const char* username, const char* password);
 
 /* ========================================================================== */
+/* Client Fingerprint (spoof SoftEther VPN Client identity)                    */
+/* ========================================================================== */
+
+/** Override client identification string. Pass NULL or "" to restore default. */
+void softether_set_client_str(softether_client_t client, const char* str);
+
+/** Override client version number. Pass 0 to restore default (444). */
+void softether_set_client_ver(softether_client_t client, uint32_t ver);
+
+/** Override client build number. Pass 0 to restore default (9807). */
+void softether_set_client_build(softether_client_t client, uint32_t build);
+
+/** Override OS name, version, title sent to server. Pass NULL to clear. */
+void softether_set_os_info(softether_client_t client, const char* name, const char* version, const char* title);
+
+/* ========================================================================== */
+/* Android Integration                                                        */
+/* ========================================================================== */
+
+/**
+ * Register Android VpnService.protect() callback to exempt TLS sockets from
+ * VPN routing. Pass NULL to clear. Only meaningful on Android.
+ */
+typedef int32_t (*softether_android_protect_fn)(int32_t fd);
+void softether_set_android_protect(softether_android_protect_fn cb);
+
+/* ========================================================================== */
 /* Diagnostics                                                                */
 /* ========================================================================== */
 
@@ -435,6 +501,19 @@ typedef void (*softether_log_callback_t)(int level, const char* msg);
  * extension teardown — register a callback that calls os_log directly.
  */
 void softether_set_log_callback(softether_log_callback_t cb);
+
+/** Set whether the external log callback is exclusive (stops further output).
+ *  Default: true (exclusive). */
+void softether_set_log_callback_exclusive(bool exclusive);
+
+/** Set the minimum log level at runtime. 0=err, 1=warn, 2=info, 3=debug. */
+void softether_set_log_level_global(int level);
+
+/** Compat shim — old two-arg API (client pointer is ignored). */
+void softether_set_log_level(softether_client_t client, int level);
+
+/** Per-client log level — delegates to softether_set_log_level_global. */
+void softether_set_log_level_client(softether_client_t client, int level);
 
 /**
  * Bind libsoftether's outbound TLS sockets to a specific network interface
