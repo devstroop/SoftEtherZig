@@ -1083,9 +1083,10 @@ test "FarmServer execTask — post + dequeue + complete" {
     defer member.deinit();
 
     // Manually post a task and simulate service-loop dequeue.
+    // Note: postTask takes ownership of `req` by value — do not deinit it
+    // separately, as the task now owns the Pack's allocated resources.
     var req = Pack.init(std.testing.allocator);
     try req.addStr("HubName", "EXEC_TEST");
-    defer req.deinit();
 
     const task = server.postTask(&member, "enumhub", req) orelse return error.TestFailed;
     try std.testing.expectEqual(@as(usize, 1), member.task_queue.items.len);
@@ -1123,7 +1124,7 @@ test "FarmServer waitTask timeout — orphaned task freed" {
 
     var req = Pack.init(std.testing.allocator);
     try req.addStr("data", "timeout_test");
-    defer req.deinit();
+    // Note: postTask takes ownership of `req` — do not defer deinit.
 
     // Post but never complete — waitTask should timeout and free.
     const task = server.postTask(&member, "noop", req) orelse return error.TestFailed;
@@ -1245,10 +1246,9 @@ test "concurrent postTask from multiple threads" {
                     var p = Pack.init(s.allocator);
                     p.addStr("thread", &.{@intCast('A' + @as(u8, @intCast(id % 26)))}) catch continue;
                     p.addInt("seq", @intCast(j)) catch continue;
-                    const task = s.postTask(m, task_noop, p);
-                    if (task) |t| {
-                        s.allocator.destroy(t);
-                    }
+                    // postTask appends to member.task_queue — the queue owns
+                    // the task; do not destroy it here.
+                    _ = s.postTask(m, task_noop, p);
                 }
             }
         }.worker, .{ &server, &member, i });
@@ -1259,8 +1259,7 @@ test "concurrent postTask from multiple threads" {
     }
 
     // All tasks were posted; the queue should contain them.
-    // Some may have been destroyed in the worker (null return path),
-    // but the lock-protected append should not have corrupted.
+    // The lock-protected append should not have corrupted.
     try std.testing.expect(member.task_queue.items.len <= num_threads * tasks_per_thread);
 
     // Drain remaining tasks to avoid leaks.
