@@ -277,6 +277,12 @@ pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket, peer_ip:
         var established = (try authenticateVpn(self, tls_sock, &method_pack, &hello_random)) orelse return;
         defer established.deinit(self.allocator);
         try runSession(self, tls_sock, &established, peer_ip, peer_port);
+    } else if (mem.eql(u8, method, "additional_connect")) {
+        // 3c. Multi-TCP additional connection — C: `ServerAccept` at
+        //     Protocol.c:4296. The client opens a new TLS socket and
+        //     identifies itself with a session key; the server validates
+        //     the key, assigns a direction, and returns RC4 keys.
+        try handleAdditionalConnect(self, tls_sock, &method_pack, peer_ip, peer_port);
     } else {
         return error.ProtocolError;
     }
@@ -718,6 +724,7 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
         .peer_port = peer_port,
         .created_time = std.time.milliTimestamp(),
         .main = &main,
+        .session_key = established.session.session_key,
     };
     self.session_registry.register(rec) catch {
         self.allocator.free(rec.session_name);
@@ -742,6 +749,106 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
         },
         else => return err,
     };
+}
+
+/// C `ServerAccept` additional_connect branch (Protocol.c:4296-4483).
+/// The client opens a new TLS connection and identifies itself with a
+/// session key. The server validates the key, checks the connection limit,
+/// assigns a direction (for half-connection mode), generates per-socket
+/// RC4 keys if needed, and responds with the assigned direction.
+fn handleAdditionalConnect(
+    self: *ServerContext,
+    tls_sock: *tls.TlsSocket,
+    pack: *Pack,
+    peer_ip: u32,
+    peer_port: u16,
+) !void {
+    _ = peer_ip;
+    _ = peer_port;
+
+    // Extract the 20-byte session key from the client's Pack.
+    const session_key_data = pack.getData("session_key") orelse {
+        try sendAdditionalConnectError(self, tls_sock, error.InvalidParameter);
+        return;
+    };
+    if (session_key_data.len != Protocol.sha1_size) {
+        try sendAdditionalConnectError(self, tls_sock, error.InvalidParameter);
+        return;
+    }
+    var session_key: [Protocol.sha1_size]u8 = undefined;
+    @memcpy(&session_key, session_key_data);
+
+    // Look up the existing session by key (C: `GetSessionFromKey`).
+    const rec = self.session_registry.findBySessionKey(&session_key) orelse {
+        log.warn("additional_connect: session key not found", .{});
+        try sendAdditionalConnectError(self, tls_sock, error.SessionTimeout);
+        return;
+    };
+
+    // Validate the session is still alive.
+    if (rec.main.isStopRequested()) {
+        log.warn("additional_connect: session is halting", .{});
+        try sendAdditionalConnectError(self, tls_sock, error.SessionTimeout);
+        return;
+    }
+
+    // Check connection limit (C: `Count(s->Connection->CurrentNumConnection) > s->MaxConnection`).
+    const current = rec.main.current_connections.load(.acquire);
+    if (current >= rec.main.max_connections) {
+        log.warn("additional_connect: too many connections ({d}/{d})", .{ current, rec.main.max_connections });
+        try sendAdditionalConnectError(self, tls_sock, error.TooManyConnections);
+        return;
+    }
+
+    // Increment the connection counter.
+    _ = rec.main.current_connections.fetchAdd(1, .seq_cst);
+
+    // Determine direction. In half-connection mode, assign the underrepresented
+    // direction; otherwise bidirectional (C: `TCP_BOTH`).
+    // For M1, always return bidirectional (direction=0).
+    const direction: u32 = 0;
+
+    // Generate per-socket RC4 keys if fast-RC4 is active.
+    // For now, respond without RC4 keys (plaintext-over-TLS mode).
+    // TODO: wire RC4 key generation when fast-RC4 is fully supported.
+
+    // Build and send the success response.
+    var resp = Pack.init(self.allocator);
+    defer resp.deinit();
+    try resp.addInt("error", 0); // ERR_NO_ERROR
+    try resp.addInt("direction", direction);
+
+    const resp_bytes = try resp.toBytes(self.allocator);
+    defer self.allocator.free(resp_bytes);
+
+    try http.sendHttpResponse(tls_sock, resp_bytes);
+    log.info("additional_connect: session {s} accepted (dir={d}, conns={d})", .{
+        rec.session_name,
+        direction,
+        rec.main.current_connections.load(.acquire),
+    });
+}
+
+fn sendAdditionalConnectError(self: *ServerContext, tls_sock: *tls.TlsSocket, err: anyerror) !void {
+    // C error codes from Cedar.h — match what the client expects.
+    const ERR_INVALID_PARAMETER: u32 = 38;
+    const ERR_SESSION_TIMEOUT: u32 = 20;
+    const ERR_TOO_MANY_CONNECTION: u32 = 49;
+    const ERR_INTERNAL_ERROR: u32 = 23;
+    const error_code: u32 = switch (err) {
+        error.InvalidParameter => ERR_INVALID_PARAMETER,
+        error.SessionTimeout => ERR_SESSION_TIMEOUT,
+        error.TooManyConnections => ERR_TOO_MANY_CONNECTION,
+        else => ERR_INTERNAL_ERROR,
+    };
+    var resp = Pack.init(self.allocator);
+    defer resp.deinit();
+    try resp.addInt("error", error_code);
+
+    const resp_bytes = try resp.toBytes(self.allocator);
+    defer self.allocator.free(resp_bytes);
+
+    try http.sendHttpResponse(tls_sock, resp_bytes);
 }
 
 /// TunnelConnection I/O callbacks over a TlsSocket.
