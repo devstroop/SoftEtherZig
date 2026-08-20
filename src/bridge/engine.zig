@@ -91,6 +91,13 @@ pub const BridgeEngine = struct {
         };
     }
 
+    /// Learn with explicit VLAN ID.
+    pub fn learnVlan(self: *BridgeEngine, src_mac: MacAddress, src_port: u16, now: u32, vlan_id: u16) void {
+        self.fdb.learnVlan(src_mac, src_port, now, vlan_id) catch |err| switch (err) {
+            error.TableFull => {},
+        };
+    }
+
     /// Resolve the destination of a frame arriving on `src_port`.
     pub fn classifyDest(_: *const BridgeEngine, dst_mac: MacAddress) DestKind {
         if (isBroadcast(dst_mac)) return .broadcast;
