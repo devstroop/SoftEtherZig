@@ -36,9 +36,117 @@ const BridgeEngine = engine_mod.BridgeEngine;
 const ForwardAction = engine_mod.ForwardAction;
 const fdb_mod = @import("fdb.zig");
 const MacAddress = fdb_mod.MacAddress;
+const rate_limiter_mod = @import("rate_limiter.zig");
+const TokenBucket = rate_limiter_mod.TokenBucket;
 
 /// Must match `adapter/af_packet.zig`'s session L2 frame budget.
 pub const SESSION_FRAME_BUDGET: usize = 1514;
+
+/// 802.1Q VLAN tag ethertype (network byte order).
+pub const VLAN_ETHERTYPE: u16 = 0x8100;
+/// 802.1Q tag size in bytes.
+pub const VLAN_TAG_SIZE: usize = 4;
+
+/// Per-port bridge configuration (trunk/access, rate limiting).
+pub const PortConfig = struct {
+    /// Port VLAN mode.
+    mode: PortVlanMode = .access,
+    /// Native VLAN for trunk ports (untagged traffic assigned to this VLAN).
+    native_vlan: u16 = 1,
+    /// Allowed VLANs for trunk ports. Empty = all VLANs allowed.
+    allowed_vlans: [32]u16 = .{0} ** 32,
+    /// Number of valid entries in `allowed_vlans`.
+    allowed_vlan_count: u8 = 0,
+    /// Ingress rate limit (LAN → engine). null = unlimited.
+    ingress_limit: ?TokenBucket.Config = null,
+    /// Egress rate limit (engine → LAN). null = unlimited.
+    egress_limit: ?TokenBucket.Config = null,
+};
+
+pub const PortVlanMode = enum {
+    /// Access port: traffic is tagged with `native_vlan`; incoming 802.1Q
+    /// tags are stripped.
+    access,
+    /// Trunk port: carries tagged traffic for multiple VLANs; native VLAN
+    /// is assigned to untagged traffic.
+    trunk,
+};
+
+/// 802.1Q VLAN tag parsed from an Ethernet frame.
+pub const VlanTag = struct {
+    vlan_id: u16,
+    /// Priority code point (3 bits).
+    pcp: u3 = 0,
+    /// Drop eligible indicator.
+    dei: bool = false,
+};
+
+/// Extract the 802.1Q VLAN tag from a frame, if present.
+/// Returns null if the frame has no VLAN tag (ethertype != 0x8100).
+pub fn parseVlanTag(frame: []const u8) ?VlanTag {
+    if (frame.len < 14 + VLAN_TAG_SIZE) return null;
+    const ethertype = std.mem.readInt(u16, frame[12..14], .big);
+    if (ethertype != VLAN_ETHERTYPE) return null;
+    const tci = std.mem.readInt(u16, frame[14..16], .big);
+    return .{
+        .pcp = @truncate(tci >> 13),
+        .dei = (tci >> 12) & 1 != 0,
+        .vlan_id = tci & 0x0FFF,
+    };
+}
+
+/// Build the TCI (Tag Control Information) field from VLAN tag components.
+pub fn buildTci(vlan_id: u16, pcp: u3, dei: bool) u16 {
+    return (@as(u16, pcp) << 13) | (@as(u16, @intFromBool(dei)) << 12) | (vlan_id & 0x0FFF);
+}
+
+/// Insert a 802.1Q tag into a frame at offset 12 (after DST+SRC MACs).
+/// The frame must be at least 14 bytes (ethernet header). Returns the
+/// expanded frame. Caller provides an output buffer of sufficient size.
+/// Returns error.FrameTooSmall if the frame is too short.
+pub fn insertVlanTag(
+    frame: []const u8,
+    vlan_id: u16,
+    pcp: u3,
+    dei: bool,
+    out: []u8,
+) ![]u8 {
+    if (frame.len < 14) return error.FrameTooSmall;
+    const out_len = frame.len + VLAN_TAG_SIZE;
+    if (out.len < out_len) return error.BufferTooSmall;
+
+    // Copy DST + SRC MACs (12 bytes).
+    @memcpy(out[0..12], frame[0..12]);
+    // Insert 802.1Q ethertype.
+    std.mem.writeInt(u16, out[12..14], VLAN_ETHERTYPE, .big);
+    // TCI: PCP(3) | DEI(1) | VLAN_ID(12).
+    std.mem.writeInt(u16, out[14..16], buildTci(vlan_id, pcp, dei), .big);
+    // Copy remaining payload (original ethertype + data).
+    @memcpy(out[16..out_len], frame[12..]);
+    return out[0..out_len];
+}
+
+/// Strip the 802.1Q tag from a frame (shift payload left by 4 bytes).
+/// Returns the shortened frame. Caller provides an output buffer.
+pub fn stripVlanTag(frame: []const u8, out: []u8) ![]u8 {
+    if (frame.len < 14 + VLAN_TAG_SIZE) return error.FrameTooSmall;
+    const ethertype = std.mem.readInt(u16, frame[12..14], .big);
+    if (ethertype != VLAN_ETHERTYPE) {
+        // No VLAN tag — just copy through.
+        if (out.len < frame.len) return error.BufferTooSmall;
+        @memcpy(out[0..frame.len], frame);
+        return out[0..frame.len];
+    }
+    const out_len = frame.len - VLAN_TAG_SIZE;
+    if (out.len < out_len) return error.BufferTooSmall;
+    // DST + SRC MACs.
+    @memcpy(out[0..12], frame[0..12]);
+    // Original ethertype (after the VLAN tag).
+    @memcpy(out[12..14], frame[16..18]);
+    // Payload.
+    @memcpy(out[14..out_len], frame[18..]);
+    return out[0..out_len];
+}
 
 /// Where incoming Ethernet frames (LAN → VPN) go. The pump never buffers
 /// frames itself; the caller's `send` delivers one complete L2 frame.
@@ -92,6 +200,12 @@ pub const BridgeLoop = struct {
     sink: SessionSink,
     /// Loop-local counters (session direction + drops).
     stats: BridgeStats = .{},
+    /// Per-port egress rate limiters (engine → LAN).
+    egress_limiters: []?TokenBucket,
+    /// Per-port ingress rate limiters (LAN → engine).
+    ingress_limiters: []?TokenBucket,
+    /// Per-port VLAN configuration.
+    port_configs: []PortConfig,
 
     pub fn init(
         allocator: Allocator,
@@ -108,19 +222,51 @@ pub const BridgeLoop = struct {
         engine.fdb.max_entries = fdb_max;
         const owned_ports = try allocator.dupe(NetPort, ports);
         errdefer allocator.free(owned_ports);
+
+        const egress_limiters = try allocator.alloc(?TokenBucket, ports.len);
+        errdefer allocator.free(egress_limiters);
+        @memset(egress_limiters, null);
+
+        const ingress_limiters = try allocator.alloc(?TokenBucket, ports.len);
+        errdefer allocator.free(ingress_limiters);
+        @memset(ingress_limiters, null);
+
+        const port_configs = try allocator.alloc(PortConfig, ports.len);
+        errdefer allocator.free(port_configs);
+        @memset(port_configs, .{});
+
         return .{
             .allocator = allocator,
             .ports = owned_ports,
             .engine = engine,
             .session_port = @intCast(ports.len),
             .sink = sink,
+            .egress_limiters = egress_limiters,
+            .ingress_limiters = ingress_limiters,
+            .port_configs = port_configs,
         };
     }
 
     pub fn deinit(self: *BridgeLoop) void {
+        self.allocator.free(self.egress_limiters);
+        self.allocator.free(self.ingress_limiters);
+        self.allocator.free(self.port_configs);
         self.allocator.free(self.ports);
         self.engine.deinit();
         self.* = undefined;
+    }
+
+    /// Configure rate limiting for a port. Pass null to disable.
+    pub fn setPortRateLimit(self: *BridgeLoop, port: u16, ingress: ?TokenBucket.Config, egress: ?TokenBucket.Config) void {
+        if (port >= self.ports.len) return;
+        self.ingress_limiters[port] = if (ingress) |cfg| TokenBucket.init(cfg) else null;
+        self.egress_limiters[port] = if (egress) |cfg| TokenBucket.init(cfg) else null;
+    }
+
+    /// Configure VLAN mode for a port.
+    pub fn setPortVlan(self: *BridgeLoop, port: u16, config: PortConfig) void {
+        if (port >= self.ports.len) return;
+        self.port_configs[port] = config;
     }
 
     /// Live cumulative snapshot of the bridge's aggregated stats since the
@@ -200,6 +346,15 @@ pub const BridgeLoop = struct {
             self.stats.drops += 1;
             return;
         }
+        // Ingress rate limit check.
+        if (port_index < self.ingress_limiters.len) {
+            if (self.ingress_limiters[port_index]) |*limiter| {
+                if (!limiter.consume(@intCast(frame.len))) {
+                    self.stats.drops += 1;
+                    return;
+                }
+            }
+        }
         const src_mac: MacAddress = frame[6..12].*;
         const dst_mac: MacAddress = frame[0..6].*;
         if (!engine_mod.isMulticast(src_mac)) {
@@ -238,6 +393,13 @@ pub const BridgeLoop = struct {
 
     fn writePort(self: *BridgeLoop, port_index: u16, frame: []const u8, action: ForwardAction) void {
         const p = &self.ports[port_index];
+        // Egress rate limit check.
+        if (self.egress_limiters[port_index]) |*limiter| {
+            if (!limiter.consume(@intCast(frame.len))) {
+                self.stats.drops += 1;
+                return;
+            }
+        }
         // FrameTooLarge is already counted by the port layer's own stats,
         // which getStats() sums — no loop-side double count. TxBusy /
         // DeviceClosed: the port layer counted what it can.
@@ -552,4 +714,108 @@ test "bridge loop: multicast source never learned" {
 
     const stats = h.loop.getStats();
     try std.testing.expectEqual(@as(u32, 0), stats.fdb_entries);
+}
+
+// ---- VLAN tag parsing tests ----
+
+test "parseVlanTag: returns null for untagged frame" {
+    const frame = buildFrame(makeMac(1, 0, 0, 0, 0, 1), makeMac(2, 0, 0, 0, 0, 1));
+    try std.testing.expectEqual(@as(?VlanTag, null), parseVlanTag(&frame));
+}
+
+test "parseVlanTag: parses 802.1Q tag correctly" {
+    var frame: [18 + 42]u8 = undefined;
+    @memcpy(frame[0..6], &makeMac(2, 0, 0, 0, 0, 1)); // DST
+    @memcpy(frame[6..12], &makeMac(1, 0, 0, 0, 0, 1)); // SRC
+    // 802.1Q ethertype
+    std.mem.writeInt(u16, frame[12..14], VLAN_ETHERTYPE, .big);
+    // TCI: PCP=5, DEI=true, VLAN_ID=100
+    const tci = buildTci(100, 5, true);
+    std.mem.writeInt(u16, frame[14..16], tci, .big);
+    // Original ethertype (IPv4)
+    std.mem.writeInt(u16, frame[16..18], 0x0800, .big);
+    @memset(frame[18..], 0);
+
+    const tag = parseVlanTag(&frame);
+    try std.testing.expect(tag != null);
+    try std.testing.expectEqual(@as(u16, 100), tag.?.vlan_id);
+    try std.testing.expectEqual(@as(u3, 5), tag.?.pcp);
+    try std.testing.expectEqual(true, tag.?.dei);
+}
+
+test "insertVlanTag: inserts 4-byte tag at offset 12" {
+    const src_frame = buildFrame(makeMac(1, 0, 0, 0, 0, 1), makeMac(2, 0, 0, 0, 0, 1));
+    var out: [14 + 4 + 42]u8 = undefined;
+    const result = try insertVlanTag(&src_frame, 100, 0, false, &out);
+    try std.testing.expectEqual(@as(usize, 14 + 4 + 42), result.len);
+    // VLAN ethertype at offset 12.
+    try std.testing.expectEqual(VLAN_ETHERTYPE, std.mem.readInt(u16, result[12..14], .big));
+    // VLAN ID = 100 at offset 14 (lower 12 bits of TCI).
+    const tci_val = std.mem.readInt(u16, result[14..16], .big);
+    try std.testing.expectEqual(@as(u16, 100), tci_val & 0x0FFF);
+    // Original ethertype shifted to offset 16.
+    try std.testing.expectEqual(@as(u16, 0x0806), std.mem.readInt(u16, result[16..18], .big));
+}
+
+test "stripVlanTag: removes 802.1Q tag" {
+    // Build a VLAN-tagged frame.
+    var tagged: [18 + 42]u8 = undefined;
+    @memcpy(tagged[0..6], &makeMac(2, 0, 0, 0, 0, 1));
+    @memcpy(tagged[6..12], &makeMac(1, 0, 0, 0, 0, 1));
+    std.mem.writeInt(u16, tagged[12..14], VLAN_ETHERTYPE, .big);
+    std.mem.writeInt(u16, tagged[14..16], buildTci(100, 0, false), .big);
+    std.mem.writeInt(u16, tagged[16..18], 0x0806, .big); // ARP
+    @memset(tagged[18..], 0);
+
+    var out: [14 + 42]u8 = undefined;
+    const result = try stripVlanTag(&tagged, &out);
+    try std.testing.expectEqual(@as(usize, 14 + 42), result.len);
+    // Original ethertype restored at offset 12.
+    try std.testing.expectEqual(@as(u16, 0x0806), std.mem.readInt(u16, result[12..14], .big));
+}
+
+test "stripVlanTag: passthrough for untagged frame" {
+    const src_frame = buildFrame(makeMac(1, 0, 0, 0, 0, 1), makeMac(2, 0, 0, 0, 0, 1));
+    var out: [14 + 42]u8 = undefined;
+    const result = try stripVlanTag(&src_frame, &out);
+    try std.testing.expectEqual(@as(usize, 14 + 42), result.len);
+    try std.testing.expectEqualStrings(&src_frame, result);
+}
+
+// ---- Rate limiter integration tests ----
+
+test "bridge loop: egress rate limiter drops frames when bucket exhausted" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    // Set very low egress rate limit on port 0: 1 byte/sec, 1 byte burst.
+    h.loop.setPortRateLimit(0, null, .{ .rate = 1, .capacity = 1 });
+
+    const mac_a = makeMac(2, 0, 0, 0, 0, 1);
+    const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
+
+    // Learn A on port 0.
+    const f_learn = buildFrame(mac_a, mac_a);
+    h.loop.dispatchPortFrame(0, &f_learn);
+
+    // Session sends to A → unicast to port 0. First frame should succeed
+    // (burst), second should be rate-limited.
+    const f_down = buildFrame(mac_remote, mac_a);
+    h.loop.dispatchSessionBlock(&f_down);
+    try std.testing.expectEqual(@as(usize, 1), h.port0.out.items.len);
+
+    // Second frame should be dropped.
+    h.loop.dispatchSessionBlock(&f_down);
+    try std.testing.expectEqual(@as(usize, 1), h.port0.out.items.len);
+
+    const stats = h.loop.getStats();
+    try std.testing.expect(stats.drops >= 1);
 }
