@@ -208,13 +208,23 @@ pub const SessionRegistry = struct {
     }
 
     /// Find a session by its 20-byte session key (C: `GetSessionFromKey`).
-    /// Used by the `additional_connect` handler to locate the existing session
-    /// the client wants to attach a new TCP socket to.
-    pub fn findBySessionKey(self: *SessionRegistry, key: *const [20]u8) ?*SessionRecord {
+    /// Returns the session's `SessionMain` pointer if the session is alive and
+    /// not halting, or null if not found/already tearing down. The pointer is
+    /// snapshot under the lock to avoid use-after-free.
+    pub fn findBySessionKeyAndReserve(
+        self: *SessionRegistry,
+        key: *const [20]u8,
+    ) ?*SessionMain {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.sessions.items) |rec| {
-            if (mem.eql(u8, &rec.session_key, key)) return rec;
+            if (mem.eql(u8, &rec.session_key, key)) {
+                // Snapshot the halt flag under the lock so the caller sees a
+                // consistent view — the session may begin teardown after we
+                // release the mutex.
+                if (rec.main.isStopRequested()) return null;
+                return rec.main;
+            }
         }
         return null;
     }
