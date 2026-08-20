@@ -239,7 +239,7 @@ pub const FarmState = struct {
 
     // ── Farm controller fields (when server_type == FARM_CONTROLLER) ──
     /// List of all connected farm members (C `SERVER.FarmMemberList`).
-    members: std.ArrayListUnmanaged(FarmMember) = .{},
+    members: std.ArrayListUnmanaged(*FarmMember) = .{},
     /// Self-referencing entry on the controller (C `SERVER.Me`).
     me: ?*FarmMember = null,
 
@@ -259,8 +259,9 @@ pub const FarmState = struct {
     }
 
     pub fn deinit(self: *FarmState) void {
-        for (self.members.items) |*m| {
+        for (self.members.items) |m| {
             m.deinit();
+            self.allocator.destroy(m);
         }
         self.members.deinit(self.allocator);
         if (self.me) |me| {
@@ -414,7 +415,7 @@ pub const FarmState = struct {
         var best_idx: ?usize = null;
         var best_point: u32 = 0;
 
-        for (self.members.items, 0..) |*m, i| {
+        for (self.members.items, 0..) |m, i| {
             if (m.halting) continue;
             if (m.point > best_point) {
                 best_point = m.point;
@@ -422,14 +423,14 @@ pub const FarmState = struct {
             }
         }
 
-        if (best_idx) |idx| return &self.members.items[idx];
+        if (best_idx) |idx| return self.members.items[idx];
         return null;
     }
 
     /// Find the farm member that hosts a specific HUB.
     /// C `SiGetHubHostingMember` (Server.c:8214) — simplified.
     pub fn getHubHostingMember(self: *FarmState, hub_name: []const u8) ?*FarmMember {
-        for (self.members.items) |*m| {
+        for (self.members.items) |m| {
             if (m.halting) continue;
             for (m.hub_list.items) |hub| {
                 if (mem.eql(u8, hub.name[0..mem.indexOfScalar(u8, &hub.name, 0) orelse hub.name.len], hub_name)) {
@@ -575,11 +576,14 @@ test "getNextFarmMember returns highest score" {
     var state = FarmState.init(std.testing.allocator);
     defer state.deinit();
 
-    var m1 = FarmMember.init(std.testing.allocator);
+    var m1 = try std.testing.allocator.create(FarmMember);
+    m1.* = FarmMember.init(std.testing.allocator);
     m1.point = 50000;
-    var m2 = FarmMember.init(std.testing.allocator);
+    var m2 = try std.testing.allocator.create(FarmMember);
+    m2.* = FarmMember.init(std.testing.allocator);
     m2.point = 80000;
-    var m3 = FarmMember.init(std.testing.allocator);
+    var m3 = try std.testing.allocator.create(FarmMember);
+    m3.* = FarmMember.init(std.testing.allocator);
     m3.point = 30000;
     m3.halting = true;
 
@@ -596,7 +600,8 @@ test "getNextFarmMember skips halting members" {
     var state = FarmState.init(std.testing.allocator);
     defer state.deinit();
 
-    var m1 = FarmMember.init(std.testing.allocator);
+    var m1 = try std.testing.allocator.create(FarmMember);
+    m1.* = FarmMember.init(std.testing.allocator);
     m1.halting = true;
     m1.point = 99999;
     try state.members.append(state.allocator, m1);
