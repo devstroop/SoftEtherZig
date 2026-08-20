@@ -13,6 +13,7 @@ pub const engine = @import("engine.zig");
 pub const loop = @import("loop.zig");
 pub const local_bridge = @import("local_bridge.zig");
 pub const rate_limiter = @import("rate_limiter.zig");
+pub const stp = @import("stp.zig");
 
 // Re-export main types
 pub const FdbTable = fdb.FdbTable;
