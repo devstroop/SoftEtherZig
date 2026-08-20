@@ -5,8 +5,11 @@ const log = std.log.scoped(.farm_rpc);
 
 const tls_mod = @import("../../mayaqua/network/tls.zig");
 const TlsSocket = tls_mod.TlsSocket;
+const http = @import("../../mayaqua/network/http.zig");
 const pack_mod = @import("../../cedar/protocol/pack.zig");
 const Pack = pack_mod.Pack;
+const Protocol = @import("../../cedar/protocol/softether_protocol.zig").Protocol;
+const auth_mod = @import("../../cedar/protocol/auth.zig");
 
 const farm = @import("farm.zig");
 const FarmMember = farm.FarmMember;
@@ -23,6 +26,8 @@ pub const max_pack_frame_size: u32 = 100 * 1024 * 1024;
 pub const farm_rpc_timeout_ms: u64 = 60_000;
 /// Poll interval for member task acceptance loop.
 const member_poll_ms: u32 = 250;
+/// VPNCONNECT magic sent as signature POST body (C: `HTTP_VPN_TARGET_POSTDATA`).
+const vpnconnect_magic = "VPNCONNECT";
 
 // ── Pack Frame I/O ───────────────────────────────────────────────────
 
@@ -43,13 +48,13 @@ pub fn sendPack(sock: *TlsSocket, pack: *const Pack) !void {
 /// Receive a Pack frame: `[u32 BE size][Pack bytes]`.
 pub fn recvPack(sock: *TlsSocket) !Pack {
     var len_buf: [4]u8 = undefined;
-    try sock.readExact(&len_buf);
+    try sock.readAll(&len_buf);
     const len = mem.readInt(u32, &len_buf, .big);
     if (len > max_pack_frame_size) return error.PackTooLarge;
 
     const buf = try sock.allocator.alloc(u8, len);
     defer sock.allocator.free(buf);
-    try sock.readExact(buf);
+    try sock.readAll(buf);
 
     return try Pack.fromBytes(sock.allocator, buf);
 }
@@ -193,7 +198,11 @@ pub const FarmServer = struct {
             while (self.dequeueTask(member)) |task| {
                 had_task = true;
                 // Send the task request to the member.
-                sendPack(sock, &task.request) catch {
+                const req = task.request orelse {
+                    task.complete = true;
+                    continue;
+                };
+                sendPack(sock, &req) catch {
                     log.warn("Failed to send task to {s}", .{std.mem.sliceTo(&member.hostname, 0)});
                     member.halting = true;
                     break;
@@ -220,7 +229,7 @@ pub const FarmServer = struct {
             }
 
             // Brief sleep to avoid busy-wait.
-            std.time.sleep(member_poll_ms * std.time.ns_per_ms);
+            std.Thread.sleep(member_poll_ms * std.time.ns_per_ms);
         }
 
         // Drain remaining tasks on disconnect.
@@ -279,7 +288,7 @@ pub const FarmServer = struct {
     pub fn waitTask(self: *FarmServer, task: *FarmTask) ?Pack {
         var attempts: u32 = 0;
         while (!task.complete and attempts < 1000) : (attempts += 1) {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
         if (!task.complete) {
             // Timeout — clean up the orphaned task. Since we cannot
@@ -361,7 +370,7 @@ pub const FarmServer = struct {
     fn controlThreadFn(self: *FarmServer) void {
         while (!self.control_halt.load(.seq_cst)) {
             self.controlCycle();
-            std.time.sleep(farm_control_interval_ms * std.time.ns_per_ms);
+            std.Thread.sleep(farm_control_interval_ms * std.time.ns_per_ms);
         }
     }
 
@@ -375,7 +384,7 @@ pub const FarmServer = struct {
         var total_client_license: u32 = 0;
         var total_bridge_license: u32 = 0;
 
-        for (self.farm_state.members.items) |*m| {
+        for (self.farm_state.members.items) |m| {
             if (m.me or m.halting) continue;
 
             // TODO: Send SiCallEnumHub RPC to each member.
@@ -412,6 +421,9 @@ pub const FarmClient = struct {
     controller: FarmController,
     /// Mutex for task processing serialization.
     task_lock: std.Thread.Mutex = .{},
+    /// Names of dynamic HUBs created by the controller. On disconnect
+    /// all dynamic HUBs are torn down (C `SiAcceptTasksFromController`).
+    dynamic_hubs: std.ArrayListUnmanaged([]u8) = .{},
 
     pub fn init(allocator: Allocator, farm_state: *FarmState) FarmClient {
         return .{
@@ -422,33 +434,169 @@ pub const FarmClient = struct {
     }
 
     pub fn deinit(self: *FarmClient) void {
+        self.teardownDynamicHubs();
         self.controller.deinit();
+    }
+
+    /// Tear down all dynamic HUBs created by the controller.
+    /// C `SiAcceptTasksFromController` (Server.c:10156): when the member
+    /// loses the controller connection, all dynamic HUBs are taken offline
+    /// and deleted. The member must re-register all HUBs on reconnect.
+    fn teardownDynamicHubs(self: *FarmClient) void {
+        for (self.dynamic_hubs.items) |hub_name| {
+            log.info("Tearing down dynamic HUB: {s}", .{hub_name});
+            self.allocator.free(hub_name);
+        }
+        self.dynamic_hubs.clearRetainingCapacity();
     }
 
     /// Connect to the controller and handle tasks. This is the main
     /// entry point — it blocks and reconnects on failure.
     /// C `SiConnectToControllerThread` (Server.c:10572).
     ///
-    /// NOTE: TLS connection establishment is not yet implemented.
-    /// This function currently logs and sleeps until `halting` is set.
-    /// Full implementation requires establishing a TLS connection to
-    /// the controller (using `self.farm_state.controller_name` /
-    /// `controller_port`), sending a `farm_connect` RPC, and then
-    /// calling `acceptTasksFromController` with the resulting socket.
-    pub fn connectAndRun(self: *FarmClient) void {
+    /// The protocol follows the standard SoftEther handshake:
+    /// 1. TCP connect + TLS handshake
+    /// 2. Signature POST (`/vpnsvc/connect.cgi`)
+    /// 3. Read Hello pack (HTTP response) — extract `random`
+    /// 4. Send `farm_connect` method Pack (HTTP POST) with SecurePassword
+    /// 5. Read success Pack via raw frame
+    /// 6. Enter raw-Pack-frame RPC loop (`acceptTasksFromController`)
+    pub fn connectAndRun(self: *FarmClient, server_cert_der: ?[]const u8) void {
         while (!self.controller.halting) {
             self.controller.num_try += 1;
 
-            log.info("Farm member connecting to controller {s}:{d}... (TLS not yet implemented)", .{
-                std.mem.sliceTo(&self.farm_state.controller_name, 0),
-                self.farm_state.controller_port,
+            const controller_host = std.mem.sliceTo(&self.farm_state.controller_name, 0);
+            const controller_port: u16 = @intCast(self.farm_state.controller_port);
+
+            log.info("Farm member connecting to controller {s}:{d}... (attempt #{d})", .{
+                controller_host,
+                controller_port,
+                self.controller.num_try,
             });
 
-            // TODO: Establish TLS connection, send farm_connect,
-            // call acceptTasksFromController on success.
-            // For now, sleep and retry.
-            std.time.sleep(farm.retry_connect_interval_ms * std.time.ns_per_ms);
+            self.connectOnce(controller_host, controller_port, server_cert_der) catch |err| {
+                log.warn("Farm member connection to {s}:{d} failed: {} — retrying in {d}ms", .{
+                    controller_host,
+                    controller_port,
+                    err,
+                    farm.retry_connect_interval_ms,
+                });
+                std.Thread.sleep(farm.retry_connect_interval_ms * std.time.ns_per_ms);
+                continue;
+            };
+
+            log.info("Farm member disconnected from {s}:{d} — reconnecting", .{
+                controller_host,
+                controller_port,
+            });
         }
+    }
+
+    /// Single connection attempt. Returns on disconnect or error.
+    fn connectOnce(
+        self: *FarmClient,
+        controller_host: []const u8,
+        controller_port: u16,
+        server_cert_der: ?[]const u8,
+    ) !void {
+        // 1. TLS connect to controller.
+        var tls_sock = TlsSocket.connect(
+            self.allocator,
+            controller_host,
+            controller_port,
+            .{
+                .verify_certificate = false, // Farm uses shared password, not cert pinning
+                .allow_self_signed = true,
+                .timeout_ms = @intCast(farm.farm_rpc_timeout_ms),
+            },
+        ) catch |err| return err;
+        defer tls_sock.deinit();
+
+        // 2. Send signature POST (`/vpnsvc/connect.cgi` with VPNCONNECT magic).
+        //    C: `ClientUploadSignature` (Protocol.c).
+        try sendSignaturePost(&tls_sock);
+
+        // 3. Read Hello pack (HTTP 200 response).
+        //    C: `ClientDownloadHello` (Protocol.c).
+        const hello_random = try readHelloRandom(self.allocator, &tls_sock);
+
+        // 4. Build and send the `farm_connect` method pack.
+        //    C: `SiConnectToControllerThread` lines 10637-10678.
+        var method_pack = Pack.init(self.allocator);
+        defer method_pack.deinit();
+
+        try method_pack.addStr("method", "farm_connect");
+
+        // SecurePassword = SHA1(hashed_password ‖ hello_random)
+        const secure_pw = auth_mod.securePassword(&self.farm_state.member_password, &hello_random);
+        try method_pack.addData("SecurePassword", &secure_pw);
+
+        if (server_cert_der) |cert| {
+            try method_pack.addData("ServerCert", cert);
+        }
+
+        try method_pack.addInt("MaxSessions", 0);
+        try method_pack.addInt("Point", 0);
+        try method_pack.addInt("Weight", self.farm_state.weight);
+        try method_pack.addStr("HostName", ""); // Will be filled by controller from socket
+        try method_pack.addInt("PublicIp", self.farm_state.public_ip);
+
+        // Public ports.
+        for (0..self.farm_state.num_public_port) |i| {
+            try method_pack.addIntEx("PublicPort", self.farm_state.public_ports[i], i);
+        }
+
+        // Send the method pack via HTTP POST.
+        try http.sendHttpRequest(&tls_sock, try method_pack.toBytes(self.allocator), controller_host);
+
+        // 5. Read success pack via raw frame.
+        //    C: `HttpClientRecv` reads HTTP response, but we use raw frames
+        //    after the initial handshake for the farm RPC loop.
+        //    The controller's `acceptMember` sends via `sendPack` (raw frame).
+        var success_pack = try recvPack(&tls_sock);
+        success_pack.deinit();
+
+        log.info("Farm member authenticated by controller", .{});
+
+        // 6. Enter the RPC loop.
+        self.acceptTasksFromController(&tls_sock);
+    }
+
+    /// Send the signature POST to `/vpnsvc/connect.cgi` with VPNCONNECT magic.
+    /// C: `ClientUploadSignature` (Protocol.c).
+    fn sendSignaturePost(sock: *TlsSocket) !void {
+        var head_buf: [512]u8 = undefined;
+        const head = std.fmt.bufPrint(
+            &head_buf,
+            "POST /vpnsvc/connect.cgi HTTP/1.1\r\n" ++
+                "Host: controller\r\n" ++
+                "Content-Type: application/octet-stream\r\n" ++
+                "Content-Length: {d}\r\n" ++
+                "\r\n",
+            .{vpnconnect_magic.len},
+        ) catch unreachable;
+        try sock.writeAll(head);
+        try sock.writeAll(vpnconnect_magic);
+    }
+
+    /// Read the Hello pack from an HTTP response and extract the `random` field.
+    /// C: `ClientDownloadHello` (Protocol.c).
+    fn readHelloRandom(allocator: Allocator, sock: *TlsSocket) ![Protocol.sha1_size]u8 {
+        // Read HTTP response status line + headers.
+        var buf: [http.max_pack_body_len]u8 = undefined;
+        const resp = try http.readHttpResponse(sock, &buf);
+
+        // Parse the body as a Pack.
+        var hello_pack = try Pack.fromBytes(allocator, resp.body);
+        defer hello_pack.deinit();
+
+        // Extract the random challenge.
+        const random_data = hello_pack.getData("random") orelse return error.ProtocolError;
+        if (random_data.len != Protocol.sha1_size) return error.ProtocolError;
+
+        var random: [Protocol.sha1_size]u8 = undefined;
+        @memcpy(&random, random_data);
+        return random;
     }
 
     /// Accept tasks from the controller over an established connection.
@@ -456,6 +604,9 @@ pub const FarmClient = struct {
     pub fn acceptTasksFromController(self: *FarmClient, sock: *TlsSocket) void {
         self.controller.is_connected = true;
         defer self.controller.is_connected = false;
+        // On disconnect, tear down all dynamic HUBs created by the controller.
+        // C `SiAcceptTasksFromController` (Server.c:10156).
+        defer self.teardownDynamicHubs();
 
         while (!self.controller.halting) {
             var request = recvPack(sock) catch |err| {
@@ -563,13 +714,31 @@ pub const FarmClient = struct {
 
     // ── SiCalled* handlers (stubs for now) ───────────────────────
 
-    fn calledCreateHub(self: *FarmClient, _: *Pack) ?Pack {
-        log.info("SiCalledCreateHub: stub", .{});
+    fn calledCreateHub(self: *FarmClient, request: *Pack) ?Pack {
+        const hub_name = request.getStr("HubName") orelse {
+            log.warn("SiCalledCreateHub: missing HubName", .{});
+            return Pack.init(self.allocator);
+        };
+        log.info("SiCalledCreateHub: {s}", .{hub_name});
+        // Track dynamic HUB for teardown on disconnect.
+        const owned = self.allocator.dupe(u8, hub_name) catch return Pack.init(self.allocator);
+        self.dynamic_hubs.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+        };
         return Pack.init(self.allocator);
     }
 
-    fn calledDeleteHub(self: *FarmClient, _: *Pack) ?Pack {
-        log.info("SiCalledDeleteHub: stub", .{});
+    fn calledDeleteHub(self: *FarmClient, request: *Pack) ?Pack {
+        const hub_name = request.getStr("HubName") orelse "unknown";
+        log.info("SiCalledDeleteHub: {s}", .{hub_name});
+        // Remove from dynamic HUB list if present.
+        for (self.dynamic_hubs.items, 0..) |name, i| {
+            if (mem.eql(u8, name, hub_name)) {
+                self.allocator.free(name);
+                _ = self.dynamic_hubs.orderedRemove(i);
+                break;
+            }
+        }
         return Pack.init(self.allocator);
     }
 
@@ -780,4 +949,68 @@ test "FarmServer postTask and dequeueTask" {
         t.request.deinit();
         server.allocator.destroy(t);
     }
+}
+
+test "FarmClient calledCreateHub tracks dynamic hubs" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var client = FarmClient.init(std.testing.allocator, &state);
+    defer client.deinit();
+
+    var req = Pack.init(std.testing.allocator);
+    defer req.deinit();
+    try req.addStr("HubName", "DYNAMIC_HUB_1");
+
+    var resp = client.calledCreateHub(&req);
+    try std.testing.expect(resp != null);
+    if (resp) |*r| r.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), client.dynamic_hubs.items.len);
+    try std.testing.expectEqualStrings("DYNAMIC_HUB_1", client.dynamic_hubs.items[0]);
+}
+
+test "FarmClient calledDeleteHub removes from dynamic hubs" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var client = FarmClient.init(std.testing.allocator, &state);
+    defer client.deinit();
+
+    // First create a hub.
+    var create_req = Pack.init(std.testing.allocator);
+    defer create_req.deinit();
+    try create_req.addStr("HubName", "TO_DELETE");
+    _ = client.calledCreateHub(&create_req);
+    try std.testing.expectEqual(@as(usize, 1), client.dynamic_hubs.items.len);
+
+    // Now delete it.
+    var del_req = Pack.init(std.testing.allocator);
+    defer del_req.deinit();
+    try del_req.addStr("HubName", "TO_DELETE");
+    var del_resp = client.calledDeleteHub(&del_req);
+    if (del_resp) |*r| r.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), client.dynamic_hubs.items.len);
+}
+
+test "FarmClient teardownDynamicHubs clears list" {
+    var state = FarmState.init(std.testing.allocator);
+    defer state.deinit();
+    var client = FarmClient.init(std.testing.allocator, &state);
+    defer client.deinit();
+
+    // Create two hubs.
+    var req1 = Pack.init(std.testing.allocator);
+    defer req1.deinit();
+    try req1.addStr("HubName", "HUB_A");
+    _ = client.calledCreateHub(&req1);
+
+    var req2 = Pack.init(std.testing.allocator);
+    defer req2.deinit();
+    try req2.addStr("HubName", "HUB_B");
+    _ = client.calledCreateHub(&req2);
+
+    try std.testing.expectEqual(@as(usize, 2), client.dynamic_hubs.items.len);
+
+    client.teardownDynamicHubs();
+    try std.testing.expectEqual(@as(usize, 0), client.dynamic_hubs.items.len);
 }

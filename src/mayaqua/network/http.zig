@@ -504,6 +504,36 @@ fn parseRequestHead(head: []const u8) !usize {
     return content_length;
 }
 
+/// Parse an HTTP/1.1 response status line and extract Content-Length.
+/// Used by `readHttpResponse` (C: `HttpClientRecv` pattern).
+fn parseResponseHead(head: []const u8) !usize {
+    const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return error.InvalidResponse;
+    const status_line = head[0..line_end];
+
+    var tokens = std.mem.tokenizeAny(u8, status_line, " ");
+    _ = tokens.next() orelse return error.InvalidResponse; // version
+    const status = tokens.next() orelse return error.InvalidResponse; // "200"
+    _ = tokens.next() orelse return error.InvalidResponse; // "OK"
+
+    if (!std.mem.eql(u8, status, "200")) return error.HttpError;
+
+    var content_length: usize = 0;
+    var lines = std.mem.splitSequence(u8, head[line_end + 2 ..], "\r\n");
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
+            content_length = std.fmt.parseInt(usize, value, 10) catch return error.InvalidContentLength;
+        }
+    }
+
+    if (content_length == 0 or content_length > max_pack_body_len) return error.InvalidContentLength;
+
+    return content_length;
+}
+
 /// Read and validate one SoftEther HTTP POST from an accepted TLS socket
 /// (C: HttpServerRecvEx). The head is scanned byte-by-byte through the
 /// socket's read-ahead buffer until the terminating blank line, then exactly
@@ -594,6 +624,72 @@ pub fn sendHttpResponse(sock: *TlsSocket, body: []const u8) !void {
     try sock.writeAll(head);
     try sock.writeAll(body);
 }
+
+/// Build the request head (POST line + headers + blank line) for a body of
+/// `body_len` bytes. Mirrors C `HttpClientSend` (Network.c:22897).
+fn buildRequestHead(buf: []u8, body_len: usize, host: []const u8) []const u8 {
+    var date_buf: [64]u8 = undefined;
+    return std.fmt.bufPrint(
+        buf,
+        "POST " ++ vpn_target ++ " HTTP/1.1\r\n" ++
+            "Host: {s}\r\n" ++
+            "Date: {s}\r\n" ++
+            "Keep-Alive: {s}\r\n" ++
+            "Connection: Keep-Alive\r\n" ++
+            "Content-Type: {s}\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "\r\n",
+        .{ host, httpDateStr(&date_buf), vpn_keep_alive, vpn_content_type, body_len },
+    ) catch unreachable;
+}
+
+/// Write an HTTP/1.1 POST request carrying `body` (C: `HttpClientSend`).
+/// Used by the farm member to send the initial `farm_connect` Pack.
+pub fn sendHttpRequest(sock: *TlsSocket, body: []const u8, host: []const u8) !void {
+    var head_buf: [512]u8 = undefined;
+    const head = buildRequestHead(&head_buf, body.len, host);
+    try sock.writeAll(head);
+    try sock.writeAll(body);
+}
+
+/// Read an HTTP/1.1 response body. Mirrors C `HttpClientRecv` (Network.c:22815).
+/// Returns the response body bytes (valid until the next read on this socket).
+pub fn readHttpResponse(sock: *TlsSocket, buf: []u8) !HttpResponse {
+    const head_cap = @min(buf.len, max_request_head_len);
+    var head_len: usize = 0;
+    var head_found = false;
+    while (head_len < head_cap) {
+        const n = try sock.readBlocking(buf[head_len .. head_len + 1]);
+        if (n == 0) return error.EndOfStream;
+        head_len += n;
+        if (head_len >= 4 and std.mem.eql(u8, buf[head_len - 4 .. head_len], "\r\n\r\n")) {
+            head_found = true;
+            break;
+        }
+    }
+    if (!head_found) return error.HeaderTooLarge;
+
+    const content_length = try parseResponseHead(buf[0 .. head_len - 4]);
+    if (content_length > buf.len) return error.BufferTooSmall;
+
+    const body = buf[0..content_length];
+    var got: usize = 0;
+    while (got < body.len) {
+        const m = try sock.readBlocking(body[got..]);
+        if (m == 0) return error.EndOfStream;
+        got += m;
+    }
+
+    return .{
+        .content_length = content_length,
+        .body = body,
+    };
+}
+
+pub const HttpResponse = struct {
+    content_length: usize,
+    body: []u8,
+};
 
 // ============================================================================
 // Tests
