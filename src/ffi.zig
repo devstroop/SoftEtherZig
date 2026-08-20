@@ -846,18 +846,27 @@ export fn softether_get_gateway_ip(client: ?*const VpnClient) u32 {
 /// Get first DHCP-assigned DNS server (host byte order u32, 0 if none).
 export fn softether_get_assigned_dns1(client: ?*const VpnClient) u32 {
     const c = client orelse return 0;
-    return c.getAssignedDns1();
+    const mc: *VpnClient = @constCast(c);
+    mc.mutex.lock();
+    defer mc.mutex.unlock();
+    return mc.assigned_dns1;
 }
 
 /// Get second DHCP-assigned DNS server (host byte order u32, 0 if none).
 export fn softether_get_assigned_dns2(client: ?*const VpnClient) u32 {
     const c = client orelse return 0;
-    return c.getAssignedDns2();
+    const mc: *VpnClient = @constCast(c);
+    mc.mutex.lock();
+    defer mc.mutex.unlock();
+    return mc.assigned_dns2;
 }
 
 export fn softether_get_assigned_mask(client: ?*const VpnClient) u32 {
     const c = client orelse return 0;
-    return c.getAssignedMask();
+    const mc: *VpnClient = @constCast(c);
+    mc.mutex.lock();
+    defer mc.mutex.unlock();
+    return mc.assigned_mask;
 }
 
 /// Get the IPv4 server address this client actually connected to (host byte
@@ -893,7 +902,10 @@ export fn softether_get_assigned_ip_v6(client: ?*const VpnClient, buf: ?*[16]u8)
 /// error code rather than relying on generic "connection failed" messages.
 export fn softether_get_last_error(client: ?*const VpnClient) c_int {
     const c = client orelse return 0;
-    return @intFromEnum(mapClientError(c.last_error orelse return 0));
+    const mc: *VpnClient = @constCast(c);
+    mc.mutex.lock();
+    defer mc.mutex.unlock();
+    return @intFromEnum(mapClientError(mc.last_error orelse return 0));
 }
 
 // ============================================================================
@@ -1398,14 +1410,14 @@ export fn softether_set_log_level_client(client: ?*VpnClient, level: c_int) void
 
 /// Override the client identification string sent to the server.
 /// Pass NULL or "" to restore the default ("SoftEther VPN Client").
-export fn softether_set_client_str(client: ?*VpnClient, str: [*:0]const u8) void {
+export fn softether_set_client_str(client: ?*VpnClient, str: ?[*:0]const u8) void {
     const c = client orelse return;
-    const s = std.mem.span(str);
-    if (c.config.fingerprint == null) c.config.fingerprint = .{};
-    if (s.len == 0) {
-        c.config.fingerprint.?.client_str = null;
+    if (str == null or std.mem.span(str.?).len == 0) {
+        if (c.config.fingerprint) |*fp| fp.client_str = null;
         return;
     }
+    const s = std.mem.span(str.?);
+    if (c.config.fingerprint == null) c.config.fingerprint = .{};
     c.config.fingerprint.?.client_str = ffi_allocator.dupe(u8, s) catch return;
 }
 
@@ -1434,12 +1446,20 @@ export fn softether_set_client_build(client: ?*VpnClient, build: u32) void {
 }
 
 /// Override OS name, version, and title sent to the server.
-/// All three must be non-NULL to take effect; pass NULL to clear.
-export fn softether_set_os_info(client: ?*VpnClient, name: [*:0]const u8, version: [*:0]const u8, title: [*:0]const u8) void {
+/// All three must be non-NULL and non-empty to take effect; pass any NULL to clear.
+export fn softether_set_os_info(client: ?*VpnClient, name: ?[*:0]const u8, version: ?[*:0]const u8, title: ?[*:0]const u8) void {
     const c = client orelse return;
-    const name_s = std.mem.span(name);
-    const ver_s = std.mem.span(version);
-    const title_s = std.mem.span(title);
+    if (name == null or version == null or title == null) {
+        if (c.config.fingerprint) |*fp| {
+            fp.os_name = null;
+            fp.os_version = null;
+            fp.os_title = null;
+        }
+        return;
+    }
+    const name_s = std.mem.span(name.?);
+    const ver_s = std.mem.span(version.?);
+    const title_s = std.mem.span(title.?);
     if (name_s.len == 0 or ver_s.len == 0 or title_s.len == 0) {
         if (c.config.fingerprint) |*fp| {
             fp.os_name = null;
