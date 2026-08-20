@@ -651,18 +651,33 @@ export fn softether_run_data_loop_async(
         }
     }
 
-    // Check if async loop is already running.
-    if (@atomicLoad(?*anyopaque, &c.async_data_ctx, .acquire) != null) {
-        return @intFromEnum(SoftetherError.already_connected);
-    }
-
+    // Atomically claim the async slot under the client mutex — prevents
+    // double-start races. This is a rare operation (once per connect), so
+    // holding the mutex is acceptable.
     const ctx = ffi_allocator.create(AsyncDataContext) catch return @intFromEnum(SoftetherError.out_of_memory);
     ctx.* = .{ .frame_fn = ff, .done_fn = df, .user_data = user_data };
-    @atomicStore(?*anyopaque, &c.async_data_ctx, @ptrCast(ctx), .release);
+    {
+        c.mutex.lock();
+        defer c.mutex.unlock();
+        if (c.async_data_ctx != null) {
+            ffi_allocator.destroy(ctx);
+            return @intFromEnum(SoftetherError.already_connected);
+        }
+        c.async_data_ctx = @ptrCast(ctx);
+    }
+
+    // Wire the frame callback into the data loop so tunBlock delivers frames.
+    c.ffi_frame_fn = ff;
+    c.ffi_frame_user_data = user_data;
+    c.ffi_cancelled = false;
 
     // Spawn the polling thread.
     const thread = std.Thread.spawn(.{}, asyncDataLoopPoll, .{ c }) catch {
-        @atomicStore(?*anyopaque, &c.async_data_ctx, null, .release);
+        c.mutex.lock();
+        defer c.mutex.unlock();
+        c.async_data_ctx = null;
+        c.ffi_frame_fn = null;
+        c.ffi_frame_user_data = null;
         ffi_allocator.destroy(ctx);
         return @intFromEnum(SoftetherError.internal_error);
     };
@@ -676,6 +691,7 @@ export fn softether_run_data_loop_async(
 /// SOFTETHER_ERR_CANCELLED.
 export fn softether_cancel_data_loop(client: ?*VpnClient) void {
     const c = client orelse return;
+    c.ffi_cancelled = true;
     c.requestStop();
 }
 
@@ -684,11 +700,23 @@ fn asyncDataLoopPoll(c: *VpnClient) void {
     while (@atomicLoad(bool, &c.data_loop_running, .acquire)) {
         std.Thread.sleep(10 * std.time.ns_per_ms);
     }
-    // Data loop finished — invoke done callback.
-    const err: c_int = if (c.last_error) |e| @intFromEnum(mapClientError(e)) else 0;
+    // Data loop finished — determine exit status.
+    const err: c_int = if (c.ffi_cancelled)
+        @intFromEnum(SoftetherError.operation_cancelled)
+    else if (c.last_error) |e|
+        @intFromEnum(mapClientError(e))
+    else
+        0;
     ctx.done_fn(c, err, ctx.user_data);
-    // Clean up.
-    @atomicStore(?*anyopaque, &c.async_data_ctx, null, .release);
+    // Clear frame callback before cleanup.
+    c.ffi_frame_fn = null;
+    c.ffi_frame_user_data = null;
+    // Clean up the async slot under the mutex.
+    {
+        c.mutex.lock();
+        defer c.mutex.unlock();
+        c.async_data_ctx = null;
+    }
     ffi_allocator.destroy(ctx);
 }
 
@@ -851,8 +879,11 @@ export fn softether_get_effective_server_ip(client: ?*const VpnClient) u32 {
 export fn softether_get_assigned_ip_v6(client: ?*const VpnClient, buf: ?*[16]u8) c_int {
     const c = client orelse return -1;
     const b = buf orelse return -1;
-    if (!c.ipv6_configured) return -1;
-    @memcpy(b, &c.ipv6_assigned_addr);
+    const mc: *VpnClient = @constCast(c);
+    mc.mutex.lock();
+    defer mc.mutex.unlock();
+    if (!mc.ipv6_configured) return -1;
+    @memcpy(b, &mc.ipv6_assigned_addr);
     return 0;
 }
 

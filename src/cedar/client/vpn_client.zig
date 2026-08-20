@@ -199,6 +199,10 @@ fn tunBlock(ctx_: *anyopaque, block_data: []u8) void {
     if (dc.self.tun_write_blocked) return;
     dc.diag.bytes_in += block_data.len;
     dc.diag.pkts_in += 1;
+    // Invoke the FFI frame callback (if set) for every inbound frame.
+    if (dc.self.ffi_frame_fn) |ff| {
+        ff(dc.self, @ptrCast(block_data.ptr), @intCast(block_data.len), dc.self.ffi_frame_user_data);
+    }
     // Fast path: batch IP writes to TUN when configured
     if (dc.is_configured.* and block_data.len > 14) {
         const ethertype = (@as(u16, block_data[12]) << 8) | block_data[13];
@@ -598,6 +602,12 @@ pub const VpnClient = struct {
     async_data_ctx: ?*anyopaque = null,
     /// Thread handle for the FFI async data-loop polling thread.
     async_data_thread: ?Thread = null,
+    /// FFI frame callback: invoked for each inbound Ethernet frame.
+    ffi_frame_fn: ?*const fn (*VpnClient, [*]const u8, u32, ?*anyopaque) callconv(.c) void = null,
+    ffi_frame_user_data: ?*anyopaque = null,
+    /// Set when softether_cancel_data_loop is called so the done callback
+    /// can distinguish cancellation from normal disconnect.
+    ffi_cancelled: bool = false,
 
     /// Network operating mode captured at init from `config.mode` (or via
     /// `softether_set_network_mode` before connect).
@@ -703,6 +713,11 @@ pub const VpnClient = struct {
 
     pub fn deinit(self: *Self) void {
         self.disconnect() catch |e| std.log.debug("deinit disconnect failed: {}", .{e});
+        // Join the FFI async polling thread first (it depends on data_loop_running).
+        if (self.async_data_thread) |thread| {
+            thread.join();
+            self.async_data_thread = null;
+        }
         // Ensure the data loop thread is joined (should already be done by
         // performDisconnect, but be safe in case connect spawned it without
         // a subsequent disconnect).
