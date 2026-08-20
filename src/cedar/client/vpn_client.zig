@@ -594,6 +594,10 @@ pub const VpnClient = struct {
     data_loop_running: bool,
     tun_write_blocked: bool = false,
     tun_eagain_count: u64 = 0,
+    /// Opaque pointer to FFI async data-loop context (managed by ffi.zig).
+    async_data_ctx: ?*anyopaque = null,
+    /// Thread handle for the FFI async data-loop polling thread.
+    async_data_thread: ?Thread = null,
 
     /// Network operating mode captured at init from `config.mode` (or via
     /// `softether_set_network_mode` before connect).

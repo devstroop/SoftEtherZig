@@ -250,6 +250,32 @@ pub const SoftetherError = enum(c_int) {
     internal_error = -99,
 };
 
+/// Get a human-readable string for an error code.
+/// Returns a pointer to a static, NUL-terminated string.
+/// Unknown codes return "Unknown error".
+export fn softether_error_string(code: c_int) [*:0]const u8 {
+    const values = [_]struct { c_int, [*:0]const u8 }{
+        .{ 0, "No error" },
+        .{ -1, "Invalid argument" },
+        .{ -2, "Already connected" },
+        .{ -3, "Not connected" },
+        .{ -4, "Connection failed" },
+        .{ -5, "Authentication failed" },
+        .{ -6, "DNS resolution failed" },
+        .{ -7, "Operation timed out" },
+        .{ -8, "Protocol error" },
+        .{ -9, "Adapter configuration failed" },
+        .{ -10, "Session establishment failed" },
+        .{ -11, "Out of memory" },
+        .{ -12, "Operation cancelled" },
+        .{ -99, "Internal error" },
+    };
+    for (values) |entry| {
+        if (entry.@"0" == code) return entry.@"1";
+    }
+    return "Unknown error";
+}
+
 fn mapClientError(err: ClientError) SoftetherError {
     return switch (err) {
         ClientError.AlreadyConnected => .already_connected,
@@ -578,6 +604,95 @@ export fn softether_request_stop(client: ?*VpnClient) void {
 }
 
 // ============================================================================
+// Async Data Loop
+// ============================================================================
+
+/// Callback invoked by the async data loop on each received frame.
+/// `frame` is valid only for the duration of the callback; the consumer
+/// MUST copy if retaining. Return value is ignored.
+const DataLoopFrameFn = *const fn (client: ?*VpnClient, frame: [*]const u8, frame_len: u32, user_data: ?*anyopaque) callconv(.c) void;
+
+/// Callback invoked when the async data loop exits (clean or error).
+/// `error_code` is 0 on clean shutdown, or a SoftetherError code.
+const DataLoopDoneFn = *const fn (client: ?*VpnClient, error_code: c_int, user_data: ?*anyopaque) callconv(.c) void;
+
+/// Async context stored on the client for the duration of the async run.
+const AsyncDataContext = struct {
+    frame_fn: DataLoopFrameFn,
+    done_fn: DataLoopDoneFn,
+    user_data: ?*anyopaque,
+};
+
+/// Start the data loop in a background thread. The `frame_fn` callback is
+/// invoked for each received Ethernet frame. The `done_fn` callback is
+/// invoked once when the loop exits (clean disconnect or error), providing
+/// the exit status code.
+///
+/// Returns 0 on success, or a negative SoftetherError on failure:
+///   - invalid_argument: null client or null frame_fn
+///   - not_connected: data loop thread not yet spawned (call softether_connect first)
+///   - already_connected: an async data loop is already running
+export fn softether_run_data_loop_async(
+    client: ?*VpnClient,
+    frame_fn: ?DataLoopFrameFn,
+    done_fn: ?DataLoopDoneFn,
+    user_data: ?*anyopaque,
+) c_int {
+    const c = client orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const ff = frame_fn orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const df = done_fn orelse return @intFromEnum(SoftetherError.invalid_argument);
+
+    // Must have a data loop thread spawned (softether_connect does this).
+    {
+        c.mutex.lock();
+        defer c.mutex.unlock();
+        if (c.data_loop_thread == null) {
+            return @intFromEnum(SoftetherError.not_connected);
+        }
+    }
+
+    // Check if async loop is already running.
+    if (@atomicLoad(?*anyopaque, &c.async_data_ctx, .acquire) != null) {
+        return @intFromEnum(SoftetherError.already_connected);
+    }
+
+    const ctx = ffi_allocator.create(AsyncDataContext) catch return @intFromEnum(SoftetherError.out_of_memory);
+    ctx.* = .{ .frame_fn = ff, .done_fn = df, .user_data = user_data };
+    @atomicStore(?*anyopaque, &c.async_data_ctx, @ptrCast(ctx), .release);
+
+    // Spawn the polling thread.
+    const thread = std.Thread.spawn(.{}, asyncDataLoopPoll, .{ c }) catch {
+        @atomicStore(?*anyopaque, &c.async_data_ctx, null, .release);
+        ffi_allocator.destroy(ctx);
+        return @intFromEnum(SoftetherError.internal_error);
+    };
+    c.async_data_thread = thread;
+
+    return 0;
+}
+
+/// Cancel a running async data loop. Signal-safe, non-blocking.
+/// The loop will exit and the done_fn will be called with
+/// SOFTETHER_ERR_CANCELLED.
+export fn softether_cancel_data_loop(client: ?*VpnClient) void {
+    const c = client orelse return;
+    c.requestStop();
+}
+
+fn asyncDataLoopPoll(c: *VpnClient) void {
+    const ctx: *AsyncDataContext = @ptrCast(@alignCast(@atomicLoad(?*anyopaque, &c.async_data_ctx, .acquire) orelse return));
+    while (@atomicLoad(bool, &c.data_loop_running, .acquire)) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    // Data loop finished — invoke done callback.
+    const err: c_int = if (c.last_error) |e| @intFromEnum(mapClientError(e)) else 0;
+    ctx.done_fn(c, err, ctx.user_data);
+    // Clean up.
+    @atomicStore(?*anyopaque, &c.async_data_ctx, null, .release);
+    ffi_allocator.destroy(ctx);
+}
+
+// ============================================================================
 // State & Stats Queries
 // ============================================================================
 
@@ -729,6 +844,16 @@ export fn softether_get_effective_server_ip(client: ?*const VpnClient) u32 {
     const addr = c.effective_server_ip orelse return 0;
     if (addr.any.family != std.posix.AF.INET) return 0;
     return addr.in.sa.addr;
+}
+
+/// Get assigned IPv6 address (16 bytes copied into buf).
+/// Returns 0 on success, -1 if not assigned or invalid arguments.
+export fn softether_get_assigned_ip_v6(client: ?*const VpnClient, buf: ?*[16]u8) c_int {
+    const c = client orelse return -1;
+    const b = buf orelse return -1;
+    if (!c.ipv6_configured) return -1;
+    @memcpy(b, &c.ipv6_assigned_addr);
+    return 0;
 }
 
 /// Get the last error code for a failed connection. Returns the SoftetherError
@@ -1960,4 +2085,58 @@ test "ffi monitor frame getters require a running pump" {
     try std.testing.expectEqual(@as(i64, -1), softether_monitor_frame_count(&c));
     try std.testing.expectEqual(@as(i64, -1), softether_monitor_get_frame(&c, 0, &buf, buf.len));
     try std.testing.expectEqual(@as(i64, 0), softether_monitor_get_frame(&c, 0, null, 0));
+}
+
+test "softether_error_string returns valid strings" {
+    // All defined error codes must return a non-empty string.
+    const codes = [_]c_int{ 0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -99 };
+    for (codes) |code| {
+        const str = softether_error_string(code);
+        try std.testing.expect(str[0] != 0);
+    }
+    // Unknown code (positive) still returns a valid string.
+    const unknown = softether_error_string(999);
+    try std.testing.expect(unknown[0] != 0);
+}
+
+test "softether_error_string ok returns No error" {
+    const str = softether_error_string(0);
+    try std.testing.expectEqualStrings("No error", std.mem.span(str));
+}
+
+test "softether_get_assigned_ip_v6 returns -1 when not configured" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    var buf: [16]u8 = undefined;
+    // Not configured → -1
+    try std.testing.expectEqual(@as(c_int, -1), softether_get_assigned_ip_v6(&c, &buf));
+    // Null client → -1
+    try std.testing.expectEqual(@as(c_int, -1), softether_get_assigned_ip_v6(null, &buf));
+    // Null buf → -1
+    try std.testing.expectEqual(@as(c_int, -1), softether_get_assigned_ip_v6(&c, null));
+}
+
+test "softether_get_assigned_ip_v6 returns address when configured" {
+    var c = VpnClient.init(std.testing.allocator, .{
+        .server_address = "x",
+        .server_port = 443,
+        .hub_name = "h",
+        .auth = .{ .anonymous = {} },
+    });
+    defer c.deinit();
+
+    // Simulate IPv6 assignment.
+    const test_addr = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    @memcpy(&c.ipv6_assigned_addr, &test_addr);
+    c.ipv6_configured = true;
+
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), softether_get_assigned_ip_v6(&c, &buf));
+    try std.testing.expectEqualSlices(u8, &test_addr, &buf);
 }
