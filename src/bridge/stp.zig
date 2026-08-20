@@ -263,10 +263,16 @@ pub const StpBridge = struct {
     /// Mark a port as an edge port (connected to end hosts).
     pub fn setEdgePort(self: *StpBridge, port: u16, is_edge: bool) void {
         if (port >= self.port_count) return;
+        const was_edge = self.ports[port].is_edge;
         self.ports[port].is_edge = is_edge;
         if (is_edge and self.ports[port].state != .disabled) {
             self.ports[port].state = .forwarding;
             self.ports[port].role = .designated;
+        } else if (!is_edge and was_edge) {
+            // Un-setting edge: restore to blocking so STP reconverges.
+            self.ports[port].state = .blocking;
+            self.ports[port].role = .designated;
+            self.recompute();
         }
     }
 
@@ -285,16 +291,18 @@ pub const StpBridge = struct {
     /// Process a received Configuration BPDU on a port.
     /// Returns the action the bridge should take (send BPDU, change state, etc.).
     pub fn processConfigBpdu(self: *StpBridge, port: u16, bpdu: ConfigBpdu) BpduAction {
-        if (port >= self.port_count) return .none;
-        const p = &self.ports[port];
-        p.bpdu_received = true;
-        p.info_age_s = 0;
-
-        // Store the last received information.
-        p.last_root_id = bpdu.root_id;
-        p.last_root_path_cost = bpdu.root_path_cost;
-        p.last_sender_id = bpdu.sender_id;
-        p.last_sender_port_id = bpdu.sender_port_id;
+        // Session port (port_count) is a virtual port — process BPDU without
+        // per-port state (it only affects root election).
+        const is_session_port = port >= self.port_count;
+        if (!is_session_port) {
+            const p = &self.ports[port];
+            p.bpdu_received = true;
+            p.info_age_s = 0;
+            p.last_root_id = bpdu.root_id;
+            p.last_root_path_cost = bpdu.root_path_cost;
+            p.last_sender_id = bpdu.sender_id;
+            p.last_sender_port_id = bpdu.sender_port_id;
+        }
 
         // Ignore BPDUs from a superior (higher bridge ID) root.
         // STP §17.2.1: Use superior information only if it's better.
@@ -302,43 +310,44 @@ pub const StpBridge = struct {
         const new_root_better = bpdu.root_id.lessThan(&self.root_id);
         const same_root = !bpdu.root_id.lessThan(&self.root_id) and !self.root_id.lessThan(&bpdu.root_id);
 
+        // Path cost from this port to us.
+        const link_cost: u32 = if (is_session_port) DEFAULT_PATH_COST else self.ports[port].path_cost;
+
         var action = BpduAction{ .none = {} };
 
         if (new_root_better) {
             // We have a new root — update root info.
             self.root_id = bpdu.root_id;
-            self.root_path_cost = bpdu.root_path_cost + p.path_cost;
+            self.root_path_cost = bpdu.root_path_cost + link_cost;
             self.root_port = port;
             self.is_root = false;
             action = .recompute;
 
-            // If we were previously root, transition all designated ports.
             if (current_root_is_self) {
                 action = .recompute;
             }
         } else if (same_root) {
             // Same root — check if this path is better than current.
-            const new_cost = bpdu.root_path_cost + p.path_cost;
+            const new_cost = bpdu.root_path_cost + link_cost;
             if (new_cost < self.root_path_cost) {
                 self.root_path_cost = new_cost;
                 self.root_port = port;
                 action = .recompute;
-            } else if (new_cost == self.root_path_cost and
-                bpdu.sender_port_id.lessThan(&self.ports[self.root_port].port_id))
-            {
-                // Equal cost — use port ID as tiebreaker.
-                self.root_port = port;
-                action = .recompute;
+            } else if (new_cost == self.root_path_cost) {
+                // Equal cost — use sender port ID as tiebreaker.
+                if (bpdu.sender_port_id.lessThan(&self.ports[self.root_port].port_id)) {
+                    self.root_port = port;
+                    action = .recompute;
+                }
             } else {
-                // This BPDU is inferior — check if we should become designated.
-                if (p.role != .root and p.role != .alternate) {
+                // This BPDU is inferior — send ours if we're designated.
+                if (!is_session_port and self.ports[port].role == .designated) {
                     action = .send_bpdu;
                 }
             }
         } else {
             // Received root ID is worse than our root — inferior BPDU.
-            // If we are designated for this segment, send our BPDU.
-            if (p.role == .designated) {
+            if (!is_session_port and self.ports[port].role == .designated) {
                 action = .send_bpdu;
             }
         }
@@ -348,7 +357,7 @@ pub const StpBridge = struct {
 
     /// Process a received TCN BPDU on a port.
     pub fn processTcnBpdu(self: *StpBridge, port: u16) void {
-        if (port >= self.port_count) return;
+        if (port > self.port_count) return; // session port (port_count) is valid
         self.topology_change = true;
         self.topology_change_timer_s = DEFAULT_MAX_AGE_S + DEFAULT_FORWARD_DELAY_S;
     }
@@ -364,16 +373,17 @@ pub const StpBridge = struct {
     pub fn tick(self: *StpBridge) TickAction {
         var action = TickAction{};
 
-        // Hello timer: send periodic BPDUs if root or designated.
+        // Hello timer: send periodic BPDUs from designated ports (root and non-root).
         if (self.hello_timer_s > 0) {
             self.hello_timer_s -= 1;
         }
-        if (self.hello_timer_s == 0 and self.is_root) {
+        if (self.hello_timer_s == 0) {
             self.hello_timer_s = self.hello_s;
             action.send_hello = true;
         }
 
         // Per-port info age: increment and age out stale BPDUs.
+        var any_bpdu_received = false;
         for (self.ports) |*p| {
             if (p.state == .disabled) continue;
             if (p.bpdu_received and p.info_age_s < self.max_age_s) {
@@ -384,13 +394,13 @@ pub const StpBridge = struct {
                 p.bpdu_received = false;
                 action.recompute = true;
             }
+            if (p.bpdu_received) any_bpdu_received = true;
 
             // Forward delay timer: transition between states.
             if (p.state == .listening or p.state == .learning) {
                 p.forward_delay_timer_s += 1;
                 if (p.forward_delay_timer_s >= self.forward_delay_s) {
                     p.forward_delay_timer_s = 0;
-                    // Advance state: listening → learning, learning → forwarding.
                     if (p.state == .listening) {
                         p.state = .learning;
                     } else {
@@ -399,6 +409,15 @@ pub const StpBridge = struct {
                     action.recompute = true;
                 }
             }
+        }
+
+        // If no port has received a BPDU and we are not root, re-elect self.
+        if (!any_bpdu_received and !self.is_root) {
+            self.is_root = true;
+            self.root_id = self.bridge_id;
+            self.root_path_cost = 0;
+            self.root_port = PORT_NONE;
+            action.recompute = true;
         }
 
         // Topology change timer.
@@ -463,8 +482,7 @@ pub const StpBridge = struct {
                 const same_root = self.root_id.order() == p.last_root_id.order();
 
                 if (same_root and their_root_cost + p.path_cost <= our_root_cost) {
-                    // This port has an equal or better path — it should be designated
-                    // or alternate.
+                    // This port's path to root is equal or better — designated or equal-cost.
                     if (their_root_cost + p.path_cost < our_root_cost) {
                         p.role = .designated;
                         if (p.state == .blocking) {
@@ -473,13 +491,25 @@ pub const StpBridge = struct {
                         }
                     } else {
                         // Equal cost — compare port IDs as tiebreaker.
-                        p.role = .alternate;
-                        if (p.state != .blocking and p.state != .disabled) {
-                            p.state = .blocking;
+                        // If our port ID is lower, we are designated; else alternate.
+                        const their_port_order = p.last_sender_port_id.order();
+                        const our_port_order = p.port_id.order();
+                        if (our_port_order < their_port_order) {
+                            p.role = .designated;
+                            if (p.state == .blocking) {
+                                p.state = .listening;
+                                p.forward_delay_timer_s = 0;
+                            }
+                        } else {
+                            p.role = .alternate;
+                            if (p.state != .blocking and p.state != .disabled) {
+                                p.state = .blocking;
+                            }
                         }
                     }
                 } else {
-                    // Inferior BPDU — this port is alternate (blocked).
+                    // Inferior BPDU — the remote bridge has a better root path.
+                    // We are NOT designated for this segment; block the port.
                     p.role = .alternate;
                     if (p.state != .blocking and p.state != .disabled) {
                         p.state = .blocking;
@@ -537,12 +567,12 @@ pub const TickAction = struct {
 // BPDU wire encoding/decoding
 // ============================================================================
 
-/// Encode a ConfigBpdu into a 35-byte BPDU frame payload (after Ethernet header).
-/// Frame layout: [DST 6][SRC 6][BPDU header 35]. Returns total frame length.
-pub fn encodeConfigBpdu(bpdu: ConfigBpdu, out: []u8) !usize {
-    // BPDU frame: DST(6) + SRC(6) + LLC/SNAP header(8) + BPDU data(35)
-    // Minimum frame size: 14 (eth header) + 35 (BPDU) = 49 bytes.
-    if (out.len < 49) return error.BufferTooSmall;
+/// Encode a ConfigBpdu into an IEEE 802.1D BPDU frame.
+/// Frame layout: [DST 6][SRC 6][Length 2][LLC 3][BPDU 35].
+/// Total frame length: 52 bytes (padded to 60 on the wire by the port layer).
+/// `src_mac` is the bridge's MAC address for the sender field.
+pub fn encodeConfigBpdu(bpdu: ConfigBpdu, src_mac: MacAddress, out: []u8) !usize {
+    if (out.len < 52) return error.BufferTooSmall;
 
     // DST: STP multicast address 01:80:C2:00:00:00
     out[0] = 0x01;
@@ -552,12 +582,11 @@ pub fn encodeConfigBpdu(bpdu: ConfigBpdu, out: []u8) !usize {
     out[4] = 0x00;
     out[5] = 0x00;
 
-    // SRC: sender MAC (filled by caller, leave as 0 for now).
-    // Actually, the caller should set this. We'll leave a placeholder.
-    @memset(out[6..12], 0);
+    // SRC: bridge MAC.
+    @memcpy(out[6..12], &src_mac);
 
-    // Ethertype: STP (0x0000) — actually 802.2 LLC uses 0x0000.
-    std.mem.writeInt(u16, out[12..14], 0x0000, .big);
+    // 802.3 Length field: LLC(3) + BPDU(35) = 38 bytes.
+    std.mem.writeInt(u16, out[12..14], 38, .big);
 
     // LLC header: DSAP=0x42, SSAP=0x42, Control=0x03
     out[14] = 0x42;
@@ -570,41 +599,42 @@ pub fn encodeConfigBpdu(bpdu: ConfigBpdu, out: []u8) !usize {
     out[19] = BPDU_VERSION;
     // BPDU type (0x00 = Configuration).
     out[20] = BPDU_TYPE_CONFIG;
+    // BPDU flags (0x00 — no topology change proposal).
+    out[21] = 0x00;
 
     // Root bridge ID (8 bytes: priority 2 + MAC 6).
-    std.mem.writeInt(u16, out[21..23], bpdu.root_id.priority, .big);
-    @memcpy(out[23..29], &bpdu.root_id.mac);
+    std.mem.writeInt(u16, out[22..24], bpdu.root_id.priority, .big);
+    @memcpy(out[24..30], &bpdu.root_id.mac);
 
     // Root path cost (4 bytes).
-    std.mem.writeInt(u32, out[29..33], bpdu.root_path_cost, .big);
+    std.mem.writeInt(u32, out[30..34], bpdu.root_path_cost, .big);
 
     // Sender bridge ID (8 bytes).
-    std.mem.writeInt(u16, out[33..35], bpdu.sender_id.priority, .big);
-    @memcpy(out[35..41], &bpdu.sender_id.mac);
+    std.mem.writeInt(u16, out[34..36], bpdu.sender_id.priority, .big);
+    @memcpy(out[36..42], &bpdu.sender_id.mac);
 
     // Sender port ID (2 bytes).
-    std.mem.writeInt(u16, out[41..43], bpdu.sender_port_id.order(), .big);
+    std.mem.writeInt(u16, out[42..44], bpdu.sender_port_id.order(), .big);
 
     // Message age (2 bytes, in 256ths of a second).
-    std.mem.writeInt(u16, out[43..45], bpdu.message_age, .big);
+    std.mem.writeInt(u16, out[44..46], bpdu.message_age, .big);
 
     // Max age (2 bytes).
-    std.mem.writeInt(u16, out[45..47], bpdu.max_age, .big);
+    std.mem.writeInt(u16, out[46..48], bpdu.max_age, .big);
 
     // Hello time (2 bytes).
-    std.mem.writeInt(u16, out[47..49], bpdu.hello_time, .big);
+    std.mem.writeInt(u16, out[48..50], bpdu.hello_time, .big);
 
-    // Forward delay (2 bytes) — at offset 49. Total frame = 51 bytes.
-    if (out.len < 51) return error.BufferTooSmall;
-    std.mem.writeInt(u16, out[49..51], bpdu.forward_delay, .big);
+    // Forward delay (2 bytes).
+    std.mem.writeInt(u16, out[50..52], bpdu.forward_delay, .big);
 
-    return 51;
+    return 52;
 }
 
 /// Decode a Configuration BPDU from a frame. Returns null if the frame is
 /// not a valid Configuration BPDU.
 pub fn decodeConfigBpdu(frame: []const u8) ?ConfigBpdu {
-    if (frame.len < 51) return null;
+    if (frame.len < 52) return null;
     // Check for LLC header: DSAP=0x42, SSAP=0x42.
     if (frame[14] != 0x42 or frame[15] != 0x42) return null;
     // Check BPDU protocol ID.
@@ -615,19 +645,20 @@ pub fn decodeConfigBpdu(frame: []const u8) ?ConfigBpdu {
     if (frame[20] != BPDU_TYPE_CONFIG) return null;
 
     var bpdu: ConfigBpdu = undefined;
-    bpdu.root_id.priority = std.mem.readInt(u16, frame[21..23], .big);
-    @memcpy(&bpdu.root_id.mac, frame[23..29]);
-    bpdu.root_path_cost = std.mem.readInt(u32, frame[29..33], .big);
-    bpdu.sender_id.priority = std.mem.readInt(u16, frame[33..35], .big);
-    @memcpy(&bpdu.sender_id.mac, frame[35..41]);
+    // Flags at offset 21 — ignored for now.
+    bpdu.root_id.priority = std.mem.readInt(u16, frame[22..24], .big);
+    @memcpy(&bpdu.root_id.mac, frame[24..30]);
+    bpdu.root_path_cost = std.mem.readInt(u32, frame[30..34], .big);
+    bpdu.sender_id.priority = std.mem.readInt(u16, frame[34..36], .big);
+    @memcpy(&bpdu.sender_id.mac, frame[36..42]);
     bpdu.sender_port_id = .{
-        .priority = @truncate(std.mem.readInt(u16, frame[41..43], .big) >> 8),
-        .port_num = @truncate(std.mem.readInt(u16, frame[41..43], .big)),
+        .priority = @truncate(std.mem.readInt(u16, frame[42..44], .big) >> 8),
+        .port_num = @truncate(std.mem.readInt(u16, frame[42..44], .big)),
     };
-    bpdu.message_age = std.mem.readInt(u16, frame[43..45], .big);
-    bpdu.max_age = std.mem.readInt(u16, frame[45..47], .big);
-    bpdu.hello_time = std.mem.readInt(u16, frame[47..49], .big);
-    bpdu.forward_delay = std.mem.readInt(u16, frame[49..51], .big);
+    bpdu.message_age = std.mem.readInt(u16, frame[44..46], .big);
+    bpdu.max_age = std.mem.readInt(u16, frame[46..48], .big);
+    bpdu.hello_time = std.mem.readInt(u16, frame[48..50], .big);
+    bpdu.forward_delay = std.mem.readInt(u16, frame[50..52], .big);
 
     return bpdu;
 }
@@ -782,8 +813,9 @@ test "STP BPDU encode/decode round-trip" {
     };
 
     var buf: [64]u8 = undefined;
-    const len = try encodeConfigBpdu(bpdu, &buf);
-    try std.testing.expectEqual(@as(usize, 51), len);
+    const src_mac = makeMac(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+    const len = try encodeConfigBpdu(bpdu, src_mac, &buf);
+    try std.testing.expectEqual(@as(usize, 52), len);
 
     const decoded = decodeConfigBpdu(&buf);
     try std.testing.expect(decoded != null);
@@ -795,6 +827,9 @@ test "STP BPDU encode/decode round-trip" {
     try std.testing.expectEqual(bpdu.max_age, decoded.?.max_age);
     try std.testing.expectEqual(bpdu.hello_time, decoded.?.hello_time);
     try std.testing.expectEqual(bpdu.forward_delay, decoded.?.forward_delay);
+
+    // Verify source MAC was encoded correctly.
+    try std.testing.expectEqualSlices(u8, &src_mac, buf[6..12]);
 }
 
 test "STP isBpdu detection" {
@@ -810,7 +845,8 @@ test "STP isBpdu detection" {
     };
 
     var buf: [64]u8 = undefined;
-    _ = try encodeConfigBpdu(bpdu, &buf);
+    const src_mac_for_test = makeMac(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+    _ = try encodeConfigBpdu(bpdu, src_mac_for_test, &buf);
     try std.testing.expect(isBpdu(&buf));
 
     // Non-BPDU frame (ARP).
