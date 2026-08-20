@@ -143,6 +143,10 @@ pub const ServerState = struct {
     server_ctx: ?*softether.server.accept.ServerContext = null,
     session_registry: ?*softether.server.session_registry.SessionRegistry = null,
     admin_server: ?*softether.server.admin_dispatch.Server = null,
+    /// Farm state (cluster controller/member metadata). Outlives farm_server.
+    farm_state: ?*softether.server.farm.FarmState = null,
+    /// Farm RPC server (controller only). Accepts farm member TLS connections.
+    farm_server: ?*softether.server.farm_rpc.FarmServer = null,
     listeners: std.ArrayListUnmanaged(*softether.server.listener.Listener) = .{},
 
     pub fn init(allocator: std.mem.Allocator, cli_args: CliArgs) ServerState {
@@ -177,7 +181,16 @@ pub const ServerState = struct {
             server.bridge_ops.ctx = null;
         }
 
+        // Farm teardown: stop the farm server (control thread + members)
+        // before destroying the ServerContext that references it.
+        if (self.farm_server) |fs| {
+            fs.deinit();
+            self.allocator.destroy(fs);
+        }
+        self.farm_server = null;
+
         if (self.server_ctx) |ctx| {
+            ctx.farm_server = null; // already freed above
             ctx.deinit();
             self.allocator.destroy(ctx);
         }
@@ -188,6 +201,12 @@ pub const ServerState = struct {
             self.allocator.destroy(server);
         }
         self.admin_server = null;
+
+        if (self.farm_state) |fs| {
+            fs.deinit();
+            self.allocator.destroy(fs);
+        }
+        self.farm_state = null;
 
         if (self.switch_hub) |hub| hub.deinit(); // Hub.deinit frees itself
         self.switch_hub = null;
@@ -389,6 +408,19 @@ fn buildServer(state: *ServerState) !void {
     admin.* = try softether.server.admin_dispatch.Server.init(state.allocator);
     state.admin_server = admin;
 
+    // Create farm state for cluster support. Always allocated even in
+    // standalone mode — the server type and controller/member wiring
+    // are configured later via the config subsystem.
+    const farm_state = try state.allocator.create(softether.server.farm.FarmState);
+    farm_state.* = softether.server.farm.FarmState.init(state.allocator);
+    state.farm_state = farm_state;
+
+    // Create farm RPC server. Always allocated — the handler checks
+    // server_type/isFarmController before accepting members.
+    const farm_server = try state.allocator.create(softether.server.farm_rpc.FarmServer);
+    farm_server.* = softether.server.farm_rpc.FarmServer.init(state.allocator, farm_state);
+    state.farm_server = farm_server;
+
     const ctx = try state.allocator.create(softether.server.accept.ServerContext);
     ctx.* = .{
         .allocator = state.allocator,
@@ -398,6 +430,7 @@ fn buildServer(state: *ServerState) !void {
         .switch_hub = state.switch_hub.?,
         .session_registry = registry,
         .admin_server = admin,
+        .farm_server = farm_server,
     };
     state.server_ctx = ctx;
 
@@ -408,6 +441,9 @@ fn buildServer(state: *ServerState) !void {
         .create = &softether.server.accept.bridgeCreate,
         .destroy = &softether.server.accept.bridgeDestroy,
     };
+
+    // TODO(M8 Phase 2): When server type is configured as farm controller,
+    // start the farm control thread via farm_server.startControlThread().
 }
 
 /// Start a listener on each default port. A port that fails to bind (e.g. 443

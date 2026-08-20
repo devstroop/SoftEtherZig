@@ -52,6 +52,10 @@ const SessionMain = @import("session_main.zig").SessionMain;
 const session_registry_mod = @import("session_registry.zig");
 const bridge_mod = @import("../../bridge/mod.zig");
 const loop_mod = @import("../../bridge/loop.zig");
+const farm_mod = @import("farm.zig");
+const farm_rpc_mod = @import("farm_rpc.zig");
+const FarmServer = farm_rpc_mod.FarmServer;
+const farm_protocol_mod = @import("../../cedar/protocol/auth.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -91,6 +95,7 @@ const error_hub_not_found: u32 = 8;
 const error_auth_failed: u32 = 9;
 const err_protocol_error: u32 = 12;
 const err_access_denied: u32 = 15;
+const err_not_farm_controller: u32 = 46;
 
 // ============================================================================
 // ServerContext
@@ -122,6 +127,9 @@ pub const ServerContext = struct {
     /// Admin RPC dispatch server (issue #99): when non-null, enables the
     /// admin method in `handleConnection` for vpncmd-style RPC connections.
     admin_server: ?*dispatch_mod.Server = null,
+    /// Farm RPC server (controller only): when non-null, enables the
+    /// `farm_connect` method in `handleConnection` for cluster RPC.
+    farm_server: ?*FarmServer = null,
     /// Bridge mode (C `StStartServer(true)`): when set, the server operates
     /// as a bridge — hub creation is restricted, LocalBridge is the primary
     /// role. Set by the vpnbridge executable.
@@ -283,6 +291,11 @@ pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket, peer_ip:
         //     identifies itself with a session key; the server validates
         //     the key, assigns a direction, and returns RC4 keys.
         try handleAdditionalConnect(self, tls_sock, &method_pack, peer_ip, peer_port);
+    } else if (mem.eql(u8, method, "farm_connect")) {
+        // 3d. Farm cluster RPC — C: `ServerAccept` at Protocol.c:4531.
+        //     A farm member connects to the controller, authenticates,
+        //     and enters a bidirectional task loop.
+        try handleFarmConnect(self, tls_sock, &method_pack, &hello_random);
     } else {
         return error.ProtocolError;
     }
@@ -649,6 +662,95 @@ fn acceptAdmin(
     rpc.hub_name = hubname;
     rpc.is_vpn_server = true;
     rpc.runServer();
+}
+
+/// Handle a farm cluster RPC connection from a member server.
+///
+/// C `ServerAccept` at Protocol.c:4531. Validates the member's password,
+/// extracts network info, then hands off to `FarmServer.acceptMember`
+/// which sends the success Pack and enters the bidirectional task loop.
+fn handleFarmConnect(
+    self: *ServerContext,
+    tls_sock: *tls.TlsSocket,
+    method_pack: *const Pack,
+    hello_random: *const [Protocol.sha1_size]u8,
+) !void {
+    const farm_server = self.farm_server orelse {
+        try sendFarmError(self, tls_sock, err_not_farm_controller);
+        return;
+    };
+
+    // Check that we are actually a farm controller.
+    if (!farm_server.farm_state.isFarmController() or !farm_server.farm_state.farm_controller_inited) {
+        try sendFarmError(self, tls_sock, err_not_farm_controller);
+        return;
+    }
+
+    // Verify SecurePassword = SHA1(member_password ‖ hello_random).
+    const secure_pw_data = method_pack.getData("SecurePassword") orelse {
+        try sendFarmError(self, tls_sock, err_access_denied);
+        return;
+    };
+    if (secure_pw_data.len != Protocol.sha1_size) {
+        try sendFarmError(self, tls_sock, err_access_denied);
+        return;
+    }
+    var secure_password: [Protocol.sha1_size]u8 = undefined;
+    @memcpy(&secure_password, secure_pw_data);
+
+    const expected = auth_mod.securePassword(&farm_server.farm_state.member_password, hello_random);
+    if (!mem.eql(u8, &expected, &secure_password)) {
+        try sendFarmError(self, tls_sock, err_access_denied);
+        return;
+    }
+
+    // Extract the member's server certificate (DER-encoded X.509).
+    // Optional — farm members without a configured certificate pass null.
+    const cert_data = method_pack.getData("ServerCert");
+
+    // Extract network info.
+    const ip = method_pack.getInt("PublicIp") orelse 0;
+    const point = method_pack.getInt("Point") orelse 0;
+    const hostname = method_pack.getStr("HostName") orelse "";
+
+    // Extract public ports (index 0..N-1).
+    const num_port = method_pack.getValueCount("PublicPort");
+    if (num_port < 1 or num_port > farm_mod.max_public_port_num) {
+        try sendFarmError(self, tls_sock, err_protocol_error);
+        return;
+    }
+
+    var ports = try self.allocator.alloc(u32, num_port);
+    defer self.allocator.free(ports);
+    for (0..num_port) |i| {
+        ports[i] = method_pack.getIntEx("PublicPort", i) orelse 0;
+    }
+
+    const weight = method_pack.getInt("Weight") orelse farm_mod.farm_default_weight;
+    const max_sessions = method_pack.getInt("MaxSessions") orelse 0;
+
+    // Delegate to the farm server — this blocks until the member disconnects.
+    farm_server.acceptMember(
+        tls_sock,
+        cert_data,
+        ip,
+        ports,
+        hostname,
+        point,
+        weight,
+        max_sessions,
+    ) catch |err| {
+        log.warn("Farm member connection failed: {}", .{err});
+    };
+}
+
+/// Send a farm-specific error Pack using raw framing (matching the client's
+/// `recvPack` expectation after the initial HTTP handshake).
+fn sendFarmError(_: *ServerContext, tls_sock: *tls.TlsSocket, err_code: u32) !void {
+    var resp = Pack.init(std.heap.page_allocator);
+    defer resp.deinit();
+    try resp.addInt("error", err_code);
+    try farm_rpc_mod.sendPack(tls_sock, &resp);
 }
 
 /// Run the session data plane: attach a packet adapter for this session to the
