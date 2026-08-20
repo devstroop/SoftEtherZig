@@ -217,7 +217,9 @@ typedef void (*softether_data_loop_done_fn)(
 /**
  * Start the data loop in a background thread with per-frame callbacks.
  * Must call softether_connect() first (which spawns the native data loop).
- * Returns 0 on success, negative SoftetherError on failure.
+ * The frame_fn callback is invoked from the data loop thread for each
+ * inbound Ethernet frame. Returns 0 on success, negative SoftetherError
+ * on failure.
  */
 int softether_run_data_loop_async(
     softether_client_t client,
