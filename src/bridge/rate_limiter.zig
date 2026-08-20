@@ -39,8 +39,9 @@ pub const TokenBucket = struct {
 
     /// Try to consume `bytes` tokens. Returns true if allowed, false if
     /// rate-limited. Refills tokens based on elapsed time since last call.
+    /// A config with rate=0 OR capacity=0 means unlimited (always allowed).
     pub fn consume(self: *TokenBucket, bytes: u64) bool {
-        if (self.rate == 0) return true; // unlimited
+        if (self.rate == 0 or self.capacity == 0) return true; // unlimited
 
         const now_ns: i64 = @intCast(std.time.nanoTimestamp());
         const elapsed_ns: u64 = @intCast(@max(0, now_ns - self.last_refill_ns));

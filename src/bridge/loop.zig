@@ -129,14 +129,16 @@ pub fn insertVlanTag(
 /// Strip the 802.1Q tag from a frame (shift payload left by 4 bytes).
 /// Returns the shortened frame. Caller provides an output buffer.
 pub fn stripVlanTag(frame: []const u8, out: []u8) ![]u8 {
-    if (frame.len < 14 + VLAN_TAG_SIZE) return error.FrameTooSmall;
+    if (frame.len < 14) return error.FrameTooSmall;
     const ethertype = std.mem.readInt(u16, frame[12..14], .big);
     if (ethertype != VLAN_ETHERTYPE) {
-        // No VLAN tag — just copy through.
+        // No VLAN tag — just copy through (works for any >= 14 byte frame).
         if (out.len < frame.len) return error.BufferTooSmall;
         @memcpy(out[0..frame.len], frame);
         return out[0..frame.len];
     }
+    // VLAN-tagged: need at least 14 (eth hdr) + 4 (tag) bytes.
+    if (frame.len < 14 + VLAN_TAG_SIZE) return error.FrameTooSmall;
     const out_len = frame.len - VLAN_TAG_SIZE;
     if (out.len < out_len) return error.BufferTooSmall;
     // DST + SRC MACs.
@@ -312,23 +314,26 @@ pub const BridgeLoop = struct {
             self.stats.drops += 1;
             return;
         }
+        // Parse VLAN tag for session-side learning.
+        const tag = parseVlanTag(block);
+        const vlan_id: u16 = if (tag) |t| t.vlan_id else 0;
         const src_mac: MacAddress = block[6..12].*;
         const dst_mac: MacAddress = block[0..6].*;
         if (!engine_mod.isMulticast(src_mac)) {
-            self.engine.learn(src_mac, self.session_port, nowSeconds());
+            self.engine.learnVlan(src_mac, self.session_port, nowSeconds(), vlan_id);
         }
-        const action = self.engine.resolve(dst_mac, self.session_port);
+        const action = self.engine.resolveVlan(dst_mac, self.session_port, vlan_id);
         switch (action) {
             .unicast => |port_idx| {
-                if (port_idx < self.ports.len) self.writePort(port_idx, block, action);
+                if (port_idx < self.ports.len) {
+                    self.writePortVlan(port_idx, block, action, vlan_id);
+                }
             },
             .flood => {
                 for (self.ports, 0..) |_, i| {
-                    self.writePort(@intCast(i), block, action);
+                    self.writePortVlan(@intCast(i), block, action, vlan_id);
                 }
             },
-            // A destination learned on the session port would echo the
-            // block back into the session — engine no-echo.
             .drop => self.engine.noteForwarded(self.session_port, action),
         }
     }
@@ -355,31 +360,30 @@ pub const BridgeLoop = struct {
                 }
             }
         }
+        // Parse VLAN tag for ingress VLAN-aware FDB operations.
+        const tag = parseVlanTag(frame);
+        const vlan_id: u16 = if (tag) |t| t.vlan_id else 0;
         const src_mac: MacAddress = frame[6..12].*;
         const dst_mac: MacAddress = frame[0..6].*;
         if (!engine_mod.isMulticast(src_mac)) {
-            self.engine.learn(src_mac, port_index, nowSeconds());
+            self.engine.learnVlan(src_mac, port_index, nowSeconds(), vlan_id);
         }
-        const action = self.engine.resolve(dst_mac, port_index);
+        const action = self.engine.resolveVlan(dst_mac, port_index, vlan_id);
         switch (action) {
             .unicast => |dest_port| {
                 if (dest_port == self.session_port) {
                     self.sendToSession(frame);
                     self.engine.noteForwarded(self.session_port, action);
                 } else if (dest_port < self.ports.len) {
-                    self.writePort(dest_port, frame, action);
+                    self.writePortVlan(dest_port, frame, action, vlan_id);
                 }
             },
             .flood => {
-                // To the session (remote LANs) + every LAN port except src.
-                // Record the session delivery too — getStats() sums the
-                // session-port counters, so an unrecorded flood would
-                // underreport LAN-to-session broadcast deliveries.
                 self.sendToSession(frame);
                 self.engine.noteForwarded(self.session_port, action);
                 for (self.ports, 0..) |_, i| {
                     if (i == port_index) continue;
-                    self.writePort(@intCast(i), frame, action);
+                    self.writePortVlan(@intCast(i), frame, action, vlan_id);
                 }
             },
             .drop => self.engine.noteForwarded(port_index, action),
@@ -400,10 +404,49 @@ pub const BridgeLoop = struct {
                 return;
             }
         }
-        // FrameTooLarge is already counted by the port layer's own stats,
-        // which getStats() sums — no loop-side double count. TxBusy /
-        // DeviceClosed: the port layer counted what it can.
         _ = p.write(frame) catch return;
+        self.engine.noteForwarded(port_index, action);
+    }
+
+    /// Write a frame to a port, applying per-port VLAN transformation.
+    /// Access ports strip the 802.1Q tag; trunk ports keep it.
+    fn writePortVlan(self: *BridgeLoop, port_index: u16, frame: []const u8, action: ForwardAction, vlan_id: u16) void {
+        const p = &self.ports[port_index];
+        // Egress rate limit check.
+        if (self.egress_limiters[port_index]) |*limiter| {
+            if (!limiter.consume(@intCast(frame.len))) {
+                self.stats.drops += 1;
+                return;
+            }
+        }
+        const cfg = if (port_index < self.port_configs.len) self.port_configs[port_index] else PortConfig{};
+        if (cfg.mode == .trunk) {
+            // Trunk port: check VLAN admission (empty allowed list = all VLANs).
+            if (cfg.allowed_vlan_count > 0 and vlan_id != cfg.native_vlan) {
+                var allowed = false;
+                for (cfg.allowed_vlans[0..cfg.allowed_vlan_count]) |v| {
+                    if (v == vlan_id) {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if (!allowed) {
+                    self.stats.drops += 1;
+                    return;
+                }
+            }
+            // Trunk port: send frame as-is (tagged or untagged).
+            _ = p.write(frame) catch return;
+        } else {
+            // Access port: strip tag (send untagged frames).
+            var buf: [SESSION_FRAME_BUDGET]u8 = undefined;
+            const stripped = stripVlanTag(frame, &buf) catch {
+                _ = p.write(frame) catch return;
+                self.engine.noteForwarded(port_index, action);
+                return;
+            };
+            _ = p.write(stripped) catch return;
+        }
         self.engine.noteForwarded(port_index, action);
     }
 
@@ -820,4 +863,85 @@ test "bridge loop: egress rate limiter drops frames when bucket exhausted" {
 
     const stats = h.loop.getStats();
     try std.testing.expect(stats.drops >= 1);
+}
+
+// ---- VLAN integration tests ----
+
+test "bridge loop: access port strips VLAN tag on egress" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    // Configure port 0 as access port (native VLAN 10).
+    h.loop.setPortVlan(0, .{ .mode = .access, .native_vlan = 10 });
+
+    const mac_a = makeMac(2, 0, 0, 0, 0, 1);
+    const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
+
+    // Learn A on port 0 (via untagged self-frame → VLAN 0).
+    const f_learn = buildFrame(mac_a, mac_a);
+    h.loop.dispatchPortFrame(0, &f_learn);
+
+    // Session sends a VLAN-tagged frame (VLAN 10) to A.
+    // Port 0 is access → should strip the tag on egress.
+    var tagged: [18 + 42]u8 = undefined;
+    @memcpy(tagged[0..6], &mac_a); // DST
+    @memcpy(tagged[6..12], &mac_remote); // SRC
+    std.mem.writeInt(u16, tagged[12..14], VLAN_ETHERTYPE, .big);
+    std.mem.writeInt(u16, tagged[14..16], buildTci(10, 0, false), .big);
+    std.mem.writeInt(u16, tagged[16..18], 0x0806, .big);
+    @memset(tagged[18..], 0);
+
+    h.loop.dispatchSessionBlock(&tagged);
+
+    // Port 0 should receive an untagged frame (14 + 42 = 56 bytes).
+    try std.testing.expectEqual(@as(usize, 56), h.port0.out.items.len);
+    // Verify the ethertype at offset 12 is 0x0806 (ARP), not 0x8100 (VLAN).
+    try std.testing.expectEqual(@as(u16, 0x0806), std.mem.readInt(u16, h.port0.out.items[12..14], .big));
+}
+
+test "bridge loop: trunk port preserves VLAN tag on egress" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    // Configure port 0 as trunk port.
+    h.loop.setPortVlan(0, .{ .mode = .trunk, .native_vlan = 1 });
+
+    const mac_a = makeMac(2, 0, 0, 0, 0, 1);
+    const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
+
+    // Learn A on port 0 (via untagged frame → VLAN 0).
+    const f_learn = buildFrame(mac_a, mac_a);
+    h.loop.dispatchPortFrame(0, &f_learn);
+
+    // Session sends a VLAN-tagged frame (VLAN 10) to A.
+    var tagged: [18 + 42]u8 = undefined;
+    @memcpy(tagged[0..6], &mac_a);
+    @memcpy(tagged[6..12], &mac_remote);
+    std.mem.writeInt(u16, tagged[12..14], VLAN_ETHERTYPE, .big);
+    std.mem.writeInt(u16, tagged[14..16], buildTci(10, 0, false), .big);
+    std.mem.writeInt(u16, tagged[16..18], 0x0806, .big);
+    @memset(tagged[18..], 0);
+
+    h.loop.dispatchSessionBlock(&tagged);
+
+    // Port 0 (trunk) should receive the frame with VLAN tag intact (62 bytes).
+    try std.testing.expectEqual(@as(usize, 18 + 42), h.port0.out.items.len);
+    // Verify the ethertype at offset 12 is 0x8100 (VLAN).
+    try std.testing.expectEqual(VLAN_ETHERTYPE, std.mem.readInt(u16, h.port0.out.items[12..14], .big));
 }
