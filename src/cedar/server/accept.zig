@@ -708,6 +708,9 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
     var main = try SessionMain.init(self.allocator, &tunnel, pa.pa(), session_config);
     // Interpose the per-socket cipher for data-channel encryption (M7).
     main.cipher = established.session.newConnectionCipher();
+    // Wire the session policy's max_connection into the session loop so the
+    // additional_connect handler enforces the correct limit (C: `s->MaxConnection`).
+    main.max_connections = established.session.max_connection;
     defer main.deinit();
 
     // Register with the session registry (issue #88) so the admin dispatcher
@@ -779,29 +782,33 @@ fn handleAdditionalConnect(
     @memcpy(&session_key, session_key_data);
 
     // Look up the existing session by key (C: `GetSessionFromKey`).
-    const rec = self.session_registry.findBySessionKey(&session_key) orelse {
-        log.warn("additional_connect: session key not found", .{});
+    // findBySessionKeyAndReserve validates the halt flag under the registry lock
+    // to avoid a stale pointer after the session begins teardown.
+    const main = self.session_registry.findBySessionKeyAndReserve(&session_key) orelse {
+        log.warn("additional_connect: session key not found or halting", .{});
         try sendAdditionalConnectError(self, tls_sock, error.SessionTimeout);
         return;
     };
 
-    // Validate the session is still alive.
-    if (rec.main.isStopRequested()) {
-        log.warn("additional_connect: session is halting", .{});
-        try sendAdditionalConnectError(self, tls_sock, error.SessionTimeout);
-        return;
+    // Atomically reserve a connection slot (C: `Count(s->Connection->CurrentNumConnection) > s->MaxConnection`).
+    // Uses compareExchange loop to prevent concurrent requests from bypassing the limit.
+    while (true) {
+        const current = main.current_connections.load(.acquire);
+        if (current >= main.max_connections) {
+            log.warn("additional_connect: too many connections ({d}/{d})", .{ current, main.max_connections });
+            try sendAdditionalConnectError(self, tls_sock, error.TooManyConnections);
+            return;
+        }
+        if (main.current_connections.cmpxchgStrong(current, current + 1, .seq_cst, .acquire)) |_| {
+            // CAS failed — retry (another thread raced us).
+            continue;
+        } else {
+            break; // slot reserved
+        }
     }
-
-    // Check connection limit (C: `Count(s->Connection->CurrentNumConnection) > s->MaxConnection`).
-    const current = rec.main.current_connections.load(.acquire);
-    if (current >= rec.main.max_connections) {
-        log.warn("additional_connect: too many connections ({d}/{d})", .{ current, rec.main.max_connections });
-        try sendAdditionalConnectError(self, tls_sock, error.TooManyConnections);
-        return;
-    }
-
-    // Increment the connection counter.
-    _ = rec.main.current_connections.fetchAdd(1, .seq_cst);
+    // Release the reserved slot on any error below (response build failure,
+    // TLS write failure, etc.) so the counter stays accurate.
+    errdefer _ = main.current_connections.fetchSub(1, .seq_cst);
 
     // Determine direction. In half-connection mode, assign the underrepresented
     // direction; otherwise bidirectional (C: `TCP_BOTH`).
@@ -822,10 +829,18 @@ fn handleAdditionalConnect(
     defer self.allocator.free(resp_bytes);
 
     try http.sendHttpResponse(tls_sock, resp_bytes);
-    log.info("additional_connect: session {s} accepted (dir={d}, conns={d})", .{
-        rec.session_name,
+
+    // NOTE: Phase 2 (multi-socket pool in SessionMain) is required to actually
+    // use this accepted socket for data-plane traffic. Without it, the TLS
+    // socket is closed when this function returns and the client sees a
+    // disconnect. Phase 2 will wrap `tls_sock` in a `TunnelConnection`, add it
+    // to the session's socket pool, and start polling it for data. For now the
+    // connection counter is decremented to avoid stale accounting.
+    _ = main.current_connections.fetchSub(1, .seq_cst);
+
+    log.info("additional_connect: session accepted (dir={d}, conns={d})", .{
         direction,
-        rec.main.current_connections.load(.acquire),
+        main.current_connections.load(.acquire),
     });
 }
 
