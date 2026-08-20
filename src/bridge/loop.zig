@@ -537,7 +537,7 @@ pub const BridgeLoop = struct {
         const stp = &(self.stp_bridge orelse return);
         var buf: [SESSION_FRAME_BUDGET]u8 = undefined;
         const bpdu = stp.buildConfigBpdu(port_index);
-        const frame_len = stp_mod.encodeConfigBpdu(bpdu, &buf) catch return;
+        const frame_len = stp_mod.encodeConfigBpdu(bpdu, stp.bridge_id.mac, &buf) catch return;
         if (port_index < self.ports.len) {
             _ = self.ports[port_index].write(buf[0..frame_len]) catch return;
         }
@@ -556,8 +556,8 @@ pub const BridgeLoop = struct {
         const stp = &(self.stp_bridge orelse return);
         if (port_index >= stp.port_count) return;
 
-        // Try to decode as a Config BPDU (minimum 49 bytes for a valid frame).
-        if (frame.len >= 49) {
+        // Try to decode as a Config BPDU (minimum 51 bytes for a valid frame).
+        if (frame.len >= 51) {
             const bpdu = stp_mod.decodeConfigBpdu(frame) orelse return;
             const action = stp.processConfigBpdu(port_index, bpdu);
             switch (action) {
@@ -565,46 +565,43 @@ pub const BridgeLoop = struct {
                 .send_bpdu => self.sendBpdu(port_index),
                 .none => {},
             }
-        } else if (frame.len >= 14) {
-            // Minimal frame — treat as TCN BPDU (type 0x80).
-            if (frame.len >= 15) {
-                const bpdu_type = frame[14];
-                if (bpdu_type == stp_mod.BPDU_TYPE_TCN) {
-                    stp.processTcnBpdu(port_index);
-                }
+        } else if (frame.len >= 21) {
+            // Minimal frame — check for TCN BPDU (type at offset 20, after
+            // DST(6)+SRC(6)+Ethertype(2)+LLC(3)+ProtID(2)+Version(1)).
+            const bpdu_type = frame[20];
+            if (bpdu_type == stp_mod.BPDU_TYPE_TCN) {
+                stp.processTcnBpdu(port_index);
             }
         }
     }
 
     /// Process a BPDU received from the session (uplink) side.
-    /// We treat the session port as a logical port 0 for BPDU purposes;
-    /// the BPDU modifies the root path but doesn't change which port is
-    /// root (that's determined by LAN-side BPDUs).
+    /// The session is modeled as STP port index `port_count` (one past the
+    /// LAN ports). BPDUs arriving from the session are processed as if they
+    /// came from a remote switch on the uplink. Response BPDUs are sent
+    /// back through the session sink.
     fn handleBpduFromSession(self: *BridgeLoop, frame: []const u8) void {
         const stp = &(self.stp_bridge orelse return);
+        const session_stp_port: u16 = @intCast(stp.port_count);
 
-        if (frame.len >= 49) {
+        if (frame.len >= 52) {
             const bpdu = stp_mod.decodeConfigBpdu(frame) orelse return;
-            // If the BPDU's root is better than our current root, update
-            // root info via processConfigBpdu on the root port (or port 0
-            // as a fallback).
-            const root_port = if (stp.root_port != stp_mod.PORT_NONE) stp.root_port else 0;
-            const action = stp.processConfigBpdu(root_port, bpdu);
+            const action = stp.processConfigBpdu(session_stp_port, bpdu);
             switch (action) {
                 .recompute => stp.recompute(),
                 .send_bpdu => {
-                    // Respond out of the root port (toward the remote switch).
-                    if (stp.root_port != stp_mod.PORT_NONE) {
-                        self.sendBpdu(stp.root_port);
-                    }
+                    // Send a response BPDU back through the session sink.
+                    var buf: [SESSION_FRAME_BUDGET]u8 = undefined;
+                    const resp_bpdu = stp.buildConfigBpdu(session_stp_port);
+                    const frame_len = stp_mod.encodeConfigBpdu(resp_bpdu, stp.bridge_id.mac, &buf) catch return;
+                    self.sendToSession(buf[0..frame_len]);
                 },
                 .none => {},
             }
-        } else if (frame.len >= 15) {
-            const bpdu_type = frame[14];
+        } else if (frame.len >= 21) {
+            const bpdu_type = frame[20];
             if (bpdu_type == stp_mod.BPDU_TYPE_TCN) {
-                const root_port = if (stp.root_port != stp_mod.PORT_NONE) stp.root_port else 0;
-                stp.processTcnBpdu(root_port);
+                stp.processTcnBpdu(session_stp_port);
             }
         }
     }
@@ -1104,7 +1101,9 @@ test "bridge loop: trunk port preserves VLAN tag on egress" {
 /// Build a BPDU frame with the STP multicast destination.
 fn buildBpduFrame(bpdu: stp_mod.ConfigBpdu) [64]u8 {
     var buf: [64]u8 = undefined;
-    const len = stp_mod.encodeConfigBpdu(bpdu, &buf) catch unreachable;
+    // Use zero MAC as source for test BPDU frames (not validated by decoder).
+    const zero_mac: MacAddress = .{ 0, 0, 0, 0, 0, 0 };
+    const len = stp_mod.encodeConfigBpdu(bpdu, zero_mac, &buf) catch unreachable;
     // Zero-pad the rest.
     if (len < buf.len) @memset(buf[len..], 0);
     return buf;
