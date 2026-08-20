@@ -171,6 +171,14 @@ pub const SessionMain = struct {
     next_keepalive_time: i64 = 0,
     send_queue_bytes: usize = 0,
 
+    /// Maximum number of TCP connections allowed for this session (C:
+    /// `s->MaxConnection`). Default 1; incremented by `additional_connect`.
+    max_connections: u32 = 1,
+    /// Current number of active TCP connections (C:
+    /// `s->Connection->CurrentNumConnection`). Starts at 1 for the primary
+    /// connection; incremented/decremented by `additional_connect` handling.
+    current_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+
     // Heap buffers (large; must not live on the stack).
     recv_out: [][]u8,
     recv_scratch: []u8,

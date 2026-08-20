@@ -41,6 +41,9 @@ pub const SessionRecord = struct {
     peer_port: u16 = 0,
     created_time: i64 = 0,
     main: *SessionMain,
+    /// 20-byte session key (SHA-1) used by `additional_connect` to look up
+    /// an existing session (C: `GetSessionFromKey`).
+    session_key: [20]u8 = [_]u8{0} ** 20,
 
     fn free(self: *SessionRecord, allocator: Allocator) void {
         allocator.free(self.session_name);
@@ -200,6 +203,18 @@ pub const SessionRegistry = struct {
     fn findOnHubLocked(self: *SessionRegistry, hub_name: []const u8, session_name: []const u8) ?*SessionRecord {
         for (self.sessions.items) |rec| {
             if (eqlIgnoreCase(rec.hub_name, hub_name) and eqlIgnoreCase(rec.session_name, session_name)) return rec;
+        }
+        return null;
+    }
+
+    /// Find a session by its 20-byte session key (C: `GetSessionFromKey`).
+    /// Used by the `additional_connect` handler to locate the existing session
+    /// the client wants to attach a new TCP socket to.
+    pub fn findBySessionKey(self: *SessionRegistry, key: *const [20]u8) ?*SessionRecord {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.sessions.items) |rec| {
+            if (mem.eql(u8, &rec.session_key, key)) return rec;
         }
         return null;
     }
