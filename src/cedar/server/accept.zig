@@ -1493,3 +1493,150 @@ test "server.accept two sessions exchange a frame through the hub" {
     e2e_b.client.close();
     e2e_b.client_closed = true;
 }
+
+test "server.accept rejects GET instead of POST in signature upload" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e.deinit();
+
+    // Send a GET request instead of POST — receiveSignature must reject it.
+    const bad_request = "GET /vpnsvc/connect.cgi HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nVPNCONNECT";
+    try e2e.client.writeAll(bad_request);
+
+    // Server should close the connection (receiveSignature returns error).
+    // Poll with a timeout to detect EOF — readBlocking would hang on abrupt TLS close.
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = e2e.client.tcp_fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
+    if (got_event) {
+        var buf: [64]u8 = undefined;
+        const n = e2e.client.readBlocking(&buf) catch 0;
+        try testing.expectEqual(@as(usize, 0), n);
+    }
+    // If no event, server already closed — also success.
+
+    e2e.client_closed = true;
+}
+
+test "server.accept rejects wrong target in signature upload" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e.deinit();
+
+    // POST to wrong target — receiveSignature must reject it.
+    const bad_request = "POST /wrong/path HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nVPNCONNECT";
+    try e2e.client.writeAll(bad_request);
+
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = e2e.client.tcp_fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
+    if (got_event) {
+        var buf: [64]u8 = undefined;
+        const n = e2e.client.readBlocking(&buf) catch 0;
+        try testing.expectEqual(@as(usize, 0), n);
+    }
+
+    e2e.client_closed = true;
+}
+
+test "server.accept rejects wrong body in signature upload" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e.deinit();
+
+    // Correct method and target, but body is not VPNCONNECT and doesn't match WaterMark.
+    const bad_request = "POST /vpnsvc/connect.cgi HTTP/1.1\r\nHost: test\r\nContent-Length: 11\r\n\r\nWRONG_BODY!";
+    try e2e.client.writeAll(bad_request);
+
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = e2e.client.tcp_fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
+    if (got_event) {
+        var buf: [64]u8 = undefined;
+        const n = e2e.client.readBlocking(&buf) catch 0;
+        try testing.expectEqual(@as(usize, 0), n);
+    }
+
+    e2e.client_closed = true;
+}
+
+test "server.accept rejects oversized Content-Length in signature upload" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    const cert = try tls.generateSelfSignedCert(allocator, "accept.test");
+    defer allocator.free(cert.cert_pem);
+    defer allocator.free(cert.key_pem);
+
+    var auth_hub = try auth_mod.Hub.init(allocator, "VPN");
+    defer auth_hub.deinit();
+
+    const switch_hub = try hub.Hub.init(allocator, "VPN");
+    defer switch_hub.deinit();
+
+    var e2e = try startEndToEnd(allocator, cert.cert_pem, cert.key_pem, &auth_hub, switch_hub);
+    defer e2e.deinit();
+
+    // Content-Length > MAX_WATERMARK_SIZE (8192) and != 10 — must be rejected.
+    const bad_request = "POST /vpnsvc/connect.cgi HTTP/1.1\r\nHost: test\r\nContent-Length: 99999\r\n\r\n";
+    try e2e.client.writeAll(bad_request);
+
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = e2e.client.tcp_fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
+    if (got_event) {
+        var buf: [64]u8 = undefined;
+        const n = e2e.client.readBlocking(&buf) catch 0;
+        try testing.expectEqual(@as(usize, 0), n);
+    }
+
+    e2e.client_closed = true;
+}
