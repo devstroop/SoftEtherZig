@@ -708,6 +708,9 @@ fn runSession(self: *ServerContext, tls_sock: *tls.TlsSocket, established: *Esta
     var main = try SessionMain.init(self.allocator, &tunnel, pa.pa(), session_config);
     // Interpose the per-socket cipher for data-channel encryption (M7).
     main.cipher = established.session.newConnectionCipher();
+    // Store the session pointer so additional_connect handlers can create
+    // per-socket ciphers from the same key material.
+    main.server_session = &established.session;
     // Wire the session policy's max_connection into the session loop so the
     // additional_connect handler enforces the correct limit (C: `s->MaxConnection`).
     main.max_connections = established.session.max_connection;
@@ -789,6 +792,11 @@ fn handleAdditionalConnect(
         try sendAdditionalConnectError(self, tls_sock, error.SessionTimeout);
         return;
     };
+    // findBySessionKeyAndReserve already incremented extra_slot_ref while
+    // holding the registry mutex, pinning the session alive. The errdefer
+    // releases it on any early error path; the success path releases it
+    // after the slot is pushed into the session pool.
+    errdefer _ = main.extra_slot_ref.fetchSub(1, .release);
 
     // Atomically reserve a connection slot (C: `Count(s->Connection->CurrentNumConnection) > s->MaxConnection`).
     // Uses compareExchange loop to prevent concurrent requests from bypassing the limit.
@@ -830,14 +838,88 @@ fn handleAdditionalConnect(
 
     try http.sendHttpResponse(tls_sock, resp_bytes);
 
-    // NOTE: Phase 2 (multi-socket pool in SessionMain) is required to actually
-    // use this accepted socket for data-plane traffic. Without it, the TLS
-    // socket is closed when this function returns and the client sees a
-    // disconnect. Phase 2 will wrap `tls_sock` in a `TunnelConnection`, add it
-    // to the session's socket pool, and start polling it for data. For now the
-    // connection counter is decremented to avoid stale accounting.
-    _ = main.current_connections.fetchSub(1, .seq_cst);
+    // Phase 2: wrap the TLS socket in a TunnelConnection and push it into
+    // the session's multi-TCP pool so the session loop can recv/send through it.
+    const session_main_mod = @import("session_main.zig");
 
+    // Transfer ownership of the TLS socket to the heap. The accept thread's
+    // `defer tls_sock.close()` in `acceptConnection` would otherwise close the
+    // socket (and free its SSL state + buffers) as soon as this function
+    // returns, while the session loop is still using it.
+    const owned_sock = try self.allocator.create(tls.TlsSocket);
+    owned_sock.* = tls_sock.*;
+    // Clear the stack copy so the accept thread's close() is a harmless no-op.
+    tls_sock.connected = false;
+    tls_sock.ssl = null;
+    tls_sock.ssl_ctx = null;
+    tls_sock.hostname_buf = &.{};
+    tls_sock.read_buf = "";
+
+    // Heap-allocate a TlsConn context wrapping the owned socket.
+    const ExtraCtx = struct {
+        socket: *tls.TlsSocket,
+        conn: TlsConn,
+        allocator: std.mem.Allocator,
+        fn destroy(ptr: *anyopaque) void {
+            const ctx: *@This() = @ptrCast(@alignCast(ptr));
+            ctx.socket.close();
+            ctx.allocator.destroy(ctx.socket);
+            ctx.allocator.destroy(ctx);
+        }
+    };
+    const extra_ctx = try self.allocator.create(ExtraCtx);
+    extra_ctx.* = .{
+        .socket = owned_sock,
+        .conn = .{ .sock = owned_sock },
+        .allocator = self.allocator,
+    };
+
+    // Create a TunnelConnection with its own framing state machine.
+    var tunnel = TunnelConnection.init(
+        self.allocator,
+        extra_ctx,
+        TlsConn.read,
+        TlsConn.write,
+    );
+    // Mirror compression setting from the primary connection.
+    if (main.tunnel.use_compress) {
+        tunnel.use_compress = true;
+        tunnel.initCompression();
+    }
+
+    // Heap-allocate the connection slot (stable address for the zlib state).
+    // Create a per-socket cipher from the session's key material so data-channel
+    // encryption works independently on each TCP connection.
+    const slot = try self.allocator.create(session_main_mod.ConnectionSlot);
+    slot.* = .{
+        .tunnel = tunnel,
+        .cipher = if (main.server_session) |sess| sess.newConnectionCipher() else null,
+        .direction = direction,
+        .fd = owned_sock.tcp_fd,
+        .tls_context = extra_ctx,
+        .tls_context_destroy = ExtraCtx.destroy,
+    };
+
+    // Push into the session pool. The session loop will start reading from
+    // this socket on the next iteration.
+    // Guard against TOCTOU: the session may be shutting down between the
+    // registry lookup above and this point.
+    if (main.isStopRequested()) {
+        log.info("additional_connect: session shutting down, dropping slot", .{});
+        slot.destroy(self.allocator);
+        _ = main.current_connections.fetchSub(1, .seq_cst);
+        _ = main.extra_slot_ref.fetchSub(1, .release);
+        return;
+    }
+    main.addExtraSlot(slot) catch |err| {
+        log.warn("additional_connect: failed to add slot: {}", .{err});
+        slot.destroy(self.allocator);
+        _ = main.current_connections.fetchSub(1, .seq_cst);
+        _ = main.extra_slot_ref.fetchSub(1, .release);
+        return;
+    };
+
+    _ = main.extra_slot_ref.fetchSub(1, .release);
     log.info("additional_connect: session accepted (dir={d}, conns={d})", .{
         direction,
         main.current_connections.load(.acquire),
