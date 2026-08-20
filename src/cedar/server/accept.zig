@@ -1523,12 +1523,10 @@ test "server.accept rejects GET instead of POST in signature upload" {
         .revents = 0,
     }};
     const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
-    if (got_event) {
-        var buf: [64]u8 = undefined;
-        const n = e2e.client.readBlocking(&buf) catch 0;
-        try testing.expectEqual(@as(usize, 0), n);
-    }
-    // If no event, server already closed — also success.
+    try testing.expect(got_event);
+    var buf: [64]u8 = undefined;
+    const n = e2e.client.readBlocking(&buf) catch 0;
+    try testing.expectEqual(@as(usize, 0), n);
 
     e2e.client_closed = true;
 }
@@ -1560,11 +1558,10 @@ test "server.accept rejects wrong target in signature upload" {
         .revents = 0,
     }};
     const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
-    if (got_event) {
-        var buf: [64]u8 = undefined;
-        const n = e2e.client.readBlocking(&buf) catch 0;
-        try testing.expectEqual(@as(usize, 0), n);
-    }
+    try testing.expect(got_event);
+    var buf: [64]u8 = undefined;
+    const n = e2e.client.readBlocking(&buf) catch 0;
+    try testing.expectEqual(@as(usize, 0), n);
 
     e2e.client_closed = true;
 }
@@ -1596,11 +1593,10 @@ test "server.accept rejects wrong body in signature upload" {
         .revents = 0,
     }};
     const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
-    if (got_event) {
-        var buf: [64]u8 = undefined;
-        const n = e2e.client.readBlocking(&buf) catch 0;
-        try testing.expectEqual(@as(usize, 0), n);
-    }
+    try testing.expect(got_event);
+    var buf: [64]u8 = undefined;
+    const n = e2e.client.readBlocking(&buf) catch 0;
+    try testing.expectEqual(@as(usize, 0), n);
 
     e2e.client_closed = true;
 }
@@ -1632,11 +1628,10 @@ test "server.accept rejects oversized Content-Length in signature upload" {
         .revents = 0,
     }};
     const got_event = (std.posix.poll(&pfd, 2000) catch 0) > 0;
-    if (got_event) {
-        var buf: [64]u8 = undefined;
-        const n = e2e.client.readBlocking(&buf) catch 0;
-        try testing.expectEqual(@as(usize, 0), n);
-    }
+    try testing.expect(got_event);
+    var buf: [64]u8 = undefined;
+    const n = e2e.client.readBlocking(&buf) catch 0;
+    try testing.expectEqual(@as(usize, 0), n);
 
     e2e.client_closed = true;
 }
