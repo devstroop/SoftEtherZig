@@ -667,6 +667,7 @@ pub fn build(b: *std.Build) void {
         "src/mayaqua/network/socks.zig",
         "src/bridge/fdb.zig",
         "src/bridge/engine.zig",
+        "src/bridge/rate_limiter.zig",
     };
 
     for (test_sources) |test_src| {

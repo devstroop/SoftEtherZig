@@ -91,6 +91,13 @@ pub const BridgeEngine = struct {
         };
     }
 
+    /// Learn with explicit VLAN ID.
+    pub fn learnVlan(self: *BridgeEngine, src_mac: MacAddress, src_port: u16, now: u32, vlan_id: u16) void {
+        self.fdb.learnVlan(src_mac, src_port, now, vlan_id) catch |err| switch (err) {
+            error.TableFull => {},
+        };
+    }
+
     /// Resolve the destination of a frame arriving on `src_port`.
     pub fn classifyDest(_: *const BridgeEngine, dst_mac: MacAddress) DestKind {
         if (isBroadcast(dst_mac)) return .broadcast;
@@ -100,24 +107,33 @@ pub const BridgeEngine = struct {
 
     /// Decide where a frame must go. Never returns the source port
     /// (no-echo loop guard): if the only candidate port is the source
-    /// itself, the frame is dropped.
+    /// itself, the frame is dropped. Uses VLAN 0 (untagged) by default.
     pub fn resolve(
         self: *const BridgeEngine,
         dst_mac: MacAddress,
         src_port: u16,
     ) ForwardAction {
+        return self.resolveVlan(dst_mac, src_port, 0);
+    }
+
+    /// Resolve with explicit VLAN ID. The FDB lookup uses the composite
+    /// (dst_mac, vlan_id) key.
+    pub fn resolveVlan(
+        self: *const BridgeEngine,
+        dst_mac: MacAddress,
+        src_port: u16,
+        vlan_id: u16,
+    ) ForwardAction {
         const kind = self.classifyDest(dst_mac);
         if (kind != .unicast) {
-            // Broadcast / multicast → flood to all other ports.
-            if (self.port_count <= 1) return .drop; // no other port exists
+            if (self.port_count <= 1) return .drop;
             return .flood;
         }
-        // Unknown-unicast → flood (proposal §4.3: unknown → flood).
-        const dest_port = self.fdb.lookup(dst_mac) orelse {
+        const dest_port = self.fdb.lookup(dst_mac, vlan_id) orelse {
             if (self.port_count <= 1) return .drop;
             return .flood;
         };
-        if (dest_port == src_port) return .drop; // no-echo
+        if (dest_port == src_port) return .drop;
         return .{ .unicast = dest_port };
     }
 
