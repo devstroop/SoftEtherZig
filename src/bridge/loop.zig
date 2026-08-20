@@ -796,8 +796,10 @@ test "bridge loop: egress rate limiter drops frames when bucket exhausted" {
         std.testing.allocator.destroy(h.capture);
     }
 
-    // Set very low egress rate limit on port 0: 1 byte/sec, 1 byte burst.
-    h.loop.setPortRateLimit(0, null, .{ .rate = 1, .capacity = 1 });
+    // Set very low egress rate limit on port 0: 1 byte/sec, 100 byte burst.
+    // Frame is 56 bytes (14+42), so first frame fits in burst but second
+    // is blocked (only 1 byte/sec refill).
+    h.loop.setPortRateLimit(0, null, .{ .rate = 1, .capacity = 100 });
 
     const mac_a = makeMac(2, 0, 0, 0, 0, 1);
     const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
