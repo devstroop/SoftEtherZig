@@ -854,12 +854,13 @@ test "bridge loop: egress rate limiter drops frames when bucket exhausted" {
     // Session sends to A → unicast to port 0. First frame should succeed
     // (burst), second should be rate-limited.
     const f_down = buildFrame(mac_remote, mac_a);
+    const frame_len = f_down.len;
     h.loop.dispatchSessionBlock(&f_down);
-    try std.testing.expectEqual(@as(usize, 1), h.port0.out.items.len);
+    try std.testing.expectEqual(frame_len, h.port0.out.items.len);
 
     // Second frame should be dropped.
     h.loop.dispatchSessionBlock(&f_down);
-    try std.testing.expectEqual(@as(usize, 1), h.port0.out.items.len);
+    try std.testing.expectEqual(frame_len, h.port0.out.items.len);
 
     const stats = h.loop.getStats();
     try std.testing.expect(stats.drops >= 1);
