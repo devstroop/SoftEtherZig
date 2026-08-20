@@ -291,7 +291,7 @@ pub fn handleConnection(self: *ServerContext, tls_sock: *tls.TlsSocket, peer_ip:
         //     identifies itself with a session key; the server validates
         //     the key, assigns a direction, and returns RC4 keys.
         try handleAdditionalConnect(self, tls_sock, &method_pack, peer_ip, peer_port);
-    } else if (mem.eql(u8, method, "farm_connect") and self.farm_server != null) {
+    } else if (mem.eql(u8, method, "farm_connect")) {
         // 3d. Farm cluster RPC — C: `ServerAccept` at Protocol.c:4531.
         //     A farm member connects to the controller, authenticates,
         //     and enters a bidirectional task loop.
@@ -675,7 +675,10 @@ fn handleFarmConnect(
     method_pack: *const Pack,
     hello_random: *const [Protocol.sha1_size]u8,
 ) !void {
-    const farm_server = self.farm_server.?;
+    const farm_server = self.farm_server orelse {
+        try sendFarmError(self, tls_sock, err_not_farm_controller);
+        return;
+    };
 
     // Check that we are actually a farm controller.
     if (!farm_server.farm_state.isFarmController() or !farm_server.farm_state.farm_controller_inited) {
@@ -702,10 +705,8 @@ fn handleFarmConnect(
     }
 
     // Extract the member's server certificate (DER-encoded X.509).
-    const cert_data = method_pack.getData("ServerCert") orelse {
-        try sendFarmError(self, tls_sock, err_protocol_error);
-        return;
-    };
+    // Optional — farm members without a configured certificate pass null.
+    const cert_data = method_pack.getData("ServerCert");
 
     // Extract network info.
     const ip = method_pack.getInt("PublicIp") orelse 0;
@@ -743,14 +744,13 @@ fn handleFarmConnect(
     };
 }
 
-/// Send a farm-specific error Pack and close.
+/// Send a farm-specific error Pack using raw framing (matching the client's
+/// `recvPack` expectation after the initial HTTP handshake).
 fn sendFarmError(_: *ServerContext, tls_sock: *tls.TlsSocket, err_code: u32) !void {
     var resp = Pack.init(std.heap.page_allocator);
     defer resp.deinit();
     try resp.addInt("error", err_code);
-    const resp_body = try resp.toBytes(std.heap.page_allocator);
-    defer std.heap.page_allocator.free(resp_body);
-    try http.sendHttpResponse(tls_sock, resp_body);
+    try farm_rpc_mod.sendPack(tls_sock, &resp);
 }
 
 /// Run the session data plane: attach a packet adapter for this session to the

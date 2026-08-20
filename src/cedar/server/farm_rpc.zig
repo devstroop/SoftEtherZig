@@ -106,6 +106,16 @@ pub const FarmServer = struct {
     }
 
     pub fn deinit(self: *FarmServer) void {
+        // Halt all active members so their handler threads exit before
+        // FarmState.deinit frees the member list.
+        self.farm_state.farm_controller_inited = false;
+        {
+            self.members_lock.lock();
+            defer self.members_lock.unlock();
+            for (self.farm_state.members.items) |m| {
+                m.halting = true;
+            }
+        }
         self.stopControlThread();
     }
 
@@ -466,7 +476,13 @@ pub const FarmClient = struct {
             self.controller.num_try += 1;
 
             const controller_host = std.mem.sliceTo(&self.farm_state.controller_name, 0);
-            const controller_port: u16 = @intCast(self.farm_state.controller_port);
+            const raw_port = self.farm_state.controller_port;
+            if (raw_port < 1 or raw_port > 65535) {
+                log.err("Farm controller port {d} out of valid range, retrying", .{raw_port});
+                std.Thread.sleep(farm.retry_connect_interval_ms * std.time.ns_per_ms);
+                continue;
+            }
+            const controller_port: u16 = @intCast(raw_port);
 
             log.info("Farm member connecting to controller {s}:{d}... (attempt #{d})", .{
                 controller_host,
@@ -547,7 +563,9 @@ pub const FarmClient = struct {
         }
 
         // Send the method pack via HTTP POST.
-        try http.sendHttpRequest(&tls_sock, try method_pack.toBytes(self.allocator), controller_host);
+        const method_bytes = try method_pack.toBytes(self.allocator);
+        defer self.allocator.free(method_bytes);
+        try http.sendHttpRequest(&tls_sock, method_bytes, controller_host);
 
         // 5. Read success pack via raw frame.
         //    C: `HttpClientRecv` reads HTTP response, but we use raw frames

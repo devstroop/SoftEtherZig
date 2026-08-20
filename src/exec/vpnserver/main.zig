@@ -415,6 +415,12 @@ fn buildServer(state: *ServerState) !void {
     farm_state.* = softether.server.farm.FarmState.init(state.allocator);
     state.farm_state = farm_state;
 
+    // Create farm RPC server. Always allocated — the handler checks
+    // server_type/isFarmController before accepting members.
+    const farm_server = try state.allocator.create(softether.server.farm_rpc.FarmServer);
+    farm_server.* = softether.server.farm_rpc.FarmServer.init(state.allocator, farm_state);
+    state.farm_server = farm_server;
+
     const ctx = try state.allocator.create(softether.server.accept.ServerContext);
     ctx.* = .{
         .allocator = state.allocator,
@@ -424,6 +430,7 @@ fn buildServer(state: *ServerState) !void {
         .switch_hub = state.switch_hub.?,
         .session_registry = registry,
         .admin_server = admin,
+        .farm_server = farm_server,
     };
     state.server_ctx = ctx;
 
@@ -436,7 +443,7 @@ fn buildServer(state: *ServerState) !void {
     };
 
     // TODO(M8 Phase 2): When server type is configured as farm controller,
-    // create FarmServer and wire it to ctx.farm_server + start control thread.
+    // start the farm control thread via farm_server.startControlThread().
 }
 
 /// Start a listener on each default port. A port that fails to bind (e.g. 443
