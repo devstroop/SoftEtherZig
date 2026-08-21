@@ -206,8 +206,8 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
 
         const wanted_by = if (scope == .system) "multi-user.target" else "default.target";
         const description = kind.displayName();
-        const exec_start = if (kind == .vpnserver) exe_path else try std.fmt.allocPrint(allocator, "{s} connect", .{exe_path});
-        defer if (kind != .vpnserver) allocator.free(exec_start);
+        // M22-3: bare vpnclient [OPTIONS] is canonical, no connect verb
+        const exec_start = exe_path;
         const unit_content = if (scope == .system) try std.fmt.allocPrint(allocator,
             \\[Unit]
             \\Description={s}
@@ -293,7 +293,8 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
         defer allocator.free(label);
         const log_path = try std.fmt.allocPrint(allocator, "/tmp/{s}.log", .{kind.name()});
         defer allocator.free(log_path);
-        const plist_content = if (kind == .vpnserver) try std.fmt.allocPrint(allocator,
+        // M22-3: bare, no connect verb for both client and server
+        const plist_content = try std.fmt.allocPrint(allocator,
             \\<?xml version="1.0" encoding="UTF-8"?>
             \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             \\<plist version="1.0">
@@ -303,29 +304,6 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
             \\    <key>ProgramArguments</key>
             \\    <array>
             \\        <string>{s}</string>
-            \\    </array>
-            \\    <key>RunAtLoad</key>
-            \\    <true/>
-            \\    <key>KeepAlive</key>
-            \\    <true/>
-            \\    <key>StandardOutPath</key>
-            \\    <string>{s}</string>
-            \\    <key>StandardErrorPath</key>
-            \\    <string>{s}</string>
-            \\</dict>
-            \\</plist>
-            \\
-        , .{ label, exe_path, log_path, log_path }) else try std.fmt.allocPrint(allocator,
-            \\<?xml version="1.0" encoding="UTF-8"?>
-            \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            \\<plist version="1.0">
-            \\<dict>
-            \\    <key>Label</key>
-            \\    <string>{s}</string>
-            \\    <key>ProgramArguments</key>
-            \\    <array>
-            \\        <string>{s}</string>
-            \\        <string>connect</string>
             \\    </array>
             \\    <key>RunAtLoad</key>
             \\    <true/>
@@ -358,11 +336,10 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
             runCommand(allocator, &.{ "launchctl", "print", target }) catch {};
         }
     } else if (builtin.os.tag == .windows) {
-        // Windows — SCM (Mayaqua/WinService.c pattern) — kind-specific
+        // Windows — SCM — kind-specific, M22-3 bare (no connect)
         const win_svc_name = if (kind == .vpnserver) "SoftEtherVPNServer" else "SoftEtherVPNClient";
         const display_name = kind.displayName();
-        const bin_suffix = if (kind == .vpnserver) "" else " connect";
-        const bin_path = try std.fmt.allocPrint(allocator, "\"{s}\"{s}", .{ exe_path, bin_suffix });
+        const bin_path = try std.fmt.allocPrint(allocator, "\"{s}\"", .{exe_path});
         defer allocator.free(bin_path);
         cli.display.info(display, "Creating Windows service {s}...", .{win_svc_name});
         runCommand(allocator, &.{ "sc", "create", win_svc_name, "binPath=", bin_path, "start=", "auto", "DisplayName=", display_name }) catch |err| {

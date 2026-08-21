@@ -73,17 +73,11 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // Check for subcommand (argv[1] without leading dash)
-    // M22-2: bare `vpnclient [OPTIONS]` is implicit connect (keep `connect` as alias 1 release)
+    // M22-3: `connect` alias removed (breaking, bare `vpnclient [OPTIONS]` is canonical)
     var connect_mode = false;
-    var effective_args: []const []const u8 = args;
+    const effective_args: []const []const u8 = args;
     if (args.len >= 2 and args[1][0] != '-') {
-        if (std.mem.eql(u8, args[1], "connect")) {
-            connect_mode = true;
-            const tmp = try allocator.alloc([]const u8, args.len - 1);
-            tmp[0] = args[0];
-            for (args[2..], 0..) |a, j| tmp[j + 1] = a;
-            effective_args = tmp;
-        } else if (std.mem.eql(u8, args[1], "help")) {
+        if (std.mem.eql(u8, args[1], "help")) {
             cli.showUsage(version);
             return;
         } else if (std.mem.eql(u8, args[1], "version")) {
@@ -280,7 +274,7 @@ pub fn main() !void {
             }
             return;
         } else {
-            cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient connect --help' or 'vpnclient --help'.", .{args[1]});
+            cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient --help'.", .{args[1]});
             std.process.exit(1);
         }
     }

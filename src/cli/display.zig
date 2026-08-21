@@ -361,8 +361,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.printColored(.bold, "USAGE:\n", .{});
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
-    ctx.print("    vpnclient [OPTIONS]               Connect (implicit, bare flags)\n", .{});
-    ctx.print("    vpnclient connect [OPTIONS]       Alias (deprecated, 1 release)\n", .{});
+    ctx.print("    vpnclient [OPTIONS]               Connect (bare flags, no verb)\n", .{});
     ctx.print("    vpnclient list                    List accounts (alias to vpncmd)\n", .{});
     ctx.print("    vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install [--user|--system]\n", .{});
@@ -375,7 +374,6 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.printColored(.bold, "SUBCOMMANDS:\n", .{});
     ctx.print("    help                    Show this help message\n", .{});
     ctx.print("    version                 Show version information\n", .{});
-    ctx.print("    connect                 Connect to a VPN server\n", .{});
     ctx.print("    list                    List accounts — thin alias to `vpncmd client AccountList`\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
     ctx.print("    install                 Install service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
@@ -454,20 +452,20 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install --user               # systemd user service, no sudo\n", .{});
     ctx.print("    sudo vpnclient install --system        # systemd system service\n", .{});
-    ctx.print("    vpnclient -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass  # implicit connect\n", .{});
-    ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>  # alias\n", .{});
+    ctx.print("    vpnclient -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
+    ctx.print("    vpnclient -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
     ctx.print("    vpnclient --account vpn1          # from vpncmd store, no flags\n", .{});
     ctx.print("    vpnclient                         # uses store single account\n", .{});
     ctx.print("    vpnclient list                    # alias to vpncmd client AccountList\n", .{});
-    ctx.print("    vpnclient connect --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
-    ctx.print("    vpnclient connect --mode monitor --pcap /tmp/cap.pcap\n", .{});
+    ctx.print("    vpnclient --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
+    ctx.print("    vpnclient --mode monitor --pcap /tmp/cap.pcap\n", .{});
     ctx.newline();
 
     ctx.printColored(.dim, "Note: `vpnclient passhash` is deprecated (M19 #253). Generation moved to\n", .{});
     ctx.printColored(.dim, "      `vpncmd tools generatehashedpassword` (SoftEtherVPN/src/vpncmd/Tools.c\n", .{});
     ctx.printColored(.dim, "      parity). `vpnclient` still consumes `--password-hash` for verification.\n", .{});
-    ctx.printColored(.dim, "      Bare `vpnclient [OPTIONS]` is implicit connect (M22-2, `connect` alias 1 release).\n", .{});
-    ctx.printColored(.dim, "      Minimal contract: [connect] + list + cleanup + help/version +\n", .{});
+    ctx.printColored(.dim, "      Bare `vpnclient [OPTIONS]` is connect (M22-3, `connect` alias removed).\n", .{});
+    ctx.printColored(.dim, "      Minimal contract: list + cleanup + help/version +\n", .{});
     ctx.printColored(.dim, "      install/uninstall/start/stop/restart/status/enable/disable (active)\n", .{});
     ctx.printColored(.dim, "      (bridge/monitor are --mode flags, not verbs). See docs/ACCOUNT.md.\n", .{});
     ctx.newline();
