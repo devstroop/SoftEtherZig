@@ -74,11 +74,19 @@ pub const SyslogSetting = struct {
 // SyslogClient — UDP syslog forwarder (C: Logging.c SLOG)
 // ============================================================================
 
+const builtin = @import("builtin");
+
+/// Platform-correct "invalid fd" sentinel — HANDLE on Windows, -1 on POSIX.
+const invalid_fd: std.posix.fd_t = if (builtin.os.tag == .windows)
+    @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))))
+else
+    @as(std.posix.fd_t, -1);
+
 /// UDP syslog client. Resolves the hostname, caches the IP, and sends
 /// RFC 3164 formatted datagrams. Re-resolves DNS periodically.
 pub const SyslogClient = struct {
     allocator: Allocator,
-    /// Mutex protecting destination config.
+    /// Mutex protecting all mutable state (hostname, port, dest_ip, socket).
     mutex: std.Thread.Mutex = .{},
     /// Current destination hostname.
     hostname: []u8 = &.{},
@@ -89,7 +97,9 @@ pub const SyslogClient = struct {
     /// Unix timestamp of last DNS resolution.
     last_resolve_ts: i64 = 0,
     /// UDP socket (invalid_fd when not connected).
-    socket: std.posix.fd_t = @as(std.posix.fd_t, -1),
+    socket: std.posix.fd_t = invalid_fd,
+    /// Cached hostname for the current send operation (owned snapshot).
+    send_hostname: []u8 = &.{},
 
     /// Create a new SyslogClient.
     pub fn init(allocator: Allocator) SyslogClient {
@@ -98,17 +108,20 @@ pub const SyslogClient = struct {
 
     /// Stop and free the client.
     pub fn deinit(self: *SyslogClient) void {
-        self.closeSocket();
+        self.mutex.lock();
+        self.closeSocketLocked();
         self.allocator.free(self.hostname);
+        self.allocator.free(self.send_hostname);
         self.* = undefined;
+        self.allocator = undefined; // already freed everything
     }
 
     /// Reconfigure the syslog destination. Pass empty hostname or port 0
     /// to disable syslog forwarding.
     pub fn configure(self: *SyslogClient, hostname: []const u8, port: u32) void {
-        self.closeSocket();
         self.mutex.lock();
         defer self.mutex.unlock();
+        self.closeSocketLocked();
         self.allocator.free(self.hostname);
         self.hostname = self.allocator.dupe(u8, hostname) catch &.{};
         self.port = if (port == 0) SYSLOG_PORT else port;
@@ -120,30 +133,73 @@ pub const SyslogClient = struct {
     /// sends a UDP datagram. Silently drops if destination is not configured.
     pub fn send(self: *SyslogClient, message: []const u8) void {
         self.mutex.lock();
-        const hostname = self.hostname;
+
+        // Snapshot all config under the lock to avoid use-after-free.
+        self.allocator.free(self.send_hostname);
+        self.send_hostname = self.allocator.dupe(u8, self.hostname) catch {
+            self.mutex.unlock();
+            return;
+        };
+        const hostname = self.send_hostname;
         const port: u16 = @intCast(self.port);
         self.mutex.unlock();
 
         if (hostname.len == 0) return;
 
-        // Resolve hostname if needed.
+        // Resolve hostname if needed (updates self.dest_ip under mutex).
         self.maybeResolve(hostname);
 
-        // If we still don't have a valid IP, skip.
-        if (self.dest_ip == 0) return;
+        // Use the resolved IP from the mutex snapshot or after resolve.
+        self.mutex.lock();
+        const ip = self.dest_ip;
+        self.mutex.unlock();
+        if (ip == 0) return;
 
-        // Format: RFC 3164 — `<pri>hostname app: message`
+        // Format: RFC 3164 — `<pri>Mon DD HH:MM:SS hostname tag: message`
         // Priority: facility(14=local0) + severity(6=info) = 134.
-        var buf: [SYSLOG_MAX_LENGTH + 64]u8 = undefined;
-        const msg_len = @min(message.len, SYSLOG_MAX_LENGTH);
-        const frame = std.fmt.bufPrint(&buf, "<134>{s}", .{message[0..msg_len]}) catch return;
+        var buf: [SYSLOG_MAX_LENGTH + 128]u8 = undefined;
+        const ts = std.time.timestamp();
+        const epoch_seconds: u64 = @intCast(@max(0, ts));
+        const day_seconds = @mod(epoch_seconds, 86400);
+        const hours: u8 = @intCast(day_seconds / 3600);
+        const mins: u8 = @intCast(@mod(day_seconds / 60, 60));
+        const secs: u8 = @intCast(@mod(day_seconds, 60));
 
-        // Send UDP datagram.
-        const sock = self.getSocket() orelse return;
+        // Month names for RFC 3164.
+        const month_names = [_][]const u8{
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        };
+        const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(epoch_seconds) };
+        const epoch_day = epoch_secs.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        const month_idx: usize = @intCast(@intFromEnum(month_day.month) - 1);
+        const day: u8 = month_day.day_index + 1;
+
+        const msg_len = @min(message.len, SYSLOG_MAX_LENGTH);
+        const frame = std.fmt.bufPrint(
+            &buf,
+            "<134>{s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {s} {s}",
+            .{
+                month_names[month_idx],
+                day,
+                hours,
+                mins,
+                secs,
+                hostname,
+                message[0..msg_len],
+            },
+        ) catch return;
+
+        // Send UDP datagram — hold the lock briefly for socket access.
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const sock = self.getSocketLocked() orelse return;
         const dest = std.posix.sockaddr.in{
             .family = std.posix.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
-            .addr = std.mem.nativeToBig(u32, self.dest_ip),
+            .addr = std.mem.nativeToBig(u32, ip),
             .zero = [_]u8{0} ** 8,
         };
         const dest_ptr: *const std.posix.sockaddr = @ptrCast(&dest);
@@ -152,17 +208,17 @@ pub const SyslogClient = struct {
         };
     }
 
-    // ---- Internal ----------------------------------------------------------
+    // ---- Internal (must be called with mutex held) --------------------------
 
-    fn closeSocket(self: *SyslogClient) void {
-        if (self.socket >= 0) {
+    fn closeSocketLocked(self: *SyslogClient) void {
+        if (self.socket != invalid_fd) {
             std.posix.close(self.socket);
-            self.socket = @as(std.posix.fd_t, -1);
+            self.socket = invalid_fd;
         }
     }
 
-    fn getSocket(self: *SyslogClient) ?std.posix.fd_t {
-        if (self.socket >= 0) return self.socket;
+    fn getSocketLocked(self: *SyslogClient) ?std.posix.fd_t {
+        if (self.socket != invalid_fd) return self.socket;
         const sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch return null;
         // Set a short send timeout so we never block the writer thread.
         const timeout: std.posix.timeval = .{ .sec = 0, .usec = 100_000 }; // 100ms
@@ -171,41 +227,50 @@ pub const SyslogClient = struct {
         return self.socket;
     }
 
+    // ---- Internal (mutex not required) --------------------------------------
+
     fn maybeResolve(self: *SyslogClient, hostname: []const u8) void {
+        self.mutex.lock();
         const now = std.time.timestamp();
-        if (self.dest_ip != 0 and
-            now - self.last_resolve_ts < SYSLOG_POLL_IP_INTERVAL)
-        {
-            return;
-        }
+        const needs_resolve = self.dest_ip == 0 or
+            (now - self.last_resolve_ts >= SYSLOG_POLL_IP_INTERVAL);
+        self.mutex.unlock();
+
+        if (!needs_resolve) return;
+
         self.resolveHostname(hostname);
-        self.last_resolve_ts = now;
     }
 
     fn resolveHostname(self: *SyslogClient, hostname: []const u8) void {
         // Try parsing as a dotted-decimal IP first.
-        if (parseIPv4(hostname)) |ip| {
-            self.dest_ip = ip;
-            return;
-        }
-        // DNS resolution: use getaddrinfo.
-        const addr_list = std.net.getAddressList(
-            self.allocator,
-            hostname,
-            @intCast(self.port),
-        ) catch {
-            log.warn("Syslog: failed to resolve hostname '{s}'", .{hostname});
+        const ip = parseIPv4(hostname) orelse blk: {
+            // DNS resolution: use getaddrinfo.
+            const addr_list = std.net.getAddressList(
+                self.allocator,
+                hostname,
+                @intCast(self.port),
+            ) catch {
+                log.warn("Syslog: failed to resolve hostname '{s}'", .{hostname});
+                self.mutex.lock();
+                self.dest_ip = 0;
+                self.mutex.unlock();
+                return;
+            };
+            defer addr_list.deinit();
+            for (addr_list.addrs) |addr| {
+                if (addr.any.family == std.posix.AF.INET) {
+                    break :blk std.mem.bigToNative(u32, addr.in.sa.addr);
+                }
+            }
+            self.mutex.lock();
             self.dest_ip = 0;
+            self.mutex.unlock();
             return;
         };
-        defer addr_list.deinit();
-        for (addr_list.addrs) |addr| {
-            if (addr.any.family == std.posix.AF.INET) {
-                self.dest_ip = std.mem.bigToNative(u32, addr.in.sa.addr);
-                return;
-            }
-        }
-        self.dest_ip = 0;
+        self.mutex.lock();
+        self.dest_ip = ip;
+        self.last_resolve_ts = std.time.timestamp();
+        self.mutex.unlock();
     }
 
     fn parseIPv4(str: []const u8) ?u32 {
@@ -294,6 +359,12 @@ pub const LogEntry = struct {
     size: u64,
 };
 
+/// Log category — used for syslog save_type filtering.
+pub const LogCategory = enum(u8) {
+    server = 0,
+    hub_security = 1,
+};
+
 // ============================================================================
 // LOG — the log engine (C: Logging.h:152-170)
 // ============================================================================
@@ -332,6 +403,10 @@ pub const LOG = struct {
     last_date_str: [16:0]u8 = .{0} ** 16,
     /// Syslog client for forwarding (M14). Null when syslog is disabled.
     syslog_client: ?*SyslogClient = null,
+    /// Syslog forwarding mode — controls which records are sent.
+    syslog_save_type: SyslogSaveType = .none,
+    /// Log category — determines syslog filtering behavior.
+    log_category: LogCategory = .server,
 
     /// Create a new LOG engine and start the writer thread.
     pub fn init(allocator: Allocator, dir_name: []const u8, prefix: []const u8, switch_type: LogSwitchType) !*LOG {
@@ -406,10 +481,11 @@ pub const LOG = struct {
 
     /// Attach a syslog client for forwarding. Does not take ownership —
     /// the caller owns the SyslogClient and must outlive the LOG.
-    pub fn setSyslogClient(self: *LOG, client: ?*SyslogClient) void {
+    pub fn setSyslogClient(self: *LOG, client: ?*SyslogClient, save_type: SyslogSaveType) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.syslog_client = client;
+        self.syslog_save_type = save_type;
     }
 
     // ---- Internal ----------------------------------------------------------
@@ -445,7 +521,7 @@ pub const LOG = struct {
                 // Write the record.
                 self.writeRecord(record);
                 // Forward to syslog if configured.
-                self.forwardToSyslog(record.string);
+                self.forwardToSyslog(record.string, self.log_category == .hub_security);
                 self.allocator.free(record.string);
             }
         }
@@ -492,15 +568,26 @@ pub const LOG = struct {
     }
 
     /// Forward a log record to syslog if a client is attached (C: `SiWriteSysLog`).
-    fn forwardToSyslog(self: *LOG, record: []const u8) void {
-        // Snapshot the syslog_client pointer under the LOG mutex to avoid
-        // racing with setSyslogClient().
+    /// `is_hub_log` indicates whether this record is a hub security log.
+    fn forwardToSyslog(self: *LOG, record: []const u8, is_hub_log: bool) void {
+        // Snapshot the syslog_client pointer and save_type under the LOG mutex
+        // to avoid racing with setSyslogClient().
         self.mutex.lock();
         const client = self.syslog_client orelse {
             self.mutex.unlock();
             return;
         };
+        const save_type = self.syslog_save_type;
         self.mutex.unlock();
+
+        // Check save_type mode.
+        switch (save_type) {
+            .none => return,
+            .server_log => {
+                if (is_hub_log) return;
+            },
+            .server_and_hub_security_log, .server_and_hub_all_log => {},
+        }
 
         // Format syslog message: `[prefix] record`
         var buf: [SYSLOG_MAX_LENGTH + 64]u8 = undefined;

@@ -426,8 +426,9 @@ pub const ServerConfig = struct {
 
         // Syslog settings (C: `SyslogSettings` folder, Server.c:5897).
         if (root.getFolder("SyslogSettings")) |sf| {
-            const save_type = sf.getUint("SaveType", 0);
-            self.syslog_setting.save_type = @enumFromInt(save_type);
+            const raw_type = sf.getUint("SaveType", 0);
+            // Clamp to valid range — malformed config disables syslog instead of trapping.
+            self.syslog_setting.save_type = if (raw_type <= 3) @enumFromInt(raw_type) else .none;
             self.syslog_setting.port = sf.getUint("Port", 514);
             const host = sf.getStr("HostName", "");
             if (host.len > 0) {
