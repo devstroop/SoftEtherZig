@@ -112,7 +112,11 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
     try child.spawn();
-    _ = try child.wait();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.CommandFailed,
+        else => return error.CommandFailed,
+    }
 }
 
 fn getHomeDir(allocator: std.mem.Allocator) ![]const u8 {
@@ -137,10 +141,15 @@ fn systemdUnitPath(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u
     }
 }
 
-fn launchdPlistPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try getHomeDir(allocator);
-    defer allocator.free(home);
-    return try std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/com.devstroop.vpnclient.plist", .{home});
+fn launchdPlistPath(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u8 {
+    if (scope == .system) {
+        // System LaunchDaemon requires root and is loaded at boot
+        return try allocator.dupe(u8, "/Library/LaunchDaemons/com.devstroop.vpnclient.plist");
+    } else {
+        const home = try getHomeDir(allocator);
+        defer allocator.free(home);
+        return try std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/com.devstroop.vpnclient.plist", .{home});
+    }
 }
 
 pub fn installService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
@@ -165,7 +174,7 @@ pub fn installService(allocator: std.mem.Allocator, display: *cli.display.Displa
         }
 
         const wanted_by = if (scope == .system) "multi-user.target" else "default.target";
-        const unit_content = try std.fmt.allocPrint(allocator,
+        const unit_content = if (scope == .system) try std.fmt.allocPrint(allocator,
             \\[Unit]
             \\Description=SoftEther VPN Client
             \\After=network.target
@@ -178,6 +187,21 @@ pub fn installService(allocator: std.mem.Allocator, display: *cli.display.Displa
             \\RestartSec=5
             \\AmbientCapabilities=CAP_NET_ADMIN
             \\CapabilityBoundingSet=CAP_NET_ADMIN
+            \\
+            \\[Install]
+            \\WantedBy={s}
+            \\
+        , .{ exe_path, wanted_by }) else try std.fmt.allocPrint(allocator,
+            \\[Unit]
+            \\Description=SoftEther VPN Client (user)
+            \\After=network.target
+            \\Wants=network.target
+            \\
+            \\[Service]
+            \\Type=simple
+            \\ExecStart={s} connect
+            \\Restart=on-failure
+            \\RestartSec=5
             \\
             \\[Install]
             \\WantedBy={s}
@@ -220,8 +244,11 @@ pub fn installService(allocator: std.mem.Allocator, display: *cli.display.Displa
             runCommand(allocator, &.{ "systemctl", "--user", "is-enabled", "softether-vpnclient.service" }) catch {};
         }
     } else if (builtin.os.tag == .macos) {
-        // macOS — launchd
-        const plist_path = try launchdPlistPath(allocator);
+        if (scope == .system and !isRoot()) {
+            cli.display.failure(display, "install --system on macOS requires sudo (writes to /Library/LaunchDaemons)", .{});
+            return error.PermissionDenied;
+        }
+        const plist_path = try launchdPlistPath(allocator, scope);
         defer allocator.free(plist_path);
 
         if (std.fs.path.dirname(plist_path)) |dir| {
@@ -259,9 +286,13 @@ pub fn installService(allocator: std.mem.Allocator, display: *cli.display.Displa
         try file.writeAll(plist_content);
 
         cli.display.success(display, "Created {s}", .{plist_path});
-        cli.display.info(display, "launchd plist installed. Use: launchctl load {s}", .{plist_path});
-        // Verify: launchctl print
-        runCommand(allocator, &.{ "launchctl", "print", "gui/501/com.devstroop.vpnclient" }) catch {};
+        if (scope == .system) {
+            cli.display.info(display, "launchd system plist installed. Use: sudo launchctl bootstrap system {s}", .{plist_path});
+            runCommand(allocator, &.{ "launchctl", "print", "system/com.devstroop.vpnclient" }) catch {};
+        } else {
+            cli.display.info(display, "launchd plist installed. Use: launchctl load {s}", .{plist_path});
+            runCommand(allocator, &.{ "launchctl", "print", "gui/501/com.devstroop.vpnclient" }) catch {};
+        }
     } else if (builtin.os.tag == .windows) {
         // Windows — SCM (Mayaqua/WinService.c pattern)
         // Use `sc create` as simplest parity; requires admin.
@@ -290,26 +321,34 @@ pub fn uninstallService(allocator: std.mem.Allocator, display: *cli.display.Disp
             return error.PermissionDenied;
         }
 
-        // disable + remove
+        // disable, delete, then reload (avoid stale)
         if (scope == .system) {
             runCommand(allocator, &.{ "systemctl", "disable", "softether-vpnclient.service" }) catch {};
+            std.fs.deleteFileAbsolute(unit_path) catch |err| {
+                if (err != error.FileNotFound) cli.display.warning(display, "Could not remove {s}: {s}", .{ unit_path, @errorName(err) });
+            };
             runCommand(allocator, &.{ "systemctl", "daemon-reload" }) catch {};
         } else {
             runCommand(allocator, &.{ "systemctl", "--user", "disable", "softether-vpnclient.service" }) catch {};
+            std.fs.deleteFileAbsolute(unit_path) catch |err| {
+                if (err != error.FileNotFound) cli.display.warning(display, "Could not remove {s}: {s}", .{ unit_path, @errorName(err) });
+            };
             runCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }) catch {};
         }
-
-        std.fs.deleteFileAbsolute(unit_path) catch |err| {
-            if (err != error.FileNotFound) {
-                cli.display.warning(display, "Could not remove {s}: {s}", .{ unit_path, @errorName(err) });
-            }
-        };
         cli.display.success(display, "Removed {s}", .{unit_path});
     } else if (builtin.os.tag == .macos) {
-        const plist_path = try launchdPlistPath(allocator);
+        if (scope == .system and !isRoot()) {
+            cli.display.failure(display, "uninstall --system on macOS requires sudo", .{});
+            return error.PermissionDenied;
+        }
+        const plist_path = try launchdPlistPath(allocator, scope);
         defer allocator.free(plist_path);
-        // unload first
-        runCommand(allocator, &.{ "launchctl", "unload", plist_path }) catch {};
+        // unload first (use bootout for system, unload for user)
+        if (scope == .system) {
+            runCommand(allocator, &.{ "launchctl", "bootout", "system/com.devstroop.vpnclient" }) catch {};
+        } else {
+            runCommand(allocator, &.{ "launchctl", "unload", plist_path }) catch {};
+        }
         std.fs.deleteFileAbsolute(plist_path) catch |err| {
             if (err != error.FileNotFound) cli.display.warning(display, "Could not remove {s}: {s}", .{ plist_path, @errorName(err) });
         };
