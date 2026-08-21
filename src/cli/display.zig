@@ -362,9 +362,11 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
     ctx.print("    vpnclient connect [OPTIONS]\n", .{});
+    ctx.print("    vpnclient list                    List accounts (alias to vpncmd) — planned M20\n", .{});
     ctx.print("    vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install [--user|--system]\n", .{});
     ctx.print("    vpnclient uninstall [--user|--system]\n", .{});
+    ctx.print("    vpnclient start|stop|restart|status|enable|disable  (planned M20)\n", .{});
     ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.newline();
 
@@ -372,9 +374,16 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    help                    Show this help message\n", .{});
     ctx.print("    version                 Show version information\n", .{});
     ctx.print("    connect                 Connect to a VPN server\n", .{});
+    ctx.print("    list                    List accounts — thin alias to `vpncmd client AccountList` — planned M20\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
     ctx.print("    install                 Install service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
     ctx.print("    uninstall               Remove service — --user or --system\n", .{});
+    ctx.print("    start                   Start service — planned M20\n", .{});
+    ctx.print("    stop                    Stop service — planned M20\n", .{});
+    ctx.print("    restart                 Restart service — planned M20\n", .{});
+    ctx.print("    status                  Show service status — planned M20\n", .{});
+    ctx.print("    enable                  Enable service autostart — planned M20\n", .{});
+    ctx.print("    disable                 Disable autostart — planned M20\n", .{});
     ctx.print("    passhash                (deprecated) Generate password hash — use `vpncmd tools generatehashedpassword`\n", .{});
     ctx.print("    password-hash           Alias for passhash (deprecated)\n", .{});
     ctx.newline();
@@ -410,6 +419,12 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --log-level <LEVEL>     Log level: silent, error, warn, info, debug, trace\n", .{});
     ctx.newline();
 
+    ctx.printColored(.bold, "MODES:\n", .{});
+    ctx.print("    --mode <client|bridge|monitor>  Operating mode (default: client)\n", .{});
+    ctx.print("    --ingress <IF>        Bridge ingress interface (repeatable, --mode bridge)\n", .{});
+    ctx.print("    --pcap <FILE>         Monitor pcap output (--mode monitor)\n", .{});
+    ctx.newline();
+
     ctx.printColored(.bold, "RECONNECTION OPTIONS:\n", .{});
     ctx.print("    --reconnect             Enable automatic reconnection (default)\n", .{});
     ctx.print("    --no-reconnect          Disable automatic reconnection\n", .{});
@@ -436,14 +451,20 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install --user               # systemd user service, no sudo\n", .{});
     ctx.print("    sudo vpnclient install --system        # systemd system service\n", .{});
-    ctx.print("    vpnclient connect --config config.json\n", .{});
+    ctx.print("    vpnclient connect --config config.json # deprecated, use vpncmd\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
+    ctx.print("    vpnclient list                    # alias to vpncmd client AccountList — planned M20\n", .{});
+    ctx.print("    vpnclient connect --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
+    ctx.print("    vpnclient connect --mode monitor --pcap /tmp/cap.pcap\n", .{});
     ctx.newline();
 
     ctx.printColored(.dim, "Note: `vpnclient passhash` is deprecated (M19 #253). Generation moved to\n", .{});
     ctx.printColored(.dim, "      `vpncmd tools generatehashedpassword` (SoftEtherVPN/src/vpncmd/Tools.c\n", .{});
     ctx.printColored(.dim, "      parity). `vpnclient` still consumes `--password-hash` for verification.\n", .{});
+    ctx.printColored(.dim, "      Minimal contract: connect + list + cleanup + help/version + install/uninstall (active) and\n", .{});
+    ctx.printColored(.dim, "      start/stop/restart/status/enable/disable — planned M20\n", .{});
+    ctx.printColored(.dim, "      (bridge/monitor are --mode flags, not verbs). See docs/ACCOUNT.md.\n", .{});
     ctx.newline();
 }
 
