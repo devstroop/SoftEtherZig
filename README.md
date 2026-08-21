@@ -94,7 +94,7 @@ sudo ./zig-out/bin/vpnclient connect \
   --user myuser --password mypassword
 ```
 
-Or with a config file: `sudo ./zig-out/bin/vpnclient connect --config config.json`
+Or with vpncmd store: `vpncmd client AccountCreate vpn1 /SERVER:vpn.example.com /HUB:VPN /USERNAME:myuser && sudo ./zig-out/bin/vpnclient connect --account vpn1`
 
 ### macOS — Shared Library
 
