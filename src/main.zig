@@ -95,8 +95,10 @@ pub fn main() !void {
             // Keep consumption (`--password-hash`) in vpnclient, but generation
             // now warns and delegates conceptually to vpncmd. Functional for
             // one release (non-breaking), removal in M21 P2.
-            cli.display.warning(&state.display, "vpnclient passhash is deprecated — use `vpncmd tools generatehashedpassword` (see `vpncmd tools --help`)", .{});
-            cli.display.info(&state.display, "This verb will be removed in a future release; `vpnclient` will only consume `--password-hash`.", .{});
+            // Deprecation goes to stderr to preserve stdout contract for
+            // scripts that parse `vpnclient passhash` output (see review).
+            std.debug.print("[warning] vpnclient passhash is deprecated — use `vpncmd tools generatehashedpassword` (see `vpncmd tools --help`)\n", .{});
+            std.debug.print("[info] This verb will be removed in a future release; `vpnclient` will only consume `--password-hash`.\n", .{});
 
             var hash_user: ?[]const u8 = null;
             var hash_pass: ?[]const u8 = null;
