@@ -2706,7 +2706,6 @@ pub const VpnClient = struct {
             // causing huge TCP cwnd collapses (-99% throughput). The 2MB-level
             // throttle limits burst amplitude, keeping the TCP sawtooth smooth.
             if (is_configured) {
-                if (adapter.getPort()) |tun_port| {
                     var sendq: u32 = 0;
                     const is_multi = self.conn_manager != null;
                     if (single_sock) |ss| {
@@ -2780,7 +2779,7 @@ pub const VpnClient = struct {
 
                         while (outbound_count < batch_limit) {
                             diag.tun_read_attempts += 1;
-                            if (tun_port.read(&tun_read_bufs[outbound_count])) |maybe_len| {
+                            if (adapter.read(&tun_read_bufs[outbound_count])) |maybe_len| {
                                 if (maybe_len) |ip_len| {
                                     if (ip_len > 0 and ip_len <= 1500) {
                                         diag.tun_reads += 1;
@@ -2856,7 +2855,6 @@ pub const VpnClient = struct {
                             self.stats.recordSent(outbound_bytes);
                         }
                     }
-                }
             }
 
             // ============================================================
