@@ -25,6 +25,7 @@ pub const CliArgs = struct {
     /// Optional hostname for TLS/SNI, HTTP Host, certificate validation
     hostname: ?[]const u8 = null,
     port: u16 = 443,
+    port_explicit: bool = false,
     hub: ?[]const u8 = null,
 
     // Authentication
@@ -257,6 +258,7 @@ pub const ArgParser = struct {
                 const val = try self.requireValue(argv, i, "--port");
                 defer self.allocator.free(val);
                 self.args.port = std.fmt.parseInt(u16, val, 10) catch return ParseError.InvalidPort;
+                self.args.port_explicit = true;
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hub")) {
                 i += 1;
                 self.args.hub = try self.requireValue(argv, i, "--hub");
@@ -451,8 +453,10 @@ pub const ArgParser = struct {
             if (self.args.address == null) self.args.address = v;
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PORT")) |v| {
-            if (self.args.port == 443) {
+            defer allocator.free(v);
+            if (!self.args.port_explicit) {
                 self.args.port = std.fmt.parseInt(u16, v, 10) catch 443;
+                self.args.port_explicit = true;
             }
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_HUB")) |v| {

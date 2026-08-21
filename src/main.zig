@@ -292,9 +292,12 @@ pub fn main() !void {
     cli.loadConfig(allocator, &state.cli_args) catch {};
 
     // M21 #263: vpnclient consumes vpncmd store (flags > env > XDG store)
-    // If required fields are missing, try to fill from XDG vpn_client.config
-    // (selected via --account / SOFTETHER_ACCOUNT or first account).
-    if (state.cli_args.address == null or state.cli_args.hub == null or state.cli_args.username == null) {
+    // Run when an account is selected or any required field (including password) is missing
+    // so `vpnclient connect -a ... --account NAME` can fill stored password.
+    const need_store = state.cli_args.account != null or
+        state.cli_args.address == null or state.cli_args.hub == null or state.cli_args.username == null or
+        (state.cli_args.password == null and state.cli_args.password_hash == null);
+    if (need_store) {
         resolveFromStore(allocator, &state.cli_args) catch |err| {
             // Store resolution is best-effort; validation will report missing fields.
             std.log.scoped(.app).debug("store resolve failed: {s}", .{@errorName(err)});
@@ -388,10 +391,41 @@ fn resolveFromStore(allocator: std.mem.Allocator, args: *cli.CliArgs) !void {
     defer allocator.free(acc.username);
     defer if (acc.password_hash) |h| allocator.free(h);
 
-    // Fill only missing fields (flags > env > store)
-    if (args.address == null) args.address = try allocator.dupe(u8, acc.server);
-    // port is always set (default 443), only override if still default and store has different
-    if (args.port == 443 and acc.port != 443) args.port = acc.port;
+    // Fill only missing fields (flags > env > store), handle hostname vs IP and port precedence
+    if (args.address == null) {
+        // If server looks like hostname (contains alpha), set as hostname for TLS/SNI and keep address as server
+        // The client will resolve hostname via DNS; for now we set both.
+        const server = acc.server;
+        const is_ip = blk: {
+            var is_ip_tmp = true;
+            for (server) |c| {
+                if (!std.ascii.isDigit(c) and c != '.' and c != ':') {
+                    is_ip_tmp = false;
+                    break;
+                }
+            }
+            break :blk is_ip_tmp and server.len > 0;
+        };
+        if (is_ip) {
+            args.address = try allocator.dupe(u8, server);
+        } else {
+            // Hostname: set both address and hostname (address as hostname for now, client handles DNS)
+            args.address = try allocator.dupe(u8, server);
+            if (args.hostname == null) args.hostname = try allocator.dupe(u8, server);
+        }
+    } else if (args.hostname == null) {
+        // If address was explicitly set but hostname not, and store has a hostname-like server, use it for SNI
+        const server = acc.server;
+        var is_hostname = false;
+        for (server) |c| {
+            if (std.ascii.isAlphabetic(c)) {
+                is_hostname = true;
+                break;
+            }
+        }
+        if (is_hostname) args.hostname = try allocator.dupe(u8, server);
+    }
+    if (!args.port_explicit) args.port = acc.port;
     if (args.hub == null) args.hub = try allocator.dupe(u8, acc.hub);
     if (args.username == null) args.username = try allocator.dupe(u8, acc.username);
     if (args.password == null and args.password_hash == null) {

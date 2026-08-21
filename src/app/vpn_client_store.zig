@@ -75,6 +75,15 @@ fn getAccountsFolder(cfg: *Cfg) !*Folder {
     return accounts;
 }
 
+fn lockStoreFile(file: std.fs.File) !void {
+    // Use flock for interprocess serialization (best-effort, ignore if not supported)
+    std.posix.flock(file.handle, std.posix.LOCK.EX) catch {};
+}
+
+fn unlockStoreFile(file: std.fs.File) void {
+    std.posix.flock(file.handle, std.posix.LOCK.UN) catch {};
+}
+
 pub fn loadCfg(allocator: std.mem.Allocator) !*Cfg {
     const store_path = try getStorePath(allocator);
     defer allocator.free(store_path);
@@ -108,11 +117,58 @@ pub fn saveCfg(allocator: std.mem.Allocator, cfg: *Cfg) !void {
     try ensureStoreDir(allocator);
     var dir_handle = try std.fs.cwd().openDir(dir, .{});
     defer dir_handle.close();
-    try cfg.saveToFile(dir_handle, file);
+    // Serialize mutations with interprocess lock (M21 #262 race)
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{file});
+    defer allocator.free(lock_path);
+    const lock_file = dir_handle.createFile(lock_path, .{ .truncate = false }) catch dir_handle.openFile(lock_path, .{}) catch null;
+    if (lock_file) |lf| {
+        defer lf.close();
+        try lockStoreFile(lf);
+        defer unlockStoreFile(lf);
+        try cfg.saveToFile(dir_handle, file);
+    } else {
+        try cfg.saveToFile(dir_handle, file);
+    }
 }
 
-/// Create or update an account
+fn withStoreLock(allocator: std.mem.Allocator, comptime doFn: fn (*Cfg) anyerror!void) !void {
+    const store_path = try getStorePath(allocator);
+    defer allocator.free(store_path);
+    const dir = std.fs.path.dirname(store_path) orelse return error.InvalidPath;
+    const file = std.fs.path.basename(store_path);
+    try ensureStoreDir(allocator);
+    var dir_handle = try std.fs.cwd().openDir(dir, .{});
+    defer dir_handle.close();
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{file});
+    defer allocator.free(lock_path);
+    const lock_file = try dir_handle.createFile(lock_path, .{ .truncate = false });
+    defer lock_file.close();
+    try lockStoreFile(lock_file);
+    defer unlockStoreFile(lock_file);
+    const cfg = try loadCfg(allocator);
+    defer cfg.deinit();
+    try doFn(cfg);
+    // Re-open dir_handle for save (already locked)
+    var save_dir = try std.fs.cwd().openDir(dir, .{});
+    defer save_dir.close();
+    try cfg.saveToFile(save_dir, file);
+}
+
+/// Create or update an account (atomic, locked, single transaction)
 pub fn createAccount(allocator: std.mem.Allocator, acc: Account) !void {
+    const store_path = try getStorePath(allocator);
+    defer allocator.free(store_path);
+    const dir = std.fs.path.dirname(store_path) orelse return error.InvalidPath;
+    const file = std.fs.path.basename(store_path);
+    try ensureStoreDir(allocator);
+    var dir_handle = try std.fs.cwd().openDir(dir, .{});
+    defer dir_handle.close();
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{file});
+    defer allocator.free(lock_path);
+    const lock_file = try dir_handle.createFile(lock_path, .{ .truncate = false });
+    defer lock_file.close();
+    try lockStoreFile(lock_file);
+    defer unlockStoreFile(lock_file);
     const cfg = try loadCfg(allocator);
     defer cfg.deinit();
     const accounts = try getAccountsFolder(cfg);
@@ -122,14 +178,28 @@ pub fn createAccount(allocator: std.mem.Allocator, acc: Account) !void {
     try folder.setStr("Hub", acc.hub);
     try folder.setStr("Username", acc.username);
     if (acc.password_hash) |h| try folder.setStr("PasswordHash", h);
-    try saveCfg(allocator, cfg);
+    var save_dir = try std.fs.cwd().openDir(dir, .{});
+    defer save_dir.close();
+    try cfg.saveToFile(save_dir, file);
 }
 
 pub fn deleteAccount(allocator: std.mem.Allocator, name: []const u8) !void {
+    const store_path = try getStorePath(allocator);
+    defer allocator.free(store_path);
+    const dir = std.fs.path.dirname(store_path) orelse return error.InvalidPath;
+    const file = std.fs.path.basename(store_path);
+    try ensureStoreDir(allocator);
+    var dir_handle = try std.fs.cwd().openDir(dir, .{});
+    defer dir_handle.close();
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{file});
+    defer allocator.free(lock_path);
+    const lock_file = try dir_handle.createFile(lock_path, .{ .truncate = false });
+    defer lock_file.close();
+    try lockStoreFile(lock_file);
+    defer unlockStoreFile(lock_file);
     const cfg = try loadCfg(allocator);
     defer cfg.deinit();
     const accounts = try getAccountsFolder(cfg);
-    // Find and remove folder
     var idx: ?usize = null;
     for (accounts.folders.items, 0..) |f, i| {
         if (std.mem.eql(u8, f.name, name)) {
@@ -140,17 +210,34 @@ pub fn deleteAccount(allocator: std.mem.Allocator, name: []const u8) !void {
     if (idx) |i| {
         const folder = accounts.folders.orderedRemove(i);
         folder.deinit();
-        try saveCfg(allocator, cfg);
+        var save_dir = try std.fs.cwd().openDir(dir, .{});
+        defer save_dir.close();
+        try cfg.saveToFile(save_dir, file);
     } else return error.AccountNotFound;
 }
 
 pub fn setPasswordHash(allocator: std.mem.Allocator, name: []const u8, hash: []const u8) !void {
+    const store_path = try getStorePath(allocator);
+    defer allocator.free(store_path);
+    const dir = std.fs.path.dirname(store_path) orelse return error.InvalidPath;
+    const file = std.fs.path.basename(store_path);
+    try ensureStoreDir(allocator);
+    var dir_handle = try std.fs.cwd().openDir(dir, .{});
+    defer dir_handle.close();
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{file});
+    defer allocator.free(lock_path);
+    const lock_file = try dir_handle.createFile(lock_path, .{ .truncate = false });
+    defer lock_file.close();
+    try lockStoreFile(lock_file);
+    defer unlockStoreFile(lock_file);
     const cfg = try loadCfg(allocator);
     defer cfg.deinit();
     const accounts = try getAccountsFolder(cfg);
     const folder = accounts.getFolder(name) orelse return error.AccountNotFound;
     try folder.setStr("PasswordHash", hash);
-    try saveCfg(allocator, cfg);
+    var save_dir = try std.fs.cwd().openDir(dir, .{});
+    defer save_dir.close();
+    try cfg.saveToFile(save_dir, file);
 }
 
 pub fn listAccounts(allocator: std.mem.Allocator) ![][]const u8 {
