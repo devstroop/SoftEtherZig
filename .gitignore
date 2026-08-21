@@ -53,3 +53,4 @@ config*.json
 *.speed
 *.tsv.worktrees/
 .worktrees/
+*.pem

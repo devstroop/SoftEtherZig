@@ -491,8 +491,8 @@ fn buildCertificate(
     const now = std.time.timestamp();
     const not_before = c.X509_get_notBefore(x509);
     const not_after = c.X509_get_notAfter(x509);
-    _ = c.ASN1_TIME_set(not_before, now);
-    _ = c.ASN1_TIME_set(not_after, now + @as(i64, @intCast(days)) * 86400);
+    _ = c.ASN1_TIME_set(not_before, @intCast(now));
+    _ = c.ASN1_TIME_set(not_after, @intCast(now + @as(i64, @intCast(days)) * 86400));
 
     // Public key.
     if (c.X509_set_pubkey(x509, subject_key) != 1) {
