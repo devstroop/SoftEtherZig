@@ -89,6 +89,15 @@ pub fn main() !void {
             cli.showVersion(version);
             return;
         } else if (std.mem.eql(u8, args[1], "passhash") or std.mem.eql(u8, args[1], "password-hash")) {
+            // M19 #253 — `vpnclient passhash` is deprecated; `vpncmd tools
+            // generatehashedpassword` is the canonical generator (parity to
+            // `SoftEtherVPN/src/vpncmd/Tools.c:GenerateHashedPassword`).
+            // Keep consumption (`--password-hash`) in vpnclient, but generation
+            // now warns and delegates conceptually to vpncmd. Functional for
+            // one release (non-breaking), removal in M21 P2.
+            cli.display.warning(&state.display, "vpnclient passhash is deprecated — use `vpncmd tools generatehashedpassword` (see `vpncmd tools --help`)", .{});
+            cli.display.info(&state.display, "This verb will be removed in a future release; `vpnclient` will only consume `--password-hash`.", .{});
+
             var hash_user: ?[]const u8 = null;
             var hash_pass: ?[]const u8 = null;
 
@@ -121,8 +130,9 @@ pub fn main() !void {
             }
 
             if (hash_user == null or hash_pass == null) {
-                cli.display.failure(&state.display, "Usage: vpnclient passhash [<username> <password>]", .{});
+                cli.display.failure(&state.display, "Usage: vpnclient passhash [<username> <password>]  (deprecated)", .{});
                 cli.display.failure(&state.display, "       vpnclient passhash --user <username> --password <password>", .{});
+                cli.display.failure(&state.display, "  Prefer: vpncmd tools generatehashedpassword -u <user> -p <pass>", .{});
                 std.process.exit(1);
             }
             app.password_hash.generate(hash_user.?, hash_pass.?);

@@ -120,6 +120,12 @@ pub const x509 = @import("mayaqua/encrypt/x509.zig");
 // nested below src/ and reaches these through `lib`).
 pub const cli = @import("cli/mod.zig");
 
+// Password hash helpers (M19 #253) — shared by `vpnclient` (deprecated
+// `passhash` verb, verification) and `vpncmd tools generatehashedpassword`
+// (generation, `Mayaqua/Encrypt.c:GenerateNtPasswordHash` /
+// `src/Cedar/Account.c:HashPassword` parity, SHA-0).
+pub const password_hash = @import("app/password_hash.zig");
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
