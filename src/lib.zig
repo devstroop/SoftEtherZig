@@ -120,6 +120,9 @@ pub const x509 = @import("mayaqua/encrypt/x509.zig");
 // nested below src/ and reaches these through `lib`).
 pub const cli = @import("cli/mod.zig");
 
+// Service lifecycle (M20 #256/#257) — systemd/launchd/SCM install/start/stop
+pub const service = @import("app/daemon.zig");
+
 // Password hash helpers (M19 #253) — shared by `vpnclient` (deprecated
 // `passhash` verb, verification) and `vpncmd tools generatehashedpassword`
 // (generation, `Mayaqua/Encrypt.c:GenerateNtPasswordHash` /

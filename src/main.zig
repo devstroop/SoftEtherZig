@@ -175,7 +175,8 @@ pub fn main() !void {
                     std.process.exit(1);
                 }
             }
-            app.daemon.installService(allocator, &state.display, scope) catch |err| {
+            const kind: app.daemon.ServiceKind = .vpnclient;
+            app.daemon.installService(allocator, kind, scope, &state.display) catch |err| {
                 cli.display.failure(&state.display, "install failed: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -197,7 +198,8 @@ pub fn main() !void {
                     std.process.exit(1);
                 }
             }
-            app.daemon.uninstallService(allocator, &state.display, scope) catch |err| {
+            const kind: app.daemon.ServiceKind = .vpnclient;
+            app.daemon.uninstallService(allocator, kind, scope, &state.display) catch |err| {
                 cli.display.failure(&state.display, "uninstall failed: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };

@@ -17,6 +17,7 @@ const softether = @import("softether");
 const cli = softether.cli;
 const runtime = softether.server.runtime;
 const Server = runtime.Server;
+const service = softether.service;
 
 const log = std.log.scoped(.app);
 
@@ -240,6 +241,99 @@ pub fn main() !void {
         std.process.exit(1);
     };
     defer std.process.argsFree(allocator, args);
+
+    // Service lifecycle verbs (M20 #258) — parity to vpnclient, default --system for vpnserver
+    if (args.len >= 2 and args[1][0] != '-') {
+        if (std.mem.eql(u8, args[1], "install") or std.mem.eql(u8, args[1], "uninstall")) {
+            const is_install = std.mem.eql(u8, args[1], "install");
+            var scope: service.ServiceScope = .system;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) scope = .system;
+                if (std.mem.eql(u8, a, "--user")) scope = .user;
+                if (a.len > 0 and a[0] == '-' and !std.mem.eql(u8, a, "--system") and !std.mem.eql(u8, a, "--user")) {
+                    log.err("unknown option for {s}: {s}", .{ args[1], a });
+                    std.process.exit(1);
+                }
+            }
+            var has_system = false;
+            var has_user = false;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) has_system = true;
+                if (std.mem.eql(u8, a, "--user")) has_user = true;
+            }
+            if (has_system and has_user) {
+                log.err("cannot specify both --system and --user", .{});
+                std.process.exit(1);
+            }
+            const kind: service.ServiceKind = .vpnserver;
+            if (is_install) {
+                service.installService(allocator, kind, scope, &display) catch |err| {
+                    log.err("install failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else {
+                service.uninstallService(allocator, kind, scope, &display) catch |err| {
+                    log.err("uninstall failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            }
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, args[1], "start") or std.mem.eql(u8, args[1], "stop") or std.mem.eql(u8, args[1], "restart") or std.mem.eql(u8, args[1], "status") or std.mem.eql(u8, args[1], "enable") or std.mem.eql(u8, args[1], "disable")) {
+            var scope: service.ServiceScope = .system;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) scope = .system;
+                if (std.mem.eql(u8, a, "--user")) scope = .user;
+                if (a.len > 0 and a[0] == '-' and !std.mem.eql(u8, a, "--system") and !std.mem.eql(u8, a, "--user")) {
+                    log.err("unknown option for {s}: {s}", .{ args[1], a });
+                    std.process.exit(1);
+                }
+            }
+            var has_system = false;
+            var has_user = false;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) has_system = true;
+                if (std.mem.eql(u8, a, "--user")) has_user = true;
+            }
+            if (has_system and has_user) {
+                log.err("cannot specify both --system and --user", .{});
+                std.process.exit(1);
+            }
+            const kind: service.ServiceKind = .vpnserver;
+            const cmd = args[1];
+            if (std.mem.eql(u8, cmd, "start")) {
+                service.startService(allocator, kind, scope, &display) catch |err| {
+                    log.err("start failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "stop")) {
+                service.stopService(allocator, kind, scope, &display) catch |err| {
+                    log.err("stop failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "restart")) {
+                service.restartService(allocator, kind, scope, &display) catch |err| {
+                    log.err("restart failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "status")) {
+                service.statusService(allocator, kind, scope, &display) catch |err| {
+                    log.err("status failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "enable")) {
+                service.enableService(allocator, kind, scope, &display) catch |err| {
+                    log.err("enable failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "disable")) {
+                service.disableService(allocator, kind, scope, &display) catch |err| {
+                    log.err("disable failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            }
+            std.process.exit(0);
+        }
+    }
 
     const cli_args = parseArgs(allocator, args) catch |err| {
         log.err("argument error: {s}", .{@errorName(err)});
