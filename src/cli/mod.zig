@@ -56,8 +56,10 @@ fn isFile(path: []const u8) bool {
 }
 
 /// Load configuration with priority: CLI > env > config file
+/// @deprecated config.json host surface is deprecated (M19 #254) — use `vpncmd client AccountCreate` (see docs/ACCOUNT.md). Kept for one release.
 pub fn loadConfig(allocator: std.mem.Allocator, cli_args: *CliArgs) !void {
     // Determine config path: explicit --config > ./config.json > ~/.config/softether-zig/config.json
+    const is_explicit = cli_args.config_file != null;
     const config_path = cli_args.config_file orelse blk: {
         if (isFile("config.json")) {
             break :blk "config.json";
@@ -67,6 +69,15 @@ pub fn loadConfig(allocator: std.mem.Allocator, cli_args: *CliArgs) !void {
         }
         break :blk null;
     };
+
+    // Deprecation warn for host file surface (M19 #254) — warn on auto-load or explicit --config
+    // Account store via `vpncmd client AccountCreate` lands in M21 P3; for now
+    // point to the currently available `vpncmd tools` and docs.
+    if (config_path != null) {
+        const source: []const u8 = if (is_explicit) "explicit --config" else "auto-loaded config.json";
+        // Use stderr via debug.print to preserve stdout contract for passhash etc.
+        std.debug.print("[warning] config.json ({s}: {s}) is deprecated — account store via `vpncmd` planned M21 (see docs/ACCOUNT.md)\n", .{ source, config_path.? });
+    }
 
     if (config_path) |path| {
         var mgr = ConfigManager.init(allocator);
