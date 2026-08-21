@@ -38,9 +38,15 @@ const fdb_mod = @import("fdb.zig");
 const MacAddress = fdb_mod.MacAddress;
 const rate_limiter_mod = @import("rate_limiter.zig");
 const TokenBucket = rate_limiter_mod.TokenBucket;
+const stp_mod = @import("stp.zig");
+const StpBridge = stp_mod.StpBridge;
 
 /// Must match `adapter/af_packet.zig`'s session L2 frame budget.
 pub const SESSION_FRAME_BUDGET: usize = 1514;
+
+/// STP Bridge Group Address (01:80:C2:00:00:00) — all STP BPDUs are
+/// sent to this multicast destination MAC.
+const STP_BPDU_DST: [6]u8 = .{ 0x01, 0x80, 0xC2, 0x00, 0x00, 0x00 };
 
 /// 802.1Q VLAN tag ethertype (network byte order).
 pub const VLAN_ETHERTYPE: u16 = 0x8100;
@@ -208,6 +214,8 @@ pub const BridgeLoop = struct {
     ingress_limiters: []?TokenBucket,
     /// Per-port VLAN configuration.
     port_configs: []PortConfig,
+    /// STP bridge instance (null when STP is disabled).
+    stp_bridge: ?StpBridge = null,
 
     pub fn init(
         allocator: Allocator,
@@ -250,6 +258,7 @@ pub const BridgeLoop = struct {
     }
 
     pub fn deinit(self: *BridgeLoop) void {
+        if (self.stp_bridge) |*stp| stp.deinit();
         self.allocator.free(self.egress_limiters);
         self.allocator.free(self.ingress_limiters);
         self.allocator.free(self.port_configs);
@@ -269,6 +278,34 @@ pub const BridgeLoop = struct {
     pub fn setPortVlan(self: *BridgeLoop, port: u16, config: PortConfig) void {
         if (port >= self.ports.len) return;
         self.port_configs[port] = config;
+    }
+
+    /// Enable STP on this bridge. `priority` is the bridge priority (0–65535,
+    /// lower wins root election). `bridge_mac` is the bridge MAC address.
+    /// All LAN ports start in blocking state until STP converges.
+    pub fn enableStp(self: *BridgeLoop, priority: u16, bridge_mac: MacAddress) !void {
+        if (self.stp_bridge) |*stp| stp.deinit();
+        self.stp_bridge = try StpBridge.init(
+            self.allocator,
+            @intCast(self.ports.len),
+            bridge_mac,
+            priority,
+        );
+        // Enable STP on all LAN ports (they start in blocking).
+        for (0..self.ports.len) |i| {
+            self.stp_bridge.?.enablePort(@intCast(i));
+        }
+    }
+
+    /// Disable STP and free resources. All ports return to forwarding.
+    pub fn disableStp(self: *BridgeLoop) void {
+        if (self.stp_bridge) |*stp| stp.deinit();
+        self.stp_bridge = null;
+    }
+
+    /// Mark a LAN port as an edge port (connected to end hosts).
+    pub fn setStpEdgePort(self: *BridgeLoop, port: u16, is_edge: bool) void {
+        if (self.stp_bridge) |*stp| stp.setEdgePort(port, is_edge);
     }
 
     /// Live cumulative snapshot of the bridge's aggregated stats since the
@@ -314,6 +351,11 @@ pub const BridgeLoop = struct {
             self.stats.drops += 1;
             return;
         }
+        // STP: intercept BPDU frames from session (uplink side).
+        if (self.stp_bridge != null and isBpduFrame(block)) {
+            self.handleBpduFromSession(block);
+            return;
+        }
         // Parse VLAN tag for session-side learning.
         const tag = parseVlanTag(block);
         const vlan_id: u16 = if (tag) |t| t.vlan_id else 0;
@@ -350,6 +392,15 @@ pub const BridgeLoop = struct {
         if (frame.len > SESSION_FRAME_BUDGET) {
             self.stats.drops += 1;
             return;
+        }
+        // STP: intercept BPDU frames (sent to 01:80:C2:00:00:00).
+        if (self.stp_bridge != null and isBpduFrame(frame)) {
+            self.handleBpduFromPort(port_index, frame);
+            return;
+        }
+        // STP: block data frames on non-forwarding ports.
+        if (self.stp_bridge) |*stp| {
+            if (!stp.isForwarding(port_index)) return;
         }
         // Ingress rate limit check.
         if (port_index < self.ingress_limiters.len) {
@@ -391,8 +442,11 @@ pub const BridgeLoop = struct {
     }
 
     /// Age the FDB. The pump calls this from its slow path once per second.
+    /// Also ticks the STP timer if enabled.
     pub fn age(self: *BridgeLoop, now: u32) usize {
-        return self.engine.age(now);
+        const aged = self.engine.age(now);
+        self.stpTick();
+        return aged;
     }
 
     fn writePort(self: *BridgeLoop, port_index: u16, frame: []const u8, action: ForwardAction) void {
@@ -411,6 +465,10 @@ pub const BridgeLoop = struct {
     /// Write a frame to a port, applying per-port VLAN transformation.
     /// Access ports strip the 802.1Q tag; trunk ports keep it.
     fn writePortVlan(self: *BridgeLoop, port_index: u16, frame: []const u8, action: ForwardAction, vlan_id: u16) void {
+        // STP: block egress on non-forwarding ports.
+        if (self.stp_bridge) |*stp| {
+            if (!stp.isForwarding(port_index)) return;
+        }
         const p = &self.ports[port_index];
         // Egress rate limit check.
         if (self.egress_limiters[port_index]) |*limiter| {
@@ -455,6 +513,101 @@ pub const BridgeLoop = struct {
         self.sink.send(self.sink.ctx, frame) catch {
             self.stats.session_tx_errors += 1;
         };
+    }
+
+    /// Tick the STP state machine once per second (called from `age`).
+    /// Drives hello timer, info age, forward-delay transitions, and sends
+    /// BPDUs on designated ports when the hello timer fires.
+    fn stpTick(self: *BridgeLoop) void {
+        const stp = &(self.stp_bridge orelse return);
+        const tick_action = stp.tick();
+
+        if (tick_action.recompute) {
+            stp.recompute();
+        }
+
+        // Send periodic hellos from the root or designated ports.
+        if (tick_action.send_hello) {
+            for (0..stp.port_count) |i| {
+                if (stp.ports[i].role == .designated) {
+                    self.sendBpdu(@intCast(i));
+                }
+            }
+        }
+    }
+
+    /// Send a Configuration BPDU out of a specific LAN port.
+    fn sendBpdu(self: *BridgeLoop, port_index: u16) void {
+        const stp = &(self.stp_bridge orelse return);
+        var buf: [SESSION_FRAME_BUDGET]u8 = undefined;
+        const bpdu = stp.buildConfigBpdu(port_index);
+        const frame_len = stp_mod.encodeConfigBpdu(bpdu, stp.bridge_id.mac, &buf) catch return;
+        if (port_index < self.ports.len) {
+            _ = self.ports[port_index].write(buf[0..frame_len]) catch return;
+        }
+    }
+
+    /// Check if a frame is an STP BPDU (dest == 01:80:C2:00:00:00).
+    fn isBpduFrame(frame: []const u8) bool {
+        if (frame.len < 6) return false;
+        return std.mem.eql(u8, frame[0..6], &STP_BPDU_DST);
+    }
+
+    /// Process a BPDU received on a LAN port. The BPDU is fed to the
+    /// STP state machine; if the action is `.send_bpdu`, a response BPDU
+    /// is sent back out of the same port.
+    fn handleBpduFromPort(self: *BridgeLoop, port_index: u16, frame: []const u8) void {
+        const stp = &(self.stp_bridge orelse return);
+        if (port_index >= stp.port_count) return;
+
+        // Try to decode as a Config BPDU (minimum 51 bytes for a valid frame).
+        if (frame.len >= 51) {
+            const bpdu = stp_mod.decodeConfigBpdu(frame) orelse return;
+            const action = stp.processConfigBpdu(port_index, bpdu);
+            switch (action) {
+                .recompute => stp.recompute(),
+                .send_bpdu => self.sendBpdu(port_index),
+                .none => {},
+            }
+        } else if (frame.len >= 21) {
+            // Minimal frame — check for TCN BPDU (type at offset 20, after
+            // DST(6)+SRC(6)+Ethertype(2)+LLC(3)+ProtID(2)+Version(1)).
+            const bpdu_type = frame[20];
+            if (bpdu_type == stp_mod.BPDU_TYPE_TCN) {
+                stp.processTcnBpdu(port_index);
+            }
+        }
+    }
+
+    /// Process a BPDU received from the session (uplink) side.
+    /// The session is modeled as STP port index `port_count` (one past the
+    /// LAN ports). BPDUs arriving from the session are processed as if they
+    /// came from a remote switch on the uplink. Response BPDUs are sent
+    /// back through the session sink.
+    fn handleBpduFromSession(self: *BridgeLoop, frame: []const u8) void {
+        const stp = &(self.stp_bridge orelse return);
+        const session_stp_port: u16 = @intCast(stp.port_count);
+
+        if (frame.len >= 52) {
+            const bpdu = stp_mod.decodeConfigBpdu(frame) orelse return;
+            const action = stp.processConfigBpdu(session_stp_port, bpdu);
+            switch (action) {
+                .recompute => stp.recompute(),
+                .send_bpdu => {
+                    // Send a response BPDU back through the session sink.
+                    var buf: [SESSION_FRAME_BUDGET]u8 = undefined;
+                    const resp_bpdu = stp.buildConfigBpdu(session_stp_port);
+                    const frame_len = stp_mod.encodeConfigBpdu(resp_bpdu, stp.bridge_id.mac, &buf) catch return;
+                    self.sendToSession(buf[0..frame_len]);
+                },
+                .none => {},
+            }
+        } else if (frame.len >= 21) {
+            const bpdu_type = frame[20];
+            if (bpdu_type == stp_mod.BPDU_TYPE_TCN) {
+                stp.processTcnBpdu(session_stp_port);
+            }
+        }
     }
 };
 
@@ -945,4 +1098,181 @@ test "bridge loop: trunk port preserves VLAN tag on egress" {
     try std.testing.expectEqual(@as(usize, 18 + 42), h.port0.out.items.len);
     // Verify the ethertype at offset 12 is 0x8100 (VLAN).
     try std.testing.expectEqual(VLAN_ETHERTYPE, std.mem.readInt(u16, h.port0.out.items[12..14], .big));
+}
+
+// ---- STP integration tests ----
+
+/// Build a BPDU frame with the STP multicast destination.
+fn buildBpduFrame(bpdu: stp_mod.ConfigBpdu) [64]u8 {
+    var buf: [64]u8 = undefined;
+    // Use zero MAC as source for test BPDU frames (not validated by decoder).
+    const zero_mac: MacAddress = .{ 0, 0, 0, 0, 0, 0 };
+    const len = stp_mod.encodeConfigBpdu(bpdu, zero_mac, &buf) catch unreachable;
+    // Zero-pad the rest.
+    if (len < buf.len) @memset(buf[len..], 0);
+    return buf;
+}
+
+test "bridge loop: STP blocks data on non-forwarding ports" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    const bridge_mac = makeMac(0, 0, 0, 0, 0, 0xAA);
+    try h.loop.enableStp(32768, bridge_mac);
+    // Ports start in blocking → data frames should be dropped.
+
+    const mac_a = makeMac(2, 0, 0, 0, 0, 1);
+    const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
+
+    // Self-frame to learn A on port 0 → STP blocks, no learning.
+    const f_learn = buildFrame(mac_a, mac_a);
+    h.loop.dispatchPortFrame(0, &f_learn);
+
+    // Session sends to A → blocked on port 0 (non-forwarding).
+    const f_down = buildFrame(mac_remote, mac_a);
+    h.loop.dispatchSessionBlock(&f_down);
+
+    try std.testing.expectEqual(@as(usize, 0), h.port0.out.items.len);
+    try std.testing.expectEqual(@as(usize, 0), h.capture.frames.items.len);
+}
+
+test "bridge loop: STP edge port goes straight to forwarding" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    const bridge_mac = makeMac(0, 0, 0, 0, 0, 0xAA);
+    try h.loop.enableStp(32768, bridge_mac);
+    h.loop.setStpEdgePort(0, true);
+
+    const mac_a = makeMac(2, 0, 0, 0, 0, 1);
+    const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
+
+    // Learn A on port 0 (edge → forwarding).
+    const f_learn = buildFrame(mac_a, mac_a);
+    h.loop.dispatchPortFrame(0, &f_learn);
+
+    // Session sends to A → port 0 forwarding, should receive frame.
+    const f_down = buildFrame(mac_remote, mac_a);
+    h.loop.dispatchSessionBlock(&f_down);
+
+    try std.testing.expectEqual(@as(usize, f_down.len), h.port0.out.items.len);
+}
+
+test "bridge loop: STP BPDU from port is intercepted (not forwarded)" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    const bridge_mac = makeMac(0, 0, 0, 0, 0, 0xAA);
+    try h.loop.enableStp(32768, bridge_mac);
+    h.loop.setStpEdgePort(0, true);
+    h.loop.setStpEdgePort(1, true);
+
+    // Build a BPDU frame from a remote bridge.
+    const remote_bpdu = stp_mod.ConfigBpdu{
+        .root_id = .{ .priority = 16384, .mac = makeMac(0, 0, 0, 0, 0, 1) },
+        .root_path_cost = 0,
+        .sender_id = .{ .priority = 16384, .mac = makeMac(0, 0, 0, 0, 0, 1) },
+        .sender_port_id = .{ .priority = 128, .port_num = 1 },
+        .message_age = 0,
+        .max_age = 20 << 8,
+        .hello_time = 2 << 8,
+        .forward_delay = 15 << 8,
+    };
+    var bpdu_buf = buildBpduFrame(remote_bpdu);
+
+    // Send BPDU into port 0 — should be intercepted, not forwarded.
+    h.loop.dispatchPortFrame(0, &bpdu_buf);
+    try std.testing.expectEqual(@as(usize, 0), h.port0.out.items.len);
+    try std.testing.expectEqual(@as(usize, 0), h.port1.out.items.len);
+    try std.testing.expectEqual(@as(usize, 0), h.capture.frames.items.len);
+
+    // The STP state should have updated (non-root now).
+    if (h.loop.stp_bridge) |stp| {
+        try std.testing.expect(!stp.is_root);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "bridge loop: STP tick sends hello BPDUs on designated ports" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    const bridge_mac = makeMac(0, 0, 0, 0, 0, 0xAA);
+    try h.loop.enableStp(32768, bridge_mac);
+    h.loop.setStpEdgePort(0, true);
+    h.loop.setStpEdgePort(1, true);
+
+    // Hello timer init = hello_s (2). Need 2 ticks to reach 0.
+    const now = nowSeconds();
+    _ = h.loop.age(now);
+    _ = h.loop.age(now);
+
+    // Edge ports in forwarding → hello BPDUs should be sent out both.
+    // Each BPDU is 52 bytes.
+    try std.testing.expect(h.port0.out.items.len > 0);
+    try std.testing.expect(h.port1.out.items.len > 0);
+}
+
+test "bridge loop: STP disableStp restores forwarding" {
+    var h = makeHost();
+    defer h.loop.deinit();
+    defer h.capture.deinit();
+    defer {
+        h.port0.out.deinit(std.testing.allocator);
+        h.port1.out.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(h.port0);
+        std.testing.allocator.destroy(h.port1);
+        std.testing.allocator.destroy(h.capture);
+    }
+
+    const bridge_mac = makeMac(0, 0, 0, 0, 0, 0xAA);
+    try h.loop.enableStp(32768, bridge_mac);
+
+    // Port 0 is blocking → data dropped.
+    const mac_a = makeMac(2, 0, 0, 0, 0, 1);
+    const mac_remote = makeMac(2, 0, 0, 0, 0, 9);
+    const f_learn = buildFrame(mac_a, mac_a);
+    h.loop.dispatchPortFrame(0, &f_learn);
+
+    const f_down = buildFrame(mac_remote, mac_a);
+    h.loop.dispatchSessionBlock(&f_down);
+    try std.testing.expectEqual(@as(usize, 0), h.port0.out.items.len);
+
+    // Disable STP → all ports forward.
+    h.loop.disableStp();
+    h.loop.dispatchSessionBlock(&f_down);
+    try std.testing.expectEqual(@as(usize, f_down.len), h.port0.out.items.len);
 }
