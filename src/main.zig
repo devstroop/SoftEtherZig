@@ -175,7 +175,8 @@ pub fn main() !void {
                     std.process.exit(1);
                 }
             }
-            app.daemon.installService(allocator, &state.display, scope) catch |err| {
+            const kind: app.daemon.ServiceKind = .vpnclient;
+            app.daemon.installService(allocator, kind, scope, &state.display) catch |err| {
                 cli.display.failure(&state.display, "install failed: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -197,7 +198,8 @@ pub fn main() !void {
                     std.process.exit(1);
                 }
             }
-            app.daemon.uninstallService(allocator, &state.display, scope) catch |err| {
+            const kind: app.daemon.ServiceKind = .vpnclient;
+            app.daemon.uninstallService(allocator, kind, scope, &state.display) catch |err| {
                 cli.display.failure(&state.display, "uninstall failed: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
@@ -224,32 +226,32 @@ pub fn main() !void {
             }
             const cmd = args[1];
             if (std.mem.eql(u8, cmd, "start")) {
-                app.daemon.startService(allocator, &state.display, scope) catch |err| {
+                app.daemon.startService(allocator, .vpnclient, scope, &state.display) catch |err| {
                     cli.display.failure(&state.display, "Start failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
             } else if (std.mem.eql(u8, cmd, "stop")) {
-                app.daemon.stopService(allocator, &state.display, scope) catch |err| {
+                app.daemon.stopService(allocator, .vpnclient, scope, &state.display) catch |err| {
                     cli.display.failure(&state.display, "Stop failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
             } else if (std.mem.eql(u8, cmd, "restart")) {
-                app.daemon.restartService(allocator, &state.display, scope) catch |err| {
+                app.daemon.restartService(allocator, .vpnclient, scope, &state.display) catch |err| {
                     cli.display.failure(&state.display, "Restart failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
             } else if (std.mem.eql(u8, cmd, "status")) {
-                app.daemon.statusService(allocator, &state.display, scope) catch |err| {
+                app.daemon.statusService(allocator, .vpnclient, scope, &state.display) catch |err| {
                     cli.display.failure(&state.display, "Status failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
             } else if (std.mem.eql(u8, cmd, "enable")) {
-                app.daemon.enableService(allocator, &state.display, scope) catch |err| {
+                app.daemon.enableService(allocator, .vpnclient, scope, &state.display) catch |err| {
                     cli.display.failure(&state.display, "Enable failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
             } else if (std.mem.eql(u8, cmd, "disable")) {
-                app.daemon.disableService(allocator, &state.display, scope) catch |err| {
+                app.daemon.disableService(allocator, .vpnclient, scope, &state.display) catch |err| {
                     cli.display.failure(&state.display, "Disable failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
