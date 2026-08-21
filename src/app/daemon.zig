@@ -736,8 +736,14 @@ fn showConnectProgress(display_ctx: *cli.display.DisplayContext, vpn: *client.Vp
 // ============================================================================
 
 fn daemonize(allocator: std.mem.Allocator, display: *cli.display.DisplayContext) !void {
-    // Mayaqua/Unix.c:Daemon compat — double-fork, setsid, chdir /, umask 0, close 0/1/2 → /dev/null, flock PID
+    // Mayaqua/Unix.c:Daemon compat — double-fork, setsid, umask 0, close 0/1/2 → /dev/null, flock PID
+    // Note: we intentionally do NOT chdir("/") here — the VPN client may have relative
+    // runtime paths (e.g. --pcap) that must remain resolvable from the original CWD.
+    // Original CWD is preserved; if daemon semantics require detachment from the
+    // invoking directory, callers should pass absolute paths.
     if (builtin.os.tag == .windows) return;
+    // Explicit umask 0 for Mayaqua compat (inherited umask would affect PID/PCAP perms)
+    _ = std.c.umask(0);
     const pid = try std.posix.fork();
     if (pid > 0) {
         // Parent exits immediately (no terminal held)
@@ -745,7 +751,6 @@ fn daemonize(allocator: std.mem.Allocator, display: *cli.display.DisplayContext)
     }
     // Child continues
     _ = std.posix.setsid() catch {};
-    _ = std.posix.chdir("/") catch {};
     // Second fork to ensure not session leader
     const pid2 = try std.posix.fork();
     if (pid2 > 0) std.process.exit(0);
@@ -762,16 +767,17 @@ fn daemonize(allocator: std.mem.Allocator, display: *cli.display.DisplayContext)
 /// Run the VPN client in daemon mode
 pub fn run(state: *AppState) !void {
     // Foreground for containers/dev: `vpnclient connect` without `install` runs foreground (PID 1 = vpnclient)
-    // Fallback when PID 1 != systemd and --daemon requested: Mayaqua daemon (double-fork, no terminal)
+    // Fallback when --daemon requested: Mayaqua daemon (double-fork, no terminal) — always honor --daemon,
+    // even on systemd hosts (direct `connect --daemon` must detach; service units use Type=simple without --daemon).
     if (state.cli_args.daemon) {
-        if (!isSystemd()) {
-            cli.display.info(&state.display, "systemd not detected — daemonizing via Mayaqua fallback (double-fork, no terminal)", .{});
-            daemonize(state.allocator, &state.display) catch |err| {
-                cli.display.warning(&state.display, "daemonize failed: {s} (continuing in foreground)", .{@errorName(err)});
-            };
+        if (isSystemd()) {
+            cli.display.info(&state.display, "Daemonizing via Mayaqua fallback (double-fork, no terminal) — systemd host but --daemon requested (service units should use Type=simple)", .{});
         } else {
-            cli.display.info(&state.display, "Running in daemon mode (systemd available — consider `systemctl start` for service)", .{});
+            cli.display.info(&state.display, "systemd not detected — daemonizing via Mayaqua fallback (double-fork, no terminal)", .{});
         }
+        daemonize(state.allocator, &state.display) catch |err| {
+            cli.display.warning(&state.display, "daemonize failed: {s} (continuing in foreground)", .{@errorName(err)});
+        };
     } else {
         cli.display.info(&state.display, "Running in foreground mode (docker/dev, PID 1 = vpnclient, no install needed)...", .{});
     }
