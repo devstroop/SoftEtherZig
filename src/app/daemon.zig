@@ -704,3 +704,44 @@ pub fn run(state: *AppState) !void {
     // disconnect() joins the connect-spawned data loop thread and frees resources.
     vpn.disconnect() catch {};
 }
+
+test "service install/uninstall user creates and removes unit" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_path);
+
+    const old_xdg = std.posix.getenv("XDG_CONFIG_HOME");
+    try std.posix.setenv("XDG_CONFIG_HOME", tmp_path);
+    defer {
+        if (old_xdg) |v| std.posix.setenv("XDG_CONFIG_HOME", v) catch {} else std.posix.unsetenv("XDG_CONFIG_HOME") catch {};
+    }
+
+    var ctx = cli.display.DisplayContext.initNull();
+    const alloc = std.testing.allocator;
+
+    try installService(alloc, &ctx, .user);
+    const unit_path = try std.fmt.allocPrint(alloc, "{s}/systemd/user/softether-vpnclient.service", .{tmp_path});
+    defer alloc.free(unit_path);
+    _ = std.fs.cwd().openFile(unit_path, .{}) catch |err| {
+        std.debug.print("unit not found at {s}: {}\n", .{ unit_path, err });
+        return err;
+    };
+
+    try statusService(alloc, &ctx, .user);
+
+    try uninstallService(alloc, &ctx, .user);
+    if (std.fs.cwd().openFile(unit_path, .{})) |f| {
+        f.close();
+        return error.FileStillExists;
+    } else {}
+}
+
+test "service install requires sudo for --system without root" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (std.c.getuid() == 0) return error.SkipZigTest;
+    var ctx = cli.display.DisplayContext.initNull();
+    const err = installService(std.testing.allocator, &ctx, .system) catch |e| e;
+    try std.testing.expectEqual(error.PermissionDenied, err);
+}
