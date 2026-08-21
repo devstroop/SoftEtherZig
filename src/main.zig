@@ -73,6 +73,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // Check for subcommand (argv[1] without leading dash)
+    // M22-2: bare `vpnclient [OPTIONS]` is implicit connect (keep `connect` as alias 1 release)
     var connect_mode = false;
     var effective_args: []const []const u8 = args;
     if (args.len >= 2 and args[1][0] != '-') {
@@ -324,10 +325,14 @@ pub fn main() !void {
         return;
     }
 
-    // Everything else requires 'connect' subcommand
+    // M22-2: implicit connect — bare `vpnclient [OPTIONS]` is connect (keep `connect` alias)
+    // If no subcommand was matched but we have connect-like flags or store, treat as connect.
+    // This allows `vpnclient -a ...` and `vpnclient --account NAME` without verb.
     if (!connect_mode) {
-        cli.display.failure(&state.display, "No subcommand. Use 'vpnclient connect <options>' to connect, or 'vpnclient --help' for usage.", .{});
-        std.process.exit(1);
+        // If no subcommand and not help/version, assume connect (bare flags)
+        // We already handled help/version above, so any remaining case with no connect_mode
+        // and not having exited is an implicit connect. Validate will catch missing fields.
+        connect_mode = true;
     }
 
     // Validate required fields
