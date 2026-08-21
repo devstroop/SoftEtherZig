@@ -401,8 +401,25 @@ pub fn startService(allocator: std.mem.Allocator, display: *cli.display.DisplayC
     } else if (builtin.os.tag == .macos) {
         const target = try launchdDomainTarget(allocator, scope);
         defer allocator.free(target);
+        // Try kickstart first; if not bootstrapped, bootstrap then kickstart
         var child = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", target }, allocator);
-        const term = try child.spawnAndWait();
+        var term = try child.spawnAndWait();
+        if (term == .Exited and term.Exited == 0) {
+            cli.display.success(display, "Started softether-vpnclient", .{});
+            return;
+        }
+        // Not bootstrapped — bootstrap the plist then kickstart
+        const plist_path = try launchdPlistPath(allocator, scope);
+        defer allocator.free(plist_path);
+        const domain = if (scope == .system) "system" else blk: {
+            const uid = std.c.getuid();
+            break :blk try std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
+        };
+        defer if (scope != .system) allocator.free(domain);
+        var boot = std.process.Child.init(&[_][]const u8{ "launchctl", "bootstrap", domain, plist_path }, allocator);
+        _ = try boot.spawnAndWait();
+        var child2 = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", target }, allocator);
+        term = try child2.spawnAndWait();
         switch (term) {
             .Exited => |code| if (code != 0) return error.StartFailed,
             else => return error.StartFailed,
