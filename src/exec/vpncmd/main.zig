@@ -102,6 +102,79 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // M19 #253 — local `tools` verbs that do NOT require a server connection.
+    // Must be checked before `CmdArgs.parse` which requires `--server`.
+    // Parity to `SoftEtherVPN/src/vpncmd/Tools.c:GenerateHashedPassword` /
+    // `Mayaqua/Encrypt.c:GenerateNtPasswordHash` (MD4) and
+    // `Cedar/Account.c:HashPassword` (SHA-0) — currently SHA-0 path via
+    // `src/app/password_hash.zig`. Keep offline so `vpncmd tools
+    // generatehashedpassword` works without a running server.
+    if (args.len >= 2 and (std.mem.eql(u8, args[1], "tools") or std.mem.eql(u8, args[1], "Tools"))) {
+        if (args.len >= 3 and (std.mem.eql(u8, args[2], "generatehashedpassword") or std.mem.eql(u8, args[2], "GenerateHashedPassword"))) {
+            var t_user: ?[]const u8 = null;
+            var t_pass: ?[]const u8 = null;
+            // Positional: `vpncmd tools generatehashedpassword <user> <pass>`
+            if (args.len >= 5 and args[3].len > 0 and args[4].len > 0 and args[3][0] != '-' and args[4][0] != '-') {
+                t_user = args[3];
+                t_pass = args[4];
+                if (args.len > 5) {
+                    std.debug.print("Warning: ignoring extra arguments after <user> <pass>\n", .{});
+                }
+            } else {
+                var i: usize = 3;
+                while (i < args.len) : (i += 1) {
+                    const a = args[i];
+                    if (std.mem.eql(u8, a, "-u") or std.mem.eql(u8, a, "--user") or std.mem.eql(u8, a, "/u") or std.mem.eql(u8, a, "/USER")) {
+                        i += 1;
+                        if (i >= args.len) {
+                            std.debug.print("Missing value for {s}\n\n", .{a});
+                            printToolsUsage();
+                            std.process.exit(1);
+                        }
+                        t_user = args[i];
+                    } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--password") or std.mem.eql(u8, a, "/p") or std.mem.eql(u8, a, "/PASSWORD")) {
+                        i += 1;
+                        if (i >= args.len) {
+                            std.debug.print("Missing value for {s}\n\n", .{a});
+                            printToolsUsage();
+                            std.process.exit(1);
+                        }
+                        t_pass = args[i];
+                    } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "/?")) {
+                        printToolsUsage();
+                        return;
+                    } else {
+                        std.debug.print("Unknown tools option: {s}\n\n", .{a});
+                        printToolsUsage();
+                        std.process.exit(1);
+                    }
+                }
+            }
+            if (t_user == null or t_pass == null) {
+                std.debug.print("Usage: vpncmd tools generatehashedpassword [-u <user> -p <pass>]\n", .{});
+                std.debug.print("   or: vpncmd tools generatehashedpassword <user> <pass>\n\n", .{});
+                printToolsUsage();
+                std.process.exit(1);
+            }
+            // Reuse shared SHA-0 generator (identical to `vpnclient passhash`).
+            se.password_hash.generate(t_user.?, t_pass.?);
+            return;
+        } else if (args.len == 2 or (args.len >= 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h") or std.mem.eql(u8, args[2], "help")))) {
+            printToolsUsage();
+            return;
+        } else {
+            std.debug.print("Unknown tools subcommand: {s}\n\n", .{if (args.len >= 3) args[2] else ""});
+            printToolsUsage();
+            std.process.exit(1);
+        }
+    }
+
+    // Also support top-level `vpncmd tools --help` without server.
+    if (args.len >= 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "help"))) {
+        // Fall through to printUsage via parse error, but show tools hint.
+        // Handled below via CmdArgs.parse Help path.
+    }
+
     // Skip argv[0] (the binary name).
     const cmd_args = CmdArgs.parse(args[1..]) catch |err| {
         switch (err) {
@@ -142,14 +215,47 @@ pub fn main() !void {
     shell.run();
 }
 
+fn printToolsUsage() void {
+    std.debug.print(
+        \\SoftEther VPN Command Tool v{s} — Tools
+        \\
+        \\Usage: vpncmd tools <command> [options]
+        \\
+        \\Commands:
+        \\  generatehashedpassword     Generate a SoftEther password hash (SHA-0)
+        \\                               Alias: GenerateHashedPassword
+        \\
+        \\Options for generatehashedpassword:
+        \\  -u, --user <name>            Username (required)
+        \\  -p, --password <pass>        Password (required)
+        \\  Positional: <user> <pass>    Alternative to flags
+        \\
+        \\Examples:
+        \\  vpncmd tools generatehashedpassword -u devstroop1 -p devstroop111222
+        \\  vpncmd tools generatehashedpassword devstroop1 devstroop111222
+        \\  # output: CS9ZXBrvt9GFvoHSvNuUfhP4rmw=  (use with --password-hash)
+        \\
+        \\Note: This is the same SHA-0(password + UPPERCASE(username)) as
+        \\      `vpnclient passhash` (now deprecated) — see src/app/password_hash.zig
+        \\      and SoftEtherVPN/src/Cedar/Account.c:HashPassword.
+        \\
+    , .{version});
+}
+
 fn printUsage() void {
     std.debug.print(
         \\SoftEther VPN Command Tool v{s}
         \\
-        \\Usage: vpncmd --server <host> [options]
+        \\Usage:
+        \\  vpncmd tools generatehashedpassword [-u <user> -p <pass>]  (offline)
+        \\  vpncmd --server <host> [options]                            (admin RPC)
         \\
-        \\Options:
-        \\  -s, --server <host>          Server hostname or IP (required)
+        \\Tools (offline, no server required):
+        \\  vpncmd tools generatehashedpassword  Generate password hash (SHA-0)
+        \\  vpncmd tools --help                   Show tools help
+        \\
+        \\Server options (admin RPC):
+        \\  -s, --server <host>          Server hostname or IP (required for admin)
         \\  -p, --port <port>            Server port (default: 443)
         \\  -H, --hub <name>             Virtual Hub name (default: DEFAULT)
         \\      --password <pw>          Admin password
@@ -157,11 +263,13 @@ fn printUsage() void {
         \\  -h, --help                   Show this help
         \\
         \\Examples:
+        \\  vpncmd tools generatehashedpassword -u myuser -p mypass
         \\  vpncmd --server 192.168.1.1
         \\  vpncmd -s vpn.example.com -H MYHUB --password <password>
         \\
         \\Note: Server certificate verification is enabled by default.
         \\Use --allow-self-signed for self-signed certificates.
+        \\`vpnclient passhash` is deprecated — use `vpncmd tools` instead.
         \\
     , .{version});
 }
