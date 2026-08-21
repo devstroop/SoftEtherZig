@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const cli = @import("cli/mod.zig");
 const app = @import("app/mod.zig");
 const lib = @import("lib.zig");
+const service = @import("app/service.zig");
 
 // ============================================================================
 // Logging Configuration
@@ -153,6 +154,26 @@ pub fn main() !void {
                 cli.display.success(&state.display, "Cleaned up {d} stale route(s) (purge={d}, utun-state={d})", .{ total, n1, n2 });
             } else {
                 cli.display.debug(&state.display, "No stale routes to clean", .{});
+            }
+            return;
+        } else if (std.mem.eql(u8, args[1], "install") or std.mem.eql(u8, args[1], "uninstall")) {
+            const is_install = std.mem.eql(u8, args[1], "install");
+            var mode: service.InstallMode = .user;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) mode = .system;
+                if (std.mem.eql(u8, a, "--user")) mode = .user;
+            }
+            const kind: service.ServiceKind = .vpnclient;
+            if (is_install) {
+                service.install(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Install failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else {
+                service.uninstall(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Uninstall failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
             }
             return;
         } else {

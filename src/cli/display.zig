@@ -362,21 +362,27 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
     ctx.print("    vpnclient connect [OPTIONS]\n", .{});
+    ctx.print("    vpnclient list                    List accounts (alias to vpncmd)\n", .{});
     ctx.print("    vpnclient cleanup\n", .{});
     ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
+    ctx.print("    vpnclient install [--user|--system]\n", .{});
+    ctx.print("    vpnclient uninstall [--user|--system]\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "SUBCOMMANDS:\n", .{});
     ctx.print("    help                    Show this help message\n", .{});
     ctx.print("    version                 Show version information\n", .{});
     ctx.print("    connect                 Connect to a VPN server\n", .{});
+    ctx.print("    list                    List accounts — thin alias to `vpncmd client AccountList`\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
+    ctx.print("    install                 Install as system service (systemd/launchd/SCM)\n", .{});
+    ctx.print("    uninstall               Remove service registration\n", .{});
     ctx.print("    passhash                (deprecated) Generate password hash — use `vpncmd tools generatehashedpassword`\n", .{});
     ctx.print("    password-hash           Alias for passhash (deprecated)\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "CONNECT OPTIONS:\n", .{});
-    ctx.print("    -c, --config <FILE>     Load configuration from JSON file\n", .{});
+    ctx.print("    -c, --config <FILE>     (deprecated) Load JSON — use `vpncmd` account store\n", .{});
     ctx.print("    -a, --address <IP>      Pre-resolved server IP address\n", .{});
     ctx.print("    --hostname <NAME>       Original hostname for TLS/SNI\n", .{});
     ctx.print("    -p, --port <PORT>       VPN server port (default: 443)\n", .{});
@@ -406,6 +412,12 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --log-level <LEVEL>     Log level: silent, error, warn, info, debug, trace\n", .{});
     ctx.newline();
 
+    ctx.printColored(.bold, "MODES:\n", .{});
+    ctx.print("    --mode <client|bridge|monitor>  Operating mode (default: client)\n", .{});
+    ctx.print("    --ingress <IF>        Bridge ingress interface (repeatable, --mode bridge)\n", .{});
+    ctx.print("    --pcap <FILE>         Monitor pcap output (--mode monitor)\n", .{});
+    ctx.newline();
+
     ctx.printColored(.bold, "RECONNECTION OPTIONS:\n", .{});
     ctx.print("    --reconnect             Enable automatic reconnection (default)\n", .{});
     ctx.print("    --no-reconnect          Disable automatic reconnection\n", .{});
@@ -425,14 +437,21 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpncmd tools generatehashedpassword -u myuser -p mypass\n", .{});
     ctx.print("    vpncmd tools generatehashedpassword myuser mypass  # same\n", .{});
     ctx.print("    sudo vpnclient cleanup\n", .{});
-    ctx.print("    vpnclient connect --config config.json\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
+    ctx.print("    vpnclient list                    # alias to vpncmd client AccountList\n", .{});
+    ctx.print("    vpnclient install --user          # install user service (no sudo)\n", .{});
+    ctx.print("    sudo vpnclient install --system   # install system service\n", .{});
+    ctx.print("    vpnclient --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
+    ctx.print("    vpnclient --mode monitor --pcap /tmp/cap.pcap\n", .{});
     ctx.newline();
 
     ctx.printColored(.dim, "Note: `vpnclient passhash` is deprecated (M19 #253). Generation moved to\n", .{});
     ctx.printColored(.dim, "      `vpncmd tools generatehashedpassword` (SoftEtherVPN/src/vpncmd/Tools.c\n", .{});
     ctx.printColored(.dim, "      parity). `vpnclient` still consumes `--password-hash` for verification.\n", .{});
+    ctx.printColored(.dim, "      Minimal contract: connect + list + cleanup + help/version (active) and\n", .{});
+    ctx.printColored(.dim, "      install/uninstall/start/stop/restart/status/enable/disable — active M20\n", .{});
+    ctx.printColored(.dim, "      (bridge/monitor are --mode flags, not verbs). See docs/ACCOUNT.md.\n", .{});
     ctx.newline();
 }
 
