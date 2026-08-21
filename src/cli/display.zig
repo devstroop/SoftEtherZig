@@ -454,9 +454,9 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient connect --config config.json # deprecated, use vpncmd\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
-    ctx.print("    vpnclient list                    # alias to vpncmd client AccountList\n", .{});
-    ctx.print("    vpnclient --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
-    ctx.print("    vpnclient --mode monitor --pcap /tmp/cap.pcap\n", .{});
+    ctx.print("    vpnclient list                    # alias to vpncmd client AccountList — planned M20\n", .{});
+    ctx.print("    vpnclient connect --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
+    ctx.print("    vpnclient connect --mode monitor --pcap /tmp/cap.pcap\n", .{});
     ctx.newline();
 
     ctx.printColored(.dim, "Note: `vpnclient passhash` is deprecated (M19 #253). Generation moved to\n", .{});
