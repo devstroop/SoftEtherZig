@@ -22,6 +22,7 @@
 //!   }
 
 const std = @import("std");
+const builtin = @import("builtin");
 const cfg_mod = @import("../cedar/server/config/cfg.zig");
 
 const Cfg = cfg_mod.Cfg;
@@ -76,11 +77,13 @@ fn getAccountsFolder(cfg: *Cfg) !*Folder {
 }
 
 fn lockStoreFile(file: std.fs.File) !void {
-    // Use flock for interprocess serialization (best-effort, ignore if not supported)
+    // Use flock for interprocess serialization (POSIX only; Windows has no flock — best-effort no-op)
+    if (builtin.os.tag == .windows) return;
     std.posix.flock(file.handle, std.posix.LOCK.EX) catch {};
 }
 
 fn unlockStoreFile(file: std.fs.File) void {
+    if (builtin.os.tag == .windows) return;
     std.posix.flock(file.handle, std.posix.LOCK.UN) catch {};
 }
 
