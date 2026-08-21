@@ -114,7 +114,7 @@ pub fn main() !void {
             var t_user: ?[]const u8 = null;
             var t_pass: ?[]const u8 = null;
             // Positional: `vpncmd tools generatehashedpassword <user> <pass>`
-            if (args.len >= 5 and args[3][0] != '-' and args[4][0] != '-') {
+            if (args.len >= 5 and args[3].len > 0 and args[4].len > 0 and args[3][0] != '-' and args[4][0] != '-') {
                 t_user = args[3];
                 t_pass = args[4];
                 if (args.len > 5) {
