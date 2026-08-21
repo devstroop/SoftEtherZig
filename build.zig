@@ -668,6 +668,7 @@ pub fn build(b: *std.Build) void {
         "src/bridge/fdb.zig",
         "src/bridge/engine.zig",
         "src/bridge/rate_limiter.zig",
+        "src/bridge/stp.zig",
     };
 
     for (test_sources) |test_src| {
