@@ -366,6 +366,222 @@ pub fn uninstallService(allocator: std.mem.Allocator, display: *cli.display.Disp
     }
 }
 
+// Server service (M20 #258) — parity with client, default --system, multi-user.target
+fn serverSystemdUnitPath(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u8 {
+    if (scope == .system) return try allocator.dupe(u8, "/etc/systemd/system/softether-vpnserver.service");
+    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
+        defer allocator.free(xdg);
+        return try std.fmt.allocPrint(allocator, "{s}/systemd/user/softether-vpnserver.service", .{xdg});
+    } else {
+        const home = try getHomeDir(allocator);
+        defer allocator.free(home);
+        return try std.fmt.allocPrint(allocator, "{s}/.config/systemd/user/softether-vpnserver.service", .{home});
+    }
+}
+
+fn serverLaunchdPlistPath(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u8 {
+    if (scope == .system) return try allocator.dupe(u8, "/Library/LaunchDaemons/com.devstroop.vpnserver.plist");
+    const home = try getHomeDir(allocator);
+    defer allocator.free(home);
+    return try std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/com.devstroop.vpnserver.plist", .{home});
+}
+
+pub fn installServerService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    const exe_path = try getExePath(allocator);
+    defer allocator.free(exe_path);
+    if (builtin.os.tag == .linux) {
+        const unit_path = try serverSystemdUnitPath(allocator, scope);
+        defer allocator.free(unit_path);
+        if (scope == .system and !isRoot()) {
+            cli.display.failure(display, "install --system requires sudo (writes to /etc/systemd/system)", .{});
+            return error.PermissionDenied;
+        }
+        if (scope == .user) {
+            if (std.fs.path.dirname(unit_path)) |dir| try ensureDir(dir);
+        }
+        const unit_content = try std.fmt.allocPrint(allocator,
+            \\[Unit]
+            \\Description=SoftEther VPN Server
+            \\After=network.target
+            \\Wants=network.target
+            \\
+            \\[Service]
+            \\Type=simple
+            \\ExecStart={s}
+            \\Restart=on-failure
+            \\RestartSec=5
+            \\
+            \\[Install]
+            \\WantedBy=multi-user.target
+            \\
+        , .{exe_path});
+        defer allocator.free(unit_content);
+        var file = try std.fs.createFileAbsolute(unit_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(unit_content);
+        cli.display.success(display, "Created {s}", .{unit_path});
+        if (scope == .system) {
+            runCommand(allocator, &.{ "systemctl", "daemon-reload" }) catch |err| cli.display.warning(display, "daemon-reload failed: {s}", .{@errorName(err)});
+            runCommand(allocator, &.{ "systemctl", "enable", "softether-vpnserver.service" }) catch |err| cli.display.warning(display, "enable failed: {s}", .{@errorName(err)});
+            cli.display.info(display, "Enabled vpnserver (system). Use: sudo systemctl start softether-vpnserver", .{});
+        } else {
+            runCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }) catch |err| cli.display.warning(display, "daemon-reload failed: {s}", .{@errorName(err)});
+            runCommand(allocator, &.{ "systemctl", "--user", "enable", "softether-vpnserver.service" }) catch |err| cli.display.warning(display, "enable failed: {s}", .{@errorName(err)});
+            cli.display.info(display, "Enabled vpnserver (user). Use: systemctl --user start softether-vpnserver", .{});
+        }
+    } else if (builtin.os.tag == .macos) {
+        if (scope == .system and !isRoot()) {
+            cli.display.failure(display, "install --system on macOS requires sudo", .{});
+            return error.PermissionDenied;
+        }
+        const plist_path = try serverLaunchdPlistPath(allocator, scope);
+        defer allocator.free(plist_path);
+        if (std.fs.path.dirname(plist_path)) |dir| try ensureDir(dir);
+        const plist_content = try std.fmt.allocPrint(allocator,
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            \\<plist version="1.0">
+            \\<dict>
+            \\    <key>Label</key>
+            \\    <string>com.devstroop.vpnserver</string>
+            \\    <key>ProgramArguments</key>
+            \\    <array>
+            \\        <string>{s}</string>
+            \\    </array>
+            \\    <key>RunAtLoad</key><true/>
+            \\    <key>KeepAlive</key><true/>
+            \\</dict>
+            \\</plist>
+            \\
+        , .{exe_path});
+        defer allocator.free(plist_content);
+        var file = try std.fs.createFileAbsolute(plist_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(plist_content);
+        cli.display.success(display, "Created {s}", .{plist_path});
+        if (scope == .system) {
+            cli.display.info(display, "Use: sudo launchctl bootstrap system {s}", .{plist_path});
+        } else {
+            cli.display.info(display, "Use: launchctl load {s}", .{plist_path});
+        }
+    } else if (builtin.os.tag == .windows) {
+        const bin_path = try std.fmt.allocPrint(allocator, "\"{s}\"", .{exe_path});
+        defer allocator.free(bin_path);
+        runCommand(allocator, &.{ "sc", "create", "SoftEtherVPNServer", "binPath=", bin_path, "start=", "auto", "DisplayName=", "SoftEther VPN Server" }) catch |err| {
+            cli.display.failure(display, "sc create failed: {s}", .{@errorName(err)});
+            return err;
+        };
+        cli.display.success(display, "Created SoftEtherVPNServer (auto)", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn uninstallServerService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const unit_path = try serverSystemdUnitPath(allocator, scope);
+        defer allocator.free(unit_path);
+        if (scope == .system and !isRoot()) {
+            cli.display.failure(display, "uninstall --system requires sudo", .{});
+            return error.PermissionDenied;
+        }
+        if (scope == .system) {
+            runCommand(allocator, &.{ "systemctl", "disable", "softether-vpnserver.service" }) catch {};
+            std.fs.deleteFileAbsolute(unit_path) catch |err| if (err != error.FileNotFound) cli.display.warning(display, "Could not remove {s}: {s}", .{ unit_path, @errorName(err) });
+            runCommand(allocator, &.{ "systemctl", "daemon-reload" }) catch {};
+        } else {
+            runCommand(allocator, &.{ "systemctl", "--user", "disable", "softether-vpnserver.service" }) catch {};
+            std.fs.deleteFileAbsolute(unit_path) catch |err| if (err != error.FileNotFound) cli.display.warning(display, "Could not remove {s}: {s}", .{ unit_path, @errorName(err) });
+            runCommand(allocator, &.{ "systemctl", "--user", "daemon-reload" }) catch {};
+        }
+        cli.display.success(display, "Removed {s}", .{unit_path});
+    } else if (builtin.os.tag == .macos) {
+        if (scope == .system and !isRoot()) {
+            cli.display.failure(display, "uninstall --system requires sudo", .{});
+            return error.PermissionDenied;
+        }
+        const plist_path = try serverLaunchdPlistPath(allocator, scope);
+        defer allocator.free(plist_path);
+        if (scope == .system) {
+            runCommand(allocator, &.{ "launchctl", "bootout", "system/com.devstroop.vpnserver" }) catch {};
+        } else {
+            runCommand(allocator, &.{ "launchctl", "unload", plist_path }) catch {};
+        }
+        std.fs.deleteFileAbsolute(plist_path) catch |err| if (err != error.FileNotFound) cli.display.warning(display, "Could not remove {s}: {s}", .{ plist_path, @errorName(err) });
+        cli.display.success(display, "Removed {s}", .{plist_path});
+    } else if (builtin.os.tag == .windows) {
+        runCommand(allocator, &.{ "sc", "stop", "SoftEtherVPNServer" }) catch {};
+        runCommand(allocator, &.{ "sc", "delete", "SoftEtherVPNServer" }) catch |err| {
+            cli.display.failure(display, "sc delete failed: {s}", .{@errorName(err)});
+            return err;
+        };
+        cli.display.success(display, "Removed SoftEtherVPNServer", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn startServerService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .system) &.{ "systemctl", "start", "softether-vpnserver.service" } else &.{ "systemctl", "--user", "start", "softether-vpnserver.service" };
+        try runCommand(allocator, args);
+        cli.display.success(display, "Started vpnserver ({s})", .{@tagName(scope)});
+    } else if (builtin.os.tag == .macos) {
+        const target = if (scope == .system) "system/com.devstroop.vpnserver" else "gui/501/com.devstroop.vpnserver";
+        try runCommand(allocator, &.{ "launchctl", "kickstart", "-k", target });
+        cli.display.success(display, "Started vpnserver", .{});
+    } else if (builtin.os.tag == .windows) {
+        try runCommand(allocator, &.{ "sc", "start", "SoftEtherVPNServer" });
+        cli.display.success(display, "Started SoftEtherVPNServer", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn stopServerService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .system) &.{ "systemctl", "stop", "softether-vpnserver.service" } else &.{ "systemctl", "--user", "stop", "softether-vpnserver.service" };
+        try runCommand(allocator, args);
+        cli.display.success(display, "Stopped vpnserver", .{});
+    } else if (builtin.os.tag == .macos) {
+        const target = if (scope == .system) "system/com.devstroop.vpnserver" else "gui/501/com.devstroop.vpnserver";
+        runCommand(allocator, &.{ "launchctl", "bootout", target }) catch try runCommand(allocator, &.{ "launchctl", "stop", target });
+        cli.display.success(display, "Stopped vpnserver", .{});
+    } else if (builtin.os.tag == .windows) {
+        try runCommand(allocator, &.{ "sc", "stop", "SoftEtherVPNServer" });
+        cli.display.success(display, "Stopped SoftEtherVPNServer", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn statusServerService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const active_args = if (scope == .system) &.{ "systemctl", "is-active", "softether-vpnserver.service" } else &.{ "systemctl", "--user", "is-active", "softether-vpnserver.service" };
+        var child = std.process.Child.init(active_args, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
+        var buf: [32]u8 = undefined;
+        var out: []const u8 = "unknown";
+        if (child.stdout) |s| {
+            const n = s.read(&buf) catch 0;
+            out = std.mem.trim(u8, buf[0..n], " \n\r\t");
+        }
+        const term = try child.wait();
+        const active = switch (term) { .Exited => |c| c == 0, else => false };
+        if (active) cli.display.success(display, "vpnserver active ({s})", .{out}) else cli.display.warning(display, "vpnserver {s}", .{out});
+        if (scope == .system) {
+            runCommand(allocator, &.{ "journalctl", "--unit", "softether-vpnserver.service", "-n", "20", "--no-pager" }) catch {};
+        } else {
+            runCommand(allocator, &.{ "journalctl", "--user", "--unit", "softether-vpnserver.service", "-n", "20", "--no-pager" }) catch {};
+        }
+    } else if (builtin.os.tag == .macos) {
+        const target = if (scope == .system) "system/com.devstroop.vpnserver" else "gui/501/com.devstroop.vpnserver";
+        var child = std.process.Child.init(&.{ "launchctl", "print", target }, allocator);
+        child.stdout_behavior = .Inherit;
+        try child.spawn();
+        _ = try child.wait();
+    } else if (builtin.os.tag == .windows) {
+        var child = std.process.Child.init(&.{ "sc", "query", "SoftEtherVPNServer" }, allocator);
+        child.stdout_behavior = .Inherit;
+        try child.spawn();
+        _ = try child.wait();
+    } else return error.UnsupportedPlatform;
+}
+
 // ============================================================================
 // Connection Progress Display (S-040)
 // ============================================================================

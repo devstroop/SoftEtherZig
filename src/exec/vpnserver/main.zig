@@ -241,9 +241,81 @@ pub fn main() !void {
     };
     defer std.process.argsFree(allocator, args);
 
+    // M20 #258 — service verbs for vpnserver (parity with vpnclient, default --system)
+    if (args.len >= 2 and args[1].len > 0 and args[1][0] != '-') {
+        const verb = args[1];
+        if (std.mem.eql(u8, verb, "install") or std.mem.eql(u8, verb, "uninstall") or
+            std.mem.eql(u8, verb, "start") or std.mem.eql(u8, verb, "stop") or
+            std.mem.eql(u8, verb, "restart") or std.mem.eql(u8, verb, "status") or
+            std.mem.eql(u8, verb, "enable") or std.mem.eql(u8, verb, "disable"))
+        {
+            var scope: softether.daemon.ServiceScope = .system; // default --system for vpnserver
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) {
+                    scope = .system;
+                } else if (std.mem.eql(u8, a, "--user")) {
+                    scope = .user;
+                } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    std.debug.print("Usage: vpnserver {s} [--system|--user]\n", .{verb});
+                    std.process.exit(0);
+                } else {
+                    std.debug.print("Unknown option for {s}: {s}\n", .{ verb, a });
+                    std.process.exit(1);
+                }
+            }
+            const d = softether.daemon;
+            if (std.mem.eql(u8, verb, "install")) {
+                d.installServerService(allocator, &display, scope) catch |err| {
+                    std.debug.print("install failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, verb, "uninstall")) {
+                d.uninstallServerService(allocator, &display, scope) catch |err| {
+                    std.debug.print("uninstall failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, verb, "start")) {
+                d.startServerService(allocator, &display, scope) catch |err| {
+                    std.debug.print("start failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, verb, "stop")) {
+                d.stopServerService(allocator, &display, scope) catch |err| {
+                    std.debug.print("stop failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, verb, "restart")) {
+                // restart = stop + start (reuse daemon helpers via stop/start)
+                d.stopServerService(allocator, &display, scope) catch {};
+                std.Thread.sleep(500 * std.time.ns_per_ms);
+                d.startServerService(allocator, &display, scope) catch |err| {
+                    std.debug.print("restart failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, verb, "status")) {
+                d.statusServerService(allocator, &display, scope) catch |err| {
+                    std.debug.print("status failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, verb, "enable") or std.mem.eql(u8, verb, "disable")) {
+                std.debug.print("{s}: use install/uninstall for enable/disable (systemd enable is part of install)\n", .{verb});
+                std.process.exit(0);
+            }
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, verb, "help") or std.mem.eql(u8, verb, "version")) {
+            // fall through to normal handling (parseArgs will handle --version, but help verb shown here)
+            if (std.mem.eql(u8, verb, "help")) {
+                std.debug.print("Usage: vpnserver [--config <path>] [--daemon|--foreground] [--version] [--gen-cert] | install|uninstall|start|stop|restart|status [--system|--user]\n", .{});
+                std.process.exit(0);
+            }
+        }
+    }
+
     const cli_args = parseArgs(allocator, args) catch |err| {
         log.err("argument error: {s}", .{@errorName(err)});
-        cli.display.failure(&display, "usage: {s} [--config <path>] [--daemon | --foreground] [--version] [--gen-cert]", .{server_name});
+        cli.display.failure(&display, "usage: {s} [--config <path>] [--daemon | --foreground] [--version] [--gen-cert] | install|uninstall|start|stop|restart|status [--system|--user] | help", .{server_name});
         std.process.exit(1);
     };
 

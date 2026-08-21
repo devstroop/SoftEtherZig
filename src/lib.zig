@@ -126,6 +126,11 @@ pub const cli = @import("cli/mod.zig");
 // `src/Cedar/Account.c:HashPassword` parity, SHA-0).
 pub const password_hash = @import("app/password_hash.zig");
 
+// Service lifecycle (M20 #256/#257/#258) — daemon install/uninstall/start/stop
+// for vpnclient (default --user) and vpnserver (default --system). The
+// vpnserver executable (below src/) reaches these via `softether` module.
+pub const daemon = @import("app/daemon.zig");
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
