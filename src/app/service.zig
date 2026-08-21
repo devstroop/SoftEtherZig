@@ -292,6 +292,152 @@ pub fn uninstallLaunchd(allocator: Allocator, kind: ServiceKind, display: *cli.d
     cli.display.success(display, "Uninstalled {s}", .{kind.name()});
 }
 
+fn runSystemctl(allocator: Allocator, args: []const []const u8, display: *cli.display.DisplayContext) !void {
+    var child = std.process.Child.init(args, allocator);
+    const term = try child.spawnAndWait();
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                cli.display.warning(display, "systemctl {s} exited with {d}", .{ args[1], code });
+                return ServiceError.StartFailed;
+            }
+        },
+        else => return ServiceError.StartFailed,
+    }
+}
+
+pub fn start(allocator: Allocator, kind: ServiceKind, mode: InstallMode, display: *cli.display.DisplayContext) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (mode == .user)
+            &[_][]const u8{ "systemctl", "--user", "start", kind.name() }
+        else
+            &[_][]const u8{ "systemctl", "start", kind.name() };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Started {s}", .{kind.name()});
+    } else if (builtin.os.tag == .macos) {
+        const plist_path = try launchdPlistPath(allocator, kind);
+        defer allocator.free(plist_path);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", plist_path }, allocator);
+        _ = child.spawnAndWait() catch return ServiceError.StartFailed;
+        cli.display.success(display, "Started {s}", .{kind.name()});
+    } else {
+        return ServiceError.UnsupportedPlatform;
+    }
+}
+
+pub fn stop(allocator: Allocator, kind: ServiceKind, mode: InstallMode, display: *cli.display.DisplayContext) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (mode == .user)
+            &[_][]const u8{ "systemctl", "--user", "stop", kind.name() }
+        else
+            &[_][]const u8{ "systemctl", "stop", kind.name() };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Stopped {s}", .{kind.name()});
+    } else if (builtin.os.tag == .macos) {
+        const plist_path = try launchdPlistPath(allocator, kind);
+        defer allocator.free(plist_path);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", plist_path }, allocator);
+        _ = child.spawnAndWait() catch return ServiceError.StopFailed;
+        cli.display.success(display, "Stopped {s}", .{kind.name()});
+    } else {
+        return ServiceError.UnsupportedPlatform;
+    }
+}
+
+pub fn restart(allocator: Allocator, kind: ServiceKind, mode: InstallMode, display: *cli.display.DisplayContext) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (mode == .user)
+            &[_][]const u8{ "systemctl", "--user", "restart", kind.name() }
+        else
+            &[_][]const u8{ "systemctl", "restart", kind.name() };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Restarted {s}", .{kind.name()});
+    } else if (builtin.os.tag == .macos) {
+        try stop(allocator, kind, mode, display);
+        try start(allocator, kind, mode, display);
+    } else {
+        return ServiceError.UnsupportedPlatform;
+    }
+}
+
+pub fn status(allocator: Allocator, kind: ServiceKind, mode: InstallMode, display: *cli.display.DisplayContext) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (mode == .user)
+            &[_][]const u8{ "systemctl", "--user", "is-active", kind.name() }
+        else
+            &[_][]const u8{ "systemctl", "is-active", kind.name() };
+        var child = std.process.Child.init(args, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        try child.spawn();
+        var out_buf: [256]u8 = undefined;
+        var err_buf: [256]u8 = undefined;
+        const n_out = child.stdout.?.read(&out_buf) catch 0;
+        const n_err = child.stderr.?.read(&err_buf) catch 0;
+        const term = try child.wait();
+        const out_str = std.mem.trim(u8, out_buf[0..n_out], " \n\r\t");
+        const err_str = std.mem.trim(u8, err_buf[0..n_err], " \n\r\t");
+        switch (term) {
+            .Exited => |code| {
+                if (code == 0) {
+                    cli.display.success(display, "{s} is active ({s})", .{ kind.name(), out_str });
+                } else {
+                    cli.display.info(display, "{s} is inactive ({s}) {s}", .{ kind.name(), out_str, err_str });
+                }
+            },
+            else => return ServiceError.StatusFailed,
+        }
+        // Also show journalctl tail
+        const journal_args = if (mode == .user)
+            &[_][]const u8{ "journalctl", "--user", "-u", kind.name(), "-n", "5", "--no-pager" }
+        else
+            &[_][]const u8{ "journalctl", "-u", kind.name(), "-n", "5", "--no-pager" };
+        var j_child = std.process.Child.init(journal_args, allocator);
+        j_child.stdout_behavior = .Inherit;
+        j_child.stderr_behavior = .Inherit;
+        _ = j_child.spawnAndWait() catch {};
+    } else if (builtin.os.tag == .macos) {
+        const plist_path = try launchdPlistPath(allocator, kind);
+        defer allocator.free(plist_path);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "print", plist_path }, allocator);
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+        _ = child.spawnAndWait() catch return ServiceError.StatusFailed;
+    } else {
+        return ServiceError.UnsupportedPlatform;
+    }
+}
+
+pub fn enable(allocator: Allocator, kind: ServiceKind, mode: InstallMode, display: *cli.display.DisplayContext) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (mode == .user)
+            &[_][]const u8{ "systemctl", "--user", "enable", kind.name() }
+        else
+            &[_][]const u8{ "systemctl", "enable", kind.name() };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Enabled {s} autostart", .{kind.name()});
+    } else if (builtin.os.tag == .macos) {
+        cli.display.info(display, "launchd KeepAlive already enabled via plist", .{});
+    } else {
+        return ServiceError.UnsupportedPlatform;
+    }
+}
+
+pub fn disable(allocator: Allocator, kind: ServiceKind, mode: InstallMode, display: *cli.display.DisplayContext) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (mode == .user)
+            &[_][]const u8{ "systemctl", "--user", "disable", kind.name() }
+        else
+            &[_][]const u8{ "systemctl", "disable", kind.name() };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Disabled {s} autostart", .{kind.name()});
+    } else if (builtin.os.tag == .macos) {
+        cli.display.info(display, "Disable via launchctl unload", .{});
+    } else {
+        return ServiceError.UnsupportedPlatform;
+    }
+}
+
 // ============================================================================
 // Public API
 // ============================================================================

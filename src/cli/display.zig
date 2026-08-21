@@ -367,6 +367,8 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.print("    vpnclient install [--user|--system]\n", .{});
     ctx.print("    vpnclient uninstall [--user|--system]\n", .{});
+    ctx.print("    vpnclient start|stop|restart|status [--user|--system]\n", .{});
+    ctx.print("    vpnclient enable|disable [--user|--system]\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "SUBCOMMANDS:\n", .{});
@@ -375,8 +377,14 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    connect                 Connect to a VPN server\n", .{});
     ctx.print("    list                    List accounts — thin alias to `vpncmd client AccountList`\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
-    ctx.print("    install                 Install as system service (systemd/launchd/SCM)\n", .{});
-    ctx.print("    uninstall               Remove service registration\n", .{});
+    ctx.print("    install                 Install as system service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
+    ctx.print("    uninstall               Remove service — --user or --system\n", .{});
+    ctx.print("    start                   Start service\n", .{});
+    ctx.print("    stop                    Stop service\n", .{});
+    ctx.print("    restart                 Restart service\n", .{});
+    ctx.print("    status                  Show service status\n", .{});
+    ctx.print("    enable                  Enable service autostart\n", .{});
+    ctx.print("    disable                 Disable autostart\n", .{});
     ctx.print("    passhash                (deprecated) Generate password hash — use `vpncmd tools generatehashedpassword`\n", .{});
     ctx.print("    password-hash           Alias for passhash (deprecated)\n", .{});
     ctx.newline();

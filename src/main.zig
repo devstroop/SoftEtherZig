@@ -162,6 +162,21 @@ pub fn main() !void {
             for (args[2..]) |a| {
                 if (std.mem.eql(u8, a, "--system")) mode = .system;
                 if (std.mem.eql(u8, a, "--user")) mode = .user;
+                if (a.len > 0 and a[0] == '-' and !std.mem.eql(u8, a, "--system") and !std.mem.eql(u8, a, "--user")) {
+                    cli.display.failure(&state.display, "Unknown option for {s}: {s}", .{ args[1], a });
+                    std.process.exit(1);
+                }
+            }
+            // Reject conflicting modes: last wins already, but explicit conflict is clearer
+            var has_system = false;
+            var has_user = false;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) has_system = true;
+                if (std.mem.eql(u8, a, "--user")) has_user = true;
+            }
+            if (has_system and has_user) {
+                cli.display.failure(&state.display, "Cannot specify both --system and --user", .{});
+                std.process.exit(1);
             }
             const kind: service.ServiceKind = .vpnclient;
             if (is_install) {
@@ -174,6 +189,76 @@ pub fn main() !void {
                     cli.display.failure(&state.display, "Uninstall failed: {s}", .{@errorName(err)});
                     std.process.exit(1);
                 };
+            }
+            return;
+        } else if (std.mem.eql(u8, args[1], "start") or std.mem.eql(u8, args[1], "stop") or std.mem.eql(u8, args[1], "restart") or std.mem.eql(u8, args[1], "status") or std.mem.eql(u8, args[1], "enable") or std.mem.eql(u8, args[1], "disable")) {
+            var mode: service.InstallMode = .user;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) mode = .system;
+                if (std.mem.eql(u8, a, "--user")) mode = .user;
+                if (a.len > 0 and a[0] == '-' and !std.mem.eql(u8, a, "--system") and !std.mem.eql(u8, a, "--user")) {
+                    cli.display.failure(&state.display, "Unknown option for {s}: {s}", .{ args[1], a });
+                    std.process.exit(1);
+                }
+            }
+            var has_system = false;
+            var has_user = false;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) has_system = true;
+                if (std.mem.eql(u8, a, "--user")) has_user = true;
+            }
+            if (has_system and has_user) {
+                cli.display.failure(&state.display, "Cannot specify both --system and --user", .{});
+                std.process.exit(1);
+            }
+            const kind: service.ServiceKind = .vpnclient;
+            const cmd = args[1];
+            if (std.mem.eql(u8, cmd, "start")) {
+                service.start(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Start failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "stop")) {
+                service.stop(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Stop failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "restart")) {
+                service.restart(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Restart failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "status")) {
+                service.status(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Status failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "enable")) {
+                service.enable(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Enable failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "disable")) {
+                service.disable(allocator, kind, mode, &state.display) catch |err| {
+                    cli.display.failure(&state.display, "Disable failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            }
+            return;
+        } else if (std.mem.eql(u8, args[1], "list")) {
+            // Thin alias to vpncmd client AccountList — single code path via XDG store
+            var child = std.process.Child.init(&[_][]const u8{ "vpncmd", "client", "AccountList" }, allocator);
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            const res = child.spawnAndWait() catch {
+                cli.display.info(&state.display, "No vpncmd store — use `vpncmd client AccountCreate` (see docs/ACCOUNT.md)", .{});
+                return;
+            };
+            switch (res) {
+                .Exited => |code| {
+                    if (code != 0) cli.display.info(&state.display, "vpncmd AccountList exited with {d} — no accounts or vpncmd not installed", .{code});
+                },
+                else => cli.display.info(&state.display, "vpncmd AccountList terminated abnormally", .{}),
             }
             return;
         } else {
