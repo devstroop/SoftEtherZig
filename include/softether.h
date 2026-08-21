@@ -717,6 +717,52 @@ int softether_server_set_syslog(
     uint32_t port
 );
 
+/* ========================================================================== */
+/* Session Enumeration (issue #194)                                            */
+/* ========================================================================== */
+
+/** C-compatible session info struct. */
+typedef struct {
+    char session_name[64];
+    char username[256];
+    char hub_name[256];
+    uint32_t peer_ip;
+    uint16_t peer_port;
+    int64_t created_time;
+    int active;  /* 1 = active, 0 = stop requested */
+} softether_session_info_t;
+
+/**
+ * Enumerate sessions on a hub. Fills out_buf with up to max_count entries.
+ * Returns the number of sessions written, or -1 on error.
+ */
+int softether_enum_sessions(
+    softether_server_t server,
+    const char* hub_name,
+    softether_session_info_t* out_buf,
+    int max_count
+);
+
+/**
+ * Get status of a specific session. Fills out with session info.
+ * Returns 0 on success, -1 on error.
+ */
+int softether_get_session_status(
+    softether_server_t server,
+    const char* hub_name,
+    const char* session_name,
+    softether_session_info_t* out
+);
+
+/**
+ * Disconnect (stop) a session by name. Returns 0 on success, -1 on error.
+ */
+int softether_disconnect_session(
+    softether_server_t server,
+    const char* hub_name,
+    const char* session_name
+);
+
 #ifdef __cplusplus
 }
 #endif
