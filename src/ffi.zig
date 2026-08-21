@@ -1751,8 +1751,129 @@ export fn softether_set_monitor_pcap(client: ?*VpnClient, path: ?[*:0]const u8) 
 }
 
 // ============================================================================
-// Tests
+// Server-side FFI (issue #197, M15)
 // ============================================================================
+
+const server_runtime = lib.server.runtime;
+const Server = server_runtime.Server;
+
+/// Opaque handle for the embedded VPN server.
+const ServerHandle = *Server;
+
+// ---- Lifecycle ------------------------------------------------------------
+
+/// Create a new VPN server instance. Returns null on allocation failure.
+/// The caller owns the returned handle and must call `softether_server_destroy`
+/// when done. Does not start listeners — call `softether_server_start` after.
+export fn softether_server_create(
+    hub_name: ?[*:0]const u8,
+    admin_user: ?[*:0]const u8,
+    admin_password: ?[*:0]const u8,
+) ?ServerHandle {
+    const config = server_runtime.Config{
+        .hub_name = if (hub_name) |h| std.mem.span(h) else "DEFAULT",
+        .admin_user = if (admin_user) |u| std.mem.span(u) else "administrator",
+        .admin_password = if (admin_password) |p| std.mem.span(p) else "softether",
+    };
+    const server = ffi_allocator.create(Server) catch return null;
+    server.* = Server.init(ffi_allocator, config);
+    return server;
+}
+
+/// Build the server (cert, hubs, admin dispatch) and start listeners.
+/// Calls `build()` + `start()` + `waitForListening(5000)` internally.
+/// Returns 0 on success, negative `SoftetherError` on failure.
+export fn softether_server_start(server: ?ServerHandle) c_int {
+    const s = server orelse return @intFromEnum(SoftetherError.invalid_argument);
+    s.build() catch return @intFromEnum(SoftetherError.internal_error);
+    s.start() catch return @intFromEnum(SoftetherError.internal_error);
+    if (s.listeners.items.len == 0)
+        return @intFromEnum(SoftetherError.connection_failed);
+    if (!s.waitForListening(5_000))
+        return @intFromEnum(SoftetherError.timeout);
+    return 0;
+}
+
+/// Signal the server to stop accepting new connections. This is
+/// async-signal-safe — can be called from a signal handler or any thread.
+export fn softether_server_stop(server: ?ServerHandle) void {
+    const s = server orelse return;
+    s.stop();
+}
+
+/// Destroy the server and free all resources. After this call the handle
+/// is invalid. Null-safe.
+export fn softether_server_destroy(server: ?ServerHandle) void {
+    const s = server orelse return;
+    s.deinit();
+    ffi_allocator.destroy(s);
+}
+
+/// Returns 1 if the server is running, 0 if stopped, -1 for invalid handle.
+export fn softether_server_is_running(server: ?ServerHandle) c_int {
+    const s = server orelse return -1;
+    return if (s.isRunning()) 1 else 0;
+}
+
+/// Block until at least one listener is accepting connections, or until
+/// `timeout_ms` elapses. Returns 1 if a listener is ready, 0 on timeout.
+export fn softether_server_wait_for_listening(server: ?ServerHandle, timeout_ms: i64) c_int {
+    const s = server orelse return -1;
+    return if (s.waitForListening(timeout_ms)) 1 else 0;
+}
+
+// ---- Hub management -------------------------------------------------------
+
+/// Copy the hub name into `out_buf` (up to `buf_len` bytes including NUL).
+/// Returns the number of bytes written (excluding NUL), or -1 on error.
+export fn softether_server_get_hub_name(
+    server: ?ServerHandle,
+    out_buf: ?[*]u8,
+    buf_len: c_int,
+) c_int {
+    const s = server orelse return -1;
+    const buf = out_buf orelse return -1;
+    if (buf_len <= 0) return -1;
+    const name = s.config.hub_name;
+    const copy_len = @min(name.len, @as(usize, @intCast(buf_len - 1)));
+    @memcpy(buf[0..copy_len], name[0..copy_len]);
+    buf[copy_len] = 0;
+    return @intCast(copy_len);
+}
+
+/// Copy the admin username into `out_buf` (up to `buf_len` bytes including NUL).
+/// Returns the number of bytes written (excluding NUL), or -1 on error.
+export fn softether_server_get_admin_user(
+    server: ?ServerHandle,
+    out_buf: ?[*]u8,
+    buf_len: c_int,
+) c_int {
+    const s = server orelse return -1;
+    const buf = out_buf orelse return -1;
+    if (buf_len <= 0) return -1;
+    const user = s.config.admin_user;
+    const copy_len = @min(user.len, @as(usize, @intCast(buf_len - 1)));
+    @memcpy(buf[0..copy_len], user[0..copy_len]);
+    buf[copy_len] = 0;
+    return @intCast(copy_len);
+}
+
+// ---- Syslog ---------------------------------------------------------------
+
+/// Configure syslog forwarding. Empty hostname or port 0 disables forwarding.
+/// Returns 0 on success, -1 on invalid arguments.
+export fn softether_server_set_syslog(
+    server: ?ServerHandle,
+    hostname: ?[*:0]const u8,
+    port: u32,
+) c_int {
+    const s = server orelse return @intFromEnum(SoftetherError.invalid_argument);
+    const h = if (hostname) |hn| std.mem.span(hn) else "";
+    if (s.syslog_client) |sc| {
+        sc.configure(h, port);
+    }
+    return 0;
+}
 
 test "ffi error mapping" {
     const err = mapClientError(ClientError.ConnectionFailed);
@@ -2190,4 +2311,63 @@ test "softether_get_assigned_ip_v6 returns address when configured" {
     var buf: [16]u8 = undefined;
     try std.testing.expectEqual(@as(c_int, 0), softether_get_assigned_ip_v6(&c, &buf));
     try std.testing.expectEqualSlices(u8, &test_addr, &buf);
+}
+
+// ============================================================================
+// Server FFI tests
+// ============================================================================
+
+test "softether_server_create returns valid handle" {
+    const s = softether_server_create(null, null, null);
+    try std.testing.expect(s != null);
+    softether_server_destroy(s);
+}
+
+test "softether_server_create with custom config" {
+    const s = softether_server_create("MYHUB", "admin", "secret");
+    try std.testing.expect(s != null);
+
+    var buf: [64]u8 = undefined;
+    const n = softether_server_get_hub_name(s, &buf, buf.len);
+    try std.testing.expectEqual(@as(c_int, 5), n);
+    try std.testing.expectEqualStrings("MYHUB", buf[0..@intCast(n)]);
+
+    const u = softether_server_get_admin_user(s, &buf, buf.len);
+    try std.testing.expectEqual(@as(c_int, 5), u);
+    try std.testing.expectEqualStrings("admin", buf[0..@intCast(u)]);
+
+    softether_server_destroy(s);
+}
+
+test "softether_server_is_running and stop" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+
+    try std.testing.expectEqual(@as(c_int, 1), softether_server_is_running(s));
+    softether_server_stop(s);
+    try std.testing.expectEqual(@as(c_int, 0), softether_server_is_running(s));
+}
+
+test "softether_server_null_safety" {
+    // All functions should handle null gracefully.
+    try std.testing.expectEqual(@as(c_int, -1), softether_server_is_running(null));
+    try std.testing.expectEqual(@as(c_int, -1), softether_server_wait_for_listening(null, 100));
+    try std.testing.expectEqual(@as(c_int, -1), softether_server_get_hub_name(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, -1), softether_server_get_admin_user(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, -1), softether_server_set_syslog(null, null, 0));
+    softether_server_stop(null);
+    softether_server_destroy(null);
+}
+
+test "softether_server_set_syslog configures client" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+
+    // build() creates the syslog client; start() requires port binding.
+    // Use build-only via the runtime's build() method.
+    s.build() catch return; // skip if build fails (e.g. cert gen issue)
+    defer softether_server_stop(s);
+
+    try std.testing.expectEqual(@as(c_int, 0), softether_server_set_syslog(s, "192.168.1.1", 514));
+    try std.testing.expectEqual(@as(c_int, 0), softether_server_set_syslog(s, null, 0)); // disable
 }

@@ -635,6 +635,88 @@ int softether_set_monitor_pcap(softether_client_t client, const char* path);
 /** Get library version string. Returns pointer to static string. */
 const char* softether_version(void);
 
+/* ========================================================================== */
+/* Embedded VPN Server (M15, issue #197)                                       */
+/* ========================================================================== */
+
+/** Opaque handle for the embedded VPN server. */
+typedef void* softether_server_t;
+
+/**
+ * Create a new VPN server instance. Returns NULL on allocation failure.
+ * The caller owns the handle and must call softether_server_destroy().
+ *
+ * @param hub_name      Virtual hub name (NULL → "DEFAULT").
+ * @param admin_user    Admin username (NULL → "administrator").
+ * @param admin_password Admin password (NULL → "softether").
+ * @return Server handle, or NULL on failure.
+ */
+softether_server_t softether_server_create(
+    const char* hub_name,
+    const char* admin_user,
+    const char* admin_password
+);
+
+/**
+ * Build the server (cert, hubs, admin dispatch) and start listeners.
+ * Calls build() + start() + waitForListening(5000) internally.
+ * Returns 0 on success, negative SoftetherError on failure.
+ */
+int softether_server_start(softether_server_t server);
+
+/**
+ * Signal the server to stop accepting new connections.
+ * Async-signal-safe — can be called from a signal handler.
+ */
+void softether_server_stop(softether_server_t server);
+
+/**
+ * Destroy the server and free all resources.
+ * After this call the handle is invalid. NULL-safe.
+ */
+void softether_server_destroy(softether_server_t server);
+
+/**
+ * Returns 1 if the server is running, 0 if stopped, -1 for invalid handle.
+ */
+int softether_server_is_running(softether_server_t server);
+
+/**
+ * Block until at least one listener is accepting connections, or until
+ * timeout_ms elapses. Returns 1 if ready, 0 on timeout, -1 on error.
+ */
+int softether_server_wait_for_listening(softether_server_t server, int64_t timeout_ms);
+
+/**
+ * Copy the hub name into out_buf (up to buf_len bytes including NUL).
+ * Returns bytes written (excluding NUL), or -1 on error.
+ */
+int softether_server_get_hub_name(
+    softether_server_t server,
+    char* out_buf,
+    int buf_len
+);
+
+/**
+ * Copy the admin username into out_buf (up to buf_len bytes including NUL).
+ * Returns bytes written (excluding NUL), or -1 on error.
+ */
+int softether_server_get_admin_user(
+    softether_server_t server,
+    char* out_buf,
+    int buf_len
+);
+
+/**
+ * Configure syslog forwarding. Empty hostname or port 0 disables forwarding.
+ * Returns 0 on success, -1 on invalid arguments.
+ */
+int softether_server_set_syslog(
+    softether_server_t server,
+    const char* hostname,
+    uint32_t port
+);
+
 #ifdef __cplusplus
 }
 #endif
