@@ -15,6 +15,7 @@ pub const interactive = @import("interactive.zig");
 pub const password_hash = @import("password_hash.zig");
 pub const gen_cert = @import("gen_cert.zig");
 pub const vpn_client_store = @import("vpn_client_store.zig");
+pub const env_import = @import("env_import.zig");
 
 // Re-export main types
 pub const AppState = state.AppState;
