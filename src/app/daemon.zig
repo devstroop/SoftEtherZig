@@ -196,15 +196,18 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
         }
 
         const wanted_by = if (scope == .system) "multi-user.target" else "default.target";
+        const description = kind.displayName();
+        const exec_start = if (kind == .vpnserver) exe_path else try std.fmt.allocPrint(allocator, "{s} connect", .{exe_path});
+        defer if (kind != .vpnserver) allocator.free(exec_start);
         const unit_content = if (scope == .system) try std.fmt.allocPrint(allocator,
             \\[Unit]
-            \\Description=SoftEther VPN Client
+            \\Description={s}
             \\After=network.target
             \\Wants=network.target
             \\
             \\[Service]
             \\Type=simple
-            \\ExecStart={s} connect
+            \\ExecStart={s}
             \\Restart=on-failure
             \\RestartSec=5
             \\AmbientCapabilities=CAP_NET_ADMIN
@@ -213,22 +216,22 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
             \\[Install]
             \\WantedBy={s}
             \\
-        , .{ exe_path, wanted_by }) else try std.fmt.allocPrint(allocator,
+        , .{ description, exec_start, wanted_by }) else try std.fmt.allocPrint(allocator,
             \\[Unit]
-            \\Description=SoftEther VPN Client (user)
+            \\Description={s} (user)
             \\After=network.target
             \\Wants=network.target
             \\
             \\[Service]
             \\Type=simple
-            \\ExecStart={s} connect
+            \\ExecStart={s}
             \\Restart=on-failure
             \\RestartSec=5
             \\
             \\[Install]
             \\WantedBy={s}
             \\
-        , .{ exe_path, wanted_by });
+        , .{ description, exec_start, wanted_by });
         defer allocator.free(unit_content);
 
         // Write unit file (need root for /etc, so use createFile which will fail if not root — already checked)
@@ -277,13 +280,39 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
             try ensureDir(dir);
         }
 
-        const plist_content = try std.fmt.allocPrint(allocator,
+        const label = try std.fmt.allocPrint(allocator, "com.devstroop.{s}", .{kind.name()});
+        defer allocator.free(label);
+        const log_path = try std.fmt.allocPrint(allocator, "/tmp/{s}.log", .{kind.name()});
+        defer allocator.free(log_path);
+        const plist_content = if (kind == .vpnserver) try std.fmt.allocPrint(allocator,
             \\<?xml version="1.0" encoding="UTF-8"?>
             \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             \\<plist version="1.0">
             \\<dict>
             \\    <key>Label</key>
-            \\    <string>com.devstroop.vpnclient</string>
+            \\    <string>{s}</string>
+            \\    <key>ProgramArguments</key>
+            \\    <array>
+            \\        <string>{s}</string>
+            \\    </array>
+            \\    <key>RunAtLoad</key>
+            \\    <true/>
+            \\    <key>KeepAlive</key>
+            \\    <true/>
+            \\    <key>StandardOutPath</key>
+            \\    <string>{s}</string>
+            \\    <key>StandardErrorPath</key>
+            \\    <string>{s}</string>
+            \\</dict>
+            \\</plist>
+            \\
+        , .{ label, exe_path, log_path, log_path }) else try std.fmt.allocPrint(allocator,
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            \\<plist version="1.0">
+            \\<dict>
+            \\    <key>Label</key>
+            \\    <string>{s}</string>
             \\    <key>ProgramArguments</key>
             \\    <array>
             \\        <string>{s}</string>
@@ -294,13 +323,13 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
             \\    <key>KeepAlive</key>
             \\    <true/>
             \\    <key>StandardOutPath</key>
-            \\    <string>/tmp/softether-vpnclient.log</string>
+            \\    <string>{s}</string>
             \\    <key>StandardErrorPath</key>
-            \\    <string>/tmp/softether-vpnclient.log</string>
+            \\    <string>{s}</string>
             \\</dict>
             \\</plist>
             \\
-        , .{exe_path});
+        , .{ label, exe_path, log_path, log_path });
         defer allocator.free(plist_content);
 
         var file = try std.fs.createFileAbsolute(plist_path, .{ .truncate = true });
@@ -310,23 +339,29 @@ pub fn installService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
         cli.display.success(display, "Created {s} for {s}", .{ plist_path, kind.name() });
         if (scope == .system) {
             cli.display.info(display, "launchd system plist installed. Use: sudo launchctl bootstrap system {s}", .{plist_path});
-            runCommand(allocator, &.{ "launchctl", "print", try std.fmt.allocPrint(allocator, "system/com.devstroop.{s}", .{kind.name()}) }) catch {};
+            const target = try launchdDomainTarget(allocator, scope, kind);
+            defer allocator.free(target);
+            runCommand(allocator, &.{ "launchctl", "print", target }) catch {};
         } else {
             cli.display.info(display, "launchd plist installed. Use: launchctl load {s}", .{plist_path});
-            runCommand(allocator, &.{ "launchctl", "print", try std.fmt.allocPrint(allocator, "gui/501/com.devstroop.{s}", .{kind.name()}) }) catch {};
+            const target = try launchdDomainTarget(allocator, scope, kind);
+            defer allocator.free(target);
+            runCommand(allocator, &.{ "launchctl", "print", target }) catch {};
         }
     } else if (builtin.os.tag == .windows) {
-        // Windows — SCM (Mayaqua/WinService.c pattern)
-        // Use `sc create` as simplest parity; requires admin.
-        const bin_path = try std.fmt.allocPrint(allocator, "\"{s}\" connect", .{exe_path});
+        // Windows — SCM (Mayaqua/WinService.c pattern) — kind-specific
+        const win_svc_name = if (kind == .vpnserver) "SoftEtherVPNServer" else "SoftEtherVPNClient";
+        const display_name = kind.displayName();
+        const bin_suffix = if (kind == .vpnserver) "" else " connect";
+        const bin_path = try std.fmt.allocPrint(allocator, "\"{s}\"{s}", .{ exe_path, bin_suffix });
         defer allocator.free(bin_path);
-        cli.display.info(display, "Creating Windows service SoftEtherVPNClient...", .{});
-        runCommand(allocator, &.{ "sc", "create", "SoftEtherVPNClient", "binPath=", bin_path, "start=", "auto", "DisplayName=", "SoftEther VPN Client" }) catch |err| {
+        cli.display.info(display, "Creating Windows service {s}...", .{win_svc_name});
+        runCommand(allocator, &.{ "sc", "create", win_svc_name, "binPath=", bin_path, "start=", "auto", "DisplayName=", display_name }) catch |err| {
             cli.display.failure(display, "sc create failed: {s} (run as Administrator)", .{@errorName(err)});
             return err;
         };
-        cli.display.success(display, "Created Windows service SoftEtherVPNClient (SERVICE_AUTO_START)", .{});
-        cli.display.info(display, "Use: sc start SoftEtherVPNClient", .{});
+        cli.display.success(display, "Created Windows service {s} (SERVICE_AUTO_START)", .{win_svc_name});
+        cli.display.info(display, "Use: sc start {s}", .{win_svc_name});
     } else {
         cli.display.failure(display, "Service install not supported on {s}", .{@tagName(builtin.os.tag)});
         return error.UnsupportedPlatform;
@@ -378,12 +413,13 @@ pub fn uninstallService(allocator: std.mem.Allocator, kind: ServiceKind, scope: 
         };
         cli.display.success(display, "Removed {s}", .{plist_path});
     } else if (builtin.os.tag == .windows) {
-        runCommand(allocator, &.{ "sc", "stop", "SoftEtherVPNClient" }) catch {};
-        runCommand(allocator, &.{ "sc", "delete", "SoftEtherVPNClient" }) catch |err| {
+        const win_svc_name = if (kind == .vpnserver) "SoftEtherVPNServer" else "SoftEtherVPNClient";
+        runCommand(allocator, &.{ "sc", "stop", win_svc_name }) catch {};
+        runCommand(allocator, &.{ "sc", "delete", win_svc_name }) catch |err| {
             cli.display.failure(display, "sc delete failed: {s}", .{@errorName(err)});
             return err;
         };
-        cli.display.success(display, "Removed Windows service SoftEtherVPNClient", .{});
+        cli.display.success(display, "Removed Windows service {s}", .{win_svc_name});
     } else {
         cli.display.failure(display, "Service uninstall not supported on {s}", .{@tagName(builtin.os.tag)});
         return error.UnsupportedPlatform;
@@ -405,12 +441,12 @@ fn runSystemctl(allocator: std.mem.Allocator, args: []const []const u8, display:
     }
 }
 
-fn launchdDomainTarget(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u8 {
+fn launchdDomainTarget(allocator: std.mem.Allocator, scope: ServiceScope, kind: ServiceKind) ![]const u8 {
     if (scope == .system) {
-        return try allocator.dupe(u8, "system/com.devstroop.vpnclient");
+        return try std.fmt.allocPrint(allocator, "system/com.devstroop.{s}", .{kind.name()});
     } else {
         const uid = std.c.getuid();
-        return try std.fmt.allocPrint(allocator, "gui/{d}/com.devstroop.vpnclient", .{uid});
+        return try std.fmt.allocPrint(allocator, "gui/{d}/com.devstroop.{s}", .{ uid, kind.name() });
     }
 }
 
@@ -425,7 +461,7 @@ pub fn startService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Serv
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Started {s}", .{svc_name});
     } else if (builtin.os.tag == .macos) {
-        const target = try launchdDomainTarget(allocator, scope);
+        const target = try launchdDomainTarget(allocator, scope, kind);
         defer allocator.free(target);
         var child = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", target }, allocator);
         const term = try child.spawnAndWait();
@@ -450,7 +486,7 @@ pub fn stopService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Servi
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Stopped {s}", .{svc_name});
     } else if (builtin.os.tag == .macos) {
-        const target = try launchdDomainTarget(allocator, scope);
+        const target = try launchdDomainTarget(allocator, scope, kind);
         defer allocator.free(target);
         var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", target }, allocator);
         const term = try child.spawnAndWait();
@@ -475,8 +511,10 @@ pub fn restartService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Restarted {s}", .{svc_name});
     } else if (builtin.os.tag == .macos) {
-        try stopService(allocator, display, scope);
-        try startService(allocator, display, scope);
+        try stopService(allocator, kind, scope, display);
+        // brief pause to let bootout complete
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+        try startService(allocator, kind, scope, display);
     } else {
         return error.UnsupportedPlatform;
     }
@@ -520,7 +558,7 @@ pub fn statusService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Ser
         j_child.stderr_behavior = .Inherit;
         _ = j_child.spawnAndWait() catch {};
     } else if (builtin.os.tag == .macos) {
-        const target = try launchdDomainTarget(allocator, scope);
+        const target = try launchdDomainTarget(allocator, scope, kind);
         defer allocator.free(target);
         var child = std.process.Child.init(&[_][]const u8{ "launchctl", "print", target }, allocator);
         child.stdout_behavior = .Inherit;
@@ -546,7 +584,30 @@ pub fn enableService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Ser
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Enabled {s} autostart", .{svc_name});
     } else if (builtin.os.tag == .macos) {
-        cli.display.info(display, "launchd KeepAlive already enabled via plist", .{});
+        const plist_path = try launchdPlistPath(allocator, scope, kind);
+        defer allocator.free(plist_path);
+        if (scope == .system) {
+            var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootstrap", "system", plist_path }, allocator);
+            const term = try child.spawnAndWait();
+            switch (term) {
+                .Exited => |code| if (code != 0) return error.EnableFailed,
+                else => return error.EnableFailed,
+            }
+        } else {
+            const target = try launchdDomainTarget(allocator, scope, kind);
+            defer allocator.free(target);
+            // For user, bootstrap is `launchctl bootstrap gui/<uid> <plist>`
+            const uid = std.c.getuid();
+            const domain = try std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
+            defer allocator.free(domain);
+            var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootstrap", domain, plist_path }, allocator);
+            const term = try child.spawnAndWait();
+            switch (term) {
+                .Exited => |code| if (code != 0) return error.EnableFailed,
+                else => return error.EnableFailed,
+            }
+        }
+        cli.display.success(display, "Enabled {s}", .{svc_name});
     } else {
         return error.UnsupportedPlatform;
     }
@@ -563,7 +624,7 @@ pub fn disableService(allocator: std.mem.Allocator, kind: ServiceKind, scope: Se
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Disabled {s} autostart", .{svc_name});
     } else if (builtin.os.tag == .macos) {
-        const target = try launchdDomainTarget(allocator, scope);
+        const target = try launchdDomainTarget(allocator, scope, kind);
         defer allocator.free(target);
         var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", target }, allocator);
         const term = try child.spawnAndWait();
