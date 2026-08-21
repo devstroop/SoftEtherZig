@@ -448,6 +448,46 @@ fn handleClientCommand(allocator: std.mem.Allocator, cmd_args: []const []const u
             return error.AccountNotFound;
         }
         return;
+    } else if (std.ascii.eqlIgnoreCase(verb, "ImportEnv") or std.mem.eql(u8, verb, "import-env")) {
+        // M22-1: vpncmd owns env import (strict boundary, no env in vpnclient)
+        var account_arg: ?[]const u8 = null;
+        var i: usize = 1;
+        while (i < cmd_args.len) : (i += 1) {
+            const a = cmd_args[i];
+            if (std.mem.eql(u8, a, "--account")) {
+                i += 1;
+                if (i >= cmd_args.len) return error.MissingValue;
+                account_arg = cmd_args[i];
+            } else if (a.len > 1 and a[0] == '/' and std.mem.indexOfScalar(u8, a, ':') != null) {
+                // Allow /ACCOUNT:Name as well
+                const colon = std.mem.indexOfScalar(u8, a[1..], ':').? + 1;
+                const key = a[1..colon];
+                const val = a[colon + 1 ..];
+                if (std.ascii.eqlIgnoreCase(key, "ACCOUNT")) account_arg = val;
+            }
+        }
+        const env_acc = try se.env_import.fromEnv(allocator, account_arg) orelse {
+            std.debug.print("No SOFTETHER_* env found (need SOFTETHER_ADDRESS, SOFTETHER_HUB, SOFTETHER_USER)\n", .{});
+            return error.MissingAddress;
+        };
+        defer allocator.free(env_acc.name);
+        defer allocator.free(env_acc.server);
+        defer allocator.free(env_acc.hub);
+        defer allocator.free(env_acc.username);
+        defer if (env_acc.password) |p| allocator.free(p);
+        defer if (env_acc.password_hash) |h| allocator.free(h);
+        var hash_val: ?[]const u8 = null;
+        defer if (hash_val) |h| allocator.free(h);
+        if (env_acc.password_hash) |h| {
+            hash_val = try allocator.dupe(u8, h);
+        } else if (env_acc.password) |pw| {
+            hash_val = try se.password_hash.hashPassword(allocator, env_acc.username, pw);
+        }
+        try store.createAccount(allocator, .{ .name = env_acc.name, .server = env_acc.server, .port = env_acc.port, .hub = env_acc.hub, .username = env_acc.username, .password_hash = hash_val });
+        const path = try store.getStorePath(allocator);
+        defer allocator.free(path);
+        std.debug.print("Imported env as account '{s}' -> {s} (from SOFTETHER_*)\n", .{ env_acc.name, path });
+        return;
     } else {
         std.debug.print("Unknown client subcommand: {s}\n\n", .{verb});
         printClientUsage();

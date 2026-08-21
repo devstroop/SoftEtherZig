@@ -37,15 +37,23 @@ pub const CommandHistory = shell.CommandHistory;
 // Convenience Functions
 // ============================================================================
 
-/// Parse command line arguments
+/// Parse command line arguments for vpnclient (M22 #279 strict: flags+store only, no env)
 pub fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !CliArgs {
     var parser = ArgParser.init(allocator);
     defer parser.deinit();
 
-    // Load environment variables first
-    parser.loadFromEnv();
+    // M22 #279: vpnclient no longer reads SOFTETHER_* env (vpncmd owns env import)
+    // Parse CLI args only; store is resolved later in src/main.zig:resolveFromStore
 
-    // Parse CLI args (override env vars)
+    // Parse CLI args
+    return try parser.parse(argv);
+}
+
+/// Parse with env (for vpncmd import-env and legacy)
+pub fn parseArgsWithEnv(allocator: std.mem.Allocator, argv: []const []const u8) !CliArgs {
+    var parser = ArgParser.init(allocator);
+    defer parser.deinit();
+    parser.loadFromEnv();
     return try parser.parse(argv);
 }
 
