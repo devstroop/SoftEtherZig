@@ -461,9 +461,8 @@ pub const ArgParser = struct {
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD_HASH")) |v| {
             if (self.args.password_hash == null) self.args.password_hash = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONFIG")) |v| {
-            if (self.args.config_file == null) self.args.config_file = v;
-        } else |_| {}
+        // M21 #261: SOFTETHER_CONFIG removed for vpnclient (vpncmd owns store).
+        // Kept for vpnserver Cfg compat if needed, but ignored here.
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_COMPRESS")) |v| {
             self.args.use_compress = isTrue(v);
         } else |_| {}

@@ -390,7 +390,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.newline();
 
     ctx.printColored(.bold, "CONNECT OPTIONS:\n", .{});
-    ctx.print("    -c, --config <FILE>     (deprecated) Load JSON — account store via `vpncmd` planned M21\n", .{});
+    // M21 #261: --config hidden (vpncmd owns store, 12-field flags/env only)
     ctx.print("    -a, --address <IP>      Pre-resolved server IP address\n", .{});
     ctx.print("    --hostname <NAME>       Original hostname for TLS/SNI\n", .{});
     ctx.print("    -p, --port <PORT>       VPN server port (default: 443)\n", .{});
@@ -452,7 +452,6 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install --user               # systemd user service, no sudo\n", .{});
     ctx.print("    sudo vpnclient install --system        # systemd system service\n", .{});
-    ctx.print("    vpnclient connect --config config.json # deprecated, use vpncmd\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
     ctx.print("    vpnclient list                    # alias to vpncmd client AccountList\n", .{});
