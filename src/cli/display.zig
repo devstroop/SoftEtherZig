@@ -364,11 +364,11 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient connect [OPTIONS]\n", .{});
     ctx.print("    vpnclient list                    List accounts (alias to vpncmd)\n", .{});
     ctx.print("    vpnclient cleanup\n", .{});
-    ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.print("    vpnclient install [--user|--system]\n", .{});
     ctx.print("    vpnclient uninstall [--user|--system]\n", .{});
     ctx.print("    vpnclient start|stop|restart|status [--user|--system]\n", .{});
     ctx.print("    vpnclient enable|disable [--user|--system]\n", .{});
+    ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "SUBCOMMANDS:\n", .{});
@@ -377,7 +377,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    connect                 Connect to a VPN server\n", .{});
     ctx.print("    list                    List accounts — thin alias to `vpncmd client AccountList`\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
-    ctx.print("    install                 Install as system service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
+    ctx.print("    install                 Install service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
     ctx.print("    uninstall               Remove service — --user or --system\n", .{});
     ctx.print("    start                   Start service\n", .{});
     ctx.print("    stop                    Stop service\n", .{});
@@ -420,6 +420,12 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --log-level <LEVEL>     Log level: silent, error, warn, info, debug, trace\n", .{});
     ctx.newline();
 
+    ctx.printColored(.bold, "MODES:\n", .{});
+    ctx.print("    --mode <client|bridge|monitor>  Operating mode (default: client)\n", .{});
+    ctx.print("    --ingress <IF>        Bridge ingress interface (repeatable, --mode bridge)\n", .{});
+    ctx.print("    --pcap <FILE>         Monitor pcap output (--mode monitor)\n", .{});
+    ctx.newline();
+
     ctx.printColored(.bold, "RECONNECTION OPTIONS:\n", .{});
     ctx.print("    --reconnect             Enable automatic reconnection (default)\n", .{});
     ctx.print("    --no-reconnect          Disable automatic reconnection\n", .{});
@@ -446,14 +452,20 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install --user               # systemd user service, no sudo\n", .{});
     ctx.print("    sudo vpnclient install --system        # systemd system service\n", .{});
-    ctx.print("    vpnclient connect --config config.json\n", .{});
+    ctx.print("    vpnclient connect --config config.json # deprecated, use vpncmd\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
+    ctx.print("    vpnclient list                    # alias to vpncmd client AccountList\n", .{});
+    ctx.print("    vpnclient connect --mode bridge --ingress eth0  # L2 bridge (Linux)\n", .{});
+    ctx.print("    vpnclient connect --mode monitor --pcap /tmp/cap.pcap\n", .{});
     ctx.newline();
 
     ctx.printColored(.dim, "Note: `vpnclient passhash` is deprecated (M19 #253). Generation moved to\n", .{});
     ctx.printColored(.dim, "      `vpncmd tools generatehashedpassword` (SoftEtherVPN/src/vpncmd/Tools.c\n", .{});
     ctx.printColored(.dim, "      parity). `vpnclient` still consumes `--password-hash` for verification.\n", .{});
+    ctx.printColored(.dim, "      Minimal contract: connect + list + cleanup + help/version +\n", .{});
+    ctx.printColored(.dim, "      install/uninstall/start/stop/restart/status/enable/disable (active)\n", .{});
+    ctx.printColored(.dim, "      (bridge/monitor are --mode flags, not verbs). See docs/ACCOUNT.md.\n", .{});
     ctx.newline();
 }
 
