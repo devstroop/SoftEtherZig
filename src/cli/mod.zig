@@ -71,10 +71,12 @@ pub fn loadConfig(allocator: std.mem.Allocator, cli_args: *CliArgs) !void {
     };
 
     // Deprecation warn for host file surface (M19 #254) — warn on auto-load or explicit --config
+    // Account store via `vpncmd client AccountCreate` lands in M21 P3; for now
+    // point to the currently available `vpncmd tools` and docs.
     if (config_path != null) {
         const source: []const u8 = if (is_explicit) "explicit --config" else "auto-loaded config.json";
         // Use stderr via debug.print to preserve stdout contract for passhash etc.
-        std.debug.print("[warning] config.json ({s}: {s}) is deprecated — use `vpncmd client AccountCreate` (see docs/ACCOUNT.md)\n", .{ source, config_path.? });
+        std.debug.print("[warning] config.json ({s}: {s}) is deprecated — account store via `vpncmd` planned M21 (see docs/ACCOUNT.md)\n", .{ source, config_path.? });
     }
 
     if (config_path) |path| {
