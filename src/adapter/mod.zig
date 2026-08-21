@@ -304,7 +304,7 @@ pub const VirtualAdapter = struct {
     /// The concrete platform device behind the port. Only valid for ports
     /// created by this module (`l3Port(PlatformDevice, ...)`); l2 ports
     /// (future milestones) must never be cast here.
-    fn platformDevice(self: *const VirtualAdapter) ?*PlatformDevice {
+    pub fn platformDevice(self: *const VirtualAdapter) ?*PlatformDevice {
         const p = self.port orelse return null;
         return @as(*PlatformDevice, @ptrCast(@alignCast(p.impl)));
     }
@@ -417,27 +417,34 @@ pub const VirtualAdapter = struct {
         return dev.isOpen();
     }
 
-    /// Get device name
+    /// Get device name — bypass port vtable to avoid sret stack corruption
+    /// on aarch64 Linux for ?[6]u8 returns (see core.130594).
     pub fn getName(self: *const VirtualAdapter) ?[]const u8 {
-        if (self.port) |p| {
-            return p.getName();
+        if (self.platformDevice()) |dev| {
+            if (@hasDecl(@TypeOf(dev.*), "getName")) {
+                return dev.getName();
+            }
         }
         return null;
     }
 
-    /// Get MAC address
+    /// Get MAC address — bypass port vtable (see getName).
     pub fn getMac(self: *const VirtualAdapter) ?[6]u8 {
-        if (self.port) |p| {
-            return p.getMac();
+        if (self.platformDevice()) |dev| {
+            if (@hasDecl(@TypeOf(dev.*), "getMac")) {
+                return dev.getMac();
+            }
         }
         return null;
     }
 
-    /// Get the pollable fd of the underlying device (data pump seam — the
-    /// pump never reaches into device internals).
+    /// Get the pollable fd — bypass port vtable (Bus error at 0xffaa...).
     pub fn getFd(self: *const VirtualAdapter) std.posix.fd_t {
-        if (self.port) |p| {
-            return p.getFd();
+        if (self.platformDevice()) |dev| {
+            if (@hasDecl(@TypeOf(dev.*), "getFd")) {
+                return dev.getFd();
+            }
+            return port.NetPort.invalid_fd;
         }
         return port.NetPort.invalid_fd;
     }
@@ -455,10 +462,11 @@ pub const VirtualAdapter = struct {
         try dev.replaceFd(new_fd);
     }
 
-    /// Read a packet from the adapter
+    /// Read a packet from the adapter — bypass port vtable to avoid
+    /// dangling impl after free (see wrapper cached_tun).
     pub fn read(self: *VirtualAdapter, buffer: []u8) !?usize {
-        if (self.port) |p| {
-            return p.read(buffer);
+        if (self.platformDevice()) |dev| {
+            return dev.read(buffer);
         }
         if (builtin.os.tag == .linux) {
             return TunLinuxError.DeviceNotOpen;
@@ -469,10 +477,10 @@ pub const VirtualAdapter = struct {
         }
     }
 
-    /// Write a packet to the adapter
+    /// Write a packet to the adapter — bypass port vtable.
     pub fn write(self: *VirtualAdapter, data: []const u8) !usize {
-        if (self.port) |p| {
-            return p.write(data);
+        if (self.platformDevice()) |dev| {
+            return dev.write(data);
         }
         if (builtin.os.tag == .linux) {
             return TunLinuxError.DeviceNotOpen;
