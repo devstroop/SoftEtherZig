@@ -103,7 +103,7 @@ pub fn main() !void {
             var hash_user: ?[]const u8 = null;
             var hash_pass: ?[]const u8 = null;
 
-            if (args.len >= 4 and args[2][0] != '-' and args[3][0] != '-') {
+            if (args.len >= 4 and args[2].len > 0 and args[3].len > 0 and args[2][0] != '-' and args[3][0] != '-') {
                 hash_user = args[2];
                 hash_pass = args[3];
             } else {
