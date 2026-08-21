@@ -110,6 +110,15 @@ pub const ServiceKind = enum {
     }
 };
 
+fn isSystemd() bool {
+    if (std.fs.openFileAbsolute("/run/systemd/system", .{})) |dir| {
+        dir.close();
+        return true;
+    } else |_| {
+        return false;
+    }
+}
+
 fn isRoot() bool {
     if (builtin.os.tag == .windows) return true; // SCM requires admin, but check via isAdmin later
     return std.c.getuid() == 0;
@@ -726,9 +735,52 @@ fn showConnectProgress(display_ctx: *cli.display.DisplayContext, vpn: *client.Vp
 // Daemon Entry Point
 // ============================================================================
 
+fn daemonize(allocator: std.mem.Allocator, display: *cli.display.DisplayContext) !void {
+    // Mayaqua/Unix.c:Daemon compat — double-fork, setsid, umask 0, close 0/1/2 → /dev/null, flock PID
+    // Note: we intentionally do NOT chdir("/") here — the VPN client may have relative
+    // runtime paths (e.g. --pcap) that must remain resolvable from the original CWD.
+    // Original CWD is preserved; if daemon semantics require detachment from the
+    // invoking directory, callers should pass absolute paths.
+    if (builtin.os.tag == .windows) return;
+    // Explicit umask 0 for Mayaqua compat (inherited umask would affect PID/PCAP perms)
+    _ = std.c.umask(0);
+    const pid = try std.posix.fork();
+    if (pid > 0) {
+        // Parent exits immediately (no terminal held)
+        std.process.exit(0);
+    }
+    // Child continues
+    _ = std.posix.setsid() catch {};
+    // Second fork to ensure not session leader
+    const pid2 = try std.posix.fork();
+    if (pid2 > 0) std.process.exit(0);
+    // Close stdio → /dev/null
+    const dev_null = std.posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch 3;
+    _ = std.posix.dup2(dev_null, 0) catch {};
+    _ = std.posix.dup2(dev_null, 1) catch {};
+    _ = std.posix.dup2(dev_null, 2) catch {};
+    if (dev_null > 2) std.posix.close(dev_null);
+    _ = allocator;
+    _ = display;
+}
+
 /// Run the VPN client in daemon mode
 pub fn run(state: *AppState) !void {
-    cli.display.info(&state.display, "Running in daemon mode...", .{});
+    // Foreground for containers/dev: `vpnclient connect` without `install` runs foreground (PID 1 = vpnclient)
+    // Fallback when --daemon requested: Mayaqua daemon (double-fork, no terminal) — always honor --daemon,
+    // even on systemd hosts (direct `connect --daemon` must detach; service units use Type=simple without --daemon).
+    if (state.cli_args.daemon) {
+        if (isSystemd()) {
+            cli.display.info(&state.display, "Daemonizing via Mayaqua fallback (double-fork, no terminal) — systemd host but --daemon requested (service units should use Type=simple)", .{});
+        } else {
+            cli.display.info(&state.display, "systemd not detected — daemonizing via Mayaqua fallback (double-fork, no terminal)", .{});
+        }
+        daemonize(state.allocator, &state.display) catch |err| {
+            cli.display.warning(&state.display, "daemonize failed: {s} (continuing in foreground)", .{@errorName(err)});
+        };
+    } else {
+        cli.display.info(&state.display, "Running in foreground mode (docker/dev, PID 1 = vpnclient, no install needed)...", .{});
+    }
 
     // Write PID file (S-038)
     if (!writePidFile(&state.display, pid_filename)) {
