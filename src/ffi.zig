@@ -1785,8 +1785,13 @@ export fn softether_server_create(
 /// Returns 0 on success, negative `SoftetherError` on failure.
 export fn softether_server_start(server: ?ServerHandle) c_int {
     const s = server orelse return @intFromEnum(SoftetherError.invalid_argument);
-    s.build() catch return @intFromEnum(SoftetherError.internal_error);
-    s.start() catch return @intFromEnum(SoftetherError.internal_error);
+    // Guard: don't rebuild if already built (check if listeners exist).
+    if (s.server_ctx == null) {
+        s.build() catch return @intFromEnum(SoftetherError.internal_error);
+    }
+    if (s.listeners.items.len == 0) {
+        s.start() catch return @intFromEnum(SoftetherError.internal_error);
+    }
     if (s.listeners.items.len == 0)
         return @intFromEnum(SoftetherError.connection_failed);
     if (!s.waitForListening(5_000))
@@ -1799,6 +1804,7 @@ export fn softether_server_start(server: ?ServerHandle) c_int {
 export fn softether_server_stop(server: ?ServerHandle) void {
     const s = server orelse return;
     s.stop();
+    s.stopListeners();
 }
 
 /// Destroy the server and free all resources. After this call the handle
@@ -1869,6 +1875,9 @@ export fn softether_server_set_syslog(
 ) c_int {
     const s = server orelse return @intFromEnum(SoftetherError.invalid_argument);
     const h = if (hostname) |hn| std.mem.span(hn) else "";
+    // Port 0 disables; otherwise must be a valid port number.
+    if (port != 0 and port > 65535)
+        return @intFromEnum(SoftetherError.invalid_argument);
     if (s.syslog_client) |sc| {
         sc.configure(h, port);
     }

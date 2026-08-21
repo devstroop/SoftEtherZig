@@ -210,12 +210,11 @@ fn run(server: *Server) !void {
         return error.NoListenersStarted;
     }
 
-    log.info("{s} {s} ready — hub {s}, account {s} (password: {s})", .{
+    log.info("{s} {s} ready — hub {s}, account {s}", .{
         server_name,
         version,
         server.config.hub_name,
         server.config.admin_user,
-        server.config.admin_password,
     });
 
     while (server.isRunning()) {
