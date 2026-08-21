@@ -172,8 +172,11 @@ jobs:
           sudo chmod 4755 /usr/local/libexec/softether-utun-helper
           zig build test-bpf --release=fast --summary all
 
+      - name: Build CLI for service smoke
+        if: runner.os == 'Linux' && matrix.test
+        run: zig build --release=fast --summary all
+
       # Service smoke (M20 #260): verify systemd user service install/status and aarch64 sudo TUN
-      # Uses the same shared-lib build output; no additional build needed.
       - name: Service smoke (systemd user, is-active + journalctl)
         if: always() && runner.os == 'Linux' && matrix.test
         timeout-minutes: 10
