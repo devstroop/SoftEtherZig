@@ -133,6 +133,9 @@ pub const password_hash = @import("app/password_hash.zig");
 // `vpncmd client AccountCreate` creates XDG vpn_client.config Cfg binary.
 pub const vpn_client_store = @import("app/vpn_client_store.zig");
 
+// Env import — vpncmd owns SOFTETHER_* env (M22 #279)
+pub const env_import = @import("app/env_import.zig");
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
