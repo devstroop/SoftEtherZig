@@ -259,15 +259,21 @@ pub fn main() !void {
             var child = std.process.Child.init(&[_][]const u8{ "vpncmd", "client", "AccountList" }, allocator);
             child.stdout_behavior = .Inherit;
             child.stderr_behavior = .Inherit;
-            const res = child.spawnAndWait() catch {
-                cli.display.info(&state.display, "No vpncmd store — use `vpncmd client AccountCreate` (see docs/ACCOUNT.md)", .{});
-                return;
+            const res = child.spawnAndWait() catch |err| {
+                cli.display.failure(&state.display, "Failed to spawn vpncmd: {s}", .{@errorName(err)});
+                std.process.exit(1);
             };
             switch (res) {
                 .Exited => |code| {
-                    if (code != 0) cli.display.info(&state.display, "vpncmd AccountList exited with {d} — no accounts or vpncmd not installed", .{code});
+                    if (code != 0) {
+                        cli.display.failure(&state.display, "vpncmd AccountList failed with exit {d}", .{code});
+                        std.process.exit(code);
+                    }
                 },
-                else => cli.display.info(&state.display, "vpncmd AccountList terminated abnormally", .{}),
+                else => {
+                    cli.display.failure(&state.display, "vpncmd AccountList terminated abnormally", .{});
+                    std.process.exit(1);
+                },
             }
             return;
         } else {
