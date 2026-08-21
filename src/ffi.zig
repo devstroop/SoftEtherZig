@@ -1884,6 +1884,127 @@ export fn softether_server_set_syslog(
     return 0;
 }
 
+// ---- Session enumeration (issue #194) ------------------------------------
+
+const session_registry_mod = lib.server.session_registry;
+
+/// C-compatible session info struct returned by enumeration/status queries.
+pub const SoftEtherSessionInfo = extern struct {
+    session_name: [64]u8 = .{0} ** 64,
+    username: [256]u8 = .{0} ** 256,
+    hub_name: [256]u8 = .{0} ** 256,
+    peer_ip: u32 = 0,
+    peer_port: u16 = 0,
+    created_time: i64 = 0,
+    active: c_int = 0,
+};
+
+/// Enumerate sessions on a hub. Fills `out_buf` with up to `max_count` entries.
+/// Returns the number of sessions written, or -1 on error (null server, null
+/// buffer, null/empty hub_name, server not built, or hub not found).
+export fn softether_enum_sessions(
+    server: ?ServerHandle,
+    hub_name: ?[*:0]const u8,
+    out_buf: ?[*]SoftEtherSessionInfo,
+    max_count: c_int,
+) c_int {
+    const s = server orelse return -1;
+    if (!s.isRunning()) return -1;
+    const buf = out_buf orelse return -1;
+    const hn = hub_name orelse return -1;
+    if (max_count <= 0) return -1;
+    const hub = std.mem.span(hn);
+    if (hub.len == 0) return -1;
+
+    const ctx = s.server_ctx orelse return -1;
+    if (!std.ascii.eqlIgnoreCase(ctx.switch_hub.name, hub)) return -1;
+    const snaps = ctx.session_registry.snapshot(ffi_allocator) catch return -1;
+    defer session_registry_mod.SessionRegistry.freeSnapshot(ffi_allocator, snaps);
+
+    var count: c_int = 0;
+    for (snaps) |*snap| {
+        if (!std.ascii.eqlIgnoreCase(snap.hub_name, hub)) continue;
+        if (count >= max_count) break;
+        const e = &buf[@intCast(count)];
+        e.* = .{};
+        copyIntoFixed(64, &e.session_name, snap.session_name);
+        copyIntoFixed(256, &e.username, snap.username);
+        copyIntoFixed(256, &e.hub_name, snap.hub_name);
+        e.peer_ip = snap.peer_ip;
+        e.peer_port = snap.peer_port;
+        e.created_time = @intCast(@max(snap.created_time, 0));
+        e.active = if (snap.stop_requested) 0 else 1;
+        count += 1;
+    }
+    return count;
+}
+
+/// Get status of a specific session. Fills `out` with session info.
+/// Returns 0 on success, -1 on error.
+export fn softether_get_session_status(
+    server: ?ServerHandle,
+    hub_name: ?[*:0]const u8,
+    session_name: ?[*:0]const u8,
+    out: ?*SoftEtherSessionInfo,
+) c_int {
+    const s = server orelse return -1;
+    if (!s.isRunning()) return -1;
+    const hn = hub_name orelse return -1;
+    const sn = session_name orelse return -1;
+    const o = out orelse return -1;
+    const hub = std.mem.span(hn);
+    const sess = std.mem.span(sn);
+    if (hub.len == 0 or sess.len == 0) return -1;
+
+    const ctx = s.server_ctx orelse return -1;
+    if (!std.ascii.eqlIgnoreCase(ctx.switch_hub.name, hub)) return -1;
+    const snaps = ctx.session_registry.snapshot(ffi_allocator) catch return -1;
+    defer session_registry_mod.SessionRegistry.freeSnapshot(ffi_allocator, snaps);
+
+    for (snaps) |*snap| {
+        if (std.ascii.eqlIgnoreCase(snap.hub_name, hub) and
+            std.ascii.eqlIgnoreCase(snap.session_name, sess))
+        {
+            o.* = .{};
+            copyIntoFixed(64, &o.session_name, snap.session_name);
+            copyIntoFixed(256, &o.username, snap.username);
+            copyIntoFixed(256, &o.hub_name, snap.hub_name);
+            o.peer_ip = snap.peer_ip;
+            o.peer_port = snap.peer_port;
+            o.created_time = @intCast(@max(snap.created_time, 0));
+            o.active = if (snap.stop_requested) 0 else 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/// Disconnect (stop) a session by name. Returns 0 on success, -1 on error.
+export fn softether_disconnect_session(
+    server: ?ServerHandle,
+    hub_name: ?[*:0]const u8,
+    session_name: ?[*:0]const u8,
+) c_int {
+    const s = server orelse return -1;
+    if (!s.isRunning()) return -1;
+    const hn = hub_name orelse return -1;
+    const sn = session_name orelse return -1;
+    const hub = std.mem.span(hn);
+    const sess = std.mem.span(sn);
+    if (hub.len == 0 or sess.len == 0) return -1;
+
+    const ctx = s.server_ctx orelse return -1;
+    if (!std.ascii.eqlIgnoreCase(ctx.switch_hub.name, hub)) return -1;
+    if (!ctx.session_registry.requestStopOnHub(hub, sess)) return -1;
+    return 0;
+}
+
+fn copyIntoFixed(comptime N: usize, dest: *[N]u8, src: []const u8) void {
+    const len = @min(src.len, dest.len - 1);
+    @memcpy(dest[0..len], src[0..len]);
+    dest[len] = 0;
+}
+
 test "ffi error mapping" {
     const err = mapClientError(ClientError.ConnectionFailed);
     try std.testing.expectEqual(SoftetherError.connection_failed, err);
@@ -2379,4 +2500,70 @@ test "softether_server_set_syslog configures client" {
 
     try std.testing.expectEqual(@as(c_int, 0), softether_server_set_syslog(s, "192.168.1.1", 514));
     try std.testing.expectEqual(@as(c_int, 0), softether_server_set_syslog(s, null, 0)); // disable
+}
+
+// ---- Session FFI tests (issue #194) ---------------------------------------
+
+test "softether_enum_sessions returns empty on fresh server" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+    s.build() catch return;
+
+    var buf: [16]SoftEtherSessionInfo = undefined;
+    const count = softether_enum_sessions(s, "DEFAULT", &buf, buf.len);
+    // No sessions on a freshly built server.
+    try std.testing.expect(count >= 0);
+}
+
+test "softether_enum_sessions rejects invalid hub" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+    s.build() catch return;
+
+    var buf: [16]SoftEtherSessionInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(s, "NONEXISTENT", &buf, buf.len));
+}
+
+test "softether_enum_sessions rejects after stop" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    softether_server_stop(s);
+    defer softether_server_destroy(s);
+
+    var buf: [16]SoftEtherSessionInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(s, "DEFAULT", &buf, buf.len));
+}
+
+test "softether_enum_sessions null safety" {
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(null, "DEFAULT", undefined, 1));
+    var buf: [1]SoftEtherSessionInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(null, "DEFAULT", &buf, 1));
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(null, null, &buf, 1));
+}
+
+test "softether_get_session_status not found" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+    s.build() catch return;
+
+    var info: SoftEtherSessionInfo = .{};
+    const rc = softether_get_session_status(s, "DEFAULT", "nonexistent_session", &info);
+    try std.testing.expectEqual(@as(c_int, -1), rc);
+}
+
+test "softether_get_session_status null safety" {
+    try std.testing.expectEqual(@as(c_int, -1), softether_get_session_status(null, "DEFAULT", "sess", undefined));
+    try std.testing.expectEqual(@as(c_int, -1), softether_get_session_status(null, null, null, undefined));
+}
+
+test "softether_disconnect_session not found" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+    s.build() catch return;
+
+    try std.testing.expectEqual(@as(c_int, -1), softether_disconnect_session(s, "DEFAULT", "nonexistent"));
+}
+
+test "softether_disconnect_session null safety" {
+    try std.testing.expectEqual(@as(c_int, -1), softether_disconnect_session(null, "DEFAULT", "sess"));
+    try std.testing.expectEqual(@as(c_int, -1), softether_disconnect_session(null, null, null));
 }
