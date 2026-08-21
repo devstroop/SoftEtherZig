@@ -11,6 +11,8 @@ const Allocator = std.mem.Allocator;
 const adapter_mod = @import("mod.zig");
 const VirtualAdapter = adapter_mod.VirtualAdapter;
 pub const TunStats = adapter_mod.TunStats;
+const builtin = @import("builtin");
+const is_linux_desktop = builtin.os.tag == .linux and builtin.abi != .android and builtin.abi != .androideabi;
 
 /// Adapter wrapper that bridges VpnClient to the real adapter implementation
 pub const AdapterWrapper = struct {
@@ -61,16 +63,21 @@ pub const AdapterWrapper = struct {
         if (self.real_adapter) |*adapter| {
             try adapter.open();
             self.is_open = adapter.isOpen();
-            // Cache fd, tun device and port immediately after open — avoids later
-            // vtable getFd/getName/getMac/read that crash with Bus error at
-            // 0xffaaaaaaaaaaaaaa / 0xa000000000000 (impl dangling, see
-            // core.130594 and second crash at runDataLoop:2783).
-            self.cached_fd = adapter.getFd();
-            if (adapter.platformDevice()) |dev| {
-                self.cached_tun = @ptrCast(dev);
-            }
-            if (adapter.port) |p| {
-                self.cached_port = p;
+            // Cache fd/port/tun on Linux desktop to bypass NetPort vtable
+            // sret for ?[6]u8 (Bus error at 0xffaaaaaaaaaaaaaa, core.130594).
+            // Other platforms use the vtable path (UtunDevice/TapWindowsDevice).
+            if (is_linux_desktop) {
+                self.cached_fd = adapter.getFd();
+                if (adapter.platformDevice()) |dev| {
+                    self.cached_tun = @ptrCast(dev);
+                }
+                if (adapter.port) |p| {
+                    self.cached_port = p;
+                }
+            } else {
+                // Non-Linux: don't cache tun/port (different device type); fd
+                // is still cached but will be refreshed on replaceFd.
+                self.cached_fd = adapter.getFd();
             }
 
             // Copy device name if available
@@ -170,7 +177,11 @@ pub const AdapterWrapper = struct {
 
     /// Get the pollable fd of the underlying device (data pump seam).
     pub fn getFd(self: *const Self) std.posix.fd_t {
-        if (self.cached_fd) |fd| return fd;
+        // Linux desktop: use cached fd to avoid vtable sret; otherwise
+        // fall through to real_adapter (mobile needs fresh fd after replaceFd).
+        if (is_linux_desktop) {
+            if (self.cached_fd) |fd| return fd;
+        }
         if (self.real_adapter) |*adapter| {
             return adapter.getFd();
         }
@@ -191,7 +202,6 @@ pub const AdapterWrapper = struct {
         self.gateway_ip = gateway;
         // On Android the VpnService.Builder owns the routing table and the
         // app sandbox blocks netlink writes via SELinux; skip our own routing.
-        const builtin = @import("builtin");
         if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
             std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
             return;
@@ -211,7 +221,6 @@ pub const AdapterWrapper = struct {
     /// `routes_str` is a newline-separated list of CIDR notations.
     pub fn configureSplitTunnel(self: *Self, gateway: u32, routes_str: []const u8) void {
         self.gateway_ip = gateway;
-        const builtin = @import("builtin");
         if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
             std.log.info("Routing managed by Android VpnService.Builder; skipping native route setup", .{});
             return;
@@ -230,7 +239,6 @@ pub const AdapterWrapper = struct {
     /// Add custom IPv6 split-tunnel routes through a gateway.
     /// `routes_str` is a newline-separated list of IPv6 CIDR notations.
     pub fn addIpv6Routes(self: *Self, gateway: []const u8, routes_str: []const u8) void {
-        const builtin = @import("builtin");
         if (builtin.os.tag == .linux and builtin.abi.isAndroid()) {
             return;
         }
@@ -253,12 +261,13 @@ pub const AdapterWrapper = struct {
     }
 
     /// Read a packet from the adapter (TUN device) — use cached tun device
-    /// on Linux to avoid vtable impl dangling (see cached_* above).
+    /// on Linux desktop to avoid vtable impl dangling (see cached_* above).
     pub fn read(self: *Self, buffer: []u8) !?usize {
-        if (self.cached_tun) |ptr| {
-            // Linux TUN path — direct call, no vtable.
-            const dev: *adapter_mod.TunLinuxDevice = @ptrCast(@alignCast(ptr));
-            return dev.read(buffer);
+        if (is_linux_desktop) {
+            if (self.cached_tun) |ptr| {
+                const dev: *adapter_mod.TunLinuxDevice = @ptrCast(@alignCast(ptr));
+                return dev.read(buffer);
+            }
         }
         if (self.real_adapter) |*adapter| {
             return adapter.read(buffer);
@@ -270,16 +279,20 @@ pub const AdapterWrapper = struct {
     pub fn replaceFd(self: *Self, new_fd: i32) !void {
         if (self.real_adapter) |*adapter| {
             try adapter.replaceFd(new_fd);
+            // Refresh cached fd so subsequent getFd() polls the new endpoint.
+            self.cached_fd = adapter.getFd();
         } else {
             return error.DeviceNotOpen;
         }
     }
 
-    /// Write a packet to the adapter (TUN device) — use cached tun device.
+    /// Write a packet to the adapter (TUN device) — use cached tun device on Linux.
     pub fn write(self: *Self, data: []const u8) !usize {
-        if (self.cached_tun) |ptr| {
-            const dev: *adapter_mod.TunLinuxDevice = @ptrCast(@alignCast(ptr));
-            return dev.write(data);
+        if (is_linux_desktop) {
+            if (self.cached_tun) |ptr| {
+                const dev: *adapter_mod.TunLinuxDevice = @ptrCast(@alignCast(ptr));
+                return dev.write(data);
+            }
         }
         if (self.real_adapter) |*adapter| {
             return adapter.write(data);
@@ -305,9 +318,11 @@ pub const AdapterWrapper = struct {
     }
 
     /// Return the NetPort for this adapter, if a port has been opened.
-    /// Returns cached port on Linux to avoid dangling impl (see cached_*).
+    /// Returns cached port on Linux desktop to avoid dangling impl.
     pub fn getPort(self: *const Self) ?adapter_mod.NetPort {
-        if (self.cached_port) |p| return p;
+        if (is_linux_desktop) {
+            if (self.cached_port) |p| return p;
+        }
         if (self.real_adapter) |*adapter| {
             return adapter.port;
         }

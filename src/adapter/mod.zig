@@ -421,7 +421,9 @@ pub const VirtualAdapter = struct {
     /// on aarch64 Linux for ?[6]u8 returns (see core.130594).
     pub fn getName(self: *const VirtualAdapter) ?[]const u8 {
         if (self.platformDevice()) |dev| {
-            return dev.getName();
+            if (@hasDecl(@TypeOf(dev.*), "getName")) {
+                return dev.getName();
+            }
         }
         return null;
     }
@@ -429,7 +431,9 @@ pub const VirtualAdapter = struct {
     /// Get MAC address — bypass port vtable (see getName).
     pub fn getMac(self: *const VirtualAdapter) ?[6]u8 {
         if (self.platformDevice()) |dev| {
-            return dev.getMac();
+            if (@hasDecl(@TypeOf(dev.*), "getMac")) {
+                return dev.getMac();
+            }
         }
         return null;
     }
@@ -437,7 +441,10 @@ pub const VirtualAdapter = struct {
     /// Get the pollable fd — bypass port vtable (Bus error at 0xffaa...).
     pub fn getFd(self: *const VirtualAdapter) std.posix.fd_t {
         if (self.platformDevice()) |dev| {
-            return dev.getFd();
+            if (@hasDecl(@TypeOf(dev.*), "getFd")) {
+                return dev.getFd();
+            }
+            return port.NetPort.invalid_fd;
         }
         return port.NetPort.invalid_fd;
     }
