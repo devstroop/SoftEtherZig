@@ -326,14 +326,14 @@ fn handleClientCommand(allocator: std.mem.Allocator, cmd_args: []const []const u
             std.debug.print("AccountCreate requires /USERNAME:<user>\n", .{});
             return error.MissingUsername;
         }
-        // Create account (M21 12-field minimal)
-        try store.createAccount(allocator, .{ .name = name, .server = server.?, .port = port, .hub = hub.?, .username = username.? });
+        // Create account atomically (M21 12-field minimal) — compute hash first so a
+        // failure does not leave an incomplete profile (CodeAnt #277)
+        var hash_val: ?[]const u8 = null;
+        defer if (hash_val) |h| allocator.free(h);
         if (password) |pw| {
-            // Hash via SHA-0 (same as vpnclient passhash) and store as PasswordHash
-            const hash = try se.password_hash.hashPassword(allocator, username.?, pw);
-            defer allocator.free(hash);
-            try store.setPasswordHash(allocator, name, hash);
+            hash_val = try se.password_hash.hashPassword(allocator, username.?, pw);
         }
+        try store.createAccount(allocator, .{ .name = name, .server = server.?, .port = port, .hub = hub.?, .username = username.?, .password_hash = hash_val });
         const path = try store.getStorePath(allocator);
         defer allocator.free(path);
         std.debug.print("Account '{s}' created at {s} (/SERVER:{s} /HUB:{s} /USERNAME:{s})\n", .{ name, path, server.?, hub.?, username.? });
@@ -441,7 +441,8 @@ fn handleClientCommand(allocator: std.mem.Allocator, cmd_args: []const []const u
             defer allocator.free(a.hub);
             defer allocator.free(a.username);
             defer if (a.password_hash) |h| allocator.free(h);
-            std.debug.print("Account '{s}':\n  Server: {s}:{d}\n  Hub: {s}\n  Username: {s}\n  PasswordHash: {s}\n", .{ a.name, a.server, a.port, a.hub, a.username, a.password_hash orelse "(none)" });
+            const hash_display = if (a.password_hash != null) "(set, redacted)" else "(none)";
+            std.debug.print("Account '{s}':\n  Server: {s}:{d}\n  Hub: {s}\n  Username: {s}\n  PasswordHash: {s}\n", .{ a.name, a.server, a.port, a.hub, a.username, hash_display });
         } else {
             std.debug.print("Account '{s}' not found\n", .{name});
             return error.AccountNotFound;
