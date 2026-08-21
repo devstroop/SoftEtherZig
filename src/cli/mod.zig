@@ -55,44 +55,19 @@ fn isFile(path: []const u8) bool {
     return st.kind == .file;
 }
 
-/// Load configuration with priority: CLI > env > config file
-/// @deprecated config.json host surface is deprecated (M19 #254) — use `vpncmd client AccountCreate` (see docs/ACCOUNT.md). Kept for one release.
+/// Load configuration with priority: CLI > env > vpncmd store (M21 #261)
+/// M21 #261: vpnclient no longer auto-loads host `config.json`; profile is owned by
+/// `vpncmd` (XDG `vpn_client.config` Cfg binary, no external files). Host file
+/// surface is eliminated for vpnclient — flags/env are the only inputs (12-field
+/// connect matrix). `vpn_server.config` (Cedar Cfg) remains for vpnserver.
 pub fn loadConfig(allocator: std.mem.Allocator, cli_args: *CliArgs) !void {
-    // Determine config path: explicit --config > ./config.json > ~/.config/softether-zig/config.json
-    const is_explicit = cli_args.config_file != null;
-    const config_path = cli_args.config_file orelse blk: {
-        if (isFile("config.json")) {
-            break :blk "config.json";
-        }
-        if (ConfigManager.defaultConfigExists()) {
-            break :blk try ConfigManager.getDefaultPath(allocator);
-        }
-        break :blk null;
-    };
-
-    // Deprecation warn for host file surface (M19 #254) — warn on auto-load or explicit --config
-    // Account store via `vpncmd client AccountCreate` lands in M21 P3; for now
-    // point to the currently available `vpncmd tools` and docs.
-    if (config_path != null) {
-        const source: []const u8 = if (is_explicit) "explicit --config" else "auto-loaded config.json";
-        // Use stderr via debug.print to preserve stdout contract for passhash etc.
-        std.debug.print("[warning] config.json ({s}: {s}) is deprecated — account store via `vpncmd` planned M21 (see docs/ACCOUNT.md)\n", .{ source, config_path.? });
-    }
-
-    if (config_path) |path| {
-        var mgr = ConfigManager.init(allocator);
-        defer mgr.deinit();
-
-        mgr.loadFromFile(path) catch |err| {
-            // Config file errors are warnings, not fatal
-            var ctx = DisplayContext.init();
-            display.warning(&ctx, "Could not load config file: {}", .{err});
-            return;
-        };
-
-        // Merge with CLI args (deep-copies strings, so mgr can be freed)
-        mgr.mergeWithArgs(cli_args) catch {};
-    }
+    _ = allocator;
+    _ = cli_args;
+    // No-op for vpnclient — deliberately ignore ./config.json and
+    // ~/.config/softether-zig/config.json even if present (M21 breaking).
+    // Explicit --config is hidden deprecated and also ignored to enforce
+    // the 12-field flags/env contract; vpncmd owns the store from M21-2.
+    return;
 }
 
 /// Display usage information
