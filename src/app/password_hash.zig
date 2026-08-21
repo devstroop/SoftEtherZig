@@ -7,6 +7,30 @@ const std = @import("std");
 const cli = @import("../cli/mod.zig");
 const crypto = @import("../mayaqua/encrypt/crypto.zig");
 
+/// Compute SoftEther password hash (SHA-0(password + UPPERCASE(username))) as base64.
+/// Caller owns returned slice.
+pub fn hashPassword(allocator: std.mem.Allocator, user: []const u8, pass: []const u8) ![]const u8 {
+    var hasher = crypto.sha0.Sha0.init();
+    hasher.update(pass);
+    var upper_buf: [512]u8 = undefined;
+    var idx: usize = 0;
+    for (user) |c| {
+        upper_buf[idx] = std.ascii.toUpper(c);
+        idx += 1;
+        if (idx == upper_buf.len) {
+            hasher.update(upper_buf[0..idx]);
+            idx = 0;
+        }
+    }
+    if (idx > 0) hasher.update(upper_buf[0..idx]);
+    const hash = hasher.final();
+    const base64 = std.base64.standard;
+    const out_len = base64.Encoder.calcSize(hash.len);
+    const out = try allocator.alloc(u8, out_len);
+    _ = base64.Encoder.encode(out, &hash);
+    return out;
+}
+
 /// Generate a SoftEther password hash and print it
 pub fn generate(user: []const u8, pass: []const u8) void {
     var ctx = cli.DisplayContext.init();

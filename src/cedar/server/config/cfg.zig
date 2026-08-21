@@ -125,7 +125,7 @@ pub const Folder = struct {
         return self;
     }
 
-    fn deinit(self: *Folder) void {
+    pub fn deinit(self: *Folder) void {
         for (self.folders.items) |child| child.deinit();
         self.folders.deinit(self.allocator);
         for (self.items.items) |item| {
