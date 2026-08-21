@@ -361,18 +361,18 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.printColored(.bold, "USAGE:\n", .{});
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
-    ctx.print("    vpnclient passhash [<username> <password>]\n", .{});
-    ctx.print("    vpnclient password-hash [<username> <password>]\n", .{});
     ctx.print("    vpnclient connect [OPTIONS]\n", .{});
+    ctx.print("    vpnclient cleanup\n", .{});
+    ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "SUBCOMMANDS:\n", .{});
     ctx.print("    help                    Show this help message\n", .{});
     ctx.print("    version                 Show version information\n", .{});
-    ctx.print("    passhash                Generate a SoftEther password hash\n", .{});
-    ctx.print("    password-hash           Alias for passhash\n", .{});
-    ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
     ctx.print("    connect                 Connect to a VPN server\n", .{});
+    ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
+    ctx.print("    passhash                (deprecated) Generate password hash — use `vpncmd tools generatehashedpassword`\n", .{});
+    ctx.print("    password-hash           Alias for passhash (deprecated)\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "CONNECT OPTIONS:\n", .{});
@@ -412,7 +412,8 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    --max-retries <N>       Maximum attempts, 0=infinite (default: 0)\n", .{});
     ctx.newline();
 
-    ctx.printColored(.bold, "PASSHASH OPTIONS:\n", .{});
+    ctx.printColored(.bold, "PASSHASH OPTIONS (DEPRECATED):\n", .{});
+    ctx.print("    vpnclient passhash is deprecated — use `vpncmd tools generatehashedpassword`\n", .{});
     ctx.print("    <username> <password>    Positional arguments (alternative to flags)\n", .{});
     ctx.print("    -u, --user <USERNAME>   Username (required)\n", .{});
     ctx.print("    -p, --password <PASS>   Password (required)\n", .{});
@@ -421,11 +422,17 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.printColored(.bold, "EXAMPLES:\n", .{});
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
-    ctx.print("    vpnclient passhash myuser mypassword\n", .{});
-    ctx.print("    vpnclient passhash -u myuser -p mypassword\n", .{});
+    ctx.print("    vpncmd tools generatehashedpassword -u myuser -p mypass\n", .{});
+    ctx.print("    vpncmd tools generatehashedpassword myuser mypass  # same\n", .{});
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient connect --config config.json\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
+    ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
+    ctx.newline();
+
+    ctx.printColored(.dim, "Note: `vpnclient passhash` is deprecated (M19 #253). Generation moved to\n", .{});
+    ctx.printColored(.dim, "      `vpncmd tools generatehashedpassword` (SoftEtherVPN/src/vpncmd/Tools.c\n", .{});
+    ctx.printColored(.dim, "      parity). `vpnclient` still consumes `--password-hash` for verification.\n", .{});
     ctx.newline();
 }
 
