@@ -291,6 +291,16 @@ pub fn main() !void {
     // Load config file if specified
     cli.loadConfig(allocator, &state.cli_args) catch {};
 
+    // M21 #263: vpnclient consumes vpncmd store (flags > env > XDG store)
+    // If required fields are missing, try to fill from XDG vpn_client.config
+    // (selected via --account / SOFTETHER_ACCOUNT or first account).
+    if (state.cli_args.address == null or state.cli_args.hub == null or state.cli_args.username == null) {
+        resolveFromStore(allocator, &state.cli_args) catch |err| {
+            // Store resolution is best-effort; validation will report missing fields.
+            std.log.scoped(.app).debug("store resolve failed: {s}", .{@errorName(err)});
+        };
+    }
+
     // Handle special modes (no subcommand needed)
     if (state.cli_args.help) {
         cli.showUsage(version);
@@ -345,6 +355,50 @@ pub fn main() !void {
     }
 
     std.process.exit(state.exit_code);
+}
+
+fn resolveFromStore(allocator: std.mem.Allocator, args: *cli.CliArgs) !void {
+    const store = app.vpn_client_store;
+    // Determine account name: --account > SOFTETHER_ACCOUNT (already in args.account) > first in store
+    var account_name: ?[]const u8 = args.account;
+    var owned_name = false;
+    defer if (owned_name and account_name != null) allocator.free(account_name.?);
+
+    if (account_name == null) {
+        // Try first account in store if any
+        const list = store.listAccounts(allocator) catch return;
+        defer {
+            for (list) |n| allocator.free(n);
+            allocator.free(list);
+        }
+        if (list.len == 1) {
+            account_name = try allocator.dupe(u8, list[0]);
+            owned_name = true;
+        } else if (list.len > 1) {
+            // Multiple accounts but no selector — require --account
+            return error.MultipleAccountsRequireSelector;
+        } else return; // no store, nothing to resolve
+    }
+
+    const name = account_name orelse return;
+    const acc = (try store.getAccount(allocator, name)) orelse return error.AccountNotFound;
+    defer allocator.free(acc.name);
+    defer allocator.free(acc.server);
+    defer allocator.free(acc.hub);
+    defer allocator.free(acc.username);
+    defer if (acc.password_hash) |h| allocator.free(h);
+
+    // Fill only missing fields (flags > env > store)
+    if (args.address == null) args.address = try allocator.dupe(u8, acc.server);
+    // port is always set (default 443), only override if still default and store has different
+    if (args.port == 443 and acc.port != 443) args.port = acc.port;
+    if (args.hub == null) args.hub = try allocator.dupe(u8, acc.hub);
+    if (args.username == null) args.username = try allocator.dupe(u8, acc.username);
+    if (args.password == null and args.password_hash == null) {
+        if (acc.password_hash) |h| args.password_hash = try allocator.dupe(u8, h);
+    }
+    // Mark that args now owns these duped strings via its allocator
+    args.allocator = allocator;
 }
 
 // ============================================================================

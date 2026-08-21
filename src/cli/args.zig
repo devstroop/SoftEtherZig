@@ -32,6 +32,9 @@ pub const CliArgs = struct {
     password: ?[]const u8 = null,
     password_hash: ?[]const u8 = null,
 
+    // M21 #263 — account selector for vpncmd store (flags > env > store)
+    account: ?[]const u8 = null,
+
     // Connection options
     skip_tls_verify: bool = false,
     use_compress: bool = false,
@@ -263,6 +266,9 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--password")) {
                 i += 1;
                 self.args.password = try self.requireValue(argv, i, "--password");
+            } else if (std.mem.eql(u8, arg, "--account")) {
+                i += 1;
+                self.args.account = try self.requireValue(argv, i, "--account");
             } else if (std.mem.eql(u8, arg, "--password-hash")) {
                 i += 1;
                 self.args.password_hash = try self.requireValue(argv, i, "--password-hash");
@@ -460,6 +466,9 @@ pub const ArgParser = struct {
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD_HASH")) |v| {
             if (self.args.password_hash == null) self.args.password_hash = v;
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ACCOUNT")) |v| {
+            if (self.args.account == null) self.args.account = v;
         } else |_| {}
         // M21 #261: SOFTETHER_CONFIG removed for vpnclient (vpncmd owns store).
         // Kept for vpnserver Cfg compat if needed, but ignored here.
