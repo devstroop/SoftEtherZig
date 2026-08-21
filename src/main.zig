@@ -202,6 +202,125 @@ pub fn main() !void {
                 std.process.exit(1);
             };
             return;
+        } else if (std.mem.eql(u8, args[1], "start")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) { scope = .system; } else if (std.mem.eql(u8, a, "--user")) { scope = .user; } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient start [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown start option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.startService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "start failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "stop")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) { scope = .system; } else if (std.mem.eql(u8, a, "--user")) { scope = .user; } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient stop [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown stop option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.stopService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "stop failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "restart")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) { scope = .system; } else if (std.mem.eql(u8, a, "--user")) { scope = .user; } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient restart [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown restart option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.restartService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "restart failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "status")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) { scope = .system; } else if (std.mem.eql(u8, a, "--user")) { scope = .user; } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient status [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown status option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.statusService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "status failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "enable")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) { scope = .system; } else if (std.mem.eql(u8, a, "--user")) { scope = .user; } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient enable [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown enable option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.enableService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "enable failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "disable")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) { scope = .system; } else if (std.mem.eql(u8, a, "--user")) { scope = .user; } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient disable [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown disable option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.disableService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "disable failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "list")) {
+            if (args.len > 2 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) {
+                cli.display.info(&state.display, "Usage: vpnclient list", .{});
+                cli.display.info(&state.display, "  List vpncmd-owned accounts (via admin RPC AccountList)", .{});
+                return;
+            }
+            app.daemon.listService(allocator, &state.display) catch |err| {
+                cli.display.failure(&state.display, "list failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
         } else {
             cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient connect --help' or 'vpnclient --help'.", .{args[1]});
             std.process.exit(1);

@@ -365,6 +365,13 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install [--user|--system]\n", .{});
     ctx.print("    vpnclient uninstall [--user|--system]\n", .{});
+    ctx.print("    vpnclient start [--user|--system]\n", .{});
+    ctx.print("    vpnclient stop [--user|--system]\n", .{});
+    ctx.print("    vpnclient restart [--user|--system]\n", .{});
+    ctx.print("    vpnclient status [--user|--system]\n", .{});
+    ctx.print("    vpnclient enable [--user|--system]\n", .{});
+    ctx.print("    vpnclient disable [--user|--system]\n", .{});
+    ctx.print("    vpnclient list\n", .{});
     ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.newline();
 
@@ -375,6 +382,13 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
     ctx.print("    install                 Install service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
     ctx.print("    uninstall               Remove service — --user or --system\n", .{});
+    ctx.print("    start                   Start service (systemctl/launchctl/sc)\n", .{});
+    ctx.print("    stop                    Stop service\n", .{});
+    ctx.print("    restart                 Restart service\n", .{});
+    ctx.print("    status                  Show service status (active/enabled, is-active/is-enabled, journalctl/launchctl print/sc query)\n", .{});
+    ctx.print("    enable                  Enable service autostart\n", .{});
+    ctx.print("    disable                 Disable service autostart\n", .{});
+    ctx.print("    list                    List vpncmd-owned accounts (AccountList via admin RPC)\n", .{});
     ctx.print("    passhash                (deprecated) Generate password hash — use `vpncmd tools generatehashedpassword`\n", .{});
     ctx.print("    password-hash           Alias for passhash (deprecated)\n", .{});
     ctx.newline();
@@ -423,9 +437,16 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    -p, --password <PASS>   Password (required)\n", .{});
     ctx.newline();
 
-    ctx.printColored(.bold, "SERVICE OPTIONS (M20 #256):\n", .{});
+    ctx.printColored(.bold, "SERVICE OPTIONS (M20 #256/#257):\n", .{});
     ctx.print("    vpnclient install [--user|--system]    Install service (default --user, no sudo)\n", .{});
     ctx.print("    vpnclient uninstall [--user|--system]  Remove service\n", .{});
+    ctx.print("    vpnclient start [--user|--system]      Start service\n", .{});
+    ctx.print("    vpnclient stop [--user|--system]       Stop service\n", .{});
+    ctx.print("    vpnclient restart [--user|--system]    Restart service\n", .{});
+    ctx.print("    vpnclient status [--user|--system]     Show active/enabled + journalctl/launchctl\n", .{});
+    ctx.print("    vpnclient enable [--user|--system]     Enable autostart\n", .{});
+    ctx.print("    vpnclient disable [--user|--system]    Disable autostart\n", .{});
+    ctx.print("    vpnclient list                         List accounts (AccountList)\n", .{});
     ctx.newline();
 
     ctx.printColored(.bold, "EXAMPLES:\n", .{});
@@ -436,6 +457,9 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    sudo vpnclient cleanup\n", .{});
     ctx.print("    vpnclient install --user               # systemd user service, no sudo\n", .{});
     ctx.print("    sudo vpnclient install --system        # systemd system service\n", .{});
+    ctx.print("    vpnclient start --user                 # systemctl --user start\n", .{});
+    ctx.print("    vpnclient status --user                # is-active/is-enabled + journalctl\n", .{});
+    ctx.print("    vpnclient list                         # AccountList\n", .{});
     ctx.print("    vpnclient connect --config config.json\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});

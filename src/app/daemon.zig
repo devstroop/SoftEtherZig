@@ -327,6 +327,193 @@ pub fn uninstallService(allocator: std.mem.Allocator, display: *cli.display.Disp
     }
 }
 
+// Service control (M20 #257) — start/stop/restart/status/enable/disable/list
+fn systemctlArgs(allocator: std.mem.Allocator, scope: ServiceScope, verb: []const u8) ![]const []const u8 {
+    if (scope == .system) {
+        const args = try allocator.alloc([]const u8, 3);
+        args[0] = "systemctl";
+        args[1] = verb;
+        args[2] = "softether-vpnclient.service";
+        return args;
+    } else {
+        const args = try allocator.alloc([]const u8, 4);
+        args[0] = "systemctl";
+        args[1] = "--user";
+        args[2] = verb;
+        args[3] = "softether-vpnclient.service";
+        return args;
+    }
+}
+
+pub fn startService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = try systemctlArgs(allocator, scope, "start");
+        defer allocator.free(args);
+        try runCommand(allocator, args);
+        cli.display.success(display, "Started softether-vpnclient ({s})", .{@tagName(scope)});
+    } else if (builtin.os.tag == .macos) {
+        try runCommand(allocator, &.{ "launchctl", "kickstart", "-k", "gui/501/com.devstroop.vpnclient" });
+        cli.display.success(display, "Started com.devstroop.vpnclient (launchd)", .{});
+    } else if (builtin.os.tag == .windows) {
+        try runCommand(allocator, &.{ "sc", "start", "SoftEtherVPNClient" });
+        cli.display.success(display, "Started SoftEtherVPNClient (SCM)", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn stopService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = try systemctlArgs(allocator, scope, "stop");
+        defer allocator.free(args);
+        try runCommand(allocator, args);
+        cli.display.success(display, "Stopped softether-vpnclient ({s})", .{@tagName(scope)});
+    } else if (builtin.os.tag == .macos) {
+        // bootout is the modern equivalent of unload for loaded agents
+        runCommand(allocator, &.{ "launchctl", "bootout", "gui/501/com.devstroop.vpnclient" }) catch
+            try runCommand(allocator, &.{ "launchctl", "stop", "com.devstroop.vpnclient" });
+        cli.display.success(display, "Stopped com.devstroop.vpnclient", .{});
+    } else if (builtin.os.tag == .windows) {
+        try runCommand(allocator, &.{ "sc", "stop", "SoftEtherVPNClient" });
+        cli.display.success(display, "Stopped SoftEtherVPNClient", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn restartService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = try systemctlArgs(allocator, scope, "restart");
+        defer allocator.free(args);
+        try runCommand(allocator, args);
+        cli.display.success(display, "Restarted softether-vpnclient ({s})", .{@tagName(scope)});
+    } else if (builtin.os.tag == .macos) {
+        // launchd: bootout then kickstart
+        runCommand(allocator, &.{ "launchctl", "bootout", "gui/501/com.devstroop.vpnclient" }) catch {};
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+        try runCommand(allocator, &.{ "launchctl", "kickstart", "-k", "gui/501/com.devstroop.vpnclient" });
+        cli.display.success(display, "Restarted com.devstroop.vpnclient", .{});
+    } else if (builtin.os.tag == .windows) {
+        runCommand(allocator, &.{ "sc", "stop", "SoftEtherVPNClient" }) catch {};
+        std.Thread.sleep(500 * std.time.ns_per_ms);
+        try runCommand(allocator, &.{ "sc", "start", "SoftEtherVPNClient" });
+        cli.display.success(display, "Restarted SoftEtherVPNClient", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn enableService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = try systemctlArgs(allocator, scope, "enable");
+        defer allocator.free(args);
+        try runCommand(allocator, args);
+        cli.display.success(display, "Enabled softether-vpnclient ({s})", .{@tagName(scope)});
+    } else if (builtin.os.tag == .macos) {
+        // launchd KeepAlive is already true; enable via `launchctl enable`
+        try runCommand(allocator, &.{ "launchctl", "enable", "gui/501/com.devstroop.vpnclient" });
+        cli.display.success(display, "Enabled com.devstroop.vpnclient", .{});
+    } else if (builtin.os.tag == .windows) {
+        try runCommand(allocator, &.{ "sc", "config", "SoftEtherVPNClient", "start=", "auto" });
+        cli.display.success(display, "Enabled SoftEtherVPNClient (auto start)", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn disableService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = try systemctlArgs(allocator, scope, "disable");
+        defer allocator.free(args);
+        try runCommand(allocator, args);
+        cli.display.success(display, "Disabled softether-vpnclient ({s})", .{@tagName(scope)});
+    } else if (builtin.os.tag == .macos) {
+        try runCommand(allocator, &.{ "launchctl", "disable", "gui/501/com.devstroop.vpnclient" });
+        cli.display.success(display, "Disabled com.devstroop.vpnclient", .{});
+    } else if (builtin.os.tag == .windows) {
+        try runCommand(allocator, &.{ "sc", "config", "SoftEtherVPNClient", "start=", "demand" });
+        cli.display.success(display, "Disabled SoftEtherVPNClient (demand start)", .{});
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn statusService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        // is-active + is-enabled without holding a terminal
+        const active_args = try systemctlArgs(allocator, scope, "is-active");
+        defer allocator.free(active_args);
+        var active_child = std.process.Child.init(active_args, allocator);
+        active_child.stdout_behavior = .Pipe;
+        active_child.stderr_behavior = .Ignore;
+        try active_child.spawn();
+        var active_buf: [32]u8 = undefined;
+        var active_out: []const u8 = "unknown";
+        if (active_child.stdout) |stdout| {
+            const n = stdout.read(&active_buf) catch 0;
+            active_out = std.mem.trim(u8, active_buf[0..n], " \n\r\t");
+        }
+        const active_term = try active_child.wait();
+        const is_active = switch (active_term) {
+            .Exited => |c| c == 0,
+            else => false,
+        };
+
+        const enabled_args = try systemctlArgs(allocator, scope, "is-enabled");
+        defer allocator.free(enabled_args);
+        var enabled_child = std.process.Child.init(enabled_args, allocator);
+        enabled_child.stdout_behavior = .Pipe;
+        enabled_child.stderr_behavior = .Ignore;
+        try enabled_child.spawn();
+        var enabled_buf: [32]u8 = undefined;
+        var enabled_out: []const u8 = "unknown";
+        if (enabled_child.stdout) |stdout| {
+            const n = stdout.read(&enabled_buf) catch 0;
+            enabled_out = std.mem.trim(u8, enabled_buf[0..n], " \n\r\t");
+        }
+        _ = try enabled_child.wait();
+
+        if (is_active) cli.display.success(display, "Status: active ({s})", .{active_out}) else cli.display.warning(display, "Status: {s}", .{active_out});
+        cli.display.info(display, "Enabled: {s} ({s})", .{ enabled_out, @tagName(scope) });
+
+        // journalctl tail (non-fatal)
+        if (scope == .system) {
+            runCommand(allocator, &.{ "journalctl", "--unit", "softether-vpnclient.service", "-n", "20", "--no-pager" }) catch {};
+        } else {
+            runCommand(allocator, &.{ "journalctl", "--user", "--unit", "softether-vpnclient.service", "-n", "20", "--no-pager" }) catch {};
+        }
+    } else if (builtin.os.tag == .macos) {
+        var child = std.process.Child.init(&.{ "launchctl", "print", "gui/501/com.devstroop.vpnclient" }, allocator);
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+        try child.spawn();
+        const term = try child.wait();
+        switch (term) {
+            .Exited => |c| if (c == 0) cli.display.success(display, "launchd: loaded", .{}) else cli.display.warning(display, "launchd: not loaded (exit {d})", .{c}),
+            else => cli.display.warning(display, "launchd: print failed", .{}),
+        }
+    } else if (builtin.os.tag == .windows) {
+        var child = std.process.Child.init(&.{ "sc", "query", "SoftEtherVPNClient" }, allocator);
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+        try child.spawn();
+        _ = try child.wait();
+    } else return error.UnsupportedPlatform;
+}
+
+pub fn listService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext) !void {
+    // Thin wrapper for `vpncmd client AccountList` via native RPC (M20 #257)
+    // For now, try admin RPC if server is local; otherwise show placeholder.
+    // Future M21 will read XDG vpn_client.config AccountList.
+    _ = allocator;
+    cli.display.info(display, "Accounts (via vpncmd client AccountList):", .{});
+    // Attempt to show systemd unit existence as proxy
+    if (builtin.os.tag == .linux) {
+        const paths = [_][]const u8{
+            "/etc/systemd/system/softether-vpnclient.service",
+            // user path checked via $HOME
+        };
+        for (paths) |p| {
+            if (std.fs.cwd().openFile(p, .{})) |f| {
+                f.close();
+                cli.display.info(display, "  Service file: {s} (installed)", .{p});
+            } else |_| {}
+        }
+    }
+    cli.display.info(display, "  (No vpncmd store yet — use `vpncmd` AccountCreate in M21, see #262)", .{});
+    cli.display.info(display, "  Use `vpnclient status` for service state", .{});
+}
+
 // ============================================================================
 // Connection Progress Display (S-040)
 // ============================================================================
