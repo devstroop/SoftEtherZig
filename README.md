@@ -1,6 +1,6 @@
 # SoftEtherZig
 
-A SoftEther VPN client written in Zig — standalone CLI + embeddable C library for mobile/desktop apps.
+A SoftEther VPN **client + server** written in Zig — standalone CLIs (`vpnclient`/`vpnserver`/`vpncmd`/`vpnbridge`) + embeddable C library (92 exports) for mobile/desktop apps.
 
 [![CI](https://github.com/devstroop/SoftEtherZig/actions/workflows/ci.yml/badge.svg)](https://github.com/devstroop/SoftEtherZig/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/devstroop/SoftEtherZig)](https://github.com/devstroop/SoftEtherZig/releases/latest)
@@ -10,16 +10,20 @@ A SoftEther VPN client written in Zig — standalone CLI + embeddable C library 
 
 ## Overview
 
-- **CLI** (`vpnclient`) — connect to any SoftEther VPN server
-- **Shared lib** (`libsoftether.dylib/.so/.dll`) — embed via FFI in Flutter, Swift, Kotlin
+- **Client CLI** (`vpnclient`) — connect to any SoftEther VPN server
+- **Server** (`vpnserver`) — standalone VPN server with virtual hub, SecureNAT, L2 bridge, L3 switch, farm/cluster
+- **Admin CLI** (`vpncmd`) — manage server via native RPC + WPC/HTTPS (vpncmd-compatible)
+- **Bridge** (`vpnbridge`) — hub ↔ physical NIC bridging
+- **Shared lib** (`libsoftether.dylib/.so/.dll`) — embed client + server via FFI (92 exports) in Flutter, Swift, Kotlin
 - **Static lib** (`libsoftether.a`) — iOS/Android static linking
 
-Implements the full SoftEther VPN protocol: HTTPS tunnel, AES-256-CBC session encryption, block compression (zlib), keepalive, multi-TCP connections, half-connection mode, UDP acceleration, cluster redirect support, DHCP/ARP, DHCPv6, route management.
+Implements the full SoftEther VPN protocol: HTTPS tunnel, AES-256-CBC session encryption, block compression (zlib), keepalive, multi-TCP connections, half-connection mode, UDP acceleration, cluster redirect support, DHCP/ARP, DHCPv6, route management. Server reuses the same wire protocol: client `vpnclient` ↔ Zig `vpnserver` and official SoftEther client ↔ Zig server both fully interoperable.
 
 ## Features
 
 | Feature | Status |
 |---------|--------|
+| **Client** |  |
 | Password / anonymous / X.509 certificate auth | ✅ |
 | TLS 1.2/1.3 via OpenSSL 3.x | ✅ |
 | AES-256-CBC session encryption | ✅ |
@@ -38,6 +42,20 @@ Implements the full SoftEther VPN protocol: HTTPS tunnel, AES-256-CBC session en
 | Interactive CLI shell | ✅ |
 | Daemon mode | ✅ |
 | L2 bridge mode (per-port rate limiting, 802.1Q VLAN trunking) | ✅ (Linux only) |
+| **Server** (`vpnserver`) |  |
+| Virtual Hub L2 switch (StorePacket, MAC/IP tables, flood control, ACLs) | ✅ |
+| User/group DB + policy (38 policies, cert/CRL, password/anonymous) | ✅ |
+| Virtual DHCP server + virtual host / ARP responder | ✅ |
+| SecureNAT (userspace NAT, TCP/UDP/ICMP, DNS, inbound port-mapping) | ✅ |
+| LocalBridge (hub ↔ physical NIC via NetPort/AF_PACKET) | ✅ |
+| L3 switch (inter-hub virtual routing) | ✅ |
+| Admin RPC (native TLS + WPC/HTTPS, ~200 endpoints) + `vpncmd` | ✅ |
+| Config persistence (`vpn_server.config`, Cfg text format, autosave) | ✅ |
+| Listener / TLS accept / HTTP server envelope | ✅ |
+| UDP acceleration server role (RUDP) | ✅ |
+| Farm/cluster (controller/member, SiCall RPC) + STP | ✅ |
+| Syslog forwarding + traffic accounting + logging (EnumLog) | ✅ |
+| FFI embedding (`softether_server_*` 12 exports + session enumeration 3) | ✅ |
 
 > **Bridge mode** (`--mode bridge`) operates on Linux only and requires `AF_PACKET` access (run as root or with `CAP_NET_RAW`). On macOS, BPF-based bridge mode is under development. Other platforms do not yet support L2 bridge mode.
 
@@ -127,6 +145,7 @@ zig build shared-lib -Dtarget=x86_64-windows
 ```c
 #include "softether.h"
 
+// Client
 softether_client_t client = softether_create(
     "vpn.example.com", 443, "VPN", "user", "pass");
 softether_set_encryption(client, true);
@@ -134,9 +153,15 @@ softether_connect(client);
 softether_run_data_loop(client);  // blocking, dedicated thread
 softether_disconnect(client);
 softether_destroy(client);
+
+// Embedded server (FFI)
+softether_server_t srv = softether_server_create("DEFAULT", "administrator", "pass");
+softether_server_start(srv);
+softether_server_stop(srv);
+softether_server_destroy(srv);
 ```
 
-Full header: [`include/softether.h`](include/softether.h)
+Full header: [`include/softether.h`](include/softether.h) — 92 exports, 770 lines
 
 ## CLI
 
@@ -379,13 +404,16 @@ Full env var list: see [CONFIG.md](CONFIG.md#env-vars-reference).
 
 ```
 ┌──────────────────────────────────────────┐
-│  CLI (src/main.zig)                      │
-│  FFI (src/ffi.zig)                       │
+│  CLIs: vpnclient / vpnserver / vpncmd / vpnbridge (src/exec/)       │
+│  FFI (src/ffi.zig — 92 exports)          │
 ├──────────────────────────────────────────┤
 │  Cedar — VPN Protocol Layer              │
 │  ┌────────────────────────────────────┐  │
 │  │  client/   Auth, state machine,    │  │
 │  │            multi-conn, reconnect   │  │
+│  │  server/   Hub, listener, accept,  │  │
+│  │            session, DHCP/NAT,      │  │
+│  │            farm, admin RPC/WPC     │  │
 │  │  protocol/ SoftEther wire protocol │  │
 │  │  session/  Encryption keys, state  │  │
 │  │  tunnel/   Data loop, ARP, DHCPv4  │  │
@@ -395,15 +423,17 @@ Full env var list: see [CONFIG.md](CONFIG.md#env-vars-reference).
 │  Mayaqua — Platform Abstraction Layer    │
 │  ┌────────────────────────────────────┐  │
 │  │  encrypt/   AES, SHA, HMAC, SHA-0 │  │
+│  │  │  MD4 (NTLM), RC4                │  │
 │  │  kernel/    IP utils, types, errs  │  │
-│  │  network/   TLS, TCP, HTTP, DNS   │  │
-│  │             cache, SOCKS, UDP accel│  │
+│  │  network/   TLS (accept+connect),  │  │
+│  │  │  TCP/UDP listener, HTTP server,│  │
+│  │  │  DNS cache, SOCKS, UDP accel   │  │
 │  └────────────────────────────────────┘  │
 ├──────────────────────────────────────────┤
-│  TUN Adapter (src/adapter/)              │
-│  • macOS utun · Linux TUN · Windows TAP  │
-│  • Android/iOS fd passthrough            │
-│  • Route management · Self-healing       │
+│  TUN/Bridge Adapter (src/adapter/ + src/bridge/)              │
+│  • macOS utun/BPF · Linux TUN/AF_PACKET · Windows TAP/Npcap  │
+│  • Android/iOS fd passthrough · NetPort abstraction           │
+│  • Route management · Self-healing · STP                      │
 └──────────────────────────────────────────┘
 ```
 
@@ -412,39 +442,45 @@ Full env var list: see [CONFIG.md](CONFIG.md#env-vars-reference).
 ```
 SoftEtherZig/
 ├── src/
-│   ├── main.zig              CLI entry point
-│   ├── lib.zig               Library root / public Zig API
-│   ├── ffi.zig               43 C ABI exports
+│   ├── main.zig              CLI entry point (client)
+│   ├── lib.zig               Library root / public Zig API (client+server)
+│   ├── ffi.zig               92 C ABI exports (client + server)
 │   ├── config.zig            JSON config parser
-│   ├── cedar/                VPN protocol layer
-│   │   ├── main.zig          Module root
-│   │   ├── client/           Auth, state machine, multi-conn
-│   │   ├── protocol/         SoftEther wire protocol, auth, pack, RPC
-│   │   ├── session/          Encryption keys, session state
-│   │   └── tunnel/           Data loop, ARP, DHCPv4, DHCPv6
-│   ├── mayaqua/              Platform abstraction layer
-│   │   ├── main.zig          Module root
-│   │   ├── encrypt/          AES, SHA-1, SHA-256, HMAC, SHA-0
+│   ├── cedar/
+│   │   ├── client/           Auth, state machine, multi-conn, reconnect
+│   │   ├── server/           Hub, listener, accept, session, DHCP/NAT/SecureNAT,
+│   │   │                     farm, admin RPC/WPC, config persistence, 24 modules
+│   │   ├── protocol/         SoftEther wire protocol, auth, pack, RPC, watermark
+│   │   ├── session/          Encryption keys, session state, RC4/MD4
+│   │   └── tunnel/           Data loop, ARP, DHCPv4, DHCPv6, session_io
+│   ├── mayaqua/
+│   │   ├── encrypt/          AES, SHA-0/1/256, MD4, RC4, HMAC
 │   │   ├── kernel/           IP utils, protocol types, errors
-│   │   └── network/          TLS, TCP, HTTP, DNS cache, SOCKS, UDP accel
-│   ├── adapter/              TUN/TAP, routing, DHCP, route healing
+│   │   └── network/          TLS (accept+connect), TCP/UDP listener, HTTP server,
+│   │                         DNS cache, SOCKS, UDP accel (RUDP server)
+│   ├── adapter/              TUN/TAP, NetPort, BPF/AF_PACKET/Npcap, routing
+│   ├── bridge/               FDB, engine, loop, STP (802.1D)
 │   ├── app/                  Daemon, signals, lifecycle, events
-│   └── cli/                  Arg parsing, display, config, shell
-├── include/softether.h       C API header (366 lines, 43 exports)
-├── deps/                     Pre-built OpenSSL for iOS/Android + zlib
-├── scripts/                  Build helpers + Python diagnostics
+│   ├── cli/                  Arg parsing, display, config, shell
+│   └── exec/
+│       ├── vpnserver/        Server executable (daemon, runtime)
+│       ├── vpnclient/        Client executable
+│       ├── vpncmd/           Admin CLI over RPC/WPC
+│       └── vpnbridge/        Bridge executable
+├── include/softether.h       C API header (770 lines, 92 exports, 92/92 parity)
+├── deps/                     Pre-built OpenSSL for iOS/Android + zlib + openssl-android
+├── scripts/                  Build helpers + Python diagnostics + header sync
 ├── docs/
-│   ├── rca/                  Root Cause Analysis documents
 │   ├── bridge_monitor_ops.md Operator + security guide (bridge/monitor modes)
 │   └── CODEBASE_REORGANIZATION.md
 ├── test/
 │   ├── integration/          Handshake fixture, DHCPv6 wire tests
 │   └── live/                 Live test placeholder
-├── config.*.json             Example configs + schema (17 files)
-├── build.zig                 Build system
-├── build.zig.zon             Package manifest (v0.2.0)
+├── config.*.json             Example configs + schema
+├── build.zig                 Build system (vpnclient/vpnserver/vpncmd/vpnbridge + libs)
+├── build.zig.zon             Package manifest (v0.3.11)
 ├── CHANGELOG.md              Changelog
-├── CONFIG.md                 Config field reference
+├── CONFIG.md                 Config field reference (50 client+bridge/monitor fields)
 ├── CONTRIBUTING.md           Contribution guide
 └── QUICKSTART.md             Platform build guide
 ```
