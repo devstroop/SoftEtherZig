@@ -166,6 +166,7 @@ pub const TunLinuxDevice = struct {
 
     /// Close the TUN device
     pub fn close(self: *TunLinuxDevice) void {
+        std.log.debug("TunLinuxDevice.close called for {s} fd={?}", .{ self.getName(), self.fd });
         if (self.fd) |fd| {
             // Bring the interface down first
             self.bringInterfaceDown() catch {};
