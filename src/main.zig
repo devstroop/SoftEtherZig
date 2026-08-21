@@ -202,6 +202,74 @@ pub fn main() !void {
                 std.process.exit(1);
             };
             return;
+        } else if (std.mem.eql(u8, args[1], "start") or std.mem.eql(u8, args[1], "stop") or std.mem.eql(u8, args[1], "restart") or std.mem.eql(u8, args[1], "status") or std.mem.eql(u8, args[1], "enable") or std.mem.eql(u8, args[1], "disable")) {
+            var scope: app.daemon.ServiceScope = .user;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) scope = .system;
+                if (std.mem.eql(u8, a, "--user")) scope = .user;
+                if (a.len > 0 and a[0] == '-' and !std.mem.eql(u8, a, "--system") and !std.mem.eql(u8, a, "--user")) {
+                    cli.display.failure(&state.display, "Unknown option for {s}: {s}", .{ args[1], a });
+                    std.process.exit(1);
+                }
+            }
+            var has_system = false;
+            var has_user = false;
+            for (args[2..]) |a| {
+                if (std.mem.eql(u8, a, "--system")) has_system = true;
+                if (std.mem.eql(u8, a, "--user")) has_user = true;
+            }
+            if (has_system and has_user) {
+                cli.display.failure(&state.display, "Cannot specify both --system and --user", .{});
+                std.process.exit(1);
+            }
+            const cmd = args[1];
+            if (std.mem.eql(u8, cmd, "start")) {
+                app.daemon.startService(allocator, &state.display, scope) catch |err| {
+                    cli.display.failure(&state.display, "Start failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "stop")) {
+                app.daemon.stopService(allocator, &state.display, scope) catch |err| {
+                    cli.display.failure(&state.display, "Stop failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "restart")) {
+                app.daemon.restartService(allocator, &state.display, scope) catch |err| {
+                    cli.display.failure(&state.display, "Restart failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "status")) {
+                app.daemon.statusService(allocator, &state.display, scope) catch |err| {
+                    cli.display.failure(&state.display, "Status failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "enable")) {
+                app.daemon.enableService(allocator, &state.display, scope) catch |err| {
+                    cli.display.failure(&state.display, "Enable failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            } else if (std.mem.eql(u8, cmd, "disable")) {
+                app.daemon.disableService(allocator, &state.display, scope) catch |err| {
+                    cli.display.failure(&state.display, "Disable failed: {s}", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+            }
+            return;
+        } else if (std.mem.eql(u8, args[1], "list")) {
+            var child = std.process.Child.init(&[_][]const u8{ "vpncmd", "client", "AccountList" }, allocator);
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            const res = child.spawnAndWait() catch {
+                cli.display.info(&state.display, "No vpncmd store — use `vpncmd client AccountCreate` (see docs/ACCOUNT.md)", .{});
+                return;
+            };
+            switch (res) {
+                .Exited => |code| {
+                    if (code != 0) cli.display.info(&state.display, "vpncmd AccountList exited with {d} — no accounts or vpncmd not installed", .{code});
+                },
+                else => cli.display.info(&state.display, "vpncmd AccountList terminated abnormally", .{}),
+            }
+            return;
         } else {
             cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient connect --help' or 'vpnclient --help'.", .{args[1]});
             std.process.exit(1);

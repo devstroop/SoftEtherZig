@@ -23,10 +23,10 @@ const pid_filename = "softether.pid";
 
 fn getPidFilePath(buf: *[std.fs.max_path_bytes]u8, filename: []const u8) ?[]const u8 {
     // Try XDG_RUNTIME_DIR first (e.g. /run/user/1000/)
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "XDG_RUNTIME_DIR")) |dir| {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "XDG_RUNTIME_DIR") catch null) |dir| {
         defer std.heap.page_allocator.free(dir);
         return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, filename }) catch null;
-    } else |_| {}
+    } else {}
 
     // Fall back to /tmp
     return std.fmt.bufPrint(buf, "/tmp/{s}", .{filename}) catch null;
@@ -120,7 +120,7 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 }
 
 fn getHomeDir(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |h| return h;
+    if (std.process.getEnvVarOwned(allocator, "HOME") catch null) |h| return h;
     return error.MissingHome;
 }
 
@@ -130,7 +130,7 @@ fn systemdUnitPath(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u
         return try allocator.dupe(u8, "/etc/systemd/system/softether-vpnclient.service");
     } else {
         // --user: $XDG_CONFIG_HOME/systemd/user or $HOME/.config/systemd/user
-        if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
+        if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch null) |xdg| {
             defer allocator.free(xdg);
             return try std.fmt.allocPrint(allocator, "{s}/systemd/user/softether-vpnclient.service", .{xdg});
         } else {
@@ -362,6 +362,152 @@ pub fn uninstallService(allocator: std.mem.Allocator, display: *cli.display.Disp
         cli.display.success(display, "Removed Windows service SoftEtherVPNClient", .{});
     } else {
         cli.display.failure(display, "Service uninstall not supported on {s}", .{@tagName(builtin.os.tag)});
+        return error.UnsupportedPlatform;
+    }
+}
+
+fn runSystemctl(allocator: std.mem.Allocator, args: []const []const u8, display: *cli.display.DisplayContext) !void {
+    var child = std.process.Child.init(args, allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) {
+            cli.display.warning(display, "systemctl {s} exited with {d}", .{ args[1], code });
+            return error.CommandFailed;
+        },
+        else => return error.CommandFailed,
+    }
+}
+
+pub fn startService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .user)
+            &[_][]const u8{ "systemctl", "--user", "start", "softether-vpnclient.service" }
+        else
+            &[_][]const u8{ "systemctl", "start", "softether-vpnclient.service" };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Started softether-vpnclient", .{});
+    } else if (builtin.os.tag == .macos) {
+        const plist_path = try launchdPlistPath(allocator, scope);
+        defer allocator.free(plist_path);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", plist_path }, allocator);
+        _ = child.spawnAndWait() catch return error.StartFailed;
+        cli.display.success(display, "Started softether-vpnclient", .{});
+    } else {
+        return error.UnsupportedPlatform;
+    }
+}
+
+pub fn stopService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .user)
+            &[_][]const u8{ "systemctl", "--user", "stop", "softether-vpnclient.service" }
+        else
+            &[_][]const u8{ "systemctl", "stop", "softether-vpnclient.service" };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Stopped softether-vpnclient", .{});
+    } else if (builtin.os.tag == .macos) {
+        const plist_path = try launchdPlistPath(allocator, scope);
+        defer allocator.free(plist_path);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", plist_path }, allocator);
+        _ = child.spawnAndWait() catch return error.StopFailed;
+        cli.display.success(display, "Stopped softether-vpnclient", .{});
+    } else {
+        return error.UnsupportedPlatform;
+    }
+}
+
+pub fn restartService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .user)
+            &[_][]const u8{ "systemctl", "--user", "restart", "softether-vpnclient.service" }
+        else
+            &[_][]const u8{ "systemctl", "restart", "softether-vpnclient.service" };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Restarted softether-vpnclient", .{});
+    } else if (builtin.os.tag == .macos) {
+        try stopService(allocator, display, scope);
+        try startService(allocator, display, scope);
+    } else {
+        return error.UnsupportedPlatform;
+    }
+}
+
+pub fn statusService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .user)
+            &[_][]const u8{ "systemctl", "--user", "is-active", "softether-vpnclient.service" }
+        else
+            &[_][]const u8{ "systemctl", "is-active", "softether-vpnclient.service" };
+        var child = std.process.Child.init(args, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        try child.spawn();
+        var out_buf: [256]u8 = undefined;
+        var err_buf: [256]u8 = undefined;
+        const n_out = child.stdout.?.read(&out_buf) catch 0;
+        const n_err = child.stderr.?.read(&err_buf) catch 0;
+        const term = try child.wait();
+        const out_str = std.mem.trim(u8, out_buf[0..n_out], " \n\r\t");
+        const err_str = std.mem.trim(u8, err_buf[0..n_err], " \n\r\t");
+        switch (term) {
+            .Exited => |code| {
+                if (code == 0) {
+                    cli.display.success(display, "softether-vpnclient is active ({s})", .{out_str});
+                } else {
+                    cli.display.info(display, "softether-vpnclient is inactive ({s}) {s}", .{ out_str, err_str });
+                }
+            },
+            else => return error.StatusFailed,
+        }
+        const journal_args = if (scope == .user)
+            &[_][]const u8{ "journalctl", "--user", "-u", "softether-vpnclient.service", "-n", "5", "--no-pager" }
+        else
+            &[_][]const u8{ "journalctl", "-u", "softether-vpnclient.service", "-n", "5", "--no-pager" };
+        var j_child = std.process.Child.init(journal_args, allocator);
+        j_child.stdout_behavior = .Inherit;
+        j_child.stderr_behavior = .Inherit;
+        _ = j_child.spawnAndWait() catch {};
+    } else if (builtin.os.tag == .macos) {
+        const plist_path = try launchdPlistPath(allocator, scope);
+        defer allocator.free(plist_path);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "print", plist_path }, allocator);
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
+        _ = child.spawnAndWait() catch return error.StatusFailed;
+    } else {
+        return error.UnsupportedPlatform;
+    }
+}
+
+pub fn enableService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .user)
+            &[_][]const u8{ "systemctl", "--user", "enable", "softether-vpnclient.service" }
+        else
+            &[_][]const u8{ "systemctl", "enable", "softether-vpnclient.service" };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Enabled softether-vpnclient autostart", .{});
+    } else if (builtin.os.tag == .macos) {
+        cli.display.info(display, "launchd KeepAlive already enabled via plist", .{});
+    } else {
+        return error.UnsupportedPlatform;
+    }
+}
+
+pub fn disableService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
+    if (builtin.os.tag == .linux) {
+        const args = if (scope == .user)
+            &[_][]const u8{ "systemctl", "--user", "disable", "softether-vpnclient.service" }
+        else
+            &[_][]const u8{ "systemctl", "disable", "softether-vpnclient.service" };
+        try runSystemctl(allocator, args, display);
+        cli.display.success(display, "Disabled softether-vpnclient autostart", .{});
+    } else if (builtin.os.tag == .macos) {
+        cli.display.info(display, "Disable via launchctl unload", .{});
+    } else {
         return error.UnsupportedPlatform;
     }
 }
