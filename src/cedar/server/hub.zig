@@ -301,6 +301,9 @@ pub const Hub = struct {
     log_config: HubLogConfig = .{},
     /// Hub security logger (C: `HUB.SecurityLogger`).
     security_logger: ?*Log = null,
+    /// Syslog client for forwarding security events (M14). Set by the
+    /// runtime server; null means syslog forwarding is disabled.
+    syslog_client: ?*logging_mod.SyslogClient = null,
     /// Hub MAC address (6 bytes, used for RA source link-layer and EUI-64).
     hub_mac: [6]u8 = .{ 0x02, 0xAC, 0x11, 0x22, 0x33, 0x44 },
     /// Hub link-local IPv6 address (16 bytes, fe80::EUI-64 from hub_mac).
@@ -500,6 +503,14 @@ pub const Hub = struct {
 
         const l = try Log.init(self.allocator, dir, logging_mod.HUB_SECURITY_LOG_PREFIX, self.log_config.security_log_switch_type);
         self.security_logger = l;
+        // Wire syslog forwarding if a client is configured.
+        if (self.syslog_client) |sc| {
+            const save_type: logging_mod.SyslogSaveType = if (self.log_config.save_security_log)
+                .server_and_hub_security_log
+            else
+                .server_log;
+            l.setSyslogClient(sc, save_type);
+        }
     }
 
     /// Stop the hub security logger.

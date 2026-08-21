@@ -70,6 +70,13 @@ pub const SyslogSetting = struct {
     }
 };
 
+/// Syslog configuration vtable callback (C: `SiSetSysLogSetting`).
+/// `ctx` is a `*SyslogClient`.
+pub fn syslogConfigure(ctx: *anyopaque, hostname: []const u8, port: u32) void {
+    const client: *SyslogClient = @ptrCast(@alignCast(ctx));
+    client.configure(hostname, port);
+}
+
 // ============================================================================
 // SyslogClient — UDP syslog forwarder (C: Logging.c SLOG)
 // ============================================================================
