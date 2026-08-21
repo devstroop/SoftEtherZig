@@ -376,7 +376,7 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.newline();
 
     ctx.printColored(.bold, "CONNECT OPTIONS:\n", .{});
-    ctx.print("    -c, --config <FILE>     (deprecated) Load JSON — use `vpncmd` account store\n", .{});
+    ctx.print("    -c, --config <FILE>     (deprecated) Load JSON — account store via `vpncmd` planned M21\n", .{});
     ctx.print("    -a, --address <IP>      Pre-resolved server IP address\n", .{});
     ctx.print("    --hostname <NAME>       Original hostname for TLS/SNI\n", .{});
     ctx.print("    -p, --port <PORT>       VPN server port (default: 443)\n", .{});
