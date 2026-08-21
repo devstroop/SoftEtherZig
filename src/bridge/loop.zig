@@ -465,6 +465,10 @@ pub const BridgeLoop = struct {
     /// Write a frame to a port, applying per-port VLAN transformation.
     /// Access ports strip the 802.1Q tag; trunk ports keep it.
     fn writePortVlan(self: *BridgeLoop, port_index: u16, frame: []const u8, action: ForwardAction, vlan_id: u16) void {
+        // STP: block egress on non-forwarding ports.
+        if (self.stp_bridge) |*stp| {
+            if (!stp.isForwarding(port_index)) return;
+        }
         const p = &self.ports[port_index];
         // Egress rate limit check.
         if (self.egress_limiters[port_index]) |*limiter| {
@@ -1231,12 +1235,13 @@ test "bridge loop: STP tick sends hello BPDUs on designated ports" {
     h.loop.setStpEdgePort(0, true);
     h.loop.setStpEdgePort(1, true);
 
-    // First tick: hello timer fires immediately (init value = hello_s).
+    // Hello timer init = hello_s (2). Need 2 ticks to reach 0.
     const now = nowSeconds();
+    _ = h.loop.age(now);
     _ = h.loop.age(now);
 
     // Edge ports in forwarding → hello BPDUs should be sent out both.
-    // Each BPDU is 51 bytes.
+    // Each BPDU is 52 bytes.
     try std.testing.expect(h.port0.out.items.len > 0);
     try std.testing.expect(h.port1.out.items.len > 0);
 }
