@@ -147,6 +147,8 @@ pub const ServerState = struct {
     farm_state: ?*softether.server.farm.FarmState = null,
     /// Farm RPC server (controller only). Accepts farm member TLS connections.
     farm_server: ?*softether.server.farm_rpc.FarmServer = null,
+    /// Syslog client for UDP forwarding (M14).
+    syslog_client: ?*softether.server.logging.SyslogClient = null,
     listeners: std.ArrayListUnmanaged(*softether.server.listener.Listener) = .{},
 
     pub fn init(allocator: std.mem.Allocator, cli_args: CliArgs) ServerState {
@@ -179,7 +181,15 @@ pub const ServerState = struct {
             // so any in-flight RPC handler falls back to no-op safely.
             server.server_ctx = null;
             server.bridge_ops.ctx = null;
+            server.syslog_ops.ctx = null;
         }
+
+        // Destroy syslog client after nulling the ops vtable.
+        if (self.syslog_client) |sc| {
+            sc.deinit();
+            self.allocator.destroy(sc);
+        }
+        self.syslog_client = null;
 
         // Farm teardown: stop the farm server (control thread + members)
         // before destroying the ServerContext that references it.
@@ -434,6 +444,14 @@ fn buildServer(state: *ServerState) !void {
     };
     state.server_ctx = ctx;
 
+    // Create syslog client (M14) and attach to the server context.
+    // The client is heap-allocated so it outlives admin RPC handlers that
+    // borrow it through the SyslogOps vtable.
+    const syslog_client = try state.allocator.create(softether.server.logging.SyslogClient);
+    syslog_client.* = softether.server.logging.SyslogClient.init(state.allocator);
+    ctx.syslog_client = syslog_client;
+    state.syslog_client = syslog_client;
+
     // Wire the bridge operations vtable so admin RPC can create/destroy
     // runtime LocalBridge instances.
     admin.bridge_ops = .{
@@ -441,6 +459,17 @@ fn buildServer(state: *ServerState) !void {
         .create = &softether.server.accept.bridgeCreate,
         .destroy = &softether.server.accept.bridgeDestroy,
     };
+
+    // Wire the syslog operations vtable so stSetSysLog can reconfigure
+    // the runtime SyslogClient.
+    admin.syslog_ops = .{
+        .ctx = @ptrCast(syslog_client),
+        .configure = &softether.server.logging.syslogConfigure,
+    };
+
+    // Attach the syslog client to the hub so security logs can be
+    // forwarded when the security logger starts.
+    state.switch_hub.?.syslog_client = syslog_client;
 
     // TODO(M8 Phase 2): When server type is configured as farm controller,
     // start the farm control thread via farm_server.startControlThread().

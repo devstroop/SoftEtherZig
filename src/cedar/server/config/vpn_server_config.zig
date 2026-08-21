@@ -56,6 +56,7 @@ const testing = std.testing;
 const cfg = @import("cfg.zig");
 const auth = @import("../auth.zig");
 const listener = @import("../listener.zig");
+const logging = @import("../logging.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -348,6 +349,8 @@ pub const ServerConfig = struct {
     server: ServerConfiguration,
     listeners: std.ArrayListUnmanaged(ListenerConfig) = .{},
     hubs: std.ArrayListUnmanaged(HubConfig) = .{},
+    /// Syslog destination (C: `SyslogSettings` folder in vpn_server.config).
+    syslog_setting: logging.SyslogSetting = .{},
 
     /// First-run configuration (C `SiLoadInitialConfiguration` +
     /// `SiInitDefaultHubList` + `SiInitListenerList`).
@@ -373,6 +376,7 @@ pub const ServerConfig = struct {
 
     pub fn deinit(self: *ServerConfig) void {
         self.server.deinit(self.allocator);
+        self.syslog_setting.deinit(self.allocator);
         for (self.hubs.items) |*hub| hub.deinit(self.allocator);
         self.hubs.deinit(self.allocator);
         self.listeners.deinit(self.allocator);
@@ -419,6 +423,20 @@ pub const ServerConfig = struct {
                 try self.hubs.append(allocator, try HubConfig.fromFolder(allocator, hub_folder));
             }
         }
+
+        // Syslog settings (C: `SyslogSettings` folder, Server.c:5897).
+        if (root.getFolder("SyslogSettings")) |sf| {
+            const raw_type = sf.getUint("SaveType", 0);
+            // Clamp to valid range — malformed config disables syslog instead of trapping.
+            self.syslog_setting.save_type = if (raw_type <= 3) @enumFromInt(raw_type) else .none;
+            self.syslog_setting.port = sf.getUint("Port", 514);
+            const host = sf.getStr("HostName", "");
+            if (host.len > 0) {
+                self.allocator.free(self.syslog_setting.hostname);
+                self.syslog_setting.hostname = try allocator.dupe(u8, host);
+            }
+        }
+
         return self;
     }
 
@@ -463,6 +481,12 @@ pub const ServerConfig = struct {
                 if (g.note.len > 0) try gf.setStr("Note", g.note);
             }
         }
+
+        // Syslog settings (C: `SyslogSettings` folder, Server.c:6352).
+        const sf = try root.addFolder("SyslogSettings");
+        try sf.setUint("SaveType", @intFromEnum(self.syslog_setting.save_type));
+        try sf.setStr("HostName", self.syslog_setting.hostname);
+        try sf.setUint("Port", self.syslog_setting.port);
     }
 
     /// Read and parse a configuration file (C `SiLoadConfigurationFile`).
@@ -1009,4 +1033,36 @@ test "server.vpn_server_config save/load round-trips groups" {
     try testing.expectEqualStrings("Core developers", rhub.groups.items[0].note);
     try testing.expectEqualStrings("admins", rhub.groups.items[1].name);
     try testing.expectEqualStrings("", rhub.groups.items[1].realname);
+}
+
+test "server.vpn_server_config save/load round-trips syslog settings" {
+    const allocator = testing.allocator;
+    var config = try ServerConfig.initDefault(allocator);
+    defer config.deinit();
+
+    // Set syslog config
+    config.syslog_setting.save_type = .server_and_hub_all_log;
+    config.syslog_setting.port = 1514;
+    config.syslog_setting.hostname = try allocator.dupe(u8, "syslog.example.com");
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try config.save(tmp.dir, default_config_file_name);
+
+    var reloaded = try ServerConfig.load(allocator, tmp.dir, default_config_file_name);
+    defer reloaded.deinit();
+
+    try testing.expectEqual(logging.SyslogSaveType.server_and_hub_all_log, reloaded.syslog_setting.save_type);
+    try testing.expectEqual(@as(u32, 1514), reloaded.syslog_setting.port);
+    try testing.expectEqualStrings("syslog.example.com", reloaded.syslog_setting.hostname);
+}
+
+test "server.vpn_server_config default syslog is disabled" {
+    const allocator = testing.allocator;
+    var config = try ServerConfig.initDefault(allocator);
+    defer config.deinit();
+
+    try testing.expectEqual(logging.SyslogSaveType.none, config.syslog_setting.save_type);
+    try testing.expectEqual(@as(u32, logging.SYSLOG_PORT), config.syslog_setting.port);
+    try testing.expectEqual(@as(usize, 0), config.syslog_setting.hostname.len);
 }

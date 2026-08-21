@@ -56,6 +56,7 @@ const farm_mod = @import("farm.zig");
 const farm_rpc_mod = @import("farm_rpc.zig");
 const FarmServer = farm_rpc_mod.FarmServer;
 const farm_protocol_mod = @import("../../cedar/protocol/auth.zig");
+const logging_mod = @import("logging.zig");
 
 const log = std.log.scoped(.cedar_server);
 
@@ -136,6 +137,10 @@ pub const ServerContext = struct {
     bridge_mode: bool = false,
     /// Active LocalBridge instances (admin RPC AddLocalBridge/DeleteLocalBridge).
     local_bridges: std.ArrayListUnmanaged(bridge_mod.LocalBridge) = .{},
+    /// Syslog client for forwarding (M14). Null when syslog is disabled.
+    syslog_client: ?*logging_mod.SyslogClient = null,
+    /// Current syslog forwarding mode — set by the admin dispatch handler.
+    syslog_save_type: logging_mod.SyslogSaveType = .none,
 
     /// Tear down runtime bridges and free the local_bridges list.
     pub fn deinit(self: *ServerContext) void {

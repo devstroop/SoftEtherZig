@@ -194,6 +194,16 @@ pub const BridgeOps = struct {
     }
 };
 
+/// Syslog operations vtable — wired by the runtime server to reconfigure
+/// the SyslogClient when admin handlers call SetSysLog.
+pub const SyslogOps = struct {
+    ctx: ?*anyopaque = null,
+    /// Reconfigure the syslog destination. Empty hostname disables forwarding.
+    configure: *const fn (ctx: *anyopaque, hostname: []const u8, port: u32) void = &noopConfigure,
+
+    fn noopConfigure(_: *anyopaque, _: []const u8, _: u32) void {}
+};
+
 /// Local bridge admin-model entry (C `LOCALBRIDGE` subset).
 pub const LocalBridgeEntry = struct {
     device_name: []const u8 = "",
@@ -808,6 +818,10 @@ pub const Server = struct {
     /// Bridge operations vtable — set by accept.zig to wire admin dispatch
     /// to the runtime ServerContext. Avoids circular import.
     bridge_ops: BridgeOps = .{},
+
+    /// Syslog operations vtable — set by the runtime server to wire admin
+    /// dispatch to the runtime SyslogClient.
+    syslog_ops: SyslogOps = .{},
 
     /// Live sessions (C `SERVER->SessionList` + `ConnectionList` subset).
     /// `accept.zig`'s data-plane sessions register into their own registry; the
@@ -3480,11 +3494,21 @@ fn stSetSysLog(a: *AdminCtx, t: *structs.RpcSyslogSetting, allocator: Allocator)
     s.mutex.lock();
     defer s.mutex.unlock();
 
-    s.syslog_save_type = t.save_type;
+    // C parity: force SYSLOG_NONE if hostname empty or port 0.
+    var save_type = t.save_type;
+    if (t.hostname.len == 0 or t.port == 0) save_type = 0;
+
+    s.syslog_save_type = save_type;
     allocator.free(s.syslog_hostname);
     s.syslog_hostname = dupStr(allocator, t.hostname) catch return err_internal_error;
     s.syslog_port = t.port;
     s.config_revision +|= 1;
+
+    // Notify the runtime syslog client if wired.
+    if (s.syslog_ops.ctx) |ctx| {
+        s.syslog_ops.configure(ctx, t.hostname, t.port);
+    }
+
     return err_no_error;
 }
 
@@ -3501,6 +3525,10 @@ fn stGetSysLog(a: *AdminCtx, t: *structs.RpcSyslogSetting, allocator: Allocator)
     t.port = s.syslog_port;
     if (a.server_admin) {
         t.hostname = dupStr(allocator, s.syslog_hostname) catch return err_internal_error;
+    } else if (s.syslog_save_type != 0) {
+        // C parity: non-admin sees "Secret" when syslog is active.
+        t.hostname = dupStr(allocator, "Secret") catch return err_internal_error;
+        t.port = 0;
     } else {
         t.hostname = dupStr(allocator, "") catch return err_internal_error;
     }
