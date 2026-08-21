@@ -1901,7 +1901,7 @@ pub const SoftEtherSessionInfo = extern struct {
 
 /// Enumerate sessions on a hub. Fills `out_buf` with up to `max_count` entries.
 /// Returns the number of sessions written, or -1 on error (null server, null
-/// buffer, null/empty hub_name, or server not built).
+/// buffer, null/empty hub_name, server not built, or hub not found).
 export fn softether_enum_sessions(
     server: ?ServerHandle,
     hub_name: ?[*:0]const u8,
@@ -1909,6 +1909,7 @@ export fn softether_enum_sessions(
     max_count: c_int,
 ) c_int {
     const s = server orelse return -1;
+    if (!s.isRunning()) return -1;
     const buf = out_buf orelse return -1;
     const hn = hub_name orelse return -1;
     if (max_count <= 0) return -1;
@@ -1916,6 +1917,7 @@ export fn softether_enum_sessions(
     if (hub.len == 0) return -1;
 
     const ctx = s.server_ctx orelse return -1;
+    if (!std.ascii.eqlIgnoreCase(ctx.switch_hub.name, hub)) return -1;
     const snaps = ctx.session_registry.snapshot(ffi_allocator) catch return -1;
     defer session_registry_mod.SessionRegistry.freeSnapshot(ffi_allocator, snaps);
 
@@ -1946,6 +1948,7 @@ export fn softether_get_session_status(
     out: ?*SoftEtherSessionInfo,
 ) c_int {
     const s = server orelse return -1;
+    if (!s.isRunning()) return -1;
     const hn = hub_name orelse return -1;
     const sn = session_name orelse return -1;
     const o = out orelse return -1;
@@ -1954,6 +1957,7 @@ export fn softether_get_session_status(
     if (hub.len == 0 or sess.len == 0) return -1;
 
     const ctx = s.server_ctx orelse return -1;
+    if (!std.ascii.eqlIgnoreCase(ctx.switch_hub.name, hub)) return -1;
     const snaps = ctx.session_registry.snapshot(ffi_allocator) catch return -1;
     defer session_registry_mod.SessionRegistry.freeSnapshot(ffi_allocator, snaps);
 
@@ -1982,6 +1986,7 @@ export fn softether_disconnect_session(
     session_name: ?[*:0]const u8,
 ) c_int {
     const s = server orelse return -1;
+    if (!s.isRunning()) return -1;
     const hn = hub_name orelse return -1;
     const sn = session_name orelse return -1;
     const hub = std.mem.span(hn);
@@ -1989,6 +1994,7 @@ export fn softether_disconnect_session(
     if (hub.len == 0 or sess.len == 0) return -1;
 
     const ctx = s.server_ctx orelse return -1;
+    if (!std.ascii.eqlIgnoreCase(ctx.switch_hub.name, hub)) return -1;
     if (!ctx.session_registry.requestStopOnHub(hub, sess)) return -1;
     return 0;
 }
@@ -2507,6 +2513,24 @@ test "softether_enum_sessions returns empty on fresh server" {
     const count = softether_enum_sessions(s, "DEFAULT", &buf, buf.len);
     // No sessions on a freshly built server.
     try std.testing.expect(count >= 0);
+}
+
+test "softether_enum_sessions rejects invalid hub" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    defer softether_server_destroy(s);
+    s.build() catch return;
+
+    var buf: [16]SoftEtherSessionInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(s, "NONEXISTENT", &buf, buf.len));
+}
+
+test "softether_enum_sessions rejects after stop" {
+    const s = softether_server_create(null, null, null) orelse unreachable;
+    softether_server_stop(s);
+    defer softether_server_destroy(s);
+
+    var buf: [16]SoftEtherSessionInfo = undefined;
+    try std.testing.expectEqual(@as(c_int, -1), softether_enum_sessions(s, "DEFAULT", &buf, buf.len));
 }
 
 test "softether_enum_sessions null safety" {
