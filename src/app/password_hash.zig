@@ -20,24 +20,23 @@ pub fn generate(user: []const u8, pass: []const u8) void {
 
     // Generate hash using SHA-0 (SoftEther compatibility)
     // SoftEther format: SHA0(password + UPPERCASE(username))
-    var input_buf: [512]u8 = undefined;
-    var username_upper: [256]u8 = undefined;
-
-    const pass_len = @min(pass.len, 256);
-    const user_len = @min(user.len, 256);
-
-    // Copy password first
-    @memcpy(input_buf[0..pass_len], pass[0..pass_len]);
-
-    // Convert username to uppercase and append
-    for (user[0..user_len], 0..) |c, i| {
-        username_upper[i] = std.ascii.toUpper(c);
+    // Use streaming hasher to support arbitrary-length credentials — previous
+    // code truncated to 256B each, but server hashes full slices.
+    var hasher = crypto.sha0.Sha0.init();
+    hasher.update(pass);
+    // Stream uppercased username without truncation (chunked for stack safety).
+    var upper_buf: [512]u8 = undefined;
+    var idx: usize = 0;
+    for (user) |c| {
+        upper_buf[idx] = std.ascii.toUpper(c);
+        idx += 1;
+        if (idx == upper_buf.len) {
+            hasher.update(upper_buf[0..idx]);
+            idx = 0;
+        }
     }
-    @memcpy(input_buf[pass_len..][0..user_len], username_upper[0..user_len]);
-
-    const input_len = pass_len + user_len;
-
-    const hash = crypto.sha0.hash(input_buf[0..input_len]);
+    if (idx > 0) hasher.update(upper_buf[0..idx]);
+    const hash = hasher.final();
 
     // Base64 encode (SHA-0 produces 20 bytes)
     const base64 = std.base64.standard;
