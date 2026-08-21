@@ -1,18 +1,21 @@
 # libsoftether (SoftEtherZig)
 
-Pure Zig implementation of the SoftEther VPN client protocol — standalone CLI + embeddable C library.
+Pure Zig implementation of the SoftEther VPN **client + server** protocol — standalone CLIs (`vpnclient`/`vpnserver`/`vpncmd`/`vpnbridge`) + embeddable C library (92 exports).
 
 ## Stack
 
 | Layer | Location | Technology |
 |-------|----------|------------|
-| **Platform abstraction** | `src/mayaqua/` | Zig — OS, crypto, network (mirrors SoftEtherVPN's Mayaqua/) |
-| **VPN protocol** | `src/cedar/` | Zig — pack, RPC, auth, handshake, session, tunnel (mirrors Cedar/) |
-| **Adapters** | `src/adapter/` | Zig — TUN/TAP per platform, DHCP, ARP, routing |
+| **Platform abstraction** | `src/mayaqua/` | Zig — OS, crypto, network (mirrors Mayaqua, TLS accept+connect, HTTP server, UDP) |
+| **VPN protocol** | `src/cedar/` | Zig — pack, RPC, auth, handshake, session, tunnel + server (mirrors Cedar/) |
+| **Server** | `src/cedar/server/` | Zig — hub, listener, accept, session, DHCP/NAT/SecureNAT, farm, admin RPC/WPC (24 modules) |
+| **Bridge/STP** | `src/bridge/` | Zig — FDB, engine, loop, STP 802.1D |
+| **Adapters** | `src/adapter/` | Zig — NetPort, TUN/TAP/BPF/AF_PACKET/Npcap, DHCP, ARP, routing |
 | **CLI** | `src/cli/` | Zig — argument parsing, config file, interactive shell |
+| **Executables** | `src/exec/` | Zig — vpnserver, vpnclient, vpncmd, vpnbridge |
 | **App lifecycle** | `src/app/` | Zig — state, signals, daemon, interactive mode |
-| **FFI bridge** | `src/ffi.zig` | Zig → C ABI (76 exports) for Flutter, Swift, Kotlin |
-| **Public API** | `src/lib.zig` | Zig module root — re-exports VpnClient, ClientConfig, etc. |
+| **FFI bridge** | `src/ffi.zig` | Zig → C ABI (92 exports) for Flutter, Swift, Kotlin (client + server) |
+| **Public API** | `src/lib.zig` | Zig module root — re-exports VpnClient, Server, ClientConfig, etc. |
 
 ## Architecture
 
@@ -29,51 +32,71 @@ src/
 │   │   ├── events.zig          ClientEvent, EventCallback
 │   │   ├── packet_processor.zig
 │   │   └── session_setup.zig
-│   ├── protocol/         ← Wire protocol
+│   ├── server/           ← VPN server (mirrors Server.c / Hub.c / Admin.c)
+│   │   ├── accept.zig        TLS accept + HTTP server envelope + handshake
+│   │   ├── listener.zig      TCP/UDP listener, thread-per-conn
+│   │   ├── hub.zig           Virtual Hub L2 switch (StorePacket, MAC/IP, ACL)
+│   │   ├── session.zig / session_main.zig  SessionMain loop
+│   │   ├── auth.zig / userdb.zig  Auth verification + user/group DB
+│   │   ├── dhcp_server.zig / nat.zig / securenat.zig / virtual_host.zig
+│   │   ├── farm.zig / farm_rpc.zig  Cluster controller/member
+│   │   ├── admin/  rpc.zig, wpc.zig, dispatch.zig, structs.zig (~200 endpoints)
+│   │   ├── config/ cfg.zig, vpn_server_config.zig (autosave, Cfg text format)
+│   │   ├── logging.zig       Syslog, traffic accounting, EnumLog
+│   │   ├── runtime.zig       Shared server runtime (FFI + vpnserver exe)
+│   │   └── layer3.zig / bridge / udp_accel_server.zig / ra.zig
+│   ├── protocol/         ← Wire protocol (shared)
 │   │   ├── pack.zig             Pack serialization/deserialization
 │   │   ├── rpc.zig              Remote Procedure Call layer
 │   │   ├── auth.zig             Authentication (password, cert, anonymous)
 │   │   ├── tunnel.zig           Tunnel framing + compression + keepalive
-│   │   ��── softether_protocol.zig  SoftEther protocol constants/helpers
+│   │   ├── softether_protocol.zig  SoftEther protocol constants/helpers
 │   │   └── watermark.zig        Connection watermarking
-│   ├── session/          ← Session encryption (AES-256-CBC, key derivation)
+│   ├── session/          ← Session encryption (AES-256-CBC, key derivation, RC4, MD4)
 │   │   ├── session.zig
 │   │   └── wrapper.zig
-│   └── tunnel/           ← Data plane (ARP, DHCP, data loop)
+│   └── tunnel/           ← Data plane (ARP, DHCP, data loop, session_io)
 │       ├── arp.zig
 │       ├── dhcp.zig
 │       ├── dhcpv6.zig
-│       └── data_loop.zig
+│       ├── data_loop.zig
+│       └── session_io.zig
 │
 ├── mayaqua/              ← Platform Abstraction Layer (SoftEtherVPN Mayaqua/)
-│   ├── encrypt/          ← Pure Zig crypto (no OpenSSL dependency)
+│   ├── encrypt/          ← Pure Zig crypto (no OpenSSL dependency for session crypto)
 │   │   ├── sha0.zig       SHA-0 (required by SoftEther protocol)
 │   │   ├── hash.zig       SHA-1, SHA-256
-���   │   ├── cipher.zig     AES-256-CBC
+│   │   ├── cipher.zig     AES-256-CBC + RC4
+│   │   ├── md4.zig        MD4 (NTLM)
 │   │   └── crypto.zig     Re-exports + utilities
-│   ���── kernel/           ← Core types, IP utilities, errors
+│   ├── kernel/           ← Core types, IP utilities, errors
 │   │   ├── types.zig      IpAddress, MacAddress, etc.
 │   │   ├── ip.zig         IP parsing/formatting
 │   │   └── errors.zig     Error definitions
 │   └── network/          ← Networking (system OpenSSL for TLS)
 │       ├── net.zig         Socket I/O, connection management
-��       ├── tls.zig         OpenSSL 3.x TLS wrapper
-│       ├── http.zig        HTTP CONNECT proxy tunnel
+│       ├── tls.zig         OpenSSL 3.x TLS wrapper (connect + accept, cert bootstrap)
+│       ├── http.zig        HTTP CONNECT proxy + HTTP server envelope
 │       ├── socks.zig       SOCKS5 proxy tunnel
 │       ├── dns_cache.zig   DNS cache
-│       └── udp_accel.zig   UDP acceleration (RUDP)
+│       ├── udp_accel.zig   UDP acceleration (RUDP client + server role)
+│       └── socket.zig      TcpListener / UdpListener
 │
 ├── adapter/              ← TUN/TAP device management + routing
-│   ├── utun.zig             macOS utun
-│   ├── tun_linux.zig        Linux /dev/net/tun
-│   ├── tap_windows.zig      Windows Wintun
+│   ├── utun.zig             macOS utun + BPF L2
+│   ├── tun_linux.zig        Linux /dev/net/tun + AF_PACKET L2
+│   ├── tap_windows.zig      Windows Wintun + Npcap L2
 │   ├── fd_adapter.zig       Android/iOS fd-based adapter (from VpnService/NE)
 │   ├── wrapper.zig          AdapterWrapper — unified interface
+│   ├── port.zig             NetPort abstraction (L2/L3)
 │   ├── utun_escalate.zig    macOS privilege escalation helper
 │   ├── utun_helper_main.zig SUID helper binary entry point
-│   ���── route.zig            Route management
+│   ├── route.zig            Route management
 │   ├── route_heal.zig       Stale route self-healing
 │   └── dhcp.zig             DHCP client
+│
+├── bridge/               ← L2 bridge + STP (802.1D)
+│   ├── fdb.zig, engine.zig, loop.zig, stp.zig
 │
 ├── cli/                  ← Command-line interface
 │   ├── args.zig            CLI arg parsing + env vars
@@ -87,15 +110,21 @@ src/
 │   ├── events.zig          App-level event handling
 │   ├── daemon.zig          Daemon mode
 │   ├── interactive.zig     Interactive CLI mode
-│   ���── signals.zig         Signal handling
+│   ├── signals.zig         Signal handling
 │   └── password_hash.zig   Password hashing
 │
-├── ffi.zig               ← C ABI exports (76 functions)
+├── exec/                 ← Executables
+│   ├── vpnserver/main.zig  Server executable + runtime wiring
+│   ├── vpnclient/main.zig  Client executable
+│   ├── vpncmd/main.zig     Admin CLI (RPC/WPC)
+│   └── vpnbridge/main.zig  Bridge executable
+│
+├── ffi.zig               ← C ABI exports (92 functions: client + server + bridge)
 ├── lib.zig               ← Zig module root (public API)
 ├── main.zig              ← Entry point (log config + dispatch)
-├── config.zig            �� ConnectionConfig, StaticIpConfig, RoutingConfig, AuthMethod
+├── config.zig            ← ConnectionConfig, StaticIpConfig, RoutingConfig, AuthMethod
 ├── types.zig             ← Common types (IpAddress, MacAddress)
-└── errors.zig            �� VpnError union
+└── errors.zig            ← VpnError union
 ```
 
 ### Responsibility Boundary
@@ -103,30 +132,32 @@ src/
 | Concern | Location | Notes |
 |---------|----------|-------|
 | Wire protocol (Pack, RPC, auth) | `cedar/protocol/` | Consumer-agnostic protocol impl |
-| Session encryption (AES-256-CBC) | `cedar/session/` | Direction-aware key derivation |
+| Session encryption (AES-256-CBC, RC4, MD4) | `cedar/session/` + `mayaqua/encrypt/` | Direction-aware key derivation, legacy RC4, NTLM MD4 |
 | Client state machine | `cedar/client/` | VpnClient + ConnectionManager + auth_handler |
-| Data plane (ARP, DHCP, DHCPv6) | `cedar/tunnel/` | Tunnel framing + compression |
-| TUN/TAP adapters | `adapter/` | utun, tun_linux, Wintun, fd_adapter |
+| Server (hub, listener, accept, session, farm, admin) | `cedar/server/` | 24 modules, ~20k LOC, thread-per-connection |
+| Data plane (ARP, DHCP, DHCPv6, session_io) | `cedar/tunnel/` | Tunnel framing + compression + data loop |
+| TUN/TAP + L2 bridge adapters | `adapter/` + `bridge/` | NetPort, BPF/AF_PACKET/Npcap, STP 802.1D |
 | Routing + route self-heal | `adapter/` | route.zig + route_heal.zig |
-| TLS/TCP networking | `mayaqua/network/` | System OpenSSL 3.x |
-| UDP acceleration | `mayaqua/network/` | RUDP implementation |
+| TLS/TCP networking (accept+connect) | `mayaqua/network/` | System OpenSSL 3.x, TcpListener, HTTP server envelope |
+| UDP acceleration (RUDP server role) | `mayaqua/network/` + `cedar/server/udp_accel_server.zig` | Client + server RUDP |
 | Proxy tunnels (HTTP, SOCKS5) | `mayaqua/network/` | HTTP CONNECT + SOCKS5 |
-| Cryptography (SHA-0, AES) | `mayaqua/encrypt/` | Pure Zig, no OpenSSL dep |
+| Cryptography (SHA-0, AES, MD4, RC4) | `mayaqua/encrypt/` | Pure Zig, no OpenSSL dep for session crypto |
 | CLI + interactive shell | `cli/` | args, config_manager, shell, display |
-| C ABI exports | `ffi.zig` | 76 `softether_*` functions |
-| Zig public API | `lib.zig` | VpnClient, ClientConfig, etc. |
+| Executables | `exec/` | vpnserver, vpnclient, vpncmd, vpnbridge |
+| C ABI exports | `ffi.zig` | 92 `softether_*` functions (client + server + bridge/monitor) |
+| Zig public API | `lib.zig` | VpnClient, Server, ClientConfig, etc. |
 
 ## Output Targets
 
 | Platform | Build Command | Output | TUN Device |
 |----------|--------------|--------|------------|
-| macOS (arm64/x64) | `zig build` | CLI (`vpnclient`) | utun |
-| macOS (arm64/x64) | `zig build shared-lib` | `libsoftether.dylib` (+ `softether-utun-helper` SUID binary) | utun |
+| macOS (arm64/x64) | `zig build` | CLIs (`vpnclient`/`vpnserver`/`vpncmd`/`vpnbridge`) | utun/BPF |
+| macOS (arm64/x64) | `zig build shared-lib` | `libsoftether.dylib` (+ `softether-utun-helper` SUID binary) | utun/BPF |
 | iOS (arm64) | `zig build static-lib -Dtarget=aarch64-ios` | `libsoftether.a` | NE fd |
-| Linux (x86_64) | `zig build` | CLI | `/dev/net/tun` |
-| Linux (x86_64) | `zig build shared-lib` | `libsoftether.so` | `/dev/net/tun` |
-| Windows (x64) | `zig build` | CLI | Wintun |
-| Windows (x64) | `zig build shared-lib` | `softether.dll` | Wintun |
+| Linux (x86_64) | `zig build` | CLIs | `/dev/net/tun`/AF_PACKET |
+| Linux (x86_64) | `zig build shared-lib` | `libsoftether.so` | `/dev/net/tun`/AF_PACKET |
+| Windows (x64) | `zig build` | CLIs | Wintun/Npcap |
+| Windows (x64) | `zig build shared-lib` | `softether.dll` | Wintun/Npcap |
 | Android (arm64) | `zig build shared-lib -Dtarget=aarch64-linux-android` | `libsoftether.so` | VpnService fd |
 | Android (arm32) | `zig build shared-lib -Dtarget=arm-linux-androideabi` | `libsoftether.so` | VpnService fd |
 
@@ -191,7 +222,7 @@ Every property flows through: **CLI flag → env var → config file → app bri
 //   pub const ClientConfig = struct { ... }
 ```
 
-### C ABI — FFI interface (`ffi.zig`, 76 exports)
+### C ABI — FFI interface (`ffi.zig`, 92 exports)
 
 ```c
 // ====================================================================
@@ -285,6 +316,22 @@ void softether_set_client_str(client, str);
 void softether_set_client_ver(client, ver);
 void softether_set_client_build(client, build);
 void softether_set_os_info(client, name, version, title);
+
+// Server FFI (embeddable server)
+softether_server_t softether_server_create(hub, user, pass);
+int  softether_server_start(server);
+void softether_server_stop(server);
+void softether_server_destroy(server);
+int  softether_server_is_running(server);
+int  softether_server_wait_for_listening(server, timeout_ms);
+int  softether_server_get_hub_name(server, out_buf, len);
+int  softether_server_get_admin_user(server, out_buf, len);
+int  softether_server_set_syslog(server, hostname, port);
+
+// Session enumeration (server)
+int  softether_enum_sessions(server, hub, out_buf, max);
+int  softether_get_session_status(server, hub, session, out);
+int  softether_disconnect_session(server, hub, session);
 ```
 
 ### Zig public API (`lib.zig`)
@@ -367,12 +414,15 @@ bash test.sh 120                  # Custom timeout
 | File | Purpose |
 |------|---------|
 | `build.zig` | Build system — CLI, shared-lib, static-lib, utun-helper targets |
-| `build.zig.zon` | Package manifest (version v0.3.3, fingerprint `0xc1ce1081459614f0`) |
-| `include/softether.h` | C API header (auto-synced with ffi.zig exports) |
-| `src/ffi.zig` | C ABI exports (76 `softether_*` functions, ~1,200 lines) |
-| `src/lib.zig` | Zig module root (VpnClient, ClientConfig, etc.) |
+| `build.zig.zon` | Package manifest (version v0.3.11) |
+| `include/softether.h` | C API header (770 lines, 92 exports, auto-synced with ffi.zig) |
+| `src/ffi.zig` | C ABI exports (92 `softether_*` functions, ~2,500 lines) |
+| `src/lib.zig` | Zig module root (VpnClient, Server, ClientConfig, etc.) |
 | `src/main.zig` | CLI entry point + scoped log level configuration |
 | `src/cedar/client/vpn_client.zig` | Main client facade (~2,800 lines) |
+| `src/cedar/server/` | Server (24 modules, ~20k LOC: hub, listener, accept, session, farm, admin) |
+| `src/exec/` | Executables (vpnserver, vpnclient, vpncmd, vpnbridge) |
+| `src/bridge/` | L2 bridge + STP (4 modules) |
 | `config.example.json` | Example config file (all fields documented) |
 | `config.schema.json` | JSON Schema for config file validation |
 | `CONFIG.md` | Full 45-field config matrix across all 6 layers |
