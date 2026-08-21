@@ -381,6 +381,15 @@ fn runSystemctl(allocator: std.mem.Allocator, args: []const []const u8, display:
     }
 }
 
+fn launchdDomainTarget(allocator: std.mem.Allocator, scope: ServiceScope) ![]const u8 {
+    if (scope == .system) {
+        return try allocator.dupe(u8, "system/com.devstroop.vpnclient");
+    } else {
+        const uid = std.c.getuid();
+        return try std.fmt.allocPrint(allocator, "gui/{d}/com.devstroop.vpnclient", .{uid});
+    }
+}
+
 pub fn startService(allocator: std.mem.Allocator, display: *cli.display.DisplayContext, scope: ServiceScope) !void {
     if (builtin.os.tag == .linux) {
         const args = if (scope == .user)
@@ -390,10 +399,14 @@ pub fn startService(allocator: std.mem.Allocator, display: *cli.display.DisplayC
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Started softether-vpnclient", .{});
     } else if (builtin.os.tag == .macos) {
-        const plist_path = try launchdPlistPath(allocator, scope);
-        defer allocator.free(plist_path);
-        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", plist_path }, allocator);
-        _ = child.spawnAndWait() catch return error.StartFailed;
+        const target = try launchdDomainTarget(allocator, scope);
+        defer allocator.free(target);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "kickstart", "-k", target }, allocator);
+        const term = try child.spawnAndWait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.StartFailed,
+            else => return error.StartFailed,
+        }
         cli.display.success(display, "Started softether-vpnclient", .{});
     } else {
         return error.UnsupportedPlatform;
@@ -409,10 +422,14 @@ pub fn stopService(allocator: std.mem.Allocator, display: *cli.display.DisplayCo
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Stopped softether-vpnclient", .{});
     } else if (builtin.os.tag == .macos) {
-        const plist_path = try launchdPlistPath(allocator, scope);
-        defer allocator.free(plist_path);
-        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", plist_path }, allocator);
-        _ = child.spawnAndWait() catch return error.StopFailed;
+        const target = try launchdDomainTarget(allocator, scope);
+        defer allocator.free(target);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", target }, allocator);
+        const term = try child.spawnAndWait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.StopFailed,
+            else => return error.StopFailed,
+        }
         cli.display.success(display, "Stopped softether-vpnclient", .{});
     } else {
         return error.UnsupportedPlatform;
@@ -471,12 +488,16 @@ pub fn statusService(allocator: std.mem.Allocator, display: *cli.display.Display
         j_child.stderr_behavior = .Inherit;
         _ = j_child.spawnAndWait() catch {};
     } else if (builtin.os.tag == .macos) {
-        const plist_path = try launchdPlistPath(allocator, scope);
-        defer allocator.free(plist_path);
-        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "print", plist_path }, allocator);
+        const target = try launchdDomainTarget(allocator, scope);
+        defer allocator.free(target);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "print", target }, allocator);
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;
-        _ = child.spawnAndWait() catch return error.StatusFailed;
+        const term = try child.spawnAndWait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.StatusFailed,
+            else => return error.StatusFailed,
+        }
     } else {
         return error.UnsupportedPlatform;
     }
@@ -506,7 +527,15 @@ pub fn disableService(allocator: std.mem.Allocator, display: *cli.display.Displa
         try runSystemctl(allocator, args, display);
         cli.display.success(display, "Disabled softether-vpnclient autostart", .{});
     } else if (builtin.os.tag == .macos) {
-        cli.display.info(display, "Disable via launchctl unload", .{});
+        const target = try launchdDomainTarget(allocator, scope);
+        defer allocator.free(target);
+        var child = std.process.Child.init(&[_][]const u8{ "launchctl", "bootout", target }, allocator);
+        const term = try child.spawnAndWait();
+        switch (term) {
+            .Exited => |code| if (code != 0) return error.DisableFailed,
+            else => return error.DisableFailed,
+        }
+        cli.display.success(display, "Disabled softether-vpnclient", .{});
     } else {
         return error.UnsupportedPlatform;
     }
