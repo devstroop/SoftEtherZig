@@ -171,25 +171,36 @@ Full header: [`include/softether.h`](include/softether.h) — 92 exports, 770 li
 USAGE:
   vpnclient <subcommand> [OPTIONS]
 
-SUBCOMMANDS:
+SUBCOMMANDS (minimal contract, M19 #255 — parity to SoftEtherVPN vpnclient):
   help                    Show help message
   version                 Show version information
-  passhash                Generate a SoftEther password hash
+  connect                 Connect to a VPN server (one-shot, foreground for docker)
+  list                    List accounts — thin alias to vpncmd client AccountList
   cleanup                 Clean up stale VPN routes left by crashes
-  connect                 Connect to a VPN server
+  install                 Install as system service (systemd/launchd/SCM) — planned M20
+  uninstall               Remove service registration — planned M20
+  start                   Start service — planned M20
+  stop                    Stop service — planned M20
+  restart                 Restart service — planned M20
+  status                  Show service status — planned M20
+  enable                  Enable autostart — planned M20
+  disable                 Disable autostart — planned M20
+  passhash                (deprecated) Generate hash — use vpncmd tools generatehashedpassword
 ```
+
+> **Bridge/monitor** are `--mode` flags (`--mode bridge --ingress eth0`, `--mode monitor --pcap cap.pcap`), not verbs. `config.json`/`--config` is deprecated (M19 #254) — use `vpncmd` profile store (`XDG` `vpn_client.config`). See `docs/ACCOUNT.md`.
 
 ### Connect Options
 
 ```text
 CONNECTION:
-  -c, --config <FILE>      Load JSON config file
+  -c, --config <FILE>      (deprecated) Load JSON — use vpncmd account store
   -s, --server <HOST>      VPN server hostname
   -p, --port <PORT>        Port (default: 443)
   -H, --hub <HUB>          Virtual hub name
   -u, --user <USER>        Username
   -P, --password <PASS>    Password
-  --password-hash <HASH>   Pre-hashed password (base64)
+  --password-hash <HASH>   Pre-hashed password (base64, consumed only — generation via vpncmd)
 
 ENCRYPTION / COMPRESSION:
   --use-encrypt / --no-encrypt    AES-256-CBC (default: on)
@@ -239,15 +250,22 @@ RUNTIME:
   -d, --daemon             Run in background
   -i, --interactive        Run in interactive shell mode
   --log-level <LEVEL>      silent|error|warn|info|debug|trace
+
+MODES:
+  --mode <client|bridge|monitor>  Operating mode (default: client)
+  --ingress <IF>        Bridge ingress interface (repeatable, --mode bridge)
+  --pcap <FILE>         Monitor pcap output (--mode monitor)
 ```
 
-Priority: CLI args > env vars > config file.
+Priority: CLI args > env vars > config file (deprecated, use vpncmd).
 
-### Passhash
+### Passhash (deprecated, M19 #253)
 
 ```bash
-vpnclient passhash --user myuser --password mypassword
-# Output: base64-encoded SHA-1 hash
+# vpnclient passhash is deprecated — generation moved to vpncmd (M19)
+vpncmd tools generatehashedpassword --user myuser --password mypassword
+# Output: base64-encoded SHA-0 hash (e.g. CS9ZXBrvt9GFvoHSvNuUfhP4rmw= for devstroop1)
+# vpnclient still consumes --password-hash for verification
 ```
 
 ### Cleanup
