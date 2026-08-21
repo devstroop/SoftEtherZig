@@ -11,7 +11,7 @@ Pure Zig implementation of the SoftEther VPN **client + server** protocol — st
 | **Server** | `src/cedar/server/` | Zig — hub, listener, accept, session, DHCP/NAT/SecureNAT, farm, admin RPC/WPC (24 modules) |
 | **Bridge/STP** | `src/bridge/` | Zig — FDB, engine, loop, STP 802.1D |
 | **Adapters** | `src/adapter/` | Zig — NetPort, TUN/TAP/BPF/AF_PACKET/Npcap, DHCP, ARP, routing |
-| **CLI** | `src/cli/` | Zig — argument parsing, config file, interactive shell |
+| **CLI** | `src/cli/` | Zig — 9-verb `vpnclient` (`connect`/`list`/`install`/`start`/`stop`/...) + `config file` (deprecated, `vpncmd` store), interactive shell |
 | **Executables** | `src/exec/` | Zig — vpnserver, vpnclient, vpncmd, vpnbridge |
 | **App lifecycle** | `src/app/` | Zig — state, signals, daemon, interactive mode |
 | **FFI bridge** | `src/ffi.zig` | Zig → C ABI (92 exports) for Flutter, Swift, Kotlin (client + server) |
@@ -174,7 +174,9 @@ zig build shared-lib -Dtarget=aarch64-linux-android  # Android arm64
 # === Run CLI ===
 sudo ./zig-out/bin/vpnclient connect \
   -s vpn.example.com -H VPN -u myuser -P mypassword
-sudo ./zig-out/bin/vpnclient connect --config config.json
+# vpnclient list  — alias to vpncmd client AccountList (XDG vpn_client.config)
+# vpncmd tools generatehashedpassword -u myuser -p mypass  # replaces vpnclient passhash
+sudo ./zig-out/bin/vpnclient connect --config config.json  # deprecated, use vpncmd
 
 # === macOS privilege helper — built as part of shared-lib ===
 # softether-utun-helper is automatically built by `zig build shared-lib`.
@@ -198,7 +200,7 @@ python3 scripts/diag_tcp_upload.py     # TCP upload diagnostics
 
 ### Config system — 6 layers
 
-Every property flows through: **CLI flag → env var → config file → app bridge → FFI setter → ClientConfig struct**. See `CONFIG.md` for the full 45-field matrix.
+Every property flows through: **CLI flag → env var → vpncmd store (XDG `vpn_client.config`) → app bridge → FFI setter → ClientConfig struct**. See `CONFIG.md` for the 12-field `connect` matrix (45-field legacy deprecated, see `docs/ACCOUNT.md`).
 
 ```zig
 // Layer 1: CLI args (src/cli/args.zig)
