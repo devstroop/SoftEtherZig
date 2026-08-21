@@ -169,6 +169,17 @@ pub fn main() !void {
         }
     }
 
+    // M21 #262 — local `client` verbs that do NOT require a server connection.
+    // vpncmd owns profiles (XDG vpn_client.config Cfg, no external files).
+    // Must be checked before CmdArgs.parse which requires --server.
+    if (args.len >= 2 and (std.mem.eql(u8, args[1], "client") or std.mem.eql(u8, args[1], "Client"))) {
+        handleClientCommand(allocator, args[2..]) catch |err| {
+            std.debug.print("client command failed: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
+
     // Also support top-level `vpncmd tools --help` without server.
     if (args.len >= 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "help"))) {
         // Fall through to printUsage via parse error, but show tools hint.
@@ -215,6 +226,272 @@ pub fn main() !void {
     shell.run();
 }
 
+fn handleClientCommand(allocator: std.mem.Allocator, cmd_args: []const []const u8) !void {
+    const store = se.vpn_client_store;
+    if (cmd_args.len == 0 or std.mem.eql(u8, cmd_args[0], "--help") or std.mem.eql(u8, cmd_args[0], "-h") or std.mem.eql(u8, cmd_args[0], "help")) {
+        printClientUsage();
+        return;
+    }
+    const verb = cmd_args[0];
+    // Normalize verb case-insensitive
+    if (std.ascii.eqlIgnoreCase(verb, "AccountCreate")) {
+        if (cmd_args.len < 2) {
+            std.debug.print("AccountCreate requires <name> [/SERVER:host] [/HUB:hub] [/USERNAME:user] [/PASSWORD:pass]\n", .{});
+            printClientUsage();
+            return error.MissingAccountName;
+        }
+        const name = cmd_args[1];
+        var server: ?[]const u8 = null;
+        var port: u16 = 443;
+        var hub: ?[]const u8 = null;
+        var username: ?[]const u8 = null;
+        var password: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < cmd_args.len) : (i += 1) {
+            const a = cmd_args[i];
+            if (a.len > 1 and a[0] == '/') {
+                const slash_arg = a[1..];
+                const colon = std.mem.indexOfScalar(u8, slash_arg, ':');
+                var key: []const u8 = undefined;
+                var val: []const u8 = undefined;
+                if (colon) |c| {
+                    key = slash_arg[0..c];
+                    val = slash_arg[c + 1 ..];
+                    // Handle /KEY: value split across two args (if value has spaces)
+                    if (val.len == 0 and i + 1 < cmd_args.len and !std.mem.startsWith(u8, cmd_args[i + 1], "/")) {
+                        i += 1;
+                        val = cmd_args[i];
+                    }
+                } else {
+                    // /KEY value (separated)
+                    key = slash_arg;
+                    if (i + 1 >= cmd_args.len) {
+                        std.debug.print("Missing value for {s}\n", .{a});
+                        return error.MissingValue;
+                    }
+                    i += 1;
+                    val = cmd_args[i];
+                }
+                if (std.ascii.eqlIgnoreCase(key, "SERVER")) {
+                    server = val;
+                } else if (std.ascii.eqlIgnoreCase(key, "SERVER_PORT") or std.ascii.eqlIgnoreCase(key, "PORT")) {
+                    port = std.fmt.parseInt(u16, val, 10) catch return error.InvalidPort;
+                } else if (std.ascii.eqlIgnoreCase(key, "HUB")) {
+                    hub = val;
+                } else if (std.ascii.eqlIgnoreCase(key, "USERNAME") or std.ascii.eqlIgnoreCase(key, "USER")) {
+                    username = val;
+                } else if (std.ascii.eqlIgnoreCase(key, "PASSWORD")) {
+                    password = val;
+                } else {
+                    std.debug.print("Unknown AccountCreate option: /{s}\n", .{key});
+                    return error.UnknownOption;
+                }
+            } else if (std.mem.startsWith(u8, a, "--")) {
+                // also support --server etc for convenience
+                if (std.mem.eql(u8, a, "--server")) {
+                    i += 1;
+                    if (i >= cmd_args.len) return error.MissingValue;
+                    server = cmd_args[i];
+                } else if (std.mem.eql(u8, a, "--hub")) {
+                    i += 1;
+                    if (i >= cmd_args.len) return error.MissingValue;
+                    hub = cmd_args[i];
+                } else if (std.mem.eql(u8, a, "--user")) {
+                    i += 1;
+                    if (i >= cmd_args.len) return error.MissingValue;
+                    username = cmd_args[i];
+                } else if (std.mem.eql(u8, a, "--password")) {
+                    i += 1;
+                    if (i >= cmd_args.len) return error.MissingValue;
+                    password = cmd_args[i];
+                } else if (std.mem.eql(u8, a, "--port")) {
+                    i += 1;
+                    if (i >= cmd_args.len) return error.MissingValue;
+                    port = std.fmt.parseInt(u16, cmd_args[i], 10) catch return error.InvalidPort;
+                } else {
+                    std.debug.print("Unknown option: {s}\n", .{a});
+                    return error.UnknownOption;
+                }
+            } else {
+                std.debug.print("Unknown argument: {s}\n", .{a});
+                return error.UnknownOption;
+            }
+        }
+        if (server == null) {
+            std.debug.print("AccountCreate requires /SERVER:<host> (e.g. /SERVER:203.0.113.10)\n", .{});
+            return error.MissingServerHost;
+        }
+        if (hub == null) hub = "VPN";
+        if (username == null) {
+            std.debug.print("AccountCreate requires /USERNAME:<user>\n", .{});
+            return error.MissingUsername;
+        }
+        // Create account atomically (M21 12-field minimal) — compute hash first so a
+        // failure does not leave an incomplete profile (CodeAnt #277)
+        var hash_val: ?[]const u8 = null;
+        defer if (hash_val) |h| allocator.free(h);
+        if (password) |pw| {
+            hash_val = try se.password_hash.hashPassword(allocator, username.?, pw);
+        }
+        try store.createAccount(allocator, .{ .name = name, .server = server.?, .port = port, .hub = hub.?, .username = username.?, .password_hash = hash_val });
+        const path = try store.getStorePath(allocator);
+        defer allocator.free(path);
+        std.debug.print("Account '{s}' created at {s} (/SERVER:{s} /HUB:{s} /USERNAME:{s})\n", .{ name, path, server.?, hub.?, username.? });
+        if (password != null) std.debug.print("Password set (hashed)\n", .{});
+        return;
+    } else if (std.ascii.eqlIgnoreCase(verb, "AccountList") or std.ascii.eqlIgnoreCase(verb, "AccountEnum")) {
+        const list = try store.listAccounts(allocator);
+        defer {
+            for (list) |n| allocator.free(n);
+            allocator.free(list);
+        }
+        if (list.len == 0) {
+            std.debug.print("No accounts found. Create one via: vpncmd client AccountCreate <name> /SERVER:<host> /HUB:<hub> /USERNAME:<user>\n", .{});
+            const path = try store.getStorePath(allocator);
+            defer allocator.free(path);
+            std.debug.print("Store: {s}\n", .{path});
+        } else {
+            std.debug.print("Accounts ({d}):\n", .{list.len});
+            for (list) |n| std.debug.print("  - {s}\n", .{n});
+            const path = try store.getStorePath(allocator);
+            defer allocator.free(path);
+            std.debug.print("Store: {s}\n", .{path});
+        }
+        return;
+    } else if (std.ascii.eqlIgnoreCase(verb, "AccountDelete") or std.ascii.eqlIgnoreCase(verb, "AccountRemove")) {
+        if (cmd_args.len < 2) {
+            std.debug.print("AccountDelete requires <name>\n", .{});
+            return error.MissingAccountName;
+        }
+        const name = cmd_args[1];
+        try store.deleteAccount(allocator, name);
+        std.debug.print("Account '{s}' deleted\n", .{name});
+        return;
+    } else if (std.ascii.eqlIgnoreCase(verb, "AccountPasswordSet") or std.ascii.eqlIgnoreCase(verb, "AccountPassword")) {
+        if (cmd_args.len < 2) {
+            std.debug.print("AccountPasswordSet requires <name> /PASSWORD:<pass> or /PASSWORD_HASH:<hash>\n", .{});
+            return error.MissingAccountName;
+        }
+        const name = cmd_args[1];
+        var password: ?[]const u8 = null;
+        var hash: ?[]const u8 = null;
+        var i: usize = 2;
+        while (i < cmd_args.len) : (i += 1) {
+            const a = cmd_args[i];
+            if (a.len > 1 and a[0] == '/') {
+                const slash_arg = a[1..];
+                const colon = std.mem.indexOfScalar(u8, slash_arg, ':');
+                var key: []const u8 = undefined;
+                var val: []const u8 = undefined;
+                if (colon) |c| {
+                    key = slash_arg[0..c];
+                    val = slash_arg[c + 1 ..];
+                    if (val.len == 0 and i + 1 < cmd_args.len and !std.mem.startsWith(u8, cmd_args[i + 1], "/")) {
+                        i += 1;
+                        val = cmd_args[i];
+                    }
+                } else {
+                    key = slash_arg;
+                    if (i + 1 >= cmd_args.len) return error.MissingValue;
+                    i += 1;
+                    val = cmd_args[i];
+                }
+                if (std.ascii.eqlIgnoreCase(key, "PASSWORD")) {
+                    password = val;
+                } else if (std.ascii.eqlIgnoreCase(key, "PASSWORD_HASH") or std.ascii.eqlIgnoreCase(key, "HASH")) {
+                    hash = val;
+                } else {
+                    std.debug.print("Unknown option: /{s}\n", .{key});
+                    return error.UnknownOption;
+                }
+            } else {
+                std.debug.print("Unknown argument: {s}\n", .{a});
+                return error.UnknownOption;
+            }
+        }
+        if (hash) |h| {
+            try store.setPasswordHash(allocator, name, h);
+            std.debug.print("Account '{s}' password hash set\n", .{name});
+        } else if (password) |pw| {
+            // Need username to hash correctly (SHA-0(password + UPPERCASE(username)))
+            const acc = try store.getAccount(allocator, name);
+            if (acc) |a| {
+                defer allocator.free(a.name);
+                defer allocator.free(a.server);
+                defer allocator.free(a.hub);
+                defer allocator.free(a.username);
+                defer if (a.password_hash) |hh| allocator.free(hh);
+                const computed = try se.password_hash.hashPassword(allocator, a.username, pw);
+                defer allocator.free(computed);
+                try store.setPasswordHash(allocator, name, computed);
+                std.debug.print("Account '{s}' password set (hashed)\n", .{name});
+            } else return error.AccountNotFound;
+        } else {
+            std.debug.print("AccountPasswordSet requires /PASSWORD:<pass> or /PASSWORD_HASH:<hash>\n", .{});
+            return error.MissingValue;
+        }
+        return;
+    } else if (std.ascii.eqlIgnoreCase(verb, "AccountGet")) {
+        if (cmd_args.len < 2) return error.MissingAccountName;
+        const name = cmd_args[1];
+        const acc = try store.getAccount(allocator, name);
+        if (acc) |a| {
+            defer allocator.free(a.name);
+            defer allocator.free(a.server);
+            defer allocator.free(a.hub);
+            defer allocator.free(a.username);
+            defer if (a.password_hash) |h| allocator.free(h);
+            const hash_display = if (a.password_hash != null) "(set, redacted)" else "(none)";
+            std.debug.print("Account '{s}':\n  Server: {s}:{d}\n  Hub: {s}\n  Username: {s}\n  PasswordHash: {s}\n", .{ a.name, a.server, a.port, a.hub, a.username, hash_display });
+        } else {
+            std.debug.print("Account '{s}' not found\n", .{name});
+            return error.AccountNotFound;
+        }
+        return;
+    } else {
+        std.debug.print("Unknown client subcommand: {s}\n\n", .{verb});
+        printClientUsage();
+        return error.UnknownOption;
+    }
+}
+
+fn printClientUsage() void {
+    std.debug.print(
+        \\SoftEther VPN Command Tool v{s} — Client (M21 #262)
+        \\
+        \\Usage: vpncmd client <command> [options]
+        \\
+        \\Commands (offline, no server required, XDG vpn_client.config Cfg):
+        \\  AccountCreate <name> /SERVER:<host> [/PORT:<port>] /HUB:<hub> /USERNAME:<user> [/PASSWORD:<pass>]
+        \\  AccountList
+        \\  AccountDelete <name>
+        \\  AccountPasswordSet <name> /PASSWORD:<pass>  (hash via SHA-0)
+        \\  AccountPasswordSet <name> /PASSWORD_HASH:<hash>
+        \\  AccountGet <name>
+        \\
+        \\Options use SoftEther slash syntax (/KEY:VALUE) or --key value:
+        \\  /SERVER:<host>        Server hostname/IP (required)
+        \\  /PORT:<port>          Server port (default 443)
+        \\  /HUB:<hub>            Virtual hub (default VPN)
+        \\  /USERNAME:<user>      Username
+        \\  /PASSWORD:<pass>      Plain password (hashed via SHA-0)
+        \\
+        \\Store: $XDG_CONFIG_HOME/softether-zig/vpn_client.config
+        \\       or $HOME/.config/softether-zig/vpn_client.config (Cfg text, declare tree)
+        \\       No JSON import/export — vpncmd manages profile internally (per #262).
+        \\
+        \\Examples:
+        \\  vpncmd client AccountCreate vpn1 /SERVER:203.0.113.10 /HUB:VPN /USERNAME:testuser
+        \\  vpncmd client AccountPasswordSet vpn1 /PASSWORD:testpass
+        \\  vpncmd client AccountList
+        \\  vpncmd client AccountGet vpn1
+        \\  vpncmd client AccountDelete vpn1
+        \\
+        \\Note: `vpnclient connect` without flags will discover this store in M21-3 #263.
+        \\
+    , .{version});
+}
+
 fn printToolsUsage() void {
     std.debug.print(
         \\SoftEther VPN Command Tool v{s} — Tools
@@ -231,9 +508,9 @@ fn printToolsUsage() void {
         \\  Positional: <user> <pass>    Alternative to flags
         \\
         \\Examples:
-        \\  vpncmd tools generatehashedpassword -u devstroop1 -p devstroop111222
-        \\  vpncmd tools generatehashedpassword devstroop1 devstroop111222
-        \\  # output: CS9ZXBrvt9GFvoHSvNuUfhP4rmw=  (use with --password-hash)
+        \\  vpncmd tools generatehashedpassword -u testuser -p testpass
+        \\  vpncmd tools generatehashedpassword testuser testpass
+        \\  # output: Z8aeAfh8/a88naS5l/Uxf9ig+cM=  (use with --password-hash)
         \\
         \\Note: This is the same SHA-0(password + UPPERCASE(username)) as
         \\      `vpnclient passhash` (now deprecated) — see src/app/password_hash.zig

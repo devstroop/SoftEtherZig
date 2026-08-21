@@ -25,12 +25,16 @@ pub const CliArgs = struct {
     /// Optional hostname for TLS/SNI, HTTP Host, certificate validation
     hostname: ?[]const u8 = null,
     port: u16 = 443,
+    port_explicit: bool = false,
     hub: ?[]const u8 = null,
 
     // Authentication
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     password_hash: ?[]const u8 = null,
+
+    // M21 #263 — account selector for vpncmd store (flags > env > store)
+    account: ?[]const u8 = null,
 
     // Connection options
     skip_tls_verify: bool = false,
@@ -254,6 +258,7 @@ pub const ArgParser = struct {
                 const val = try self.requireValue(argv, i, "--port");
                 defer self.allocator.free(val);
                 self.args.port = std.fmt.parseInt(u16, val, 10) catch return ParseError.InvalidPort;
+                self.args.port_explicit = true;
             } else if (std.mem.eql(u8, arg, "-H") or std.mem.eql(u8, arg, "--hub")) {
                 i += 1;
                 self.args.hub = try self.requireValue(argv, i, "--hub");
@@ -263,6 +268,9 @@ pub const ArgParser = struct {
             } else if (std.mem.eql(u8, arg, "-P") or std.mem.eql(u8, arg, "--password")) {
                 i += 1;
                 self.args.password = try self.requireValue(argv, i, "--password");
+            } else if (std.mem.eql(u8, arg, "--account")) {
+                i += 1;
+                self.args.account = try self.requireValue(argv, i, "--account");
             } else if (std.mem.eql(u8, arg, "--password-hash")) {
                 i += 1;
                 self.args.password_hash = try self.requireValue(argv, i, "--password-hash");
@@ -445,8 +453,10 @@ pub const ArgParser = struct {
             if (self.args.address == null) self.args.address = v;
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PORT")) |v| {
-            if (self.args.port == 443) {
+            defer allocator.free(v);
+            if (!self.args.port_explicit) {
                 self.args.port = std.fmt.parseInt(u16, v, 10) catch 443;
+                self.args.port_explicit = true;
             }
         } else |_| {}
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_HUB")) |v| {
@@ -461,9 +471,11 @@ pub const ArgParser = struct {
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_PASSWORD_HASH")) |v| {
             if (self.args.password_hash == null) self.args.password_hash = v;
         } else |_| {}
-        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_CONFIG")) |v| {
-            if (self.args.config_file == null) self.args.config_file = v;
+        if (std.process.getEnvVarOwned(allocator, "SOFTETHER_ACCOUNT")) |v| {
+            if (self.args.account == null) self.args.account = v;
         } else |_| {}
+        // M21 #261: SOFTETHER_CONFIG removed for vpnclient (vpncmd owns store).
+        // Kept for vpnserver Cfg compat if needed, but ignored here.
         if (std.process.getEnvVarOwned(allocator, "SOFTETHER_COMPRESS")) |v| {
             self.args.use_compress = isTrue(v);
         } else |_| {}

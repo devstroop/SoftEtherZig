@@ -133,12 +133,17 @@ sudo ./zig-out/bin/vpnclient connect -s vpn.example.com -H VPN -u user -P pass -
 See [docs/bridge_monitor_ops.md](docs/bridge_monitor_ops.md) for the security
 boundary, MTU rules, FFI semantics, and troubleshooting.
 
-## Config File
+## Config Store (M21)
 
-Any platform, instead of CLI args:
+`vpnclient` no longer uses host `config.json` (removed in M21 #261). Use `vpncmd` store:
 
 ```bash
-sudo ./zig-out/bin/vpnclient connect --config config.json
+vpncmd client AccountCreate vpn1 /SERVER:vpn.example.com /HUB:VPN /USERNAME:myuser
+vpncmd client AccountPasswordSet vpn1 /PASSWORD:mypassword
+vpncmd client AccountList
+sudo ./zig-out/bin/vpnclient connect --account vpn1
+# or: SOFTETHER_ACCOUNT=vpn1 sudo ./zig-out/bin/vpnclient connect
+# or single account: sudo ./zig-out/bin/vpnclient connect  (auto-discovers store)
 ```
 
-See [config.minimal.json](config.minimal.json) and [config.example.json](config.example.json).
+`vpn_server.config` (Cfg) remains for `vpnserver`. `config.example.json` is deprecated.

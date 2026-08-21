@@ -176,7 +176,7 @@ sudo ./zig-out/bin/vpnclient connect \
   -s vpn.example.com -H VPN -u myuser -P mypassword
 # vpnclient list  — alias to vpncmd client AccountList (XDG vpn_client.config)
 # vpncmd tools generatehashedpassword -u myuser -p mypass  # replaces vpnclient passhash
-sudo ./zig-out/bin/vpnclient connect --config config.json  # deprecated, use vpncmd
+sudo ./zig-out/bin/vpnclient connect --account vpn1  # from vpncmd store (M21)
 
 # === macOS privilege helper — built as part of shared-lib ===
 # softether-utun-helper is automatically built by `zig build shared-lib`.

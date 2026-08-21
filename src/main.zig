@@ -293,6 +293,19 @@ pub fn main() !void {
     // Load config file if specified
     cli.loadConfig(allocator, &state.cli_args) catch {};
 
+    // M21 #263: vpnclient consumes vpncmd store (flags > env > XDG store)
+    // Run when an account is selected or any required field (including password) is missing
+    // so `vpnclient connect -a ... --account NAME` can fill stored password.
+    const need_store = state.cli_args.account != null or
+        state.cli_args.address == null or state.cli_args.hub == null or state.cli_args.username == null or
+        (state.cli_args.password == null and state.cli_args.password_hash == null);
+    if (need_store) {
+        resolveFromStore(allocator, &state.cli_args) catch |err| {
+            // Store resolution is best-effort; validation will report missing fields.
+            std.log.scoped(.app).debug("store resolve failed: {s}", .{@errorName(err)});
+        };
+    }
+
     // Handle special modes (no subcommand needed)
     if (state.cli_args.help) {
         cli.showUsage(version);
@@ -347,6 +360,81 @@ pub fn main() !void {
     }
 
     std.process.exit(state.exit_code);
+}
+
+fn resolveFromStore(allocator: std.mem.Allocator, args: *cli.CliArgs) !void {
+    const store = app.vpn_client_store;
+    // Determine account name: --account > SOFTETHER_ACCOUNT (already in args.account) > first in store
+    var account_name: ?[]const u8 = args.account;
+    var owned_name = false;
+    defer if (owned_name and account_name != null) allocator.free(account_name.?);
+
+    if (account_name == null) {
+        // Try first account in store if any
+        const list = store.listAccounts(allocator) catch return;
+        defer {
+            for (list) |n| allocator.free(n);
+            allocator.free(list);
+        }
+        if (list.len == 1) {
+            account_name = try allocator.dupe(u8, list[0]);
+            owned_name = true;
+        } else if (list.len > 1) {
+            // Multiple accounts but no selector — require --account
+            return error.MultipleAccountsRequireSelector;
+        } else return; // no store, nothing to resolve
+    }
+
+    const name = account_name orelse return;
+    const acc = (try store.getAccount(allocator, name)) orelse return error.AccountNotFound;
+    defer allocator.free(acc.name);
+    defer allocator.free(acc.server);
+    defer allocator.free(acc.hub);
+    defer allocator.free(acc.username);
+    defer if (acc.password_hash) |h| allocator.free(h);
+
+    // Fill only missing fields (flags > env > store), handle hostname vs IP and port precedence
+    if (args.address == null) {
+        // If server looks like hostname (contains alpha), set as hostname for TLS/SNI and keep address as server
+        // The client will resolve hostname via DNS; for now we set both.
+        const server = acc.server;
+        const is_ip = blk: {
+            var is_ip_tmp = true;
+            for (server) |c| {
+                if (!std.ascii.isDigit(c) and c != '.' and c != ':') {
+                    is_ip_tmp = false;
+                    break;
+                }
+            }
+            break :blk is_ip_tmp and server.len > 0;
+        };
+        if (is_ip) {
+            args.address = try allocator.dupe(u8, server);
+        } else {
+            // Hostname: set both address and hostname (address as hostname for now, client handles DNS)
+            args.address = try allocator.dupe(u8, server);
+            if (args.hostname == null) args.hostname = try allocator.dupe(u8, server);
+        }
+    } else if (args.hostname == null) {
+        // If address was explicitly set but hostname not, and store has a hostname-like server, use it for SNI
+        const server = acc.server;
+        var is_hostname = false;
+        for (server) |c| {
+            if (std.ascii.isAlphabetic(c)) {
+                is_hostname = true;
+                break;
+            }
+        }
+        if (is_hostname) args.hostname = try allocator.dupe(u8, server);
+    }
+    if (!args.port_explicit) args.port = acc.port;
+    if (args.hub == null) args.hub = try allocator.dupe(u8, acc.hub);
+    if (args.username == null) args.username = try allocator.dupe(u8, acc.username);
+    if (args.password == null and args.password_hash == null) {
+        if (acc.password_hash) |h| args.password_hash = try allocator.dupe(u8, h);
+    }
+    // Mark that args now owns these duped strings via its allocator
+    args.allocator = allocator;
 }
 
 // ============================================================================

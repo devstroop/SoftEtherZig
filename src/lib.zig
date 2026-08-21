@@ -129,6 +129,10 @@ pub const service = @import("app/daemon.zig");
 // `src/Cedar/Account.c:HashPassword` parity, SHA-0).
 pub const password_hash = @import("app/password_hash.zig");
 
+// vpn_client.config store — vpncmd owns profiles, no external JSON (M21 #262)
+// `vpncmd client AccountCreate` creates XDG vpn_client.config Cfg binary.
+pub const vpn_client_store = @import("app/vpn_client_store.zig");
+
 /// Parse an IPv4 address string to u32
 pub const parseIpv4 = core.parseIpv4;
 
