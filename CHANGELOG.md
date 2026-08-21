@@ -10,6 +10,34 @@ they are called out under **Breaking** in each entry.
 
 ### Added
 
+- (no unreleased changes — `0.4.0` is `develop` HEAD @ `8217c34`)
+
+## [0.4.0] - 2026-08-21
+
+### Added — Server completeness (epics #71, #226 — all milestones M1–M12 closed, plus M15–M16 FFI)
+
+- **M1 Wire-Compatible Core** (#72–#84): TLS accept + server cert bootstrap, HTTP server envelope, SoftEther `Listener` (thread-per-connection, DoS), server handshake (signature → hello → auth → welcome), `SessionMain` loop, virtual hub `StorePacket` (MAC/IP tables, broadcast flood, ACL), user DB/policy, MD4/NTLM + RC4 parity, `vpnserver` executable, M1 acceptance gate (client ⇄ server round-trip).
+- **M2 Admin RPC + Persistence** (#85–#91): `Cfg` text-format parser/writer, `vpn_server.config` load/save + autosave timer, native admin RPC transport (TLS, `u32 size + Pack`), `RPC_*` structs + Pack serdes, dispatch core (~35 → ~200 endpoints `GetServerInfo`/`CreateHub`/`EnumUser`/etc.), multi-hub, `vpncmd` binary.
+- **M3 SecureNAT** (#92–#96): virtual DHCP server (DISCOVER/OFFER/REQUEST/ACK, lease table), hub gateway virtual host + ARP/RA responder, outbound NAT sessions (TCP/UDP/ICMP via real sockets), `SnNewSecureNAT` wiring, RUDP server role (UDP keys in `PackWelcome`).
+- **M4 Bridge, L3, WPC, Ops** (#97–#103): `LocalBridge` (hub ↔ physical NIC via `NetPort`/AF_PACKET/BPF/Npcap), L3 switch (hub↔hub routing), WPC/HTTPS admin transport (C `vpncmd -server` interop), traffic accounting/logging/`EnumLog`, ACLs, IPv6, inbound NAT port-mapping.
+- **M5 Cluster Farm** (#104–#108): farm roles standalone/controller/member + `SiSetServerType`, `SiCall*` RPC + `FarmController`, `epoll` listener, full dispatch (`GetServerCaps` parity). Hardening tests (S25 DoS/perf) — scope eliminated (no dedicated hardening test suite; covered by existing integration tests).
+- **M6–M12 Audit completeness** (#185–#215): 98 admin stubs, X.509 CA/CRL/link/SecureNAT/L3/config/syslog admin commands, encryption negotiation + multi-TCP, farm runtime/tests, test & reliability (7 integration suites), FFI & mobile, CI/tooling, bridge enhancements. `334/338` tests, `11/11` CI green.
+- **M15 Server-side FFI** (#197, PR #249): `src/cedar/server/runtime.zig` (shared lifecycle `init→build→start→stop→deinit`), `src/exec/vpnserver/main.zig` rewired, 9 FFI exports `softether_server_create/start/stop/destroy/is_running/wait_for_listening/get_hub_name/get_admin_user/set_syslog` (82→89 parity), 8 syslog + 2 config tests, 32-bit Android `x509` fix.
+- **M16 Session enumeration FFI** (#194, PR #250): 3 FFI exports `softether_enum_sessions/get_session_status/disconnect_session` + `SoftEtherSessionInfo`/`softether_session_info_t` (89→92 parity, 770-line header), `isRunning()` + hub validation guards, 8 new FFI tests (52→54 passing).
+- **Docs**: `SERVER_PLAN.md` eliminated (scope complete, file removed), `README.md`/`AGENTS.md` updated to client+server (92 exports, architecture, project structure), hardening-test scope eliminated, milestones `#7–#18` and epic `#226` closed.
+
+### Changed
+
+- `README.md` — from client-only to client+server (overview, features, architecture, project structure, C API example).
+- `AGENTS.md` — stack/architecture/responsibility boundaries now include `cedar/server/` (24 modules, ~20k LOC), `bridge/` STP, `exec/` 4 binaries, 92 exports.
+- `include/softether.h` 366→770 lines, `src/ffi.zig` 43→92 exports.
+
+---
+
+## [0.3.11] - (bridge/monitor, pre-server)
+
+### Added
+
 - **Multi-connection bridge pump** (issue #58). The bridge pump now honors
   `max_connections > 1` (I-14 relaxed for bridge only): `connect()` no
   longer coerces bridge sessions to a single TLS connection, and
