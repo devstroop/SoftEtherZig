@@ -1,4 +1,4 @@
-//! Log engine — async writer thread with file rotation.
+//! Log engine — async writer thread with file rotation + syslog forwarding.
 //!
 //! C reference: `Logging.c` / `Logging.h`. Provides a `LOG` struct that
 //! accepts records via a thread-safe queue and writes them to disk in a
@@ -12,11 +12,11 @@
 //!   - EnumLog for listing log files.
 //!   - HUB_LOG configuration struct.
 //!
-//! Deferred to M5:
-//!   - Packet logger (needs PKT struct).
-//!   - Syslog support.
-//!   - Eraser (disk space management).
-//!   - TrafficDiffList (farm member reporting).
+//! Scope (M14 — syslog forwarding):
+//!   - SyslogClient: UDP socket, DNS resolution, RFC 3164 message format.
+//!   - SyslogSetting save types (C: Cedar.h:328-331).
+//!   - Log hooks: forward records based on save_type.
+//!   - Config persistence: SyslogSettings folder in vpn_server.config.
 
 const std = @import("std");
 const fs = std.fs;
@@ -27,8 +27,277 @@ const time = std.time;
 const log = std.log.scoped(.cedar_log);
 
 // ============================================================================
-// Constants (C: Cedar.h / Logging.h)
+// Syslog save types (C: Cedar.h:328-331)
 // ============================================================================
+
+/// Syslog forwarding mode (C: `SYSLOG_*` constants).
+pub const SyslogSaveType = enum(u32) {
+    none = 0,
+    server_log = 1,
+    server_and_hub_security_log = 2,
+    server_and_hub_all_log = 3,
+};
+
+/// Default syslog UDP port (C: `SYSLOG_PORT`).
+pub const SYSLOG_PORT: u32 = 514;
+/// Maximum syslog message length (C: `SYSLOG_MAX_LENGTH`).
+pub const SYSLOG_MAX_LENGTH: usize = 1024;
+/// DNS re-resolution interval in seconds (C: `SYSLOG_POLL_IP_INTERVAL`).
+pub const SYSLOG_POLL_IP_INTERVAL: u64 = 300;
+
+// ============================================================================
+// SyslogSetting — persisted config (C: Server.h:235-239)
+// ============================================================================
+
+/// Syslog destination configuration. Stored in vpn_server.config as a
+/// `SyslogSettings` folder with keys `SaveType`, `HostName`, `Port`.
+pub const SyslogSetting = struct {
+    save_type: SyslogSaveType = .none,
+    hostname: []u8 = &.{},
+    port: u32 = SYSLOG_PORT,
+
+    pub fn deinit(self: *SyslogSetting, allocator: Allocator) void {
+        allocator.free(self.hostname);
+        self.* = .{};
+    }
+
+    pub fn clone(self: *const SyslogSetting, allocator: Allocator) !SyslogSetting {
+        return .{
+            .save_type = self.save_type,
+            .hostname = try allocator.dupe(u8, self.hostname),
+            .port = self.port,
+        };
+    }
+};
+
+/// Syslog configuration vtable callback (C: `SiSetSysLogSetting`).
+/// `ctx` is a `*SyslogClient`.
+pub fn syslogConfigure(ctx: *anyopaque, hostname: []const u8, port: u32) void {
+    const client: *SyslogClient = @ptrCast(@alignCast(ctx));
+    client.configure(hostname, port);
+}
+
+// ============================================================================
+// SyslogClient — UDP syslog forwarder (C: Logging.c SLOG)
+// ============================================================================
+
+const builtin = @import("builtin");
+
+/// Platform-correct "invalid fd" sentinel — HANDLE on Windows, -1 on POSIX.
+const invalid_fd: std.posix.fd_t = if (builtin.os.tag == .windows)
+    @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))))
+else
+    @as(std.posix.fd_t, -1);
+
+/// UDP syslog client. Resolves the hostname, caches the IP, and sends
+/// RFC 3164 formatted datagrams. Re-resolves DNS periodically.
+pub const SyslogClient = struct {
+    allocator: Allocator,
+    /// Mutex protecting all mutable state (hostname, port, dest_ip, socket).
+    mutex: std.Thread.Mutex = .{},
+    /// Current destination hostname.
+    hostname: []u8 = &.{},
+    /// Current destination port (host byte order).
+    port: u32 = SYSLOG_PORT,
+    /// Cached destination IP (host byte order, 0 = unresolved).
+    dest_ip: u32 = 0,
+    /// Unix timestamp of last DNS resolution.
+    last_resolve_ts: i64 = 0,
+    /// UDP socket (invalid_fd when not connected).
+    socket: std.posix.fd_t = invalid_fd,
+    /// Cached hostname for the current send operation (owned snapshot).
+    send_hostname: []u8 = &.{},
+
+    /// Create a new SyslogClient.
+    pub fn init(allocator: Allocator) SyslogClient {
+        return .{ .allocator = allocator };
+    }
+
+    /// Stop and free the client.
+    pub fn deinit(self: *SyslogClient) void {
+        self.mutex.lock();
+        self.closeSocketLocked();
+        self.allocator.free(self.hostname);
+        self.allocator.free(self.send_hostname);
+        self.* = undefined;
+        self.allocator = undefined; // already freed everything
+    }
+
+    /// Reconfigure the syslog destination. Pass empty hostname or port 0
+    /// to disable syslog forwarding.
+    pub fn configure(self: *SyslogClient, hostname: []const u8, port: u32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.closeSocketLocked();
+        self.allocator.free(self.hostname);
+        self.hostname = self.allocator.dupe(u8, hostname) catch &.{};
+        self.port = if (port == 0) SYSLOG_PORT else port;
+        self.dest_ip = 0; // force re-resolve
+        self.last_resolve_ts = 0;
+    }
+
+    /// Send a syslog message (C: `SendSysLog`). Formats as RFC 3164 and
+    /// sends a UDP datagram. Silently drops if destination is not configured.
+    pub fn send(self: *SyslogClient, message: []const u8) void {
+        self.mutex.lock();
+
+        // Snapshot all config under the lock to avoid use-after-free.
+        self.allocator.free(self.send_hostname);
+        self.send_hostname = self.allocator.dupe(u8, self.hostname) catch {
+            self.mutex.unlock();
+            return;
+        };
+        const hostname = self.send_hostname;
+        const port: u16 = @intCast(self.port);
+        self.mutex.unlock();
+
+        if (hostname.len == 0) return;
+
+        // Resolve hostname if needed (updates self.dest_ip under mutex).
+        self.maybeResolve(hostname);
+
+        // Use the resolved IP from the mutex snapshot or after resolve.
+        self.mutex.lock();
+        const ip = self.dest_ip;
+        self.mutex.unlock();
+        if (ip == 0) return;
+
+        // Format: RFC 3164 — `<pri>Mon DD HH:MM:SS hostname tag: message`
+        // Priority: facility(14=local0) + severity(6=info) = 134.
+        var buf: [SYSLOG_MAX_LENGTH + 128]u8 = undefined;
+        const ts = std.time.timestamp();
+        const epoch_seconds: u64 = @intCast(@max(0, ts));
+        const day_seconds = @mod(epoch_seconds, 86400);
+        const hours: u8 = @intCast(day_seconds / 3600);
+        const mins: u8 = @intCast(@mod(day_seconds / 60, 60));
+        const secs: u8 = @intCast(@mod(day_seconds, 60));
+
+        // Month names for RFC 3164.
+        const month_names = [_][]const u8{
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        };
+        const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(epoch_seconds) };
+        const epoch_day = epoch_secs.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        const month_idx: usize = @intCast(@intFromEnum(month_day.month) - 1);
+        const day: u8 = month_day.day_index + 1;
+
+        const msg_len = @min(message.len, SYSLOG_MAX_LENGTH);
+        const frame = std.fmt.bufPrint(
+            &buf,
+            "<134>{s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {s} {s}",
+            .{
+                month_names[month_idx],
+                day,
+                hours,
+                mins,
+                secs,
+                hostname,
+                message[0..msg_len],
+            },
+        ) catch return;
+
+        // Send UDP datagram — hold the lock briefly for socket access.
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const sock = self.getSocketLocked() orelse return;
+        const dest = std.posix.sockaddr.in{
+            .family = std.posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, port),
+            .addr = std.mem.nativeToBig(u32, ip),
+            .zero = [_]u8{0} ** 8,
+        };
+        const dest_ptr: *const std.posix.sockaddr = @ptrCast(&dest);
+        _ = std.posix.sendto(sock, frame, 0, dest_ptr, @sizeOf(std.posix.sockaddr.in)) catch |err| {
+            log.warn("Syslog send failed: {}", .{err});
+        };
+    }
+
+    // ---- Internal (must be called with mutex held) --------------------------
+
+    fn closeSocketLocked(self: *SyslogClient) void {
+        if (self.socket != invalid_fd) {
+            std.posix.close(self.socket);
+            self.socket = invalid_fd;
+        }
+    }
+
+    fn getSocketLocked(self: *SyslogClient) ?std.posix.fd_t {
+        if (self.socket != invalid_fd) return self.socket;
+        const sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch return null;
+        // Set a short send timeout so we never block the writer thread.
+        const timeout: std.posix.timeval = .{ .sec = 0, .usec = 100_000 }; // 100ms
+        std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+        self.socket = sock;
+        return self.socket;
+    }
+
+    // ---- Internal (mutex not required) --------------------------------------
+
+    fn maybeResolve(self: *SyslogClient, hostname: []const u8) void {
+        self.mutex.lock();
+        const now = std.time.timestamp();
+        const needs_resolve = self.dest_ip == 0 or
+            (now - self.last_resolve_ts >= SYSLOG_POLL_IP_INTERVAL);
+        self.mutex.unlock();
+
+        if (!needs_resolve) return;
+
+        self.resolveHostname(hostname);
+    }
+
+    fn resolveHostname(self: *SyslogClient, hostname: []const u8) void {
+        // Try parsing as a dotted-decimal IP first.
+        const ip = parseIPv4(hostname) orelse blk: {
+            // DNS resolution: use getaddrinfo.
+            const addr_list = std.net.getAddressList(
+                self.allocator,
+                hostname,
+                @intCast(self.port),
+            ) catch {
+                log.warn("Syslog: failed to resolve hostname '{s}'", .{hostname});
+                self.mutex.lock();
+                self.dest_ip = 0;
+                self.mutex.unlock();
+                return;
+            };
+            defer addr_list.deinit();
+            for (addr_list.addrs) |addr| {
+                if (addr.any.family == std.posix.AF.INET) {
+                    break :blk std.mem.bigToNative(u32, addr.in.sa.addr);
+                }
+            }
+            self.mutex.lock();
+            self.dest_ip = 0;
+            self.mutex.unlock();
+            return;
+        };
+        self.mutex.lock();
+        self.dest_ip = ip;
+        self.last_resolve_ts = std.time.timestamp();
+        self.mutex.unlock();
+    }
+
+    fn parseIPv4(str: []const u8) ?u32 {
+        var parts: [4]u8 = undefined;
+        var idx: usize = 0;
+        var start: usize = 0;
+        for (str, 0..) |c, i| {
+            if (c == '.') {
+                if (idx >= 4) return null;
+                parts[idx] = std.fmt.parseInt(u8, str[start..i], 10) catch return null;
+                idx += 1;
+                start = i + 1;
+            }
+        }
+        if (idx != 3) return null;
+        parts[3] = std.fmt.parseInt(u8, str[start..], 10) catch return null;
+        return (@as(u32, parts[0]) << 24) | (@as(u32, parts[1]) << 16) |
+            (@as(u32, parts[2]) << 8) | @as(u32, parts[3]);
+    }
+};
 
 /// Default max log file size before rotation (~1 GB, C: `MAX_LOG_SIZE_DEFAULT`).
 pub const MAX_LOG_SIZE_DEFAULT: u64 = 1073741823;
@@ -97,6 +366,12 @@ pub const LogEntry = struct {
     size: u64,
 };
 
+/// Log category — used for syslog save_type filtering.
+pub const LogCategory = enum(u8) {
+    server = 0,
+    hub_security = 1,
+};
+
 // ============================================================================
 // LOG — the log engine (C: Logging.h:152-170)
 // ============================================================================
@@ -133,6 +408,12 @@ pub const LOG = struct {
     current_number: u32 = 0,
     /// Last date string for rotation detection.
     last_date_str: [16:0]u8 = .{0} ** 16,
+    /// Syslog client for forwarding (M14). Null when syslog is disabled.
+    syslog_client: ?*SyslogClient = null,
+    /// Syslog forwarding mode — controls which records are sent.
+    syslog_save_type: SyslogSaveType = .none,
+    /// Log category — determines syslog filtering behavior.
+    log_category: LogCategory = .server,
 
     /// Create a new LOG engine and start the writer thread.
     pub fn init(allocator: Allocator, dir_name: []const u8, prefix: []const u8, switch_type: LogSwitchType) !*LOG {
@@ -205,6 +486,15 @@ pub const LOG = struct {
         self.max_log_size = max_size;
     }
 
+    /// Attach a syslog client for forwarding. Does not take ownership —
+    /// the caller owns the SyslogClient and must outlive the LOG.
+    pub fn setSyslogClient(self: *LOG, client: ?*SyslogClient, save_type: SyslogSaveType) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.syslog_client = client;
+        self.syslog_save_type = save_type;
+    }
+
     // ---- Internal ----------------------------------------------------------
 
     fn drainRecords(self: *LOG) void {
@@ -237,6 +527,8 @@ pub const LOG = struct {
 
                 // Write the record.
                 self.writeRecord(record);
+                // Forward to syslog if configured.
+                self.forwardToSyslog(record.string, self.log_category == .hub_security);
                 self.allocator.free(record.string);
             }
         }
@@ -259,12 +551,14 @@ pub const LOG = struct {
         const mins = @as(u8, @intCast(@mod(day_seconds / 60, 60)));
         const secs = @as(u8, @intCast(@mod(day_seconds, 60)));
 
-        // Compute year/month/day using civil_from_days.
-        const epoch_day = @as(i64, @intCast(epoch_seconds / 86400));
-        const civil = std.time.epoch.CivilDay.calculate(epoch_day);
-        const year: u16 = @intCast(civil.year);
-        const month: u8 = @intCast(@intFromEnum(civil.month));
-        const day: u8 = civil.day;
+        // Compute year/month/day using epoch API.
+        const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(epoch_seconds) };
+        const epoch_day = epoch_secs.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const year: u16 = @intCast(year_day.year);
+        const month_day = year_day.calculateMonthDay();
+        const month: u8 = @intCast(@intFromEnum(month_day.month));
+        const day: u8 = month_day.day_index + 1;
 
         const prefix_len = (std.fmt.bufPrint(&buf, "[{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}] ", .{
             year, month, day, hours, mins, secs,
@@ -274,10 +568,42 @@ pub const LOG = struct {
         @memcpy(buf[prefix_len..][0..msg_end], record.string[0..msg_end]);
         buf[prefix_len + msg_end] = '\n';
 
-        file.writer().writeAll(buf[0 .. prefix_len + msg_end + 1]) catch |err| {
+        file.writeAll(buf[0 .. prefix_len + msg_end + 1]) catch |err| {
             log.warn("Failed to write log record: {}", .{err});
         };
         self.current_size += prefix_len + msg_end + 1;
+    }
+
+    /// Forward a log record to syslog if a client is attached (C: `SiWriteSysLog`).
+    /// `is_hub_log` indicates whether this record is a hub security log.
+    fn forwardToSyslog(self: *LOG, record: []const u8, is_hub_log: bool) void {
+        // Snapshot the syslog_client pointer and save_type under the LOG mutex
+        // to avoid racing with setSyslogClient().
+        self.mutex.lock();
+        const client = self.syslog_client orelse {
+            self.mutex.unlock();
+            return;
+        };
+        const save_type = self.syslog_save_type;
+        self.mutex.unlock();
+
+        // Check save_type mode.
+        switch (save_type) {
+            .none => return,
+            .server_log => {
+                if (is_hub_log) return;
+            },
+            .server_and_hub_security_log, .server_and_hub_all_log => {},
+        }
+
+        // Format syslog message: `[prefix] record`
+        var buf: [SYSLOG_MAX_LENGTH + 64]u8 = undefined;
+        const prefix_len = self.prefix.len;
+        const copy_len = @min(record.len, buf.len - prefix_len - 1);
+        @memcpy(buf[0..prefix_len], self.prefix[0..prefix_len]);
+        @memcpy(buf[prefix_len..][0..copy_len], record[0..copy_len]);
+        const total = prefix_len + copy_len;
+        client.send(buf[0..total]);
     }
 
     /// Check if we need to rotate to a new log file.
@@ -306,14 +632,14 @@ pub const LOG = struct {
     /// Build the log file path: `<dir>/<prefix>_YYYYMMDD~NN.log`.
     fn makeLogFileName(self: *LOG, tick: i64) ![]u8 {
         const date_str = self.dateStringFromTick(tick);
-        // Format: prefix_YYYYMMDD~NN.log
+        const ds = std.mem.span(@as([*:0]const u8, @ptrCast(&date_str)));
         return std.fmt.allocPrint(
             self.allocator,
             "{s}/{s}_{s}~{d:0>2}.log",
             .{
                 self.dir_name,
                 self.prefix,
-                &date_str,
+                ds,
                 self.current_number,
             },
         );
@@ -351,11 +677,13 @@ pub const LOG = struct {
     fn dateStringFromTick(self: *LOG, tick: i64) [16:0]u8 {
         var result: [16:0]u8 = .{0} ** 16;
         const ts: i64 = @divTrunc(tick, 1000);
-        const epoch_day: i64 = @divTrunc(ts, 86400);
-        const civil = std.time.epoch.CivilDay.calculate(epoch_day);
-        const year: u16 = @intCast(civil.year);
-        const month: u8 = @intCast(@intFromEnum(civil.month));
-        const day: u8 = civil.day;
+        const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
+        const epoch_day = epoch_secs.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const year: u16 = @intCast(year_day.year);
+        const month_day = year_day.calculateMonthDay();
+        const month: u8 = @intCast(@intFromEnum(month_day.month));
+        const day: u8 = month_day.day_index + 1;
 
         switch (self.switch_type) {
             .no, .second, .minute => {
@@ -494,7 +822,7 @@ test "LOG insert and drain" {
     logger.printf("Formatted: {d}", .{42});
 
     // Allow the writer thread to process.
-    time.sleep(50 * std.time.ns_per_ms);
+    std.Thread.sleep(50 * std.time.ns_per_ms);
 }
 
 test "LOG rotation on date change" {
@@ -508,7 +836,7 @@ test "LOG rotation on date change" {
     defer logger.deinit();
 
     logger.insertStringRecord("Record 1");
-    time.sleep(50 * std.time.ns_per_ms);
+    std.Thread.sleep(50 * std.time.ns_per_ms);
 }
 
 test "enumLog lists log files" {
@@ -522,11 +850,11 @@ test "enumLog lists log files" {
     // Create some fake log files.
     const f1 = try fs.cwd().createFile(dir ++ "/vpn_20260817.log", .{});
     defer f1.close();
-    try f1.writer().writeAll("test log entry\n");
+    try f1.writeAll("test log entry\n");
 
     const f2 = try fs.cwd().createFile(dir ++ "/vpn_20260816.log", .{});
     defer f2.close();
-    try f2.writer().writeAll("older entry\n");
+    try f2.writeAll("older entry\n");
 
     // A non-log file should be excluded.
     const f3 = try fs.cwd().createFile(dir ++ "/readme.txt", .{});
@@ -556,3 +884,111 @@ test "enumLog empty directory" {
 }
 
 const test_log_dir = "/tmp/zig_softether_log_test";
+
+// ============================================================================
+// Syslog tests (M14)
+// ============================================================================
+
+test "SyslogSaveType enum values" {
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(SyslogSaveType.none));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(SyslogSaveType.server_log));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(SyslogSaveType.server_and_hub_security_log));
+    try testing.expectEqual(@as(u32, 3), @intFromEnum(SyslogSaveType.server_and_hub_all_log));
+}
+
+test "SyslogSetting default and clone" {
+    const allocator = testing.allocator;
+    var setting = SyslogSetting{};
+    defer setting.deinit(allocator);
+
+    try testing.expectEqual(SyslogSaveType.none, setting.save_type);
+    try testing.expectEqual(@as(u32, SYSLOG_PORT), setting.port);
+    try testing.expectEqual(@as(usize, 0), setting.hostname.len);
+
+    // Configure
+    setting.hostname = try allocator.dupe(u8, "syslog.example.com");
+    setting.port = 1514;
+    setting.save_type = .server_log;
+
+    // Clone
+    var cloned = try setting.clone(allocator);
+    defer cloned.deinit(allocator);
+
+    try testing.expectEqual(SyslogSaveType.server_log, cloned.save_type);
+    try testing.expectEqual(@as(u32, 1514), cloned.port);
+    try testing.expectEqualStrings("syslog.example.com", cloned.hostname);
+    // Deep copy — different pointer.
+    try testing.expect(setting.hostname.ptr != cloned.hostname.ptr);
+}
+
+test "SyslogClient init and deinit" {
+    const allocator = testing.allocator;
+    var client = SyslogClient.init(allocator);
+    defer client.deinit();
+
+    try testing.expectEqualStrings("", client.hostname);
+    try testing.expectEqual(@as(u32, SYSLOG_PORT), client.port);
+    try testing.expectEqual(@as(u32, 0), client.dest_ip);
+    try testing.expect(client.socket < 0);
+}
+
+test "SyslogClient configure" {
+    const allocator = testing.allocator;
+    var client = SyslogClient.init(allocator);
+    defer client.deinit();
+
+    // Configure with IP address
+    client.configure("192.168.1.100", 1514);
+    try testing.expectEqualStrings("192.168.1.100", client.hostname);
+    try testing.expectEqual(@as(u32, 1514), client.port);
+    try testing.expectEqual(@as(u32, 0), client.dest_ip); // force re-resolve
+
+    // Configure with port 0 → defaults to SYSLOG_PORT
+    client.configure("10.0.0.1", 0);
+    try testing.expectEqual(@as(u32, SYSLOG_PORT), client.port);
+
+    // Configure with empty hostname → disables
+    client.configure("", 1514);
+    try testing.expectEqual(@as(usize, 0), client.hostname.len);
+}
+
+test "SyslogClient parseIPv4" {
+    try testing.expectEqual(@as(?u32, 0xC0A80101), SyslogClient.parseIPv4("192.168.1.1"));
+    try testing.expectEqual(@as(?u32, 0x7F000001), SyslogClient.parseIPv4("127.0.0.1"));
+    try testing.expectEqual(@as(?u32, 0), SyslogClient.parseIPv4("0.0.0.0"));
+    try testing.expectEqual(@as(?u32, 0xFFFFFFFF), SyslogClient.parseIPv4("255.255.255.255"));
+    try testing.expectEqual(@as(?u32, null), SyslogClient.parseIPv4("not-an-ip"));
+    try testing.expectEqual(@as(?u32, null), SyslogClient.parseIPv4("192.168.1"));
+    try testing.expectEqual(@as(?u32, null), SyslogClient.parseIPv4("192.168.1.1.1"));
+}
+
+test "SyslogClient send to IP (no DNS)" {
+    const allocator = testing.allocator;
+    var client = SyslogClient.init(allocator);
+    defer client.deinit();
+
+    // Configure with a direct IP — no DNS needed.
+    client.configure("127.0.0.1", 1514);
+    // Resolve the IP.
+    client.dest_ip = 0x7F000001;
+    client.last_resolve_ts = std.time.timestamp();
+
+    // Send — should not crash (UDP to localhost, no receiver is fine).
+    client.send("test syslog message from Zig");
+}
+
+test "SyslogClient send with empty hostname skips" {
+    const allocator = testing.allocator;
+    var client = SyslogClient.init(allocator);
+    defer client.deinit();
+
+    // No hostname configured — send should be a no-op.
+    client.send("should not be sent");
+}
+
+test "SyslogSaveType round-trip via @enumFromInt" {
+    try testing.expectEqual(SyslogSaveType.none, @as(SyslogSaveType, @enumFromInt(0)));
+    try testing.expectEqual(SyslogSaveType.server_log, @as(SyslogSaveType, @enumFromInt(1)));
+    try testing.expectEqual(SyslogSaveType.server_and_hub_security_log, @as(SyslogSaveType, @enumFromInt(2)));
+    try testing.expectEqual(SyslogSaveType.server_and_hub_all_log, @as(SyslogSaveType, @enumFromInt(3)));
+}

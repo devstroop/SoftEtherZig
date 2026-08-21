@@ -87,6 +87,7 @@ pub const monitor = @import("monitor.zig");
 // TCP listener (issue #77)
 pub const server = struct {
     pub const auth = @import("cedar/server/auth.zig");
+    pub const logging = @import("cedar/server/logging.zig");
     pub const session = @import("cedar/server/session.zig");
     pub const session_main = @import("cedar/server/session_main.zig");
     pub const session_registry = @import("cedar/server/session_registry.zig");
