@@ -155,6 +155,53 @@ pub fn main() !void {
                 cli.display.debug(&state.display, "No stale routes to clean", .{});
             }
             return;
+        } else if (std.mem.eql(u8, args[1], "install")) {
+            // M20 #256 — install service (systemd/launchd/SCM)
+            var scope: app.daemon.ServiceScope = .user; // default --user for vpnclient (no sudo)
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) {
+                    scope = .system;
+                } else if (std.mem.eql(u8, a, "--user")) {
+                    scope = .user;
+                } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient install [--user|--system]", .{});
+                    cli.display.info(&state.display, "  --user    Install for current user (~/.config/systemd/user, no sudo) [default]", .{});
+                    cli.display.info(&state.display, "  --system  Install system-wide (/etc/systemd/system, requires sudo)", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown install option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.installService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "install failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        } else if (std.mem.eql(u8, args[1], "uninstall")) {
+            var scope: app.daemon.ServiceScope = .user;
+            var i: usize = 2;
+            while (i < args.len) : (i += 1) {
+                const a = args[i];
+                if (std.mem.eql(u8, a, "--system")) {
+                    scope = .system;
+                } else if (std.mem.eql(u8, a, "--user")) {
+                    scope = .user;
+                } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
+                    cli.display.info(&state.display, "Usage: vpnclient uninstall [--user|--system]", .{});
+                    return;
+                } else {
+                    cli.display.failure(&state.display, "Unknown uninstall option: {s}", .{a});
+                    std.process.exit(1);
+                }
+            }
+            app.daemon.uninstallService(allocator, &state.display, scope) catch |err| {
+                cli.display.failure(&state.display, "uninstall failed: {s}", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
         } else {
             cli.display.failure(&state.display, "Unknown subcommand: '{s}'. Use 'vpnclient connect --help' or 'vpnclient --help'.", .{args[1]});
             std.process.exit(1);

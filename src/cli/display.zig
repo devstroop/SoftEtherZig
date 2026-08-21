@@ -363,6 +363,8 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    vpnclient version\n", .{});
     ctx.print("    vpnclient connect [OPTIONS]\n", .{});
     ctx.print("    vpnclient cleanup\n", .{});
+    ctx.print("    vpnclient install [--user|--system]\n", .{});
+    ctx.print("    vpnclient uninstall [--user|--system]\n", .{});
     ctx.print("    vpnclient passhash [<username> <password>]  (deprecated)\n", .{});
     ctx.newline();
 
@@ -371,6 +373,8 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    version                 Show version information\n", .{});
     ctx.print("    connect                 Connect to a VPN server\n", .{});
     ctx.print("    cleanup                 Clean up stale VPN routes left by crashes\n", .{});
+    ctx.print("    install                 Install service (systemd/launchd/SCM) — --user (default, no sudo) or --system (requires sudo)\n", .{});
+    ctx.print("    uninstall               Remove service — --user or --system\n", .{});
     ctx.print("    passhash                (deprecated) Generate password hash — use `vpncmd tools generatehashedpassword`\n", .{});
     ctx.print("    password-hash           Alias for passhash (deprecated)\n", .{});
     ctx.newline();
@@ -419,12 +423,19 @@ pub fn displayUsage(ctx: *DisplayContext, version: []const u8) void {
     ctx.print("    -p, --password <PASS>   Password (required)\n", .{});
     ctx.newline();
 
+    ctx.printColored(.bold, "SERVICE OPTIONS (M20 #256):\n", .{});
+    ctx.print("    vpnclient install [--user|--system]    Install service (default --user, no sudo)\n", .{});
+    ctx.print("    vpnclient uninstall [--user|--system]  Remove service\n", .{});
+    ctx.newline();
+
     ctx.printColored(.bold, "EXAMPLES:\n", .{});
     ctx.print("    vpnclient help\n", .{});
     ctx.print("    vpnclient version\n", .{});
     ctx.print("    vpncmd tools generatehashedpassword -u myuser -p mypass\n", .{});
     ctx.print("    vpncmd tools generatehashedpassword myuser mypass  # same\n", .{});
     ctx.print("    sudo vpnclient cleanup\n", .{});
+    ctx.print("    vpnclient install --user               # systemd user service, no sudo\n", .{});
+    ctx.print("    sudo vpnclient install --system        # systemd system service\n", .{});
     ctx.print("    vpnclient connect --config config.json\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 --hostname vpn.example.com -H VPN -u user -P pass\n", .{});
     ctx.print("    vpnclient connect -a 1.2.3.4 -H VPN -u user --password-hash <hash>\n", .{});
