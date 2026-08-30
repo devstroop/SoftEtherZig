@@ -350,9 +350,10 @@ void softether_free_log_text(const char* msg);
 
 /**
  * Set per-client verbose flag that gates DIAG throughput logs.
+ * Thread-safe: may be called at any time, including while the data loop is
+ * running, to toggle verbose without reconnecting. Uses atomic store.
  * When false (default) the 1 Hz DIAG trace is suppressed. Controlled by
- * the UI switch (verbose_logging). Must be called before or while connected;
- * takes effect on the next DIAG interval.
+ * the UI switch (verbose_logging). Takes effect on the next DIAG interval.
  */
 void softether_set_verbose(softether_client_t client, bool enabled);
 

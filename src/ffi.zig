@@ -102,11 +102,12 @@ export fn softether_set_log_level(client: ?*VpnClient, level: c_int) void {
 }
 
 /// Set per-client verbose flag that gates DIAG throughput logs.
-/// When false (default) the 1 Hz DIAG trace is suppressed even though the
-/// data loop still collects metrics. Controlled by the UI switch.
+/// Thread-safe: may be called while the data loop is running (e.g. from
+/// the UI thread when the user toggles the verbose switch). Uses atomic
+/// store so the data loop's atomic load never races.
 export fn softether_set_verbose(client: ?*VpnClient, enabled: bool) void {
     const c = client orelse return;
-    c.config.verbose = enabled;
+    @atomicStore(bool, &c.config.verbose, enabled, .seq_cst);
 }
 
 fn libsoftetherLogFn(
