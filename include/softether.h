@@ -349,6 +349,15 @@ void softether_set_log_callback(softether_log_callback_t cb);
 void softether_free_log_text(const char* msg);
 
 /**
+ * Set per-client verbose flag that gates DIAG throughput logs.
+ * Thread-safe: may be called at any time, including while the data loop is
+ * running, to toggle verbose without reconnecting. Uses atomic store.
+ * When false (default) the 1 Hz DIAG trace is suppressed. Controlled by
+ * the UI switch (verbose_logging). Takes effect on the next DIAG interval.
+ */
+void softether_set_verbose(softether_client_t client, bool enabled);
+
+/**
  * Bind libsoftether's outbound TLS sockets to a specific network interface
  * (Darwin IP_BOUND_IF / IPV6_BOUND_IF). Pass NULL or "" to clear.
  *

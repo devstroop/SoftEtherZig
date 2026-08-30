@@ -101,6 +101,15 @@ export fn softether_set_log_level(client: ?*VpnClient, level: c_int) void {
     softether_set_log_level_global(level);
 }
 
+/// Set per-client verbose flag that gates DIAG throughput logs.
+/// Thread-safe: may be called while the data loop is running (e.g. from
+/// the UI thread when the user toggles the verbose switch). Uses atomic
+/// store so the data loop's atomic load never races.
+export fn softether_set_verbose(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    @atomicStore(bool, &c.config.verbose, enabled, .seq_cst);
+}
+
 fn libsoftetherLogFn(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),

@@ -2915,9 +2915,11 @@ pub const VpnClient = struct {
             if (iter_us >= 100_000) diag.iter_slow_100ms += 1;
 
             if (now - diag_last_ms >= 1000) {
-                // DIAG + per-connection RX: always log when data is flowing so
-                // users can see real-time throughput without needing --verbose.
-                if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
+                // DIAG: gated behind verbose (disabled by default) — no spam
+                // when verbose is off; 1 Hz throughput trace only when enabled.
+                // Use atomic load: softether_set_verbose() may be called from the UI
+                // thread while the data loop reads this flag.
+                if (@atomicLoad(bool, &self.config.verbose, .acquire) and (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0)) {
                     const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;
                     const mbps_out = @as(f64, @floatFromInt(diag.bytes_out)) * 8.0 / 1_000_000.0;
                     const drain_avg: f64 = if (diag.poll_iters > 0)
@@ -2980,7 +2982,8 @@ pub const VpnClient = struct {
                 //     common in half-connection mode and the smoking gun
                 //     for "the server is using a different direction")
                 //   - SSL pending cleared (FIFO fully drained)
-                if (self.config.verbose) {
+                // Use atomic load: may be toggled via softether_set_verbose() while connected.
+                if (@atomicLoad(bool, &self.config.verbose, .acquire)) {
                     if (self.conn_manager) |*cm| {
                         var idx: usize = 0;
                         while (idx < cm.count) : (idx += 1) {
