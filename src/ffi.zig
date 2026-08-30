@@ -101,6 +101,14 @@ export fn softether_set_log_level(client: ?*VpnClient, level: c_int) void {
     softether_set_log_level_global(level);
 }
 
+/// Set per-client verbose flag that gates DIAG throughput logs.
+/// When false (default) the 1 Hz DIAG trace is suppressed even though the
+/// data loop still collects metrics. Controlled by the UI switch.
+export fn softether_set_verbose(client: ?*VpnClient, enabled: bool) void {
+    const c = client orelse return;
+    c.config.verbose = enabled;
+}
+
 fn libsoftetherLogFn(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),

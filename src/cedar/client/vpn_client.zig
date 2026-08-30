@@ -2915,9 +2915,9 @@ pub const VpnClient = struct {
             if (iter_us >= 100_000) diag.iter_slow_100ms += 1;
 
             if (now - diag_last_ms >= 1000) {
-                // DIAG + per-connection RX: always log when data is flowing so
-                // users can see real-time throughput without needing --verbose.
-                if (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0) {
+                // DIAG: gated behind verbose (disabled by default) — no spam
+                // when verbose is off; 1 Hz throughput trace only when enabled.
+                if (self.config.verbose and (diag.bytes_in > 0 or diag.bytes_out > 0 or diag.tcp_drops_pkts > 0 or diag.nread_max > 0)) {
                     const mbps_in = @as(f64, @floatFromInt(diag.bytes_in)) * 8.0 / 1_000_000.0;
                     const mbps_out = @as(f64, @floatFromInt(diag.bytes_out)) * 8.0 / 1_000_000.0;
                     const drain_avg: f64 = if (diag.poll_iters > 0)
